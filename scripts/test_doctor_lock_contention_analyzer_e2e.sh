@@ -1,39 +1,31 @@
 #!/usr/bin/env bash
-# Doctor Workspace Scanner E2E Runner (asupersync-2b4jj.2.1)
+# Doctor Lock-Contention Analyzer E2E Runner (asupersync-2b4jj.2.4)
 #
-# Runs deterministic scanner E2E validation against a synthetic Cargo workspace
-# fixture and verifies:
-# - stable schema/taxonomy versions
+# Runs deterministic lock-order/contention analysis against a synthetic fixture
+# and verifies:
+# - stable analyzer/scanner schema versions
 # - deterministic output across repeated runs
-# - golden member/edge/warning expectations
+# - stable hotspot ranking + reproducible evidence links
 #
 # Usage:
-#   ./scripts/test_doctor_workspace_scan_e2e.sh
-#
-# Environment Variables:
-#   RCH_BIN         - path to rch binary (default: ~/.local/bin/rch)
-#   TEST_LOG_LEVEL  - informational label (default: info)
-#   RUST_LOG        - cargo/runtime log filter (default: asupersync=info)
-#   TEST_SEED       - deterministic seed label for summary metadata
+#   ./scripts/test_doctor_lock_contention_analyzer_e2e.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_workspace_scan"
+OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_lock_contention_analyzer"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
-SCAN1_JSON="${ARTIFACT_DIR}/scan_run1.json"
-SCAN2_JSON="${ARTIFACT_DIR}/scan_run2.json"
-SCAN1_NORM_JSON="${ARTIFACT_DIR}/scan_run1.normalized.json"
-SCAN2_NORM_JSON="${ARTIFACT_DIR}/scan_run2.normalized.json"
-SCAN1_LOG="${ARTIFACT_DIR}/scan1.log"
-SCAN2_LOG="${ARTIFACT_DIR}/scan2.log"
-FIXTURE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_workspace_scan_e2e"
-SUITE_ID="doctor_workspace_scan_e2e"
-SCENARIO_ID="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
+RUN1_JSON="${ARTIFACT_DIR}/analysis_run1.json"
+RUN2_JSON="${ARTIFACT_DIR}/analysis_run2.json"
+RUN1_LOG="${ARTIFACT_DIR}/run1.log"
+RUN2_LOG="${ARTIFACT_DIR}/run2.log"
+FIXTURE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_lock_contention_e2e"
+SUITE_ID="doctor_lock_contention_analyzer_e2e"
+SCENARIO_ID="E2E-SUITE-DOCTOR-LOCK-CONTENTION-ANALYZER"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
@@ -42,7 +34,7 @@ RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-240}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-if [[ ! -x "$RCH_BIN" ]]; then
+if [[ ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
 fi
@@ -50,7 +42,7 @@ fi
 mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}"
 
 echo "==================================================================="
-echo "           Asupersync Doctor Workspace Scanner E2E                "
+echo "        Asupersync Doctor Lock-Contention Analyzer E2E            "
 echo "==================================================================="
 echo "Config:"
 echo "  RCH_BIN:          ${RCH_BIN}"
@@ -71,7 +63,7 @@ EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
 
-run_scan_call() {
+run_analysis_call() {
     local run_label="$1"
     local run_log="$2"
     local run_json="$3"
@@ -81,23 +73,23 @@ run_scan_call() {
     local attempt_log=""
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
-        local target_dir="/tmp/rch-doctor-workspace-scan-${TIMESTAMP}-${run_id}-attempt${attempt}"
-        local -a scan_cmd=(
+        local target_dir="/tmp/rch-doctor-lock-contention-${TIMESTAMP}-${run_id}-attempt${attempt}"
+        local -a run_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
             cargo run --quiet --features cli --bin asupersync --
             --format json
             --color never
-            doctor scan-workspace
+            doctor analyze-lock-contention
             --root "${FIXTURE_ROOT}"
         )
         attempt_log="${run_log%.log}.attempt${attempt}.log"
-        if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${scan_cmd[@]}" >"${attempt_log}" 2>&1; then
+        if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${run_cmd[@]}" >"${attempt_log}" 2>&1; then
             rc=0
         else
             rc=$?
         fi
 
-        payload="$(grep -E '"scanner_version"[[:space:]]*:[[:space:]]*"doctor-workspace-scan-v1"' "${attempt_log}" | tail -n1 || true)"
+        payload="$(grep -E '"analyzer_version"[[:space:]]*:[[:space:]]*"doctor-lock-contention-analyzer-v1"' "${attempt_log}" | tail -n1 || true)"
         if [[ -n "${payload}" ]] && printf '%s\n' "${payload}" | jq -e . >/dev/null 2>&1; then
             cp "${attempt_log}" "${run_log}"
             printf '%s\n' "${payload}" > "${run_json}"
@@ -120,21 +112,19 @@ run_scan_call() {
     return 1
 }
 
-echo ">>> [1/4] Running scan command (run 1) via rch..."
-if ! run_scan_call "scan run 1" "${SCAN1_LOG}" "${SCAN1_JSON}" "run1"; then
+echo ">>> [1/4] Running lock-contention analysis (run 1) via rch..."
+if ! run_analysis_call "analysis run 1" "${RUN1_LOG}" "${RUN1_JSON}" "run1"; then
     EXIT_CODE=1
 fi
 
-echo ">>> [2/4] Running scan command (run 2) via rch..."
-if ! run_scan_call "scan run 2" "${SCAN2_LOG}" "${SCAN2_JSON}" "run2"; then
+echo ">>> [2/4] Running lock-contention analysis (run 2) via rch..."
+if ! run_analysis_call "analysis run 2" "${RUN2_LOG}" "${RUN2_JSON}" "run2"; then
     EXIT_CODE=1
 fi
 
 if [[ ${EXIT_CODE} -eq 0 ]]; then
     echo ">>> [3/4] Verifying deterministic output..."
-    jq 'del(.root, .workspace_manifest)' "${SCAN1_JSON}" > "${SCAN1_NORM_JSON}"
-    jq 'del(.root, .workspace_manifest)' "${SCAN2_JSON}" > "${SCAN2_NORM_JSON}"
-    if diff -u "${SCAN1_NORM_JSON}" "${SCAN2_NORM_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
+    if diff -u "${RUN1_JSON}" "${RUN2_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
         rm -f "${ARTIFACT_DIR}/determinism.diff"
     else
@@ -142,63 +132,29 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         CHECK_FAILURES=$((CHECK_FAILURES + 1))
     fi
 
-    echo ">>> [4/4] Validating schema + golden expectations..."
+    echo ">>> [4/4] Validating schema + hotspot/risk expectations..."
     if jq -e '
+        .analyzer_version == "doctor-lock-contention-analyzer-v1" and
         .scanner_version == "doctor-workspace-scan-v1" and
-        .taxonomy_version == "capability-surfaces-v1" and
-        .members == [
-          {
-            "name": "alpha",
-            "relative_path": "alpha",
-            "manifest_path": "alpha/Cargo.toml",
-            "rust_file_count": 1,
-            "capability_surfaces": ["cx", "runtime"]
-          },
-          {
-            "name": "beta",
-            "relative_path": "beta",
-            "manifest_path": "beta/Cargo.toml",
-            "rust_file_count": 1,
-            "capability_surfaces": ["channel", "lab"]
-          }
+        (.correlation_id | type == "string" and length > 0) and
+        .hotspot_count == (.hotspots | length) and
+        .violation_count == (.violations | length) and
+        (.hotspot_count >= 1) and
+        (.violation_count >= 1) and
+        (.deadlock_risk_patterns | index("A(Tasks) -> B(Regions)")) != null and
+        (.hotspots[0].hotspot_id == "lock-hotspot-001") and
+        (.hotspots[0].path == "runtime_lock/src/lib.rs") and
+        (.hotspots[0].risk_score > 0) and
+        (.hotspots[0].confidence >= 70) and
+        (.hotspots[0].evidence | length >= 1) and
+        (.reproduction_commands | length >= 1) and
+        (.rule_traces | map(.rule_id) | sort) == [
+          "contention_hotspot_ranking",
+          "deadlock_risk_patterns",
+          "lock_order_consistency"
         ] and
-        .capability_edges == [
-          {
-            "member": "alpha",
-            "surface": "cx",
-            "evidence_count": 1,
-            "sample_files": ["alpha/src/lib.rs"]
-          },
-          {
-            "member": "alpha",
-            "surface": "runtime",
-            "evidence_count": 1,
-            "sample_files": ["alpha/src/lib.rs"]
-          },
-          {
-            "member": "beta",
-            "surface": "channel",
-            "evidence_count": 1,
-            "sample_files": ["beta/src/lib.rs"]
-          },
-          {
-            "member": "beta",
-            "surface": "lab",
-            "evidence_count": 1,
-            "sample_files": ["beta/src/lib.rs"]
-          }
-        ] and
-        (.warnings | sort) == [
-          "malformed package name field in Cargo.toml",
-          "malformed package name field in Cargo.toml",
-          "member missing Cargo.toml: missing_member"
-          ,
-          "missing package name in Cargo.toml"
-        ] and
-        (.events | map(.phase) | index("scan_start")) != null and
-        (.events | map(.phase) | index("scan_complete")) != null and
-        ((.events | map(select(.level == "warn")) | length) >= 4)
-    ' "${SCAN1_JSON}" >/dev/null; then
+        ((.rule_traces[] | select(.rule_id == "lock_order_consistency")).outcome == "fail")
+    ' "${RUN1_JSON}" >/dev/null; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
     else
         echo "  ERROR: golden/schema validation failed"
@@ -243,7 +199,7 @@ cat > "${SUMMARY_FILE}" <<ENDJSON
   "tests_failed": ${TESTS_FAILED},
   "exit_code": ${EXIT_CODE},
   "pattern_failures": ${CHECK_FAILURES},
-  "log_file": "${SCAN1_LOG}",
+  "log_file": "${RUN1_LOG}",
   "artifact_dir": "${ARTIFACT_DIR}",
   "checks_passed": ${CHECKS_PASSED}
 }
@@ -251,7 +207,7 @@ ENDJSON
 
 echo ""
 echo "==================================================================="
-echo "            Doctor Workspace Scanner E2E Summary                  "
+echo "      Doctor Lock-Contention Analyzer E2E Summary                 "
 echo "==================================================================="
 echo "  Status:         ${SUITE_STATUS}"
 echo "  Exit code:      ${EXIT_CODE}"

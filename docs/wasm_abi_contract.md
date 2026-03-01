@@ -105,6 +105,12 @@ Validation entrypoint: `validate_wasm_boundary_transition()`.
     1. version policy decision,
     2. migration notes,
     3. fingerprint constant.
+- CI enforcement:
+  - Policy file: `.github/wasm_abi_policy.json`
+  - Gate script: `python3 scripts/check_wasm_abi_policy.py --policy .github/wasm_abi_policy.json`
+  - Artifacts:
+    - `artifacts/wasm_abi_contract_summary.json`
+    - `artifacts/wasm_abi_contract_events.ndjson`
 
 ## Test Evidence
 

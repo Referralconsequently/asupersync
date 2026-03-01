@@ -148,10 +148,14 @@ rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy
 
 Probe log schema:
 
-- `schema_version = raptorq-track-e-dual-policy-probe-v2`
+- `schema_version = raptorq-track-e-dual-policy-probe-v3`
 - `manifest_schema_version`, `profile_schema_version`
 - `scenario_id`, `seed`
 - `kernel`, `mode`, `profile_pack`, `profile_fallback_reason`
+- `profile_pack_env_requested`
+- `mul_min_total_env_override`, `mul_max_total_env_override`
+- `addmul_min_total_env_override`, `addmul_max_total_env_override`, `addmul_min_lane_env_override`
+- `max_lane_ratio_env_override`
 - `lane_len_a`, `lane_len_b`, `total_len`, `lane_ratio`
 - `mul_window_min`, `mul_window_max`
 - `addmul_window_min`, `addmul_window_max`, `addmul_min_lane`
@@ -165,6 +169,11 @@ Coverage intent:
 - balanced lanes below/at/above fused windows
 - asymmetric lanes near and beyond ratio threshold
 - deterministic evidence for when auto policy selects fused vs sequential dual kernels
+
+Current default policy note (profile-pack schema v3):
+
+- `x86-avx2-balanced-v1` is split-biased for `mul_slices2` (`mul_window_min > mul_window_max`), so auto mode keeps dual-mul on the sequential path by default.
+- `addmul_slices2` still uses the bounded fused window (`12KiB..16KiB`, lane floor `2KiB`) to preserve known positive regions and avoid small-lane regressions.
 
 ### E5 Profile-Pack Capture (`asupersync-36m6p.1`, 2026-02-22)
 

@@ -66,6 +66,24 @@ jobs:
             artifacts/wasm_dependency_audit_log.ndjson
           retention-days: 30
 
+      - name: WASM ABI policy self-test
+        run: python3 scripts/check_wasm_abi_policy.py --self-test
+
+      - name: WASM ABI contract gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_abi_policy.py \
+            --policy .github/wasm_abi_policy.json
+
+      - name: Upload WASM ABI contract report
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-abi-contract-report
+          path: |
+            artifacts/wasm_abi_contract_summary.json
+            artifacts/wasm_abi_contract_events.ndjson
+          retention-days: 30
+
       - name: WASM optimization policy self-test
         run: python3 scripts/check_wasm_optimization_policy.py --self-test
 
