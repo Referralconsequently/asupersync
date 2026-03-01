@@ -32,65 +32,174 @@ class Step:
     step_id: str
     command: str
     remediation_hint: str
+    package_entrypoint: str = ""
+    adapter_path: str = ""
+    runtime_profile: str = "FP-BR-DEV"
+    diagnostic_category: str = "onboarding"
 
 
 SCENARIOS: dict[str, list[Step]] = {
     "vanilla": [
         Step(
+            "vanilla.typescript_type_model",
+            "python3 scripts/check_wasm_typescript_type_model_policy.py "
+            "--policy .github/wasm_typescript_type_model_policy.json "
+            "--only-scenario TS-TYPE-VANILLA",
+            "Resolve type-model policy findings for vanilla TypeScript semantics.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="type_model",
+        ),
+        Step(
+            "vanilla.typescript_package_topology",
+            "python3 scripts/check_wasm_typescript_package_policy.py "
+            "--policy .github/wasm_typescript_package_policy.json "
+            "--only-scenario TS-PKG-VANILLA-ESM "
+            "--only-scenario TS-PKG-VANILLA-CJS",
+            "Resolve package topology/export-map policy findings for vanilla TypeScript onboarding.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="package_topology",
+        ),
+        Step(
             "vanilla.browser_ready_handoff",
             "rch exec -- cargo test -p asupersync browser_ready_handoff -- --nocapture",
             "Inspect scheduler fairness/handoff regressions in src/runtime/scheduler/three_lane.rs.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="runtime_handoff",
         ),
         Step(
             "vanilla.quiescence",
             "rch exec -- cargo test --test close_quiescence_regression "
             "browser_nested_cancel_cascade_reaches_quiescence -- --nocapture",
             "Verify region close drains cancellation/finalizers before close acknowledgement.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="quiescence",
         ),
         Step(
             "vanilla.security_policy",
             "rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture",
             "Review browser fetch capability defaults and allowlist policy in src/io/cap.rs.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="security_policy",
         ),
     ],
     "react": [
+        Step(
+            "react.typescript_type_model",
+            "python3 scripts/check_wasm_typescript_type_model_policy.py "
+            "--policy .github/wasm_typescript_type_model_policy.json "
+            "--only-scenario TS-TYPE-REACT",
+            "Resolve type-model policy findings for React adapter semantics.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="type_model",
+        ),
+        Step(
+            "react.typescript_package_topology",
+            "python3 scripts/check_wasm_typescript_package_policy.py "
+            "--policy .github/wasm_typescript_package_policy.json "
+            "--only-scenario TS-PKG-REACT-ESM "
+            "--only-scenario TS-PKG-REACT-CJS",
+            "Resolve package topology/export-map policy findings for React adapter onboarding.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="package_topology",
+        ),
         Step(
             "react.clock_start_zero",
             "rch exec -- cargo test --test native_seam_parity "
             "browser_clock_through_trait_starts_at_zero -- --nocapture",
             "Check BrowserMonotonicClock bootstrap semantics and time source trait wiring.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="adapter_lifecycle",
         ),
         Step(
             "react.clock_advances",
             "rch exec -- cargo test --test native_seam_parity "
             "browser_clock_through_trait_advances_with_host_samples -- --nocapture",
             "Check monotonic clamp policy and host-sample advancement path for browser clock.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="adapter_lifecycle",
         ),
         Step(
             "react.obligation_lifecycle",
             "rch exec -- cargo test --test obligation_wasm_parity "
             "wasm_full_browser_lifecycle_simulation -- --nocapture",
             "Inspect obligation drain/commit lifecycle invariants in tests/obligation_wasm_parity.rs.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="obligation_lifecycle",
         ),
     ],
     "next": [
+        Step(
+            "next.typescript_type_model",
+            "python3 scripts/check_wasm_typescript_type_model_policy.py "
+            "--policy .github/wasm_typescript_type_model_policy.json "
+            "--only-scenario TS-TYPE-NEXT",
+            "Resolve type-model policy findings for Next.js adapter semantics.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="type_model",
+        ),
+        Step(
+            "next.typescript_package_topology",
+            "python3 scripts/check_wasm_typescript_package_policy.py "
+            "--policy .github/wasm_typescript_package_policy.json "
+            "--only-scenario TS-PKG-NEXT-ESM "
+            "--only-scenario TS-PKG-NEXT-CJS",
+            "Resolve package topology/export-map policy findings for Next.js adapter onboarding.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="package_topology",
+        ),
         Step(
             "next.dependency_policy",
             "python3 scripts/check_wasm_dependency_policy.py "
             "--policy .github/wasm_dependency_policy.json",
             "Resolve forbidden or unresolved wasm dependency policy findings before Next integration.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="dependency_policy",
         ),
         Step(
             "next.wasm_profile_check",
             "rch exec -- cargo check --target wasm32-unknown-unknown "
             "--no-default-features --features wasm-browser-dev",
             "Resolve wasm32 compile blockers (for example getrandom wasm_js gating) before Next onboarding.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="profile_closure",
         ),
         Step(
             "next.optimization_policy",
             "python3 scripts/check_wasm_optimization_policy.py "
             "--policy .github/wasm_optimization_policy.json",
             "Fix optimization policy schema/profile mapping and regenerate summary artifact.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="optimization_policy",
         ),
     ],
 }
@@ -124,6 +233,7 @@ def run_step(
         "cwd": str(Path.cwd()),
         "target": "wasm32-unknown-unknown",
         "runner": "rch",
+        "runtime_profile": step.runtime_profile,
     }
 
     if dry_run:
@@ -140,6 +250,10 @@ def run_step(
             "env": env_metadata,
             "artifact_log_path": str(log_path),
             "remediation_hint": step.remediation_hint,
+            "package_entrypoint": step.package_entrypoint,
+            "adapter_path": step.adapter_path,
+            "runtime_profile": step.runtime_profile,
+            "diagnostic_category": step.diagnostic_category,
         }
 
     with log_path.open("w", encoding="utf-8") as log_f:
@@ -170,6 +284,10 @@ def run_step(
         "artifact_log_path": str(log_path),
         "failure_excerpt": tail_excerpt(log_path, max_lines=40) if outcome == "fail" else "",
         "remediation_hint": step.remediation_hint,
+        "package_entrypoint": step.package_entrypoint,
+        "adapter_path": step.adapter_path,
+        "runtime_profile": step.runtime_profile,
+        "diagnostic_category": step.diagnostic_category,
     }
 
 

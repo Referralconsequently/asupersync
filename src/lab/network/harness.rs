@@ -1217,7 +1217,7 @@ mod tests {
         harness.inject_spawn(&a, &b, task_id);
 
         // Long enough for spawn, ack, execution, and result exchange.
-        harness.run_for(Duration::from_millis(1000));
+        harness.run_for(Duration::from_secs(1));
 
         let host_a = harness.node(&a).unwrap().host_id;
         let host_b = harness.node(&b).unwrap().host_id;

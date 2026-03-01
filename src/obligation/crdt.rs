@@ -936,6 +936,62 @@ mod tests {
         assert_eq!(entry.total_resolves(), 0);
     }
 
+    #[test]
+    fn force_abort_repair_collapses_conflict_to_linear_aborted() {
+        let id = oid(46);
+        let mut a = CrdtObligationLedger::new(node("A"));
+        a.record_acquire(id, ObligationKind::SendPermit);
+        a.record_commit(id);
+
+        let mut b = CrdtObligationLedger::new(node("B"));
+        b.record_acquire(id, ObligationKind::SendPermit);
+        b.record_abort(id);
+
+        a.merge(&b);
+        let conflicted = a.get_entry(&id).expect("entry should exist");
+        assert!(conflicted.is_conflict());
+        assert!(!conflicted.is_linear());
+
+        a.force_abort_repair(id);
+        let repaired = a.get_entry(&id).expect("entry should exist");
+        assert_eq!(repaired.state, LatticeState::Aborted);
+        assert!(repaired.is_linear());
+        assert_eq!(repaired.total_acquires(), 1);
+        assert_eq!(repaired.total_resolves(), 1);
+        assert_eq!(repaired.witnesses.len(), 1);
+        assert_eq!(
+            repaired.witnesses.get(&node("A")).copied(),
+            Some(LatticeState::Aborted)
+        );
+    }
+
+    #[test]
+    fn compact_rewrites_non_minimal_terminal_metadata() {
+        let mut ledger = CrdtObligationLedger::new(node("A"));
+        let id = oid(47);
+        ledger.record_acquire(id, ObligationKind::Lease);
+        ledger.record_abort(id);
+
+        let entry = ledger.entries.get_mut(&id).expect("entry should exist");
+        entry.witnesses.insert(node("B"), LatticeState::Unknown);
+        entry.acquire_counts.insert(node("B"), 0);
+        entry.resolve_counts.insert(node("B"), 0);
+        assert!(entry.is_terminal());
+        assert!(entry.is_linear());
+
+        let compacted = ledger.compact();
+        assert_eq!(compacted, 1);
+
+        let compacted_entry = ledger.get_entry(&id).expect("entry should exist");
+        assert_eq!(compacted_entry.witnesses.len(), 1);
+        assert_eq!(compacted_entry.total_acquires(), 1);
+        assert_eq!(compacted_entry.total_resolves(), 1);
+        assert_eq!(
+            compacted_entry.witnesses.get(&node("A")).copied(),
+            Some(LatticeState::Aborted)
+        );
+    }
+
     // ── derive-trait coverage (wave 74) ──────────────────────────────────
 
     #[test]

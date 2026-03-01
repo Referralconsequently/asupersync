@@ -263,10 +263,12 @@ pub use types::{
     WasmAbiBoundaryEvent, WasmAbiCancellation, WasmAbiChangeClass, WasmAbiCompatibilityDecision,
     WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiPayloadShape,
     WasmAbiRecoverability, WasmAbiSignature, WasmAbiSymbol, WasmAbiValue, WasmAbiVersion,
-    WasmAbiVersionBump, WasmBoundaryState, WasmBoundaryTransitionError, WasmHandleKind,
-    WasmHandleRef, classify_wasm_abi_compatibility, is_valid_wasm_boundary_transition,
-    join_outcomes, required_wasm_abi_bump, validate_wasm_boundary_transition,
-    wasm_abi_signature_fingerprint,
+    WasmAbiVersionBump, WasmAbortInteropSnapshot, WasmAbortInteropUpdate, WasmAbortPropagationMode,
+    WasmBoundaryState, WasmBoundaryTransitionError, WasmHandleKind, WasmHandleRef,
+    apply_abort_signal_event, apply_runtime_cancel_phase_event, classify_wasm_abi_compatibility,
+    is_valid_wasm_boundary_transition, join_outcomes, required_wasm_abi_bump,
+    validate_wasm_boundary_transition, wasm_abi_signature_fingerprint,
+    wasm_boundary_state_for_cancel_phase,
 };
 
 // Re-export proc macros when the proc-macros feature is enabled

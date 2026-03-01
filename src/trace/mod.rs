@@ -102,7 +102,13 @@ pub use dpor::{
     RaceReport, ResourceRaceDistribution, SleepSet, TraceCoverageAnalysis, detect_hb_races,
     detect_races, estimated_classes, racing_events, trace_coverage_analysis,
 };
-pub use event::{TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind};
+pub use event::{
+    BROWSER_TRACE_SCHEMA_VERSION, BrowserTraceCategory, BrowserTraceCompatibility,
+    BrowserTraceEventSpec, BrowserTraceSchema, TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent,
+    TraceEventKind, browser_trace_category_for_kind, browser_trace_category_name,
+    browser_trace_log_fields, browser_trace_schema_v1, decode_browser_trace_schema,
+    redact_browser_trace_event, validate_browser_trace_schema,
+};
 pub use event_structure::{
     Event, EventId, EventStructure, HdaCell, HdaComplex, OwnerKey, TracePoset,
 };

@@ -956,6 +956,66 @@ mod tests {
     }
 
     #[test]
+    fn verify_past_end_of_trace_reports_trace_exhausted() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(42);
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        write_trace(path, &metadata, &events).unwrap();
+
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+        assert!(replayer.next_event().unwrap().is_some());
+        assert!(replayer.is_complete());
+
+        let actual = ReplayEvent::RngSeed { seed: 99 };
+        let err = replayer.verify(&actual).unwrap_err();
+        match err {
+            StreamingReplayError::Divergence(divergence) => {
+                assert!(divergence.expected.is_none());
+                assert_eq!(divergence.index, 1);
+                assert!(divergence.context.contains("Trace ended"));
+                assert!(format!("{divergence}").contains("<trace_exhausted>"));
+            }
+            other => panic!("expected divergence error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_mismatch_preserves_expected_event() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(42);
+        let events = vec![ReplayEvent::TaskScheduled {
+            task: CompactTaskId(1),
+            at_tick: 10,
+        }];
+        write_trace(path, &metadata, &events).unwrap();
+
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+        let actual = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(2),
+            at_tick: 10,
+        };
+        let err = replayer.verify(&actual).unwrap_err();
+        match err {
+            StreamingReplayError::Divergence(divergence) => {
+                assert_eq!(
+                    divergence.expected,
+                    Some(ReplayEvent::TaskScheduled {
+                        task: CompactTaskId(1),
+                        at_tick: 10,
+                    })
+                );
+                assert_eq!(divergence.actual, actual);
+                assert_eq!(divergence.index, 0);
+            }
+            other => panic!("expected divergence error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn progress_display() {
         let progress = ReplayProgress::new(250, 1000);
         let display = format!("{progress}");

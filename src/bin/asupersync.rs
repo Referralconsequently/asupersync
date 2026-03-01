@@ -5,10 +5,11 @@ use asupersync::Time;
 use asupersync::cli::{
     CliError, ColorChoice, CommonArgs, CoreDiagnosticsReportBundle, ExitCode,
     InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
-    OutputFormat, Outputtable, ScreenEngineContract, StructuredLoggingContract,
-    WorkspaceScanReport, analyze_workspace_invariants, analyze_workspace_lock_contention,
-    core_diagnostics_report_bundle, operator_model_contract, parse_color_choice,
-    parse_output_format, scan_workspace, screen_engine_contract, structured_logging_contract,
+    OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
+    StructuredLoggingContract, WorkspaceScanReport, analyze_workspace_invariants,
+    analyze_workspace_lock_contention, core_diagnostics_report_bundle, operator_model_contract,
+    parse_color_choice, parse_output_format, remediation_recipe_bundle, scan_workspace,
+    screen_engine_contract, structured_logging_contract,
 };
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
@@ -245,6 +246,8 @@ enum DoctorCommand {
     ScreenContracts,
     /// Emit baseline structured logging contract for doctor flows
     LoggingContract,
+    /// Emit remediation recipe DSL contract and deterministic fixture bundle
+    RemediationContract,
     /// Emit core diagnostics report contract and deterministic fixture bundle
     ReportContract,
 }
@@ -645,6 +648,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::OperatorModel => doctor_operator_model(output),
         DoctorCommand::ScreenContracts => doctor_screen_contracts(output),
         DoctorCommand::LoggingContract => doctor_logging_contract(output),
+        DoctorCommand::RemediationContract => doctor_remediation_contract(output),
         DoctorCommand::ReportContract => doctor_report_contract(output),
     }
 }
@@ -725,6 +729,14 @@ fn doctor_screen_contracts(output: &mut Output) -> Result<(), CliError> {
 fn doctor_logging_contract(output: &mut Output) -> Result<(), CliError> {
     let contract: StructuredLoggingContract = structured_logging_contract();
     output.write(&contract).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_remediation_contract(output: &mut Output) -> Result<(), CliError> {
+    let bundle: RemediationRecipeBundle = remediation_recipe_bundle();
+    output.write(&bundle).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
     Ok(())

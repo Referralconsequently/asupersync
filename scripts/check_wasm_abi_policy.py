@@ -51,6 +51,9 @@ SIGNATURE_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 SYMBOL_RE = re.compile(r"symbol:\s*WasmAbiSymbol::([A-Za-z0-9_]+)")
+MIGRATION_ENTRY_RE = re.compile(
+    r"Current ABI entry:\s*`v(?P<major>\d+)\.(?P<minor>\d+)\s+fingerprint=(?P<fingerprint>[0-9_]+)`"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -263,6 +266,64 @@ def verify_documentation(contract: ContractPaths, doc_text: str) -> list[dict[st
     return findings
 
 
+def verify_migration_notes(doc_text: str, observed: ObservedContract) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+
+    heading = "## Migration Notes Ledger"
+    if heading not in doc_text:
+        findings.append(
+            {
+                "field": "migration_notes_heading",
+                "expected": heading,
+                "actual": "missing",
+                "message": "documentation missing migration notes ledger heading",
+            }
+        )
+        return findings
+
+    match = MIGRATION_ENTRY_RE.search(doc_text)
+    if not match:
+        findings.append(
+            {
+                "field": "migration_notes_current_entry",
+                "expected": (
+                    "Current ABI entry: `v<major>.<minor> fingerprint=<fingerprint>`"
+                ),
+                "actual": "missing_or_malformed",
+                "message": "migration notes missing parseable current ABI entry",
+            }
+        )
+        return findings
+
+    doc_major = int(match.group("major"))
+    doc_minor = int(match.group("minor"))
+    doc_fingerprint = int(match.group("fingerprint").replace("_", ""))
+
+    if (
+        doc_major != observed.major_version
+        or doc_minor != observed.minor_version
+        or doc_fingerprint != observed.signature_fingerprint
+    ):
+        findings.append(
+            {
+                "field": "migration_notes_current_entry",
+                "expected": {
+                    "major_version": observed.major_version,
+                    "minor_version": observed.minor_version,
+                    "signature_fingerprint": observed.signature_fingerprint,
+                },
+                "actual": {
+                    "major_version": doc_major,
+                    "minor_version": doc_minor,
+                    "signature_fingerprint": doc_fingerprint,
+                },
+                "message": "migration notes current ABI entry does not match source contract",
+            }
+        )
+
+    return findings
+
+
 def write_outputs(
     summary_path: pathlib.Path,
     log_path: pathlib.Path,
@@ -370,7 +431,12 @@ pub const WASM_ABI_SIGNATURES_V1: [WasmAbiSignature; 2] = [
     )
     assert compare_contract(expected_bad, observed)
 
-    docs = "Contract ID: `asupersync-wasm-abi-v1`\nDrift Detection and CI Gate\n"
+    docs = (
+        "Contract ID: `asupersync-wasm-abi-v1`\n"
+        "Drift Detection and CI Gate\n"
+        "## Migration Notes Ledger\n"
+        "Current ABI entry: `v1.0 fingerprint=1234`\n"
+    )
     contract = ContractPaths(
         contract_id="asupersync-wasm-abi-v1",
         source="src/types/wasm_abi.rs",
@@ -379,6 +445,11 @@ pub const WASM_ABI_SIGNATURES_V1: [WasmAbiSignature; 2] = [
     )
     assert not verify_documentation(contract, docs)
     assert verify_documentation(contract, "missing everything")
+    assert not verify_migration_notes(docs, observed)
+    assert verify_migration_notes("## Migration Notes Ledger\n", observed)
+    assert verify_migration_notes(
+        "## Migration Notes Ledger\nCurrent ABI entry: `v2.0 fingerprint=1`\n", observed
+    )
 
     print("wasm ABI policy self-test passed")
 
@@ -401,6 +472,7 @@ def main() -> int:
     observed = parse_contract_from_source(source_text)
     findings = compare_contract(expected, observed)
     findings.extend(verify_documentation(contract, doc_text))
+    findings.extend(verify_migration_notes(doc_text, observed))
 
     summary_path = pathlib.Path(args.summary_output or summary_default)
     log_path = pathlib.Path(args.log_output or log_default)

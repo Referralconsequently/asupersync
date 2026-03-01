@@ -2054,7 +2054,10 @@ impl Outputtable for RemediationRecipeContract {
             "Allowed rollback strategies: {}",
             self.allowed_rollback_strategies.join(", ")
         ));
-        lines.push(format!("Confidence weights: {}", self.confidence_weights.len()));
+        lines.push(format!(
+            "Confidence weights: {}",
+            self.confidence_weights.len()
+        ));
         lines.push(format!("Risk bands: {}", self.risk_bands.len()));
         for band in &self.risk_bands {
             lines.push(format!(
@@ -6681,6 +6684,815 @@ pub fn validate_structured_logging_event_stream(
     }
 
     Ok(())
+}
+
+/// Returns the canonical remediation-recipe DSL contract.
+#[must_use]
+pub fn remediation_recipe_contract() -> RemediationRecipeContract {
+    RemediationRecipeContract {
+        contract_version: REMEDIATION_RECIPE_CONTRACT_VERSION.to_string(),
+        logging_contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        required_recipe_fields: vec![
+            "confidence_inputs".to_string(),
+            "finding_id".to_string(),
+            "fix_intent".to_string(),
+            "preconditions".to_string(),
+            "recipe_id".to_string(),
+            "rollback".to_string(),
+        ],
+        required_precondition_fields: vec![
+            "evidence_ref".to_string(),
+            "expected_value".to_string(),
+            "key".to_string(),
+            "predicate".to_string(),
+            "required".to_string(),
+        ],
+        required_rollback_fields: vec![
+            "rollback_command".to_string(),
+            "strategy".to_string(),
+            "timeout_secs".to_string(),
+            "verify_command".to_string(),
+        ],
+        required_confidence_input_fields: vec![
+            "evidence_ref".to_string(),
+            "key".to_string(),
+            "rationale".to_string(),
+            "score".to_string(),
+        ],
+        allowed_fix_intents: vec![
+            "adjust_timeout_budget".to_string(),
+            "add_cancellation_checkpoint".to_string(),
+            "enforce_lock_order".to_string(),
+            "harden_retry_backoff".to_string(),
+            "reduce_lock_scope".to_string(),
+        ],
+        allowed_precondition_predicates: vec![
+            "contains".to_string(),
+            "eq".to_string(),
+            "exists".to_string(),
+            "gte".to_string(),
+            "lte".to_string(),
+        ],
+        allowed_rollback_strategies: vec![
+            "git_apply_reverse_patch".to_string(),
+            "replay_last_green_artifact".to_string(),
+            "restore_backup_snapshot".to_string(),
+        ],
+        confidence_weights: vec![
+            RemediationConfidenceWeight {
+                key: "analyzer_confidence".to_string(),
+                weight_bps: 3_200,
+                rationale: "Confidence reported by analyzer or invariant oracle.".to_string(),
+            },
+            RemediationConfidenceWeight {
+                key: "blast_radius".to_string(),
+                weight_bps: 2_400,
+                rationale: "Estimated change-surface containment (higher is narrower)."
+                    .to_string(),
+            },
+            RemediationConfidenceWeight {
+                key: "replay_reproducibility".to_string(),
+                weight_bps: 2_200,
+                rationale: "Deterministic replay confidence for this finding.".to_string(),
+            },
+            RemediationConfidenceWeight {
+                key: "test_coverage_delta".to_string(),
+                weight_bps: 2_200,
+                rationale: "Coverage confidence that the recipe is regression-safe.".to_string(),
+            },
+        ],
+        risk_bands: vec![
+            RemediationRiskBand {
+                band_id: "critical_risk".to_string(),
+                min_score_inclusive: 0,
+                max_score_inclusive: 39,
+                requires_human_approval: true,
+                allow_auto_apply: false,
+            },
+            RemediationRiskBand {
+                band_id: "elevated_risk".to_string(),
+                min_score_inclusive: 40,
+                max_score_inclusive: 69,
+                requires_human_approval: true,
+                allow_auto_apply: false,
+            },
+            RemediationRiskBand {
+                band_id: "guarded_auto_apply".to_string(),
+                min_score_inclusive: 70,
+                max_score_inclusive: 84,
+                requires_human_approval: false,
+                allow_auto_apply: true,
+            },
+            RemediationRiskBand {
+                band_id: "trusted_auto_apply".to_string(),
+                min_score_inclusive: 85,
+                max_score_inclusive: 100,
+                requires_human_approval: false,
+                allow_auto_apply: true,
+            },
+        ],
+        compatibility: ContractCompatibility {
+            minimum_reader_version: REMEDIATION_RECIPE_CONTRACT_VERSION.to_string(),
+            supported_reader_versions: vec![REMEDIATION_RECIPE_CONTRACT_VERSION.to_string()],
+            migration_guidance: vec![MigrationGuidance {
+                from_version: "doctor-remediation-recipe-v0".to_string(),
+                to_version: REMEDIATION_RECIPE_CONTRACT_VERSION.to_string(),
+                breaking: false,
+                required_actions: vec![
+                    "Validate lexical ordering for all deterministic array fields.".to_string(),
+                    "Require confidence input weights to sum to exactly 10_000 bps.".to_string(),
+                    "Fail recipe parsing when fix_intent/predicate/rollback strategy are outside allowlists.".to_string(),
+                ],
+            }],
+        },
+    }
+}
+
+/// Validates invariants for [`RemediationRecipeContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, schema, or compatibility invariants are violated.
+pub fn validate_remediation_recipe_contract(
+    contract: &RemediationRecipeContract,
+) -> Result<(), String> {
+    if contract.contract_version != REMEDIATION_RECIPE_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.logging_contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected logging_contract_version {}",
+            contract.logging_contract_version
+        ));
+    }
+    validate_lexical_string_set(&contract.required_recipe_fields, "required_recipe_fields")?;
+    validate_lexical_string_set(
+        &contract.required_precondition_fields,
+        "required_precondition_fields",
+    )?;
+    validate_lexical_string_set(
+        &contract.required_rollback_fields,
+        "required_rollback_fields",
+    )?;
+    validate_lexical_string_set(
+        &contract.required_confidence_input_fields,
+        "required_confidence_input_fields",
+    )?;
+    validate_lexical_string_set(&contract.allowed_fix_intents, "allowed_fix_intents")?;
+    validate_lexical_string_set(
+        &contract.allowed_precondition_predicates,
+        "allowed_precondition_predicates",
+    )?;
+    validate_lexical_string_set(
+        &contract.allowed_rollback_strategies,
+        "allowed_rollback_strategies",
+    )?;
+    for required in [
+        "confidence_inputs",
+        "finding_id",
+        "fix_intent",
+        "preconditions",
+        "recipe_id",
+        "rollback",
+    ] {
+        if !contract
+            .required_recipe_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_recipe_fields missing {required}"));
+        }
+    }
+
+    if contract.confidence_weights.is_empty() {
+        return Err("confidence_weights must be non-empty".to_string());
+    }
+    let weight_keys = contract
+        .confidence_weights
+        .iter()
+        .map(|weight| weight.key.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&weight_keys, "confidence_weights.key")?;
+    let mut total_weight_bps: u32 = 0;
+    for weight in &contract.confidence_weights {
+        if weight.rationale.trim().is_empty() {
+            return Err(format!(
+                "confidence weight {} must include rationale",
+                weight.key
+            ));
+        }
+        if weight.weight_bps == 0 {
+            return Err(format!(
+                "confidence weight {} must have non-zero weight_bps",
+                weight.key
+            ));
+        }
+        total_weight_bps = total_weight_bps.saturating_add(u32::from(weight.weight_bps));
+    }
+    if total_weight_bps != 10_000 {
+        return Err(format!(
+            "confidence_weights must sum to 10000 bps (got {total_weight_bps})"
+        ));
+    }
+
+    if contract.risk_bands.is_empty() {
+        return Err("risk_bands must be non-empty".to_string());
+    }
+    let band_ids = contract
+        .risk_bands
+        .iter()
+        .map(|band| band.band_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&band_ids, "risk_bands.band_id")?;
+    let mut ordered_ranges = contract
+        .risk_bands
+        .iter()
+        .map(|band| (band.min_score_inclusive, band.max_score_inclusive))
+        .collect::<Vec<_>>();
+    ordered_ranges.sort();
+    let mut cursor = 0u8;
+    for (min_score, max_score) in ordered_ranges {
+        if min_score > max_score {
+            return Err("risk band has min_score_inclusive > max_score_inclusive".to_string());
+        }
+        if min_score != cursor {
+            return Err("risk_bands must cover 0..=100 without gaps".to_string());
+        }
+        cursor = max_score.saturating_add(1);
+    }
+    if cursor != 101 {
+        return Err("risk_bands must end at max score 100".to_string());
+    }
+
+    if contract
+        .compatibility
+        .minimum_reader_version
+        .trim()
+        .is_empty()
+    {
+        return Err("compatibility.minimum_reader_version must be non-empty".to_string());
+    }
+    validate_lexical_string_set(
+        &contract.compatibility.supported_reader_versions,
+        "compatibility.supported_reader_versions",
+    )?;
+    if !contract
+        .compatibility
+        .supported_reader_versions
+        .iter()
+        .any(|version| version == &contract.compatibility.minimum_reader_version)
+    {
+        return Err("minimum_reader_version missing from supported_reader_versions".to_string());
+    }
+    for (index, guidance) in contract.compatibility.migration_guidance.iter().enumerate() {
+        if guidance.from_version.trim().is_empty() || guidance.to_version.trim().is_empty() {
+            return Err(format!(
+                "migration_guidance[{index}] has empty from/to version"
+            ));
+        }
+        validate_lexical_string_set(
+            &guidance.required_actions,
+            &format!("migration_guidance[{index}].required_actions"),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Validates one remediation recipe against the canonical DSL contract.
+///
+/// # Errors
+///
+/// Returns `Err` when recipe content violates deterministic DSL invariants.
+pub fn validate_remediation_recipe(
+    contract: &RemediationRecipeContract,
+    recipe: &RemediationRecipe,
+) -> Result<(), String> {
+    validate_remediation_recipe_contract(contract)?;
+
+    if !recipe.recipe_id.starts_with("recipe-") || !is_slug_like(&recipe.recipe_id) {
+        return Err("recipe_id must match recipe-* slug format".to_string());
+    }
+    if recipe.finding_id.trim().is_empty() {
+        return Err("finding_id must be non-empty".to_string());
+    }
+    if !contract
+        .allowed_fix_intents
+        .iter()
+        .any(|candidate| candidate == &recipe.fix_intent)
+    {
+        return Err(format!("unsupported fix_intent {}", recipe.fix_intent));
+    }
+    if recipe.preconditions.is_empty() {
+        return Err("preconditions must be non-empty".to_string());
+    }
+    let precondition_keys = recipe
+        .preconditions
+        .iter()
+        .map(|precondition| precondition.key.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&precondition_keys, "recipe.preconditions.key")?;
+    for precondition in &recipe.preconditions {
+        if !contract
+            .allowed_precondition_predicates
+            .iter()
+            .any(|predicate| predicate == &precondition.predicate)
+        {
+            return Err(format!(
+                "unsupported precondition predicate {}",
+                precondition.predicate
+            ));
+        }
+        if precondition.expected_value.trim().is_empty() {
+            return Err(format!(
+                "precondition {} expected_value must be non-empty",
+                precondition.key
+            ));
+        }
+        if precondition.required && precondition.evidence_ref.trim().is_empty() {
+            return Err(format!(
+                "required precondition {} must include evidence_ref",
+                precondition.key
+            ));
+        }
+    }
+
+    if !contract
+        .allowed_rollback_strategies
+        .iter()
+        .any(|strategy| strategy == &recipe.rollback.strategy)
+    {
+        return Err(format!(
+            "unsupported rollback strategy {}",
+            recipe.rollback.strategy
+        ));
+    }
+    if recipe.rollback.rollback_command.trim().is_empty()
+        || recipe.rollback.verify_command.trim().is_empty()
+    {
+        return Err("rollback commands must be non-empty".to_string());
+    }
+    if recipe.rollback.rollback_command.contains('\n')
+        || recipe.rollback.rollback_command.contains('\r')
+        || recipe.rollback.verify_command.contains('\n')
+        || recipe.rollback.verify_command.contains('\r')
+    {
+        return Err("rollback commands must be single-line command strings".to_string());
+    }
+    if recipe.rollback.timeout_secs == 0 {
+        return Err("rollback timeout_secs must be > 0".to_string());
+    }
+
+    if recipe.confidence_inputs.is_empty() {
+        return Err("confidence_inputs must be non-empty".to_string());
+    }
+    let input_keys = recipe
+        .confidence_inputs
+        .iter()
+        .map(|input| input.key.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&input_keys, "recipe.confidence_inputs.key")?;
+    let weight_keys = contract
+        .confidence_weights
+        .iter()
+        .map(|weight| weight.key.clone())
+        .collect::<BTreeSet<_>>();
+    for input in &recipe.confidence_inputs {
+        if !weight_keys.contains(&input.key) {
+            return Err(format!(
+                "confidence input {} missing from contract weights",
+                input.key
+            ));
+        }
+        if input.score > 100 {
+            return Err(format!(
+                "confidence input {} score {} must be <= 100",
+                input.key, input.score
+            ));
+        }
+        if input.rationale.trim().is_empty() {
+            return Err(format!(
+                "confidence input {} must include rationale",
+                input.key
+            ));
+        }
+        if input.evidence_ref.trim().is_empty() {
+            return Err(format!(
+                "confidence input {} must include evidence_ref",
+                input.key
+            ));
+        }
+    }
+    for required_weight in &weight_keys {
+        if !input_keys
+            .iter()
+            .any(|input_key| input_key == required_weight)
+        {
+            return Err(format!(
+                "missing confidence input for required weight {required_weight}"
+            ));
+        }
+    }
+    if let Some(override_justification) = &recipe.override_justification
+        && override_justification.trim().is_empty()
+    {
+        return Err("override_justification must be non-empty when provided".to_string());
+    }
+
+    Ok(())
+}
+
+/// Parses one remediation recipe JSON payload and validates it against contract invariants.
+///
+/// # Errors
+///
+/// Returns `Err` when deserialization or validation fails.
+pub fn parse_remediation_recipe(
+    contract: &RemediationRecipeContract,
+    payload: &str,
+) -> Result<RemediationRecipe, String> {
+    let recipe: RemediationRecipe = serde_json::from_str(payload)
+        .map_err(|err| format!("invalid remediation recipe JSON: {err}"))?;
+    validate_remediation_recipe(contract, &recipe)?;
+    Ok(recipe)
+}
+
+/// Computes deterministic confidence score for one remediation recipe.
+///
+/// # Errors
+///
+/// Returns `Err` when recipe validation fails or risk-band mapping is invalid.
+pub fn compute_remediation_confidence_score(
+    contract: &RemediationRecipeContract,
+    recipe: &RemediationRecipe,
+) -> Result<RemediationConfidenceScore, String> {
+    validate_remediation_recipe(contract, recipe)?;
+
+    let input_scores = recipe
+        .confidence_inputs
+        .iter()
+        .map(|input| (input.key.clone(), input.score))
+        .collect::<BTreeMap<_, _>>();
+    let mut total: u32 = 0;
+    let mut weighted_contributions = Vec::new();
+    for weight in &contract.confidence_weights {
+        let score = input_scores
+            .get(&weight.key)
+            .copied()
+            .ok_or_else(|| format!("missing confidence input {}", weight.key))?;
+        let contribution = u32::from(score) * u32::from(weight.weight_bps);
+        total = total.saturating_add(contribution);
+        weighted_contributions.push(format!(
+            "{}={}*{}bps/10000",
+            weight.key, score, weight.weight_bps
+        ));
+    }
+
+    let confidence_score = u8::try_from(total / 10_000).map_err(|_| {
+        "computed confidence score exceeded u8 bounds; check weight configuration".to_string()
+    })?;
+
+    let mut sorted_bands = contract.risk_bands.clone();
+    sorted_bands.sort_by_key(|band| band.min_score_inclusive);
+    let band = sorted_bands
+        .iter()
+        .find(|candidate| {
+            confidence_score >= candidate.min_score_inclusive
+                && confidence_score <= candidate.max_score_inclusive
+        })
+        .ok_or_else(|| format!("no risk band covers confidence score {}", confidence_score))?;
+
+    Ok(RemediationConfidenceScore {
+        recipe_id: recipe.recipe_id.clone(),
+        confidence_score,
+        risk_band: band.band_id.clone(),
+        requires_human_approval: band.requires_human_approval,
+        allow_auto_apply: band.allow_auto_apply && recipe.override_justification.is_none(),
+        weighted_contributions,
+    })
+}
+
+/// Returns deterministic fixtures for remediation recipe validation/scoring.
+#[must_use]
+pub fn remediation_recipe_fixtures() -> Vec<RemediationRecipeFixture> {
+    vec![
+        RemediationRecipeFixture {
+            fixture_id: "fixture-guarded-auto-apply".to_string(),
+            description: "High-confidence lock-order fix with deterministic rollback.".to_string(),
+            recipe: RemediationRecipe {
+                recipe_id: "recipe-lock-order-001".to_string(),
+                finding_id: "doctor-lock-contention:src/runtime/state.rs:critical".to_string(),
+                fix_intent: "enforce_lock_order".to_string(),
+                preconditions: vec![
+                    RemediationPrecondition {
+                        key: "lock_order_violation_present".to_string(),
+                        predicate: "eq".to_string(),
+                        expected_value: "true".to_string(),
+                        evidence_ref: "evidence-lock-001".to_string(),
+                        required: true,
+                    },
+                    RemediationPrecondition {
+                        key: "repro_seed_available".to_string(),
+                        predicate: "exists".to_string(),
+                        expected_value: "true".to_string(),
+                        evidence_ref: "evidence-seed-001".to_string(),
+                        required: true,
+                    },
+                ],
+                rollback: RemediationRollbackPlan {
+                    strategy: "git_apply_reverse_patch".to_string(),
+                    rollback_command: "git apply -R artifacts/run-lock/patch.diff".to_string(),
+                    verify_command:
+                        "rch exec -- cargo test --lib cli::doctor::tests::lock_order_smoke"
+                            .to_string(),
+                    timeout_secs: 120,
+                },
+                confidence_inputs: vec![
+                    RemediationConfidenceInput {
+                        key: "analyzer_confidence".to_string(),
+                        score: 86,
+                        rationale: "Invariant analyzer reported high confidence.".to_string(),
+                        evidence_ref: "evidence-analyzer-001".to_string(),
+                    },
+                    RemediationConfidenceInput {
+                        key: "blast_radius".to_string(),
+                        score: 82,
+                        rationale: "Change is constrained to one lock-order block.".to_string(),
+                        evidence_ref: "evidence-diff-001".to_string(),
+                    },
+                    RemediationConfidenceInput {
+                        key: "replay_reproducibility".to_string(),
+                        score: 79,
+                        rationale: "Replay reproduces failure with fixed seed.".to_string(),
+                        evidence_ref: "evidence-replay-001".to_string(),
+                    },
+                    RemediationConfidenceInput {
+                        key: "test_coverage_delta".to_string(),
+                        score: 74,
+                        rationale: "Targeted tests cover touched lock-order path.".to_string(),
+                        evidence_ref: "evidence-tests-001".to_string(),
+                    },
+                ],
+                override_justification: None,
+            },
+            expected_confidence_score: 80,
+            expected_risk_band: "guarded_auto_apply".to_string(),
+            expected_decision: "apply".to_string(),
+        },
+        RemediationRecipeFixture {
+            fixture_id: "fixture-human-approval".to_string(),
+            description: "Low-confidence timeout tuning requiring manual approval.".to_string(),
+            recipe: RemediationRecipe {
+                recipe_id: "recipe-timeout-budget-001".to_string(),
+                finding_id: "doctor-invariant:src/time/driver.rs:warning".to_string(),
+                fix_intent: "adjust_timeout_budget".to_string(),
+                preconditions: vec![
+                    RemediationPrecondition {
+                        key: "timeout_regression_detected".to_string(),
+                        predicate: "eq".to_string(),
+                        expected_value: "true".to_string(),
+                        evidence_ref: "evidence-timeout-001".to_string(),
+                        required: true,
+                    },
+                    RemediationPrecondition {
+                        key: "rollback_artifact_exists".to_string(),
+                        predicate: "exists".to_string(),
+                        expected_value: "true".to_string(),
+                        evidence_ref: "evidence-rollback-001".to_string(),
+                        required: true,
+                    },
+                ],
+                rollback: RemediationRollbackPlan {
+                    strategy: "restore_backup_snapshot".to_string(),
+                    rollback_command: "cp artifacts/backups/time-driver.prev src/time/driver.rs"
+                        .to_string(),
+                    verify_command: "rch exec -- cargo test --lib time::driver::tests::timeout_budget_regression"
+                        .to_string(),
+                    timeout_secs: 120,
+                },
+                confidence_inputs: vec![
+                    RemediationConfidenceInput {
+                        key: "analyzer_confidence".to_string(),
+                        score: 38,
+                        rationale: "Analyzer confidence is low due to sparse evidence.".to_string(),
+                        evidence_ref: "evidence-analyzer-002".to_string(),
+                    },
+                    RemediationConfidenceInput {
+                        key: "blast_radius".to_string(),
+                        score: 44,
+                        rationale: "Potential impact spans scheduler and timer paths.".to_string(),
+                        evidence_ref: "evidence-diff-002".to_string(),
+                    },
+                    RemediationConfidenceInput {
+                        key: "replay_reproducibility".to_string(),
+                        score: 41,
+                        rationale: "Replay currently reproduces intermittently.".to_string(),
+                        evidence_ref: "evidence-replay-002".to_string(),
+                    },
+                    RemediationConfidenceInput {
+                        key: "test_coverage_delta".to_string(),
+                        score: 36,
+                        rationale: "Coverage increase still pending.".to_string(),
+                        evidence_ref: "evidence-tests-002".to_string(),
+                    },
+                ],
+                override_justification: Some(
+                    "Force plan generation for operator review; do not auto-apply.".to_string(),
+                ),
+            },
+            expected_confidence_score: 39,
+            expected_risk_band: "critical_risk".to_string(),
+            expected_decision: "review".to_string(),
+        },
+    ]
+}
+
+/// Returns bundle for remediation-recipe DSL contract consumers.
+#[must_use]
+pub fn remediation_recipe_bundle() -> RemediationRecipeBundle {
+    RemediationRecipeBundle {
+        contract: remediation_recipe_contract(),
+        fixtures: remediation_recipe_fixtures(),
+    }
+}
+
+/// Executes deterministic remediation recipe smoke flow and emits structured logs.
+///
+/// # Errors
+///
+/// Returns `Err` when fixture evaluation or log emission violates contracts.
+pub fn run_remediation_recipe_smoke(
+    recipe_contract: &RemediationRecipeContract,
+    logging_contract: &StructuredLoggingContract,
+) -> Result<Vec<StructuredLogEvent>, String> {
+    validate_remediation_recipe_contract(recipe_contract)?;
+    let mut events = Vec::new();
+    let bundle = remediation_recipe_bundle();
+
+    for fixture in &bundle.fixtures {
+        let score = compute_remediation_confidence_score(recipe_contract, &fixture.recipe)?;
+        if score.confidence_score != fixture.expected_confidence_score {
+            return Err(format!(
+                "fixture {} expected confidence {}, got {}",
+                fixture.fixture_id, fixture.expected_confidence_score, score.confidence_score
+            ));
+        }
+        if score.risk_band != fixture.expected_risk_band {
+            return Err(format!(
+                "fixture {} expected risk band {}, got {}",
+                fixture.fixture_id, fixture.expected_risk_band, score.risk_band
+            ));
+        }
+
+        let outcome_class = if fixture.expected_decision == "apply" {
+            "success"
+        } else {
+            "failed"
+        };
+        let mut apply_fields = BTreeMap::new();
+        apply_fields.insert(
+            "artifact_pointer".to_string(),
+            format!(
+                "artifacts/run-remediation-smoke/{}/apply.json",
+                fixture.fixture_id
+            ),
+        );
+        apply_fields.insert(
+            "command_provenance".to_string(),
+            "rch exec -- cargo test --lib cli::doctor::tests::remediation_recipe_smoke".to_string(),
+        );
+        apply_fields.insert("flow_id".to_string(), "remediation".to_string());
+        apply_fields.insert("outcome_class".to_string(), outcome_class.to_string());
+        apply_fields.insert("run_id".to_string(), "run-remediation-smoke".to_string());
+        apply_fields.insert("scenario_id".to_string(), fixture.fixture_id.clone());
+        apply_fields.insert(
+            "trace_id".to_string(),
+            format!("trace-remediation-{}-apply", fixture.fixture_id),
+        );
+        apply_fields.insert("risk_score".to_string(), score.confidence_score.to_string());
+        apply_fields.insert("recipe_id".to_string(), fixture.recipe.recipe_id.clone());
+        apply_fields.insert("risk_band".to_string(), score.risk_band.clone());
+        apply_fields.insert(
+            "confidence_breakdown".to_string(),
+            score.weighted_contributions.join(";"),
+        );
+        apply_fields.insert(
+            "decision_rationale".to_string(),
+            format!(
+                "decision={} requires_human_approval={}",
+                fixture.expected_decision, score.requires_human_approval
+            ),
+        );
+        if fixture.expected_decision == "review" {
+            apply_fields.insert(
+                "rejection_rationale".to_string(),
+                "confidence below auto-apply threshold; escalate to operator review".to_string(),
+            );
+            if let Some(override_justification) = &fixture.recipe.override_justification {
+                apply_fields.insert(
+                    "override_rationale".to_string(),
+                    override_justification.clone(),
+                );
+            }
+        }
+        let apply_event = emit_structured_log_event(
+            logging_contract,
+            "remediation",
+            "remediation_apply",
+            &apply_fields,
+        )?;
+        events.push(apply_event);
+
+        let mut verify_fields = BTreeMap::new();
+        verify_fields.insert(
+            "artifact_pointer".to_string(),
+            format!(
+                "artifacts/run-remediation-smoke/{}/verify.json",
+                fixture.fixture_id
+            ),
+        );
+        verify_fields.insert(
+            "command_provenance".to_string(),
+            fixture.recipe.rollback.verify_command.clone(),
+        );
+        verify_fields.insert("flow_id".to_string(), "remediation".to_string());
+        verify_fields.insert("outcome_class".to_string(), "success".to_string());
+        verify_fields.insert("run_id".to_string(), "run-remediation-smoke".to_string());
+        verify_fields.insert("scenario_id".to_string(), fixture.fixture_id.clone());
+        verify_fields.insert(
+            "trace_id".to_string(),
+            format!("trace-remediation-{}-verify", fixture.fixture_id),
+        );
+        verify_fields.insert("risk_score".to_string(), score.confidence_score.to_string());
+        verify_fields.insert("recipe_id".to_string(), fixture.recipe.recipe_id.clone());
+        verify_fields.insert(
+            "verification_summary".to_string(),
+            "rollback_readiness=verified".to_string(),
+        );
+        let verify_event = emit_structured_log_event(
+            logging_contract,
+            "remediation",
+            "remediation_verify",
+            &verify_fields,
+        )?;
+        events.push(verify_event);
+    }
+
+    let mut summary_fields = BTreeMap::new();
+    summary_fields.insert(
+        "artifact_pointer".to_string(),
+        "artifacts/run-remediation-smoke/summary.json".to_string(),
+    );
+    summary_fields.insert(
+        "command_provenance".to_string(),
+        "asupersync doctor remediation-contract --json".to_string(),
+    );
+    summary_fields.insert("flow_id".to_string(), "remediation".to_string());
+    summary_fields.insert("outcome_class".to_string(), "success".to_string());
+    summary_fields.insert("run_id".to_string(), "run-remediation-smoke".to_string());
+    summary_fields.insert(
+        "scenario_id".to_string(),
+        "doctor-remediation-smoke".to_string(),
+    );
+    summary_fields.insert(
+        "trace_id".to_string(),
+        "trace-remediation-summary".to_string(),
+    );
+    summary_fields.insert(
+        "decision_rationale".to_string(),
+        "all remediation recipe fixtures matched expected decisions and risk bands".to_string(),
+    );
+    let summary_event = emit_structured_log_event(
+        logging_contract,
+        "remediation",
+        "verification_summary",
+        &summary_fields,
+    )?;
+    events.push(summary_event);
+
+    events.sort_by(|left, right| {
+        (
+            left.flow_id.as_str(),
+            left.event_kind.as_str(),
+            left.fields
+                .get("trace_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+            .cmp(&(
+                right.flow_id.as_str(),
+                right.event_kind.as_str(),
+                right
+                    .fields
+                    .get("trace_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ))
+    });
+    Ok(events)
 }
 
 /// Returns the canonical rch-backed execution-adapter contract.
@@ -14327,6 +15139,77 @@ impl RuntimeState {
         assert!(
             err.contains("events must be lexically ordered by flow_id/event_kind/trace_id"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn remediation_recipe_contract_validates() {
+        let contract = remediation_recipe_contract();
+        validate_remediation_recipe_contract(&contract).expect("valid remediation recipe contract");
+    }
+
+    #[test]
+    fn remediation_recipe_contract_round_trip_json() {
+        let contract = remediation_recipe_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: RemediationRecipeContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_remediation_recipe_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn parse_remediation_recipe_rejects_unknown_fix_intent() {
+        let contract = remediation_recipe_contract();
+        let mut bad = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        bad.fix_intent = "rewrite_runtime_in_one_shot".to_string();
+        let payload = serde_json::to_string(&bad).expect("serialize");
+
+        let err = parse_remediation_recipe(&contract, &payload).expect_err("must fail");
+        assert!(err.contains("unsupported fix_intent"), "{err}");
+    }
+
+    #[test]
+    fn remediation_confidence_score_is_deterministic() {
+        let contract = remediation_recipe_contract();
+        let fixture = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+
+        let first = compute_remediation_confidence_score(&contract, &fixture).expect("score");
+        let second = compute_remediation_confidence_score(&contract, &fixture).expect("score");
+        assert_eq!(first, second);
+        assert_eq!(first.confidence_score, 80);
+        assert_eq!(first.risk_band, "guarded_auto_apply".to_string());
+    }
+
+    #[test]
+    fn remediation_recipe_smoke_is_deterministic_and_logs_decision_context() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+
+        let first =
+            run_remediation_recipe_smoke(&recipe_contract, &logging_contract).expect("smoke");
+        let second =
+            run_remediation_recipe_smoke(&recipe_contract, &logging_contract).expect("smoke");
+        assert_eq!(first, second);
+        validate_structured_logging_event_stream(&logging_contract, &first)
+            .expect("event stream valid");
+
+        let has_rejection = first.iter().any(|event| {
+            event
+                .fields
+                .get("rejection_rationale")
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        assert!(
+            has_rejection,
+            "smoke stream should include rejection rationale"
         );
     }
 

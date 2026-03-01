@@ -1277,10 +1277,12 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract |
 | [`docs/wasm_quickstart_migration.md`](./docs/wasm_quickstart_migration.md) | **Browser Quickstart + Migration**: deterministic onboarding commands, migration anti-pattern map, deferred-surface fallback guidance |
 | [`docs/wasm_pilot_cohort_rubric.md`](./docs/wasm_pilot_cohort_rubric.md) | **Pilot Cohort Rubric**: deterministic intake scoring, risk tiers, exclusions, and onboarding acceptance criteria |
+| [`docs/wasm_browser_scheduler_semantics.md`](./docs/wasm_browser_scheduler_semantics.md) | **Browser Scheduler + Trace Contract**: scheduler/event-loop law plus browser trace schema v1 taxonomy, compatibility, and redaction rules |
 | [`docs/doctor_operator_model_contract.md`](./docs/doctor_operator_model_contract.md) | **Doctor Operator Contract**: personas, missions, and decision-loop schema |
 | [`docs/doctor_workspace_scanner_contract.md`](./docs/doctor_workspace_scanner_contract.md) | **Doctor Workspace + Screen Contract**: workspace scan schema and screen-to-engine payload contracts |
 | [`docs/doctor_evidence_ingestion_contract.md`](./docs/doctor_evidence_ingestion_contract.md) | **Doctor Evidence Contract**: deterministic artifact-ingestion schema, provenance, and compatibility policy |
 | [`docs/doctor_logging_contract.md`](./docs/doctor_logging_contract.md) | **Doctor Logging Contract**: baseline event envelope, correlation primitives, and deterministic smoke-validation rules |
+| [`docs/doctor_remediation_recipe_contract.md`](./docs/doctor_remediation_recipe_contract.md) | **Doctor Remediation DSL Contract**: machine-readable recipe schema, confidence scoring model, risk bands, and extension policy |
 | [`docs/doctor_diagnostics_report_contract.md`](./docs/doctor_diagnostics_report_contract.md) | **Doctor Core Report Contract**: summary/findings/evidence/commands/provenance schema with deterministic fixture bundle |
 | [`docs/raptorq_baseline_bench_profile.md`](./docs/raptorq_baseline_bench_profile.md) | **RaptorQ Baseline Packet**: deterministic bench/profile corpus + repro commands |
 | [`docs/raptorq_unit_test_matrix.md`](./docs/raptorq_unit_test_matrix.md) | **RaptorQ Unit Matrix**: unit/E2E scenario coverage and replay/log schema mapping |

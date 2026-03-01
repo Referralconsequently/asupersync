@@ -826,6 +826,45 @@ mod tests {
     }
 
     #[test]
+    fn oracle_report_failure_helpers_surface_failed_entries() {
+        let report = OracleReport {
+            entries: vec![
+                OracleEntryReport {
+                    invariant: "task_leak".to_string(),
+                    passed: true,
+                    violation: None,
+                    stats: OracleStats {
+                        entities_tracked: 2,
+                        events_recorded: 4,
+                    },
+                },
+                OracleEntryReport {
+                    invariant: "obligation_leak".to_string(),
+                    passed: false,
+                    violation: Some("Obligation leak: leaked obligation".to_string()),
+                    stats: OracleStats {
+                        entities_tracked: 3,
+                        events_recorded: 6,
+                    },
+                },
+            ],
+            total: 2,
+            passed: 1,
+            failed: 1,
+            check_time_nanos: 42,
+        };
+
+        let failures = report.failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].invariant, "obligation_leak");
+        assert!(!report.all_passed());
+
+        let text = report.to_text();
+        assert!(text.contains("FAIL"));
+        assert!(text.contains("Obligation leak: leaked obligation"));
+    }
+
+    #[test]
     fn oracle_report_entry_lookup() {
         let suite = OracleSuite::new();
         let report = suite.report(Time::ZERO);

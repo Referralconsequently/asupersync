@@ -14,8 +14,10 @@ mod common;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
 use asupersync::trace::{
-    DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TraceReader, TraceReplayer,
-    diagnose_divergence, minimal_divergent_prefix, write_trace,
+    DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TraceEvent, TraceReader,
+    TraceReplayer, browser_trace_log_fields, browser_trace_schema_v1, diagnose_divergence,
+    minimal_divergent_prefix, redact_browser_trace_event, validate_browser_trace_schema,
+    write_trace,
 };
 use asupersync::types::Budget;
 use asupersync::util::DetRng;
@@ -147,6 +149,31 @@ fn record_trace_with_seed(seed: u64) -> ReplayTrace {
 
     runtime.run_until_quiescent();
     runtime.finish_replay_trace().expect("finish trace")
+}
+
+fn record_observability_trace_with_seed(seed: u64) -> Vec<TraceEvent> {
+    let config = LabConfig::new(seed).with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_a, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task a");
+    let (task_b, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task b");
+    let (task_c, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task c");
+
+    runtime.scheduler.lock().schedule(task_a, 0);
+    runtime.scheduler.lock().schedule(task_b, 0);
+    runtime.scheduler.lock().schedule(task_c, 0);
+    runtime.run_until_quiescent();
+    runtime.trace().snapshot()
 }
 
 fn record_parity_trace_with_seed(seed: u64) -> ReplayTrace {
@@ -339,6 +366,64 @@ fn normalize_preserves_events_e2e() {
         "normalize_preserves_events_e2e",
         events = event_count,
         seed = original_seed
+    );
+}
+
+/// Browser trace schema v1: capture -> validate log envelope -> replay.
+#[test]
+fn browser_trace_schema_capture_and_replay_e2e() {
+    init_test("browser_trace_schema_capture_and_replay_e2e");
+    let seed = 0xB012_5EED;
+
+    test_section!("schema-contract");
+    let schema = browser_trace_schema_v1();
+    validate_browser_trace_schema(&schema).expect("schema contract must validate");
+
+    test_section!("capture-observability-trace");
+    let events = record_observability_trace_with_seed(seed);
+    assert!(!events.is_empty(), "expected non-empty observability trace");
+
+    let mut previous_seq = 0u64;
+    for (index, event) in events.iter().enumerate() {
+        if index > 0 {
+            assert!(
+                event.seq >= previous_seq,
+                "event seq must be monotonic: {} < {}",
+                event.seq,
+                previous_seq
+            );
+        }
+        previous_seq = event.seq;
+
+        let redacted = redact_browser_trace_event(event);
+        let fields = browser_trace_log_fields(&redacted, "trace-browser-e2e", None);
+        for required in &schema.structured_log_required_fields {
+            assert!(
+                fields.contains_key(required),
+                "missing required structured-log field {required}"
+            );
+        }
+        assert_eq!(
+            fields.get("trace_id"),
+            Some(&"trace-browser-e2e".to_string())
+        );
+    }
+
+    test_section!("replay-self-consistency");
+    let replay_trace = record_trace_with_seed(seed);
+    let mut replayer = TraceReplayer::new(replay_trace.clone());
+    for event in &replay_trace.events {
+        replayer
+            .verify_and_advance(event)
+            .expect("captured replay trace must be self-consistent");
+    }
+    assert!(replayer.is_completed(), "replayer should complete");
+
+    test_complete!(
+        "browser_trace_schema_capture_and_replay_e2e",
+        seed = seed,
+        observability_events = events.len(),
+        replay_events = replay_trace.events.len()
     );
 }
 

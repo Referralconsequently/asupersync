@@ -158,7 +158,7 @@ impl RegionTreeOracle {
         // If this region already existed with a different parent, remove the
         // stale edge from the old parent's subregion set.
         if let Some(previous_parent) = self.regions.get(&region).and_then(|entry| entry.parent) {
-            if previous_parent != parent {
+            if Some(previous_parent) != parent {
                 if let Some(previous_parent_entry) = self.regions.get_mut(&previous_parent) {
                     previous_parent_entry.subregions.remove(&region);
                 }

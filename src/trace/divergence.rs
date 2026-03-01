@@ -1296,6 +1296,31 @@ mod tests {
         assert!(report.explanation.contains("TimerFired"));
     }
 
+    #[test]
+    fn diagnose_trace_exhausted_divergence() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let trace = make_trace(0xCAFE, events);
+        let error = DivergenceError {
+            index: 1,
+            expected: None,
+            actual: ReplayEvent::RngSeed { seed: 99 },
+            context: "Trace ended but execution continued".to_string(),
+        };
+
+        let report = diagnose_divergence(&trace, &error, &DiagnosticConfig::default());
+
+        assert_eq!(report.category, DivergenceCategory::LengthMismatch);
+        assert_eq!(report.expected.event_type, "TraceExhausted");
+        assert!(
+            report
+                .expected
+                .details
+                .contains("recorded trace ended before this event")
+        );
+        assert!(report.explanation.contains("trace is exhausted"));
+        assert_eq!(report.actual.event_type, "RngSeed");
+    }
+
     // -------------------------------------------------------------------------
     // Context window tests
     // -------------------------------------------------------------------------

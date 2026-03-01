@@ -21,7 +21,11 @@ use asupersync::trace::compat::{
 use asupersync::trace::distributed::{
     CausalOrder, CausalTracker, LamportClock, LamportTime, LogicalTime, VectorClock,
 };
-use asupersync::trace::event::{TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind};
+use asupersync::trace::event::{
+    BROWSER_TRACE_SCHEMA_VERSION, TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent,
+    TraceEventKind, browser_trace_log_fields, browser_trace_schema_v1, decode_browser_trace_schema,
+    redact_browser_trace_event, validate_browser_trace_schema,
+};
 use asupersync::trace::replay::{
     CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace, TraceMetadata,
 };
@@ -217,6 +221,80 @@ proptest! {
             prop_assert_eq!(a.0, b.0);
         }
     }
+}
+
+// ============================================================================
+// Browser Trace Schema v1 Contract
+// ============================================================================
+
+#[test]
+fn browser_trace_schema_v1_contract_validates_and_round_trips() {
+    init_test_logging();
+    let schema = browser_trace_schema_v1();
+    validate_browser_trace_schema(&schema).expect("schema validates");
+
+    let payload = serde_json::to_string(&schema).expect("serialize schema");
+    let decoded = decode_browser_trace_schema(&payload).expect("decode schema");
+    assert_eq!(
+        decoded.schema_version,
+        BROWSER_TRACE_SCHEMA_VERSION.to_string()
+    );
+    assert_eq!(decoded, schema);
+}
+
+#[test]
+fn browser_trace_schema_v0_alias_decodes_with_v1_contract() {
+    init_test_logging();
+    let legacy = serde_json::json!({
+        "schema_version": "browser-trace-schema-v0",
+        "required_envelope_fields": [
+            "event_kind",
+            "schema_version",
+            "seq",
+            "time_ns",
+            "trace_id"
+        ],
+        "ordering_semantics": [
+            "events must be strictly ordered by seq ascending",
+            "logical_time must be monotonic for comparable causal domains",
+            "trace streams must be deterministic for identical seed/config/replay inputs"
+        ],
+        "event_specs": browser_trace_schema_v1().event_specs
+    });
+    let payload = serde_json::to_string(&legacy).expect("serialize legacy schema");
+    let decoded = decode_browser_trace_schema(&payload).expect("decode legacy schema");
+    assert_eq!(
+        decoded.schema_version,
+        BROWSER_TRACE_SCHEMA_VERSION.to_string()
+    );
+}
+
+#[test]
+fn browser_trace_redaction_and_log_fields_are_deterministic() {
+    init_test_logging();
+    let event = TraceEvent::user_trace(10, Time::from_nanos(7), "opaque-secret");
+    let redacted = redact_browser_trace_event(&event);
+    assert_eq!(
+        redacted,
+        TraceEvent::new(
+            10,
+            Time::from_nanos(7),
+            TraceEventKind::UserTrace,
+            TraceData::Message("<redacted>".to_string()),
+        )
+    );
+
+    let fields = browser_trace_log_fields(&redacted, "trace-browser-prop-1", None);
+    assert_eq!(
+        fields.get("trace_id"),
+        Some(&"trace-browser-prop-1".to_string())
+    );
+    assert_eq!(
+        fields.get("schema_version"),
+        Some(&BROWSER_TRACE_SCHEMA_VERSION.to_string())
+    );
+    assert_eq!(fields.get("event_kind"), Some(&"user_trace".to_string()));
+    assert_eq!(fields.get("validation_status"), Some(&"valid".to_string()));
 }
 
 // ============================================================================

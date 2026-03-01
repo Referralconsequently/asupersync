@@ -347,3 +347,49 @@ Any semantic change requires:
 - contract version bump,
 - explicit compatibility note in dependent beads,
 - updated deterministic fixtures and parity artifacts.
+
+## Browser Trace Schema v1 Contract (`asupersync-umelq.12.1`)
+
+Browser incident forensics requires a deterministic trace payload contract that
+is stable across replay tooling and browser adapters.
+
+Canonical implementation surface:
+
+- `src/trace/event.rs`:
+  - `BROWSER_TRACE_SCHEMA_VERSION`
+  - `BrowserTraceSchema`
+  - `browser_trace_schema_v1()`
+  - `validate_browser_trace_schema(...)`
+  - `decode_browser_trace_schema(...)`
+  - `redact_browser_trace_event(...)`
+  - `browser_trace_log_fields(...)`
+
+Normative event taxonomy categories:
+
+- `scheduler`
+- `timer`
+- `host_callback`
+- `capability_invocation`
+- `cancellation_transition`
+
+Required structured-log fields for browser trace diagnostics:
+
+- `trace_id`
+- `schema_version`
+- `event_kind`
+- `seq`
+- `time_ns`
+- `sequence_group`
+- `validation_status`
+- `validation_failure_category`
+
+Backward decode policy:
+
+- v1 readers must decode `browser-trace-schema-v0` payloads through the
+  compatibility alias path and normalize to v1 semantics.
+- Unsupported schema versions fail closed with explicit validation errors.
+
+Redaction policy:
+
+- `user_trace.message` is redacted for browser-oriented diagnostic payloads.
+- `chaos_injection.detail` is redacted for browser-oriented diagnostic payloads.

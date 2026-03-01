@@ -8,7 +8,9 @@
     "required_doc_markers": [
       "Contract ID: `asupersync-wasm-abi-v1`",
       "Drift Detection and CI Gate",
-      "`WASM_ABI_SIGNATURES_V1`"
+      "`WASM_ABI_SIGNATURES_V1`",
+      "Migration Notes Ledger",
+      "Current ABI entry:"
     ]
   },
   "expected": {

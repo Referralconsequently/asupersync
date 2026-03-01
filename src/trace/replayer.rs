@@ -790,7 +790,10 @@ mod tests {
         // Verify past end should produce divergence
         let actual = ReplayEvent::RngSeed { seed: 99 };
         let err = replayer.verify(&actual).unwrap_err();
+        assert!(err.expected.is_none());
+        assert_eq!(err.index, 1);
         assert!(err.context.contains("Trace ended"));
+        assert!(format!("{err}").contains("<trace_exhausted>"));
     }
 
     #[test]

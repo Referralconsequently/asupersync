@@ -8,9 +8,72 @@ use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use crate::trace::distributed::LogicalTime;
 use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
 use core::fmt;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Current schema version for trace events.
 pub const TRACE_EVENT_SCHEMA_VERSION: u32 = 1;
+/// Browser trace contract schema version.
+pub const BROWSER_TRACE_SCHEMA_VERSION: &str = "browser-trace-schema-v1";
+
+/// Browser trace event category for deterministic diagnostics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTraceCategory {
+    /// Scheduler decisions and task lifecycle.
+    Scheduler,
+    /// Timer and virtual-time transitions.
+    Timer,
+    /// Host callback and host-signal integration events.
+    HostCallback,
+    /// Capability/authority mediated runtime effects.
+    CapabilityInvocation,
+    /// Cancellation protocol transitions.
+    CancellationTransition,
+}
+
+/// One browser-trace event taxonomy entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserTraceEventSpec {
+    /// Stable event-kind identifier.
+    pub event_kind: String,
+    /// High-level event category.
+    pub category: BrowserTraceCategory,
+    /// Required event data fields in lexical order.
+    pub required_fields: Vec<String>,
+    /// Fields that must be redacted in browser-friendly logs.
+    pub redacted_fields: Vec<String>,
+}
+
+/// Browser trace schema compatibility policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserTraceCompatibility {
+    /// Oldest reader version that must be supported.
+    pub minimum_reader_version: String,
+    /// Supported reader versions in lexical order.
+    pub supported_reader_versions: Vec<String>,
+    /// Legacy aliases that decode into v1 semantics.
+    pub backward_decode_aliases: Vec<String>,
+}
+
+/// Browser trace schema v1 contract for deterministic diagnostics and replay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserTraceSchema {
+    /// Contract version identifier.
+    pub schema_version: String,
+    /// Required envelope metadata fields in lexical order.
+    pub required_envelope_fields: Vec<String>,
+    /// Required ordering semantics in lexical order.
+    pub ordering_semantics: Vec<String>,
+    /// Required structured-log fields for trace diagnostics.
+    pub structured_log_required_fields: Vec<String>,
+    /// Validation-failure categories in lexical order.
+    pub validation_failure_categories: Vec<String>,
+    /// Canonical event taxonomy in lexical `event_kind` order.
+    pub event_specs: Vec<BrowserTraceEventSpec>,
+    /// Compatibility policy for readers/writers.
+    pub compatibility: BrowserTraceCompatibility,
+}
 
 /// The kind of trace event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -217,6 +280,400 @@ impl TraceEventKind {
             Self::ExitDelivered => "link_ref, from, to, failure_vt, reason",
         }
     }
+}
+
+/// Returns the browser trace category for one trace event kind.
+#[must_use]
+pub const fn browser_trace_category_for_kind(kind: TraceEventKind) -> BrowserTraceCategory {
+    match kind {
+        TraceEventKind::Spawn
+        | TraceEventKind::Schedule
+        | TraceEventKind::Yield
+        | TraceEventKind::Wake
+        | TraceEventKind::Poll
+        | TraceEventKind::Complete
+        | TraceEventKind::Checkpoint
+        | TraceEventKind::FuturelockDetected => BrowserTraceCategory::Scheduler,
+        TraceEventKind::TimeAdvance
+        | TraceEventKind::TimerScheduled
+        | TraceEventKind::TimerFired
+        | TraceEventKind::TimerCancelled => BrowserTraceCategory::Timer,
+        TraceEventKind::IoRequested
+        | TraceEventKind::IoReady
+        | TraceEventKind::IoResult
+        | TraceEventKind::IoError
+        | TraceEventKind::RngSeed
+        | TraceEventKind::RngValue
+        | TraceEventKind::UserTrace
+        | TraceEventKind::ChaosInjection => BrowserTraceCategory::HostCallback,
+        TraceEventKind::ObligationReserve
+        | TraceEventKind::ObligationCommit
+        | TraceEventKind::ObligationAbort
+        | TraceEventKind::ObligationLeak
+        | TraceEventKind::RegionCreated
+        | TraceEventKind::MonitorCreated
+        | TraceEventKind::MonitorDropped
+        | TraceEventKind::DownDelivered
+        | TraceEventKind::LinkCreated
+        | TraceEventKind::LinkDropped
+        | TraceEventKind::ExitDelivered => BrowserTraceCategory::CapabilityInvocation,
+        TraceEventKind::CancelRequest
+        | TraceEventKind::CancelAck
+        | TraceEventKind::RegionCloseBegin
+        | TraceEventKind::RegionCloseComplete
+        | TraceEventKind::RegionCancelled => BrowserTraceCategory::CancellationTransition,
+    }
+}
+
+/// Returns stable snake_case category name for structured logs.
+#[must_use]
+pub const fn browser_trace_category_name(category: BrowserTraceCategory) -> &'static str {
+    match category {
+        BrowserTraceCategory::Scheduler => "scheduler",
+        BrowserTraceCategory::Timer => "timer",
+        BrowserTraceCategory::HostCallback => "host_callback",
+        BrowserTraceCategory::CapabilityInvocation => "capability_invocation",
+        BrowserTraceCategory::CancellationTransition => "cancellation_transition",
+    }
+}
+
+fn redacted_fields_for_kind(kind: TraceEventKind) -> Vec<String> {
+    match kind {
+        TraceEventKind::UserTrace => vec!["message".to_string()],
+        TraceEventKind::ChaosInjection => vec!["detail".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn split_required_fields_csv(csv: &str) -> Vec<String> {
+    let mut fields = csv
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    fields
+}
+
+fn validate_lexical_string_set(values: &[String], field: &str) -> Result<(), String> {
+    if values.is_empty() {
+        return Err(format!("{field} must be non-empty"));
+    }
+    for value in values {
+        if value.trim().is_empty() {
+            return Err(format!("{field} must not contain empty values"));
+        }
+    }
+    for window in values.windows(2) {
+        if window[0] >= window[1] {
+            return Err(format!("{field} must be lexically sorted and unique"));
+        }
+    }
+    Ok(())
+}
+
+/// Returns canonical browser-trace schema v1 contract.
+#[must_use]
+pub fn browser_trace_schema_v1() -> BrowserTraceSchema {
+    let mut event_specs = TraceEventKind::ALL
+        .iter()
+        .map(|kind| {
+            let mut redacted_fields = redacted_fields_for_kind(*kind);
+            redacted_fields.sort();
+            redacted_fields.dedup();
+            BrowserTraceEventSpec {
+                event_kind: kind.stable_name().to_string(),
+                category: browser_trace_category_for_kind(*kind),
+                required_fields: split_required_fields_csv(kind.required_fields()),
+                redacted_fields,
+            }
+        })
+        .collect::<Vec<_>>();
+    event_specs.sort_by(|left, right| left.event_kind.cmp(&right.event_kind));
+
+    BrowserTraceSchema {
+        schema_version: BROWSER_TRACE_SCHEMA_VERSION.to_string(),
+        required_envelope_fields: vec![
+            "event_kind".to_string(),
+            "schema_version".to_string(),
+            "seq".to_string(),
+            "time_ns".to_string(),
+            "trace_id".to_string(),
+        ],
+        ordering_semantics: vec![
+            "events must be strictly ordered by seq ascending".to_string(),
+            "logical_time must be monotonic for comparable causal domains".to_string(),
+            "trace streams must be deterministic for identical seed/config/replay inputs"
+                .to_string(),
+        ],
+        structured_log_required_fields: vec![
+            "event_kind".to_string(),
+            "schema_version".to_string(),
+            "seq".to_string(),
+            "sequence_group".to_string(),
+            "trace_id".to_string(),
+            "validation_failure_category".to_string(),
+            "validation_status".to_string(),
+        ],
+        validation_failure_categories: vec![
+            "invalid_event_payload".to_string(),
+            "missing_required_field".to_string(),
+            "schema_version_mismatch".to_string(),
+            "sequence_regression".to_string(),
+        ],
+        event_specs,
+        compatibility: BrowserTraceCompatibility {
+            minimum_reader_version: "browser-trace-schema-v0".to_string(),
+            supported_reader_versions: vec![
+                "browser-trace-schema-v0".to_string(),
+                BROWSER_TRACE_SCHEMA_VERSION.to_string(),
+            ],
+            backward_decode_aliases: vec!["browser-trace-schema-v0".to_string()],
+        },
+    }
+}
+
+/// Validates browser trace schema invariants.
+///
+/// # Errors
+///
+/// Returns `Err` when deterministic ordering, schema, or compatibility
+/// invariants are violated.
+#[allow(clippy::too_many_lines)]
+pub fn validate_browser_trace_schema(schema: &BrowserTraceSchema) -> Result<(), String> {
+    if schema.schema_version != BROWSER_TRACE_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported browser trace schema version {}",
+            schema.schema_version
+        ));
+    }
+
+    validate_lexical_string_set(&schema.required_envelope_fields, "required_envelope_fields")?;
+    validate_lexical_string_set(&schema.ordering_semantics, "ordering_semantics")?;
+    validate_lexical_string_set(
+        &schema.structured_log_required_fields,
+        "structured_log_required_fields",
+    )?;
+    validate_lexical_string_set(
+        &schema.validation_failure_categories,
+        "validation_failure_categories",
+    )?;
+
+    for required in [
+        "trace_id",
+        "seq",
+        "event_kind",
+        "schema_version",
+        "validation_failure_category",
+    ] {
+        if !schema
+            .structured_log_required_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("structured_log_required_fields missing {required}"));
+        }
+    }
+
+    if schema.event_specs.is_empty() {
+        return Err("event_specs must be non-empty".to_string());
+    }
+    let event_kinds = schema
+        .event_specs
+        .iter()
+        .map(|entry| entry.event_kind.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&event_kinds, "event_specs.event_kind")?;
+
+    let expected = TraceEventKind::ALL
+        .iter()
+        .map(|kind| kind.stable_name().to_string())
+        .collect::<BTreeSet<_>>();
+    let observed = event_kinds.into_iter().collect::<BTreeSet<_>>();
+    if expected != observed {
+        return Err("event_specs must include exactly all TraceEventKind stable names".to_string());
+    }
+
+    for entry in &schema.event_specs {
+        validate_lexical_string_set(
+            &entry.required_fields,
+            &format!("event_specs[{}].required_fields", entry.event_kind),
+        )?;
+        if !entry.redacted_fields.is_empty() {
+            validate_lexical_string_set(
+                &entry.redacted_fields,
+                &format!("event_specs[{}].redacted_fields", entry.event_kind),
+            )?;
+            for field in &entry.redacted_fields {
+                if !entry
+                    .required_fields
+                    .iter()
+                    .any(|required| required == field)
+                {
+                    return Err(format!(
+                        "event_specs[{}].redacted_fields contains unknown field {}",
+                        entry.event_kind, field
+                    ));
+                }
+            }
+        }
+    }
+
+    if schema
+        .compatibility
+        .minimum_reader_version
+        .trim()
+        .is_empty()
+    {
+        return Err("compatibility.minimum_reader_version must be non-empty".to_string());
+    }
+    validate_lexical_string_set(
+        &schema.compatibility.supported_reader_versions,
+        "compatibility.supported_reader_versions",
+    )?;
+    if !schema
+        .compatibility
+        .supported_reader_versions
+        .iter()
+        .any(|version| version == &schema.compatibility.minimum_reader_version)
+    {
+        return Err("minimum_reader_version missing from supported_reader_versions".to_string());
+    }
+    if !schema
+        .compatibility
+        .supported_reader_versions
+        .iter()
+        .any(|version| version == BROWSER_TRACE_SCHEMA_VERSION)
+    {
+        return Err("supported_reader_versions must include browser-trace-schema-v1".to_string());
+    }
+    validate_lexical_string_set(
+        &schema.compatibility.backward_decode_aliases,
+        "compatibility.backward_decode_aliases",
+    )?;
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserTraceSchemaLegacyV0 {
+    schema_version: String,
+    required_envelope_fields: Vec<String>,
+    ordering_semantics: Vec<String>,
+    event_specs: Vec<BrowserTraceEventSpec>,
+}
+
+/// Decodes browser trace schema payload with backwards-compatible v0 support.
+///
+/// # Errors
+///
+/// Returns `Err` when JSON decoding fails or schema version is unsupported.
+pub fn decode_browser_trace_schema(payload: &str) -> Result<BrowserTraceSchema, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|err| format!("invalid schema JSON: {err}"))?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "schema_version must be a string".to_string())?;
+
+    let schema = match version {
+        BROWSER_TRACE_SCHEMA_VERSION => serde_json::from_value::<BrowserTraceSchema>(value)
+            .map_err(|err| format!("invalid browser-trace-schema-v1 payload: {err}"))?,
+        "browser-trace-schema-v0" => {
+            let legacy = serde_json::from_value::<BrowserTraceSchemaLegacyV0>(value)
+                .map_err(|err| format!("invalid browser-trace-schema-v0 payload: {err}"))?;
+            if legacy.schema_version != "browser-trace-schema-v0" {
+                return Err(format!(
+                    "invalid legacy schema version {}",
+                    legacy.schema_version
+                ));
+            }
+            let mut schema = browser_trace_schema_v1();
+            schema.required_envelope_fields = legacy.required_envelope_fields;
+            schema.ordering_semantics = legacy.ordering_semantics;
+            schema.event_specs = legacy.event_specs;
+            schema.compatibility.backward_decode_aliases =
+                vec!["browser-trace-schema-v0".to_string()];
+            schema.compatibility.minimum_reader_version = "browser-trace-schema-v0".to_string();
+            schema
+        }
+        other => {
+            return Err(format!("unsupported browser trace schema version {other}"));
+        }
+    };
+
+    validate_browser_trace_schema(&schema)?;
+    Ok(schema)
+}
+
+/// Returns redacted trace event suitable for browser diagnostics.
+#[must_use]
+pub fn redact_browser_trace_event(event: &TraceEvent) -> TraceEvent {
+    let mut redacted = event.clone();
+    match (&event.kind, &event.data) {
+        (TraceEventKind::UserTrace, TraceData::Message(_)) => {
+            redacted.data = TraceData::Message("<redacted>".to_string());
+        }
+        (
+            TraceEventKind::ChaosInjection,
+            TraceData::Chaos {
+                kind,
+                task,
+                detail: _,
+            },
+        ) => {
+            redacted.data = TraceData::Chaos {
+                kind: kind.clone(),
+                task: *task,
+                detail: "<redacted>".to_string(),
+            };
+        }
+        _ => {}
+    }
+    redacted
+}
+
+/// Returns deterministic structured-log fields for one browser trace event.
+#[must_use]
+pub fn browser_trace_log_fields(
+    event: &TraceEvent,
+    trace_id: &str,
+    validation_failure_category: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "event_kind".to_string(),
+        event.kind.stable_name().to_string(),
+    );
+    fields.insert(
+        "schema_version".to_string(),
+        BROWSER_TRACE_SCHEMA_VERSION.to_string(),
+    );
+    fields.insert("seq".to_string(), event.seq.to_string());
+    fields.insert("time_ns".to_string(), event.time.as_nanos().to_string());
+    fields.insert("trace_id".to_string(), trace_id.to_string());
+    fields.insert(
+        "sequence_group".to_string(),
+        browser_trace_category_name(browser_trace_category_for_kind(event.kind)).to_string(),
+    );
+    let failure_category = validation_failure_category
+        .filter(|category| !category.trim().is_empty())
+        .unwrap_or("none");
+    fields.insert(
+        "validation_failure_category".to_string(),
+        failure_category.to_string(),
+    );
+    fields.insert(
+        "validation_status".to_string(),
+        if failure_category == "none" {
+            "valid".to_string()
+        } else {
+            "invalid".to_string()
+        },
+    );
+    fields
 }
 
 impl fmt::Display for TraceEventKind {
@@ -2311,5 +2768,86 @@ mod tests {
         assert_eq!(e, e2);
         let dbg = format!("{e:?}");
         assert!(dbg.contains("TraceEvent"));
+    }
+
+    #[test]
+    fn browser_trace_schema_v1_validates() {
+        let schema = browser_trace_schema_v1();
+        validate_browser_trace_schema(&schema).expect("browser schema should validate");
+    }
+
+    #[test]
+    fn browser_trace_schema_round_trip_json() {
+        let schema = browser_trace_schema_v1();
+        let payload = serde_json::to_string(&schema).expect("serialize schema");
+        let decoded = decode_browser_trace_schema(&payload).expect("decode schema");
+        assert_eq!(schema, decoded);
+    }
+
+    #[test]
+    fn browser_trace_schema_decode_v0_migrates() {
+        let legacy = serde_json::json!({
+            "schema_version": "browser-trace-schema-v0",
+            "required_envelope_fields": [
+                "event_kind",
+                "schema_version",
+                "seq",
+                "time_ns",
+                "trace_id"
+            ],
+            "ordering_semantics": [
+                "events must be strictly ordered by seq ascending",
+                "logical_time must be monotonic for comparable causal domains",
+                "trace streams must be deterministic for identical seed/config/replay inputs"
+            ],
+            "event_specs": browser_trace_schema_v1().event_specs
+        });
+        let payload = serde_json::to_string(&legacy).expect("serialize legacy schema");
+        let decoded = decode_browser_trace_schema(&payload).expect("decode legacy schema");
+        assert_eq!(
+            decoded.schema_version,
+            BROWSER_TRACE_SCHEMA_VERSION.to_string()
+        );
+        assert!(
+            decoded
+                .compatibility
+                .backward_decode_aliases
+                .iter()
+                .any(|alias| alias == "browser-trace-schema-v0")
+        );
+    }
+
+    #[test]
+    fn browser_trace_redaction_masks_message_payloads() {
+        let event = TraceEvent::user_trace(4, Time::ZERO, "secret-token");
+        let redacted = redact_browser_trace_event(&event);
+        assert_eq!(
+            redacted,
+            TraceEvent::new(
+                4,
+                Time::ZERO,
+                TraceEventKind::UserTrace,
+                TraceData::Message("<redacted>".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_include_required_metadata() {
+        let event = TraceEvent::timer_fired(9, Time::from_nanos(42), 10);
+        let fields = browser_trace_log_fields(&event, "trace-browser-1", None);
+
+        assert_eq!(
+            fields.get("schema_version"),
+            Some(&BROWSER_TRACE_SCHEMA_VERSION.to_string())
+        );
+        assert_eq!(fields.get("trace_id"), Some(&"trace-browser-1".to_string()));
+        assert_eq!(fields.get("event_kind"), Some(&"timer_fired".to_string()));
+        assert_eq!(fields.get("seq"), Some(&"9".to_string()));
+        assert_eq!(fields.get("validation_status"), Some(&"valid".to_string()));
+        assert_eq!(
+            fields.get("validation_failure_category"),
+            Some(&"none".to_string())
+        );
     }
 }

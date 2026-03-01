@@ -89,7 +89,10 @@ Validation entrypoint: `validate_wasm_boundary_transition()`.
 - `payload_shape`
 - `state_from`
 - `state_to`
-- `compatibility`
+- `compatibility` / `compatibility_decision`
+- `compatibility_compatible`
+- `compatibility_producer_major` / `compatibility_consumer_major`
+- `compatibility_producer_minor` / `compatibility_consumer_minor` (when available)
 
 `as_log_fields()` emits a deterministic key/value map for replay diagnostics.
 
@@ -111,6 +114,20 @@ Validation entrypoint: `validate_wasm_boundary_transition()`.
   - Artifacts:
     - `artifacts/wasm_abi_contract_summary.json`
     - `artifacts/wasm_abi_contract_events.ndjson`
+
+## Migration Notes Ledger
+
+Current ABI entry: `v1.0 fingerprint=4558451663113424898`.
+
+- `2026-02-28`: Initial `v1.0` contract baseline for WASM ABI v1 symbols,
+  payload classes, and boundary state-machine semantics.
+
+Update protocol for future ABI changes:
+
+1. Update `WasmAbiVersion` and/or `WASM_ABI_SIGNATURE_FINGERPRINT_V1`.
+2. Record a new migration ledger entry with version + fingerprint + rationale.
+3. Update `.github/wasm_abi_policy.json` expected values.
+4. Ensure `scripts/check_wasm_abi_policy.py` passes with updated artifacts.
 
 ## Test Evidence
 

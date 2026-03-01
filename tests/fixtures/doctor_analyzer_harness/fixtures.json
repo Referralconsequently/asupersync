@@ -1,0 +1,54 @@
+{
+  "schema_version": "doctor-analyzer-fixture-pack-v1",
+  "fixtures": [
+    {
+      "fixture_id": "scanner_workspace_baseline",
+      "description": "Workspace scanner baseline over malformed/missing-member fixture workspace.",
+      "family": "scanner",
+      "workspace_root": "tests/fixtures/doctor_workspace_scan_e2e",
+      "expectation": {
+        "min_members": 1,
+        "min_edges": 1,
+        "min_warnings": 1,
+        "warning_contains": [
+          "missing"
+        ],
+        "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness scanner_workspace_baseline"
+      }
+    },
+    {
+      "fixture_id": "invariant_workspace_baseline",
+      "description": "Invariant analyzer baseline over workspace-scanner fixture output.",
+      "family": "invariant",
+      "workspace_root": "tests/fixtures/doctor_workspace_scan_e2e",
+      "expectation": {
+        "min_members": 1,
+        "min_findings": 1,
+        "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness invariant_workspace_baseline"
+      }
+    },
+    {
+      "fixture_id": "lock_contention_baseline",
+      "description": "Lock/contention analyzer baseline over deterministic lock-order inversion fixture.",
+      "family": "lock_contention",
+      "workspace_root": "tests/fixtures/doctor_lock_contention_e2e",
+      "expectation": {
+        "min_members": 1,
+        "min_hotspots": 1,
+        "min_violations": 1,
+        "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness lock_contention_baseline"
+      }
+    },
+    {
+      "fixture_id": "ingestion_mixed_artifacts_baseline",
+      "description": "Evidence ingestion baseline with mixed valid/invalid artifacts.",
+      "family": "ingestion",
+      "artifact_profile": "mixed_artifacts_v1",
+      "expectation": {
+        "min_records": 3,
+        "min_rejected": 1,
+        "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness ingestion_mixed_artifacts_baseline"
+      }
+    }
+  ]
+}

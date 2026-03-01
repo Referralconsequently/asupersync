@@ -86,6 +86,17 @@ impl WasmAbiCompatibilityDecision {
     pub const fn is_compatible(self) -> bool {
         matches!(self, Self::Exact | Self::BackwardCompatible { .. })
     }
+
+    /// Stable, machine-readable decision name for structured logs.
+    #[must_use]
+    pub const fn decision_name(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::BackwardCompatible { .. } => "backward_compatible",
+            Self::MajorMismatch { .. } => "major_mismatch",
+            Self::ConsumerTooOld { .. } => "consumer_too_old",
+        }
+    }
 }
 
 /// Classify compatibility between a producer ABI and consumer ABI.
@@ -388,6 +399,150 @@ impl WasmAbiCancellation {
     }
 }
 
+/// Cancellation propagation policy between runtime cancel tokens and browser
+/// `AbortSignal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WasmAbortPropagationMode {
+    /// Runtime cancellation updates JS `AbortSignal`; JS abort does not
+    /// request runtime cancellation.
+    RuntimeToAbortSignal,
+    /// JS `AbortSignal` requests runtime cancellation; runtime cancellation
+    /// does not update JS abort state.
+    AbortSignalToRuntime,
+    /// Propagate cancellation in both directions.
+    Bidirectional,
+}
+
+impl WasmAbortPropagationMode {
+    /// Returns true when runtime cancellation should propagate to JS
+    /// `AbortSignal`.
+    #[must_use]
+    pub const fn propagates_runtime_to_abort_signal(self) -> bool {
+        matches!(self, Self::RuntimeToAbortSignal | Self::Bidirectional)
+    }
+
+    /// Returns true when JS `AbortSignal` abort should request runtime
+    /// cancellation.
+    #[must_use]
+    pub const fn propagates_abort_signal_to_runtime(self) -> bool {
+        matches!(self, Self::AbortSignalToRuntime | Self::Bidirectional)
+    }
+}
+
+/// Snapshot of boundary state used when applying cancel/abort interop rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WasmAbortInteropSnapshot {
+    /// Interop propagation mode.
+    pub mode: WasmAbortPropagationMode,
+    /// Current boundary lifecycle state.
+    pub boundary_state: WasmBoundaryState,
+    /// Whether the browser abort signal is already in aborted state.
+    pub abort_signal_aborted: bool,
+}
+
+/// Deterministic interop update result for one cancel/abort step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WasmAbortInteropUpdate {
+    /// Next boundary state after applying the interop rule.
+    pub next_boundary_state: WasmBoundaryState,
+    /// Updated browser abort state.
+    pub abort_signal_aborted: bool,
+    /// Whether a JS abort event was propagated to runtime cancellation.
+    pub propagated_to_runtime: bool,
+    /// Whether a runtime cancellation phase was propagated to JS abort state.
+    pub propagated_to_abort_signal: bool,
+}
+
+/// Maps runtime cancellation phase to boundary-state intent.
+#[must_use]
+pub const fn wasm_boundary_state_for_cancel_phase(phase: CancelPhase) -> WasmBoundaryState {
+    match phase {
+        CancelPhase::Requested | CancelPhase::Cancelling => WasmBoundaryState::Cancelling,
+        CancelPhase::Finalizing => WasmBoundaryState::Draining,
+        CancelPhase::Completed => WasmBoundaryState::Closed,
+    }
+}
+
+/// Applies a JS `AbortSignal` abort event to boundary state.
+///
+/// This helper is deterministic and idempotent:
+/// - If abort is already observed, no additional runtime propagation occurs.
+/// - When propagation is enabled, active work transitions to cancelling.
+/// - Bound-but-not-active handles close immediately on JS abort.
+#[must_use]
+pub fn apply_abort_signal_event(snapshot: WasmAbortInteropSnapshot) -> WasmAbortInteropUpdate {
+    let propagated_to_runtime = snapshot.mode.propagates_abort_signal_to_runtime()
+        && !snapshot.abort_signal_aborted
+        && matches!(
+            snapshot.boundary_state,
+            WasmBoundaryState::Bound | WasmBoundaryState::Active
+        );
+
+    let next_boundary_state = if propagated_to_runtime {
+        match snapshot.boundary_state {
+            WasmBoundaryState::Bound => WasmBoundaryState::Closed,
+            WasmBoundaryState::Active => WasmBoundaryState::Cancelling,
+            state => state,
+        }
+    } else {
+        snapshot.boundary_state
+    };
+
+    WasmAbortInteropUpdate {
+        next_boundary_state,
+        abort_signal_aborted: true,
+        propagated_to_runtime,
+        propagated_to_abort_signal: false,
+    }
+}
+
+/// Applies a runtime cancellation phase event to boundary + abort state.
+///
+/// Runtime cancel protocol (`requested -> cancelling -> finalizing -> completed`)
+/// is mapped to boundary state transitions with monotonic progression when legal.
+#[must_use]
+pub fn apply_runtime_cancel_phase_event(
+    snapshot: WasmAbortInteropSnapshot,
+    phase: CancelPhase,
+) -> WasmAbortInteropUpdate {
+    let target_state = wasm_boundary_state_for_cancel_phase(phase);
+    let next_boundary_state = if snapshot.boundary_state == target_state
+        || is_valid_wasm_boundary_transition(snapshot.boundary_state, target_state)
+    {
+        target_state
+    } else {
+        snapshot.boundary_state
+    };
+
+    let should_abort = snapshot.mode.propagates_runtime_to_abort_signal()
+        && !snapshot.abort_signal_aborted
+        && matches!(
+            phase,
+            CancelPhase::Requested
+                | CancelPhase::Cancelling
+                | CancelPhase::Finalizing
+                | CancelPhase::Completed
+        );
+
+    let abort_signal_aborted = snapshot.abort_signal_aborted
+        || (snapshot.mode.propagates_runtime_to_abort_signal()
+            && matches!(
+                phase,
+                CancelPhase::Requested
+                    | CancelPhase::Cancelling
+                    | CancelPhase::Finalizing
+                    | CancelPhase::Completed
+            ));
+
+    WasmAbortInteropUpdate {
+        next_boundary_state,
+        abort_signal_aborted,
+        propagated_to_runtime: false,
+        propagated_to_abort_signal: should_abort,
+    }
+}
+
 /// Encoded outcome envelope for boundary transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(missing_docs)]
@@ -520,8 +675,62 @@ impl WasmAbiBoundaryEvent {
         fields.insert("state_to", format!("{:?}", self.state_to).to_lowercase());
         fields.insert(
             "compatibility",
-            format!("{:?}", self.compatibility).to_lowercase(),
+            self.compatibility.decision_name().to_string(),
         );
+        fields.insert(
+            "compatibility_decision",
+            self.compatibility.decision_name().to_string(),
+        );
+        fields.insert(
+            "compatibility_compatible",
+            self.compatibility.is_compatible().to_string(),
+        );
+        match self.compatibility {
+            WasmAbiCompatibilityDecision::Exact => {
+                fields.insert(
+                    "compatibility_producer_major",
+                    self.abi_version.major.to_string(),
+                );
+                fields.insert(
+                    "compatibility_consumer_major",
+                    self.abi_version.major.to_string(),
+                );
+                fields.insert(
+                    "compatibility_producer_minor",
+                    self.abi_version.minor.to_string(),
+                );
+                fields.insert(
+                    "compatibility_consumer_minor",
+                    self.abi_version.minor.to_string(),
+                );
+            }
+            WasmAbiCompatibilityDecision::BackwardCompatible {
+                producer_minor,
+                consumer_minor,
+            }
+            | WasmAbiCompatibilityDecision::ConsumerTooOld {
+                producer_minor,
+                consumer_minor,
+            } => {
+                fields.insert(
+                    "compatibility_producer_major",
+                    self.abi_version.major.to_string(),
+                );
+                fields.insert(
+                    "compatibility_consumer_major",
+                    self.abi_version.major.to_string(),
+                );
+                fields.insert("compatibility_producer_minor", producer_minor.to_string());
+                fields.insert("compatibility_consumer_minor", consumer_minor.to_string());
+            }
+            WasmAbiCompatibilityDecision::MajorMismatch {
+                producer_major,
+                consumer_major,
+            } => {
+                fields.insert("compatibility_producer_major", producer_major.to_string());
+                fields.insert("compatibility_consumer_major", consumer_major.to_string());
+            }
+        }
         fields
     }
 }
@@ -635,6 +844,82 @@ mod tests {
         assert_eq!(encoded.message.as_deref(), Some("deadline exceeded"));
         assert_eq!(encoded.origin_region, "R3");
         assert_eq!(encoded.origin_task.as_deref(), Some("T4"));
+    }
+
+    #[test]
+    fn abort_signal_event_propagates_to_runtime_when_configured() {
+        let snapshot = WasmAbortInteropSnapshot {
+            mode: WasmAbortPropagationMode::AbortSignalToRuntime,
+            boundary_state: WasmBoundaryState::Active,
+            abort_signal_aborted: false,
+        };
+
+        let update = apply_abort_signal_event(snapshot);
+        assert_eq!(update.next_boundary_state, WasmBoundaryState::Cancelling);
+        assert!(update.abort_signal_aborted);
+        assert!(update.propagated_to_runtime);
+        assert!(!update.propagated_to_abort_signal);
+
+        let repeated = apply_abort_signal_event(WasmAbortInteropSnapshot {
+            mode: snapshot.mode,
+            boundary_state: update.next_boundary_state,
+            abort_signal_aborted: update.abort_signal_aborted,
+        });
+        assert_eq!(repeated.next_boundary_state, WasmBoundaryState::Cancelling);
+        assert!(repeated.abort_signal_aborted);
+        assert!(!repeated.propagated_to_runtime);
+        assert!(!repeated.propagated_to_abort_signal);
+    }
+
+    #[test]
+    fn runtime_cancel_phase_event_maps_to_abort_signal_and_state() {
+        let requested = apply_runtime_cancel_phase_event(
+            WasmAbortInteropSnapshot {
+                mode: WasmAbortPropagationMode::RuntimeToAbortSignal,
+                boundary_state: WasmBoundaryState::Active,
+                abort_signal_aborted: false,
+            },
+            CancelPhase::Requested,
+        );
+        assert_eq!(requested.next_boundary_state, WasmBoundaryState::Cancelling);
+        assert!(requested.abort_signal_aborted);
+        assert!(requested.propagated_to_abort_signal);
+        assert!(!requested.propagated_to_runtime);
+
+        let finalizing = apply_runtime_cancel_phase_event(
+            WasmAbortInteropSnapshot {
+                mode: WasmAbortPropagationMode::RuntimeToAbortSignal,
+                boundary_state: requested.next_boundary_state,
+                abort_signal_aborted: requested.abort_signal_aborted,
+            },
+            CancelPhase::Finalizing,
+        );
+        assert_eq!(finalizing.next_boundary_state, WasmBoundaryState::Draining);
+        assert!(finalizing.abort_signal_aborted);
+        assert!(!finalizing.propagated_to_abort_signal);
+
+        let completed = apply_runtime_cancel_phase_event(
+            WasmAbortInteropSnapshot {
+                mode: WasmAbortPropagationMode::RuntimeToAbortSignal,
+                boundary_state: finalizing.next_boundary_state,
+                abort_signal_aborted: finalizing.abort_signal_aborted,
+            },
+            CancelPhase::Completed,
+        );
+        assert_eq!(completed.next_boundary_state, WasmBoundaryState::Closed);
+        assert!(completed.abort_signal_aborted);
+    }
+
+    #[test]
+    fn bidirectional_mode_keeps_already_aborted_signal_idempotent() {
+        let update = apply_abort_signal_event(WasmAbortInteropSnapshot {
+            mode: WasmAbortPropagationMode::Bidirectional,
+            boundary_state: WasmBoundaryState::Active,
+            abort_signal_aborted: true,
+        });
+        assert_eq!(update.next_boundary_state, WasmBoundaryState::Active);
+        assert!(update.abort_signal_aborted);
+        assert!(!update.propagated_to_runtime);
     }
 
     #[test]
@@ -756,5 +1041,65 @@ mod tests {
         assert!(fields.contains_key("state_from"));
         assert!(fields.contains_key("state_to"));
         assert!(fields.contains_key("compatibility"));
+        assert_eq!(fields.get("compatibility"), Some(&"exact".to_string()));
+        assert_eq!(
+            fields.get("compatibility_decision"),
+            Some(&"exact".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_compatible"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_producer_major"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_consumer_major"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_producer_minor"),
+            Some(&"0".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_consumer_minor"),
+            Some(&"0".to_string())
+        );
+    }
+
+    #[test]
+    fn major_mismatch_log_fields_include_major_only_details() {
+        let event = WasmAbiBoundaryEvent {
+            abi_version: WasmAbiVersion::CURRENT,
+            symbol: WasmAbiSymbol::RuntimeCreate,
+            payload_shape: WasmAbiPayloadShape::Empty,
+            state_from: WasmBoundaryState::Unbound,
+            state_to: WasmBoundaryState::Bound,
+            compatibility: WasmAbiCompatibilityDecision::MajorMismatch {
+                producer_major: 1,
+                consumer_major: 2,
+            },
+        };
+
+        let fields = event.as_log_fields();
+        assert_eq!(
+            fields.get("compatibility_decision"),
+            Some(&"major_mismatch".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_compatible"),
+            Some(&"false".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_producer_major"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            fields.get("compatibility_consumer_major"),
+            Some(&"2".to_string())
+        );
+        assert!(!fields.contains_key("compatibility_producer_minor"));
+        assert!(!fields.contains_key("compatibility_consumer_minor"));
     }
 }

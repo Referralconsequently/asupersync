@@ -35,6 +35,7 @@
 //!     .with_field("symbol_count", "10");
 //! ```
 
+pub mod analyzer_plugin;
 pub mod collector;
 pub mod context;
 pub mod diagnostics;
@@ -48,6 +49,14 @@ pub mod resource_accounting;
 pub mod spectral_health;
 pub mod task_inspector;
 
+pub use analyzer_plugin::{
+    ANALYZER_PLUGIN_CONTRACT_VERSION, AggregatedAnalyzerFinding, AnalyzerCapability,
+    AnalyzerFinding, AnalyzerOutput, AnalyzerPlugin, AnalyzerPluginDescriptor,
+    AnalyzerPluginPackReport, AnalyzerPluginRegistry, AnalyzerPluginRunError, AnalyzerRequest,
+    AnalyzerSandboxPolicy, AnalyzerSchemaVersion, AnalyzerSeverity, PluginExecutionRecord,
+    PluginExecutionState, PluginLifecycleEvent, PluginLifecyclePhase, PluginRegistrationError,
+    SchemaDecision, SchemaNegotiation, negotiate_schema_version, run_analyzer_plugin_pack_smoke,
+};
 pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
 pub use diagnostics::{

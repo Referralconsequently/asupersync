@@ -1000,6 +1000,27 @@ mod tests {
             Poll::Ready(Some(20)),
             poll
         );
+        let poll = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(3)),
+            "merge fifth",
+            Poll::Ready(Some(3)),
+            poll
+        );
+        let poll = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(30)),
+            "merge sixth",
+            Poll::Ready(Some(30)),
+            poll
+        );
+        let poll = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(None::<i32>),
+            "merge done",
+            Poll::Ready(None::<i32>),
+            poll
+        );
         crate::test_complete!("test_stream_merge_method");
     }
 }

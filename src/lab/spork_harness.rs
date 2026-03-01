@@ -487,9 +487,9 @@ impl SporkScenarioRunner {
             return Err(ScenarioRunnerError::InvalidScenarioId);
         }
         if self.scenarios.contains_key(&id) {
-            return Err(ScenarioRunnerError::DuplicateScenarioId(id.clone()));
+            return Err(ScenarioRunnerError::DuplicateScenarioId(id));
         }
-        scenario.id = id.clone();
+        scenario.id.clone_from(&id);
         self.scenarios.insert(id, scenario);
         Ok(())
     }

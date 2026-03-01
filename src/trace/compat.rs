@@ -919,7 +919,9 @@ mod tests {
         drop(file);
 
         let mut reader = CompatReader::open(path).expect("open reader");
-        let err = reader.read_event().expect_err("truncated event stream must error");
+        let err = reader
+            .read_event()
+            .expect_err("truncated event stream must error");
         assert!(matches!(err, TraceFileError::Io(_)), "got: {err:?}");
     }
 

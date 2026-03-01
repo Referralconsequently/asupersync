@@ -2320,9 +2320,9 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let mut fut = scope.race_all::<i32>(&cx, vec![]);
+        let fut = scope.race_all::<i32>(&cx, vec![]);
         let waker = std::task::Waker::noop();
-        let mut poll_cx = std::task::Context::from_waker(&waker);
+        let mut poll_cx = std::task::Context::from_waker(waker);
         let pinned = std::pin::pin!(fut);
         let status = std::future::Future::poll(pinned, &mut poll_cx);
         assert!(status.is_pending());

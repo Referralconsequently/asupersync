@@ -144,6 +144,9 @@ pub struct TraceFilter {
     /// Only record events for these regions (None = all regions).
     region_filter: Option<BTreeSet<RegionId>>,
 
+    /// Explicitly excluded regions (always dropped).
+    exclude_regions: BTreeSet<RegionId>,
+
     /// Only record events for these tasks (None = all tasks).
     task_filter: Option<BTreeSet<TaskId>>,
 
@@ -165,6 +168,7 @@ impl Default for TraceFilter {
             include_kinds: BTreeSet::new(),
             exclude_kinds: BTreeSet::new(),
             region_filter: None,
+            exclude_regions: BTreeSet::new(),
             task_filter: None,
             sample_rate: 1.0,
             custom: None,
@@ -179,6 +183,7 @@ impl std::fmt::Debug for TraceFilter {
             .field("include_kinds", &self.include_kinds)
             .field("exclude_kinds", &self.exclude_kinds)
             .field("region_filter", &self.region_filter)
+            .field("exclude_regions", &self.exclude_regions)
             .field("task_filter", &self.task_filter)
             .field("sample_rate", &self.sample_rate)
             .field("custom", &self.custom.as_ref().map(|_| "<predicate>"))
@@ -326,15 +331,23 @@ impl TraceFilter {
 
     /// Excludes a specific region from recording.
     ///
-    /// Note: This removes the region from the include set. If no include set exists,
-    /// this method has no effect. Use `exclude_region_explicit` if you need
-    /// explicit exclusion.
+    /// This is an explicit exclusion and always takes precedence over
+    /// inclusion filters.
     #[must_use]
     pub fn exclude_region(mut self, region: RegionId) -> Self {
+        self.exclude_regions.insert(region);
         if let Some(ref mut regions) = self.region_filter {
             regions.remove(&region);
         }
         self
+    }
+
+    /// Excludes a specific region from recording.
+    ///
+    /// Alias for [`exclude_region`](Self::exclude_region).
+    #[must_use]
+    pub fn exclude_region_explicit(self, region: RegionId) -> Self {
+        self.exclude_region(region)
     }
 
     /// Sets the task filter.
@@ -414,7 +427,14 @@ impl TraceFilter {
             return false;
         }
 
-        // 3. Check region filter
+        // 3. Check explicit region exclusions
+        if let Some(region) = event.region_id() {
+            if self.exclude_regions.contains(&region) {
+                return false;
+            }
+        }
+
+        // 4. Check region filter
         if let Some(ref regions) = self.region_filter {
             if let Some(region) = event.region_id() {
                 if !regions.contains(&region) {
@@ -424,7 +444,7 @@ impl TraceFilter {
             // Events without region association pass through
         }
 
-        // 4. Check task filter
+        // 5. Check task filter
         if let Some(ref tasks) = self.task_filter {
             if let Some(task) = event.task_id() {
                 if !tasks.contains(&task) {
@@ -434,12 +454,12 @@ impl TraceFilter {
             // Events without task association pass through
         }
 
-        // 5. Apply sampling for high-frequency events
+        // 6. Apply sampling for high-frequency events
         if kind.is_sampled() && self.sample_rate < 1.0 && !self.sample() {
             return false;
         }
 
-        // 6. Apply custom predicate
+        // 7. Apply custom predicate
         if let Some(ref predicate) = self.custom {
             if !predicate(event) {
                 return false;
@@ -455,6 +475,7 @@ impl TraceFilter {
         self.include_kinds.is_empty()
             && self.exclude_kinds.is_empty()
             && self.region_filter.is_none()
+            && self.exclude_regions.is_empty()
             && self.task_filter.is_none()
             && (self.sample_rate - 1.0).abs() < f64::EPSILON
             && self.custom.is_none()
@@ -504,6 +525,12 @@ impl TraceFilter {
     #[must_use]
     pub fn excluded_kinds(&self) -> &BTreeSet<EventCategory> {
         &self.exclude_kinds
+    }
+
+    /// Returns explicitly excluded regions.
+    #[must_use]
+    pub fn excluded_regions(&self) -> &BTreeSet<RegionId> {
+        &self.exclude_regions
     }
 }
 
@@ -559,8 +586,8 @@ impl FilterBuilder {
 
     /// Excludes the root region (useful for reducing noise).
     #[must_use]
-    pub fn exclude_root_region(self) -> Self {
-        // Note: This would need actual RegionId construction
+    pub fn exclude_root_region(mut self) -> Self {
+        self.filter = self.filter.exclude_region(RegionId::testing_default());
         self
     }
 
@@ -744,6 +771,53 @@ mod tests {
     }
 
     #[test]
+    fn exclude_region_blocks_events() {
+        let region1 = make_region_id(1);
+        let region2 = make_region_id(2);
+
+        let mut filter = TraceFilter::new().exclude_region(region1);
+
+        let excluded = TestEvent {
+            kind: EventCategory::Scheduling,
+            task: None,
+            region: Some(region1),
+        };
+        let allowed = TestEvent {
+            kind: EventCategory::Scheduling,
+            task: None,
+            region: Some(region2),
+        };
+
+        assert!(!filter.should_record(&excluded));
+        assert!(filter.should_record(&allowed));
+        assert!(filter.excluded_regions().contains(&region1));
+    }
+
+    #[test]
+    fn exclude_region_overrides_region_filter() {
+        let region1 = make_region_id(1);
+        let region2 = make_region_id(2);
+
+        let mut filter = TraceFilter::new()
+            .filter_regions([region1, region2])
+            .exclude_region(region2);
+
+        let event1 = TestEvent {
+            kind: EventCategory::Scheduling,
+            task: None,
+            region: Some(region1),
+        };
+        let event2 = TestEvent {
+            kind: EventCategory::Scheduling,
+            task: None,
+            region: Some(region2),
+        };
+
+        assert!(filter.should_record(&event1));
+        assert!(!filter.should_record(&event2));
+    }
+
+    #[test]
     fn sampling() {
         // Seed for reproducibility
         let mut filter = TraceFilter::new()
@@ -850,6 +924,24 @@ mod tests {
         assert!(!filter.includes_kind(EventCategory::Rng));
         assert!(!filter.includes_kind(EventCategory::Waker));
         assert!((filter.sample_rate() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn filter_builder_exclude_root_region() {
+        let mut filter = FilterBuilder::new().exclude_root_region().build();
+        let root = TestEvent {
+            kind: EventCategory::Scheduling,
+            task: None,
+            region: Some(make_region_id(0)),
+        };
+        let non_root = TestEvent {
+            kind: EventCategory::Scheduling,
+            task: None,
+            region: Some(make_region_id(7)),
+        };
+
+        assert!(!filter.should_record(&root));
+        assert!(filter.should_record(&non_root));
     }
 
     #[test]
