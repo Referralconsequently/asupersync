@@ -8,10 +8,12 @@
 use asupersync::bytes::BytesMut;
 use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder, Settings, SettingsBuilder};
 use asupersync::io::{
-    BrowserStorageAdapter, BrowserStorageIoCap, FetchAuthority, FetchMethod, FetchPolicyError,
-    FetchRequest, StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap,
-    StorageOperation, StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy,
-    StorageRequest,
+    BrowserStorageAdapter, BrowserStorageIoCap, BrowserTransportAuthority,
+    BrowserTransportCancellationPolicy, BrowserTransportIoCap, BrowserTransportKind,
+    BrowserTransportPolicyError, BrowserTransportReconnectPolicy, BrowserTransportRequest,
+    BrowserTransportSupport, FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest,
+    StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap, StorageOperation,
+    StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy, StorageRequest, TransportIoCap,
 };
 use asupersync::net::websocket::{CloseReason, Frame, Opcode, WsError};
 
@@ -403,6 +405,104 @@ mod browser_storage_security {
         assert_eq!(event.namespace_label, "namespace[len:13]");
         assert_eq!(event.key_label.as_deref(), Some("key[len:12]"));
         assert_eq!(event.value_len, None);
+    }
+}
+
+// =============================================================================
+// BROWSER TRANSPORT AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_transport_security {
+    use super::*;
+
+    fn strict_transport_cap() -> BrowserTransportIoCap {
+        BrowserTransportIoCap::new(
+            BrowserTransportAuthority::deny_all()
+                .grant_origin("wss://chat.example.com")
+                .grant_kind(BrowserTransportKind::WebSocket)
+                .with_max_subprotocol_count(2),
+            BrowserTransportSupport::WEBSOCKET_ONLY,
+            BrowserTransportCancellationPolicy::CloseThenAbort,
+            BrowserTransportReconnectPolicy {
+                max_attempts: 2,
+                base_delay_ms: 200,
+                max_delay_ms: 2_000,
+                jitter_ms: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn invariant_transport_policy_denies_untrusted_origin() {
+        let cap = strict_transport_cap();
+        let request =
+            BrowserTransportRequest::new(BrowserTransportKind::WebSocket, "wss://evil.example.com");
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::OriginDenied(
+                "wss://evil.example.com".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_denies_kind_escalation() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebTransport,
+            "https://chat.example.com/session",
+        );
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::UnsupportedKind(
+                BrowserTransportKind::WebTransport
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_enforces_reconnect_limits() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebSocket,
+            "wss://chat.example.com/socket",
+        )
+        .with_reconnect_attempt(3);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::ReconnectAttemptExceeded {
+                attempt: 3,
+                max_attempts: 2
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_enforces_subprotocol_limits() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebSocket,
+            "wss://chat.example.com/socket",
+        )
+        .with_subprotocol("chat")
+        .with_subprotocol("presence")
+        .with_subprotocol("typing");
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::TooManySubprotocols { count: 3, limit: 2 })
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_allows_explicitly_permitted_websocket() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebSocket,
+            "wss://chat.example.com/socket",
+        )
+        .with_subprotocol("chat")
+        .with_reconnect_attempt(1);
+        assert_eq!(cap.authorize(&request), Ok(()));
     }
 }
 

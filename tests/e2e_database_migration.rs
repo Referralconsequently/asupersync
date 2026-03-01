@@ -1107,7 +1107,7 @@ fn e2e_dual_value_conversion_roundtrip() {
     let mut value = DualValue::Traditional("hello world".to_string());
 
     test_section!("Convert to symbol-native");
-    value.ensure_symbols(&config);
+    value.ensure_symbols(&config).unwrap();
     assert!(value.uses_raptorq());
     assert!(!value.is_traditional());
 
@@ -1115,7 +1115,7 @@ fn e2e_dual_value_conversion_roundtrip() {
     assert_eq!(value.get().unwrap(), "hello world");
 
     test_section!("Second ensure_symbols is no-op");
-    value.ensure_symbols(&config);
+    value.ensure_symbols(&config).unwrap();
     assert!(value.uses_raptorq());
     assert_eq!(value.get().unwrap(), "hello world");
 
@@ -1133,7 +1133,7 @@ fn e2e_dual_value_debug() {
 
     let config = asupersync::config::EncodingConfig::default();
     let mut sym = DualValue::Traditional(vec![1, 2, 3]);
-    sym.ensure_symbols(&config);
+    sym.ensure_symbols(&config).unwrap();
     let dbg = format!("{sym:?}");
     assert!(dbg.contains("SymbolNative"));
 

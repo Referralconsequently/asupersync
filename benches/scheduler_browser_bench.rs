@@ -85,16 +85,10 @@ fn bench_browser_ready_handoff(c: &mut Criterion) {
                         // Keep polling until all tasks dispatched.
                         // Worker returns None on handoff yield; we re-enter.
                         loop {
-                            match worker.next_task() {
-                                Some(_) => dispatched += 1,
-                                None => {
-                                    if dispatched >= u64::from(task_count) {
-                                        break;
-                                    }
-                                    // Handoff yield - re-enter worker loop
-                                    // (simulates browser event loop returning control)
-                                    continue;
-                                }
+                            if worker.next_task().is_some() {
+                                dispatched += 1;
+                            } else if dispatched >= u64::from(task_count) {
+                                break;
                             }
                         }
                         black_box(dispatched)
@@ -182,11 +176,8 @@ fn bench_browser_profile_throughput(c: &mut Criterion) {
                         let mut workers = sched.take_workers().into_iter();
                         let mut worker = workers.next().unwrap();
                         let mut dispatched = 0u64;
-                        loop {
-                            match worker.next_task() {
-                                Some(_) => dispatched += 1,
-                                None => break,
-                            }
+                        while worker.next_task().is_some() {
+                            dispatched += 1;
                         }
                         black_box(dispatched)
                     },
@@ -325,11 +316,8 @@ fn bench_browser_fairness_metrics(c: &mut Criterion) {
                         let mut workers = sched.take_workers().into_iter();
                         let mut worker = workers.next().unwrap();
                         let mut dispatched = 0u64;
-                        loop {
-                            match worker.next_task() {
-                                Some(_) => dispatched += 1,
-                                None => break,
-                            }
+                        while worker.next_task().is_some() {
+                            dispatched += 1;
                         }
                         let metrics = worker.preemption_metrics().clone();
                         black_box((dispatched, metrics))

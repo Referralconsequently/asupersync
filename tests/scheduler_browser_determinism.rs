@@ -59,19 +59,15 @@ fn dispatch_all(
     let mut consecutive_nones = 0u32;
 
     loop {
-        match worker.next_task() {
-            Some(tid) => {
-                order.push(tid);
-                consecutive_nones = 0;
-            }
-            None => {
-                consecutive_nones += 1;
-                // A single None can be a handoff yield. Two consecutive
-                // Nones means the worker truly has no more work.
-                if consecutive_nones >= 2 {
-                    break;
-                }
-                continue;
+        if let Some(tid) = worker.next_task() {
+            order.push(tid);
+            consecutive_nones = 0;
+        } else {
+            consecutive_nones += 1;
+            // A single None can be a handoff yield. Two consecutive
+            // Nones means the worker truly has no more work.
+            if consecutive_nones >= 2 {
+                break;
             }
         }
         if order.len() >= max_steps {
@@ -96,22 +92,18 @@ fn dispatch_tracking_bursts(
     let mut consecutive_nones = 0u32;
 
     loop {
-        match worker.next_task() {
-            Some(tid) => {
-                order.push(tid);
-                current_burst += 1;
-                consecutive_nones = 0;
+        if let Some(tid) = worker.next_task() {
+            order.push(tid);
+            current_burst += 1;
+            consecutive_nones = 0;
+        } else {
+            consecutive_nones += 1;
+            if current_burst > 0 {
+                burst_sizes.push(current_burst);
+                current_burst = 0;
             }
-            None => {
-                consecutive_nones += 1;
-                if current_burst > 0 {
-                    burst_sizes.push(current_burst);
-                    current_burst = 0;
-                }
-                if consecutive_nones >= 2 {
-                    break;
-                }
-                continue;
+            if consecutive_nones >= 2 {
+                break;
             }
         }
         if order.len() >= max_steps {
@@ -429,17 +421,13 @@ fn regression_browser_profile_1k_mixed() {
     let mut dispatched = 0u32;
     let mut consecutive_nones = 0u32;
     loop {
-        match worker.next_task() {
-            Some(_) => {
-                dispatched += 1;
-                consecutive_nones = 0;
-            }
-            None => {
-                consecutive_nones += 1;
-                if consecutive_nones >= 2 {
-                    break;
-                }
-                continue;
+        if worker.next_task().is_some() {
+            dispatched += 1;
+            consecutive_nones = 0;
+        } else {
+            consecutive_nones += 1;
+            if consecutive_nones >= 2 {
+                break;
             }
         }
     }
@@ -472,15 +460,10 @@ fn regression_browser_ready_handoff_5k() {
     let mut worker = workers.next().unwrap();
     let mut dispatched = 0u32;
     loop {
-        match worker.next_task() {
-            Some(_) => dispatched += 1,
-            None => {
-                if dispatched >= task_count {
-                    break;
-                }
-                // Handoff yield: re-enter (simulates browser returning control)
-                continue;
-            }
+        if worker.next_task().is_some() {
+            dispatched += 1;
+        } else if dispatched >= task_count {
+            break;
         }
     }
 
@@ -518,17 +501,13 @@ fn regression_browser_cancel_ready_fairness_1k() {
     let mut dispatched = 0u32;
     let mut consecutive_nones = 0u32;
     loop {
-        match worker.next_task() {
-            Some(_) => {
-                dispatched += 1;
-                consecutive_nones = 0;
-            }
-            None => {
-                consecutive_nones += 1;
-                if consecutive_nones >= 2 {
-                    break;
-                }
-                continue;
+        if worker.next_task().is_some() {
+            dispatched += 1;
+            consecutive_nones = 0;
+        } else {
+            consecutive_nones += 1;
+            if consecutive_nones >= 2 {
+                break;
             }
         }
     }
