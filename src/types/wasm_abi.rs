@@ -3165,6 +3165,38 @@ pub enum NextjsRenderEnvironment {
     NodeServer,
 }
 
+/// Coarse Next.js boundary mode for mixed deployment planning.
+///
+/// This normalizes detailed render environments into the three operator-facing
+/// lanes used in docs and adapter policy checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsBoundaryMode {
+    /// Browser client lane (`client` boundary).
+    Client,
+    /// Server component / node lane (`server` boundary).
+    Server,
+    /// Edge runtime lane (`edge` boundary).
+    Edge,
+}
+
+/// Fallback behavior when runtime capability is unavailable in a boundary.
+///
+/// This is the explicit policy surface for "what should happen instead of
+/// direct WASM runtime execution" in mixed Next.js deployments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsRuntimeFallback {
+    /// No fallback needed; runtime is directly available.
+    NoneRequired,
+    /// Client-side runtime call attempted before hydration; defer until hydrated.
+    DeferUntilHydrated,
+    /// Runtime is unavailable in server/node boundary; use serialized node bridge.
+    UseServerBridge,
+    /// Runtime is unavailable in edge boundary; use serialized edge bridge.
+    UseEdgeBridge,
+}
+
 impl NextjsRenderEnvironment {
     /// Returns true if this environment supports WASM runtime initialization.
     #[must_use]
@@ -3185,6 +3217,46 @@ impl NextjsRenderEnvironment {
             self,
             Self::ServerComponent | Self::EdgeRuntime | Self::NodeServer
         )
+    }
+
+    /// Returns the normalized boundary mode for this environment.
+    #[must_use]
+    pub fn boundary_mode(self) -> NextjsBoundaryMode {
+        match self {
+            Self::ClientSsr | Self::ClientHydrated => NextjsBoundaryMode::Client,
+            Self::ServerComponent | Self::NodeServer => NextjsBoundaryMode::Server,
+            Self::EdgeRuntime => NextjsBoundaryMode::Edge,
+        }
+    }
+
+    /// Returns deterministic fallback behavior when runtime capability is unavailable.
+    #[must_use]
+    pub fn runtime_fallback(self) -> NextjsRuntimeFallback {
+        match self {
+            Self::ClientHydrated => NextjsRuntimeFallback::NoneRequired,
+            Self::ClientSsr => NextjsRuntimeFallback::DeferUntilHydrated,
+            Self::ServerComponent | Self::NodeServer => NextjsRuntimeFallback::UseServerBridge,
+            Self::EdgeRuntime => NextjsRuntimeFallback::UseEdgeBridge,
+        }
+    }
+
+    /// Human-readable fallback guidance for diagnostics and docs.
+    #[must_use]
+    pub fn runtime_fallback_reason(self) -> &'static str {
+        match self.runtime_fallback() {
+            NextjsRuntimeFallback::NoneRequired => {
+                "runtime capability available: execute directly in hydrated client boundary"
+            }
+            NextjsRuntimeFallback::DeferUntilHydrated => {
+                "runtime unavailable during SSR client pass: defer initialization until hydration completes"
+            }
+            NextjsRuntimeFallback::UseServerBridge => {
+                "runtime unavailable in server boundary: route through serialized node/server bridge"
+            }
+            NextjsRuntimeFallback::UseEdgeBridge => {
+                "runtime unavailable in edge boundary: route through serialized edge bridge"
+            }
+        }
     }
 }
 
@@ -6067,6 +6139,67 @@ mod tests {
         assert!(NextjsRenderEnvironment::NodeServer.is_server_side());
         assert!(!NextjsRenderEnvironment::ClientSsr.is_server_side());
         assert!(!NextjsRenderEnvironment::ClientHydrated.is_server_side());
+    }
+
+    #[test]
+    fn render_environment_boundary_mode_mapping() {
+        assert_eq!(
+            NextjsRenderEnvironment::ClientSsr.boundary_mode(),
+            NextjsBoundaryMode::Client
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::ClientHydrated.boundary_mode(),
+            NextjsBoundaryMode::Client
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::ServerComponent.boundary_mode(),
+            NextjsBoundaryMode::Server
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::NodeServer.boundary_mode(),
+            NextjsBoundaryMode::Server
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::EdgeRuntime.boundary_mode(),
+            NextjsBoundaryMode::Edge
+        );
+    }
+
+    #[test]
+    fn render_environment_runtime_fallback_mapping() {
+        assert_eq!(
+            NextjsRenderEnvironment::ClientHydrated.runtime_fallback(),
+            NextjsRuntimeFallback::NoneRequired
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::ClientSsr.runtime_fallback(),
+            NextjsRuntimeFallback::DeferUntilHydrated
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::ServerComponent.runtime_fallback(),
+            NextjsRuntimeFallback::UseServerBridge
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::NodeServer.runtime_fallback(),
+            NextjsRuntimeFallback::UseServerBridge
+        );
+        assert_eq!(
+            NextjsRenderEnvironment::EdgeRuntime.runtime_fallback(),
+            NextjsRuntimeFallback::UseEdgeBridge
+        );
+
+        for env in [
+            NextjsRenderEnvironment::ClientSsr,
+            NextjsRenderEnvironment::ClientHydrated,
+            NextjsRenderEnvironment::ServerComponent,
+            NextjsRenderEnvironment::EdgeRuntime,
+            NextjsRenderEnvironment::NodeServer,
+        ] {
+            assert!(
+                !env.runtime_fallback_reason().is_empty(),
+                "fallback reason should be present for {env:?}"
+            );
+        }
     }
 
     #[test]

@@ -152,7 +152,11 @@ pub struct NextjsBootstrapSnapshot {
     pub runtime_init_successes: u32,
     /// Number of runtime failures observed.
     pub runtime_failure_count: u32,
-    /// Number of bootstrap cancellations observed.
+    /// Number of runtime cancellations observed.
+    ///
+    /// Includes explicit bootstrap cancellations (`CancelBootstrap`) and
+    /// deterministic scope invalidations (cache revalidation, hard navigation,
+    /// hot reload) that require draining active runtime work.
     pub cancellation_count: u32,
     /// Number of hydration mismatches observed.
     pub hydration_mismatch_count: u32,
@@ -164,6 +168,16 @@ pub struct NextjsBootstrapSnapshot {
     pub popstate_navigation_count: u32,
     /// Number of cache revalidation events observed.
     pub cache_revalidation_count: u32,
+    /// Number of runtime scope invalidations triggered by route/cache events.
+    pub scope_invalidation_count: u32,
+    /// Number of times invalidation required runtime re-initialization.
+    pub runtime_reinit_required_count: u32,
+    /// Current active runtime scope generation.
+    ///
+    /// Increments on each successful runtime initialization.
+    pub active_scope_generation: u32,
+    /// Last invalidated runtime scope generation, if any.
+    pub last_invalidated_scope_generation: Option<u32>,
     /// Number of hot reload events observed.
     pub hot_reload_count: u32,
     /// Last recovery action taken.
@@ -260,6 +274,10 @@ impl NextjsBootstrapState {
                 hard_navigation_count: 0,
                 popstate_navigation_count: 0,
                 cache_revalidation_count: 0,
+                scope_invalidation_count: 0,
+                runtime_reinit_required_count: 0,
+                active_scope_generation: 0,
+                last_invalidated_scope_generation: None,
                 hot_reload_count: 0,
                 last_recovery_action: BootstrapRecoveryAction::None,
                 last_error: None,
@@ -372,6 +390,8 @@ impl NextjsBootstrapState {
         self.snapshot.runtime_initialized = true;
         self.snapshot.runtime_init_successes =
             self.snapshot.runtime_init_successes.saturating_add(1);
+        self.snapshot.active_scope_generation =
+            self.snapshot.active_scope_generation.saturating_add(1);
         Ok(())
     }
 
@@ -413,8 +433,8 @@ impl NextjsBootstrapState {
             NextjsNavigationType::HardNavigation => {
                 self.snapshot.hard_navigation_count =
                     self.snapshot.hard_navigation_count.saturating_add(1);
+                self.invalidate_runtime_scope("hard_navigation_scope_reset");
                 self.snapshot.environment = NextjsRenderEnvironment::ClientSsr;
-                self.snapshot.runtime_initialized = false;
                 self.force_transition(NextjsBootstrapPhase::ServerRendered);
             }
             NextjsNavigationType::PopState => {
@@ -423,8 +443,8 @@ impl NextjsBootstrapState {
                 if !(self.config.popstate_preserves_runtime
                     && self.snapshot.phase == NextjsBootstrapPhase::RuntimeReady)
                 {
+                    self.invalidate_runtime_scope("popstate_scope_reset");
                     self.snapshot.environment = NextjsRenderEnvironment::ClientSsr;
-                    self.snapshot.runtime_initialized = false;
                     self.force_transition(NextjsBootstrapPhase::ServerRendered);
                 }
             }
@@ -433,7 +453,7 @@ impl NextjsBootstrapState {
 
     fn handle_hot_reload(&mut self) {
         self.snapshot.hot_reload_count = self.snapshot.hot_reload_count.saturating_add(1);
-        self.snapshot.runtime_initialized = false;
+        self.invalidate_runtime_scope("hot_reload_scope_reset");
         self.snapshot.environment = NextjsRenderEnvironment::ClientSsr;
         self.force_transition(NextjsBootstrapPhase::Hydrating);
     }
@@ -450,7 +470,28 @@ impl NextjsBootstrapState {
         }
         self.snapshot.cache_revalidation_count =
             self.snapshot.cache_revalidation_count.saturating_add(1);
+        if self.snapshot.phase == NextjsBootstrapPhase::RuntimeReady {
+            self.invalidate_runtime_scope("cache_revalidation_scope_reset");
+            self.snapshot.environment = NextjsRenderEnvironment::ClientHydrated;
+            self.force_transition(NextjsBootstrapPhase::Hydrated);
+        }
         Ok(())
+    }
+
+    fn invalidate_runtime_scope(&mut self, reason: &str) {
+        if self.snapshot.runtime_initialized {
+            self.snapshot.scope_invalidation_count =
+                self.snapshot.scope_invalidation_count.saturating_add(1);
+            self.snapshot.runtime_reinit_required_count = self
+                .snapshot
+                .runtime_reinit_required_count
+                .saturating_add(1);
+            self.snapshot.cancellation_count = self.snapshot.cancellation_count.saturating_add(1);
+            self.snapshot.last_invalidated_scope_generation =
+                Some(self.snapshot.active_scope_generation);
+            self.snapshot.last_error = Some(reason.to_string());
+        }
+        self.snapshot.runtime_initialized = false;
     }
 
     fn transition_to(&mut self, to: NextjsBootstrapPhase) -> Result<(), NextjsBootstrapError> {
@@ -576,5 +617,96 @@ mod tests {
         assert!(fields.contains_key("to_environment"));
         assert!(fields.contains_key("route_segment"));
         assert!(fields.contains_key("recovery_action"));
+    }
+
+    #[test]
+    fn cache_revalidation_invalidates_runtime_scope_and_requires_reinit() {
+        let mut state = NextjsBootstrapState::new();
+        state
+            .apply(BootstrapCommand::BeginHydration)
+            .expect("begin hydration");
+        state
+            .apply(BootstrapCommand::CompleteHydration)
+            .expect("complete hydration");
+        state
+            .apply(BootstrapCommand::InitializeRuntime)
+            .expect("init runtime");
+        assert_eq!(state.snapshot().active_scope_generation, 1);
+
+        state
+            .apply(BootstrapCommand::CacheRevalidated)
+            .expect("cache revalidated");
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, NextjsBootstrapPhase::Hydrated);
+        assert!(!snapshot.runtime_initialized);
+        assert_eq!(snapshot.cache_revalidation_count, 1);
+        assert_eq!(snapshot.scope_invalidation_count, 1);
+        assert_eq!(snapshot.runtime_reinit_required_count, 1);
+        assert_eq!(snapshot.cancellation_count, 1);
+        assert_eq!(snapshot.last_invalidated_scope_generation, Some(1));
+
+        state
+            .apply(BootstrapCommand::InitializeRuntime)
+            .expect("re-init runtime");
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, NextjsBootstrapPhase::RuntimeReady);
+        assert_eq!(snapshot.active_scope_generation, 2);
+        assert_eq!(snapshot.runtime_init_attempts, 2);
+        assert_eq!(snapshot.runtime_init_successes, 2);
+    }
+
+    #[test]
+    fn cache_revalidation_while_hydrated_without_runtime_does_not_invalidate_scope() {
+        let mut state = NextjsBootstrapState::new();
+        state
+            .apply(BootstrapCommand::BeginHydration)
+            .expect("begin hydration");
+        state
+            .apply(BootstrapCommand::CompleteHydration)
+            .expect("complete hydration");
+
+        state
+            .apply(BootstrapCommand::CacheRevalidated)
+            .expect("cache revalidated");
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, NextjsBootstrapPhase::Hydrated);
+        assert!(!snapshot.runtime_initialized);
+        assert_eq!(snapshot.cache_revalidation_count, 1);
+        assert_eq!(snapshot.scope_invalidation_count, 0);
+        assert_eq!(snapshot.runtime_reinit_required_count, 0);
+        assert_eq!(snapshot.cancellation_count, 0);
+        assert_eq!(snapshot.last_invalidated_scope_generation, None);
+    }
+
+    #[test]
+    fn hard_navigation_invalidates_runtime_scope_before_reset() {
+        let mut state = NextjsBootstrapState::new();
+        state
+            .apply(BootstrapCommand::BeginHydration)
+            .expect("begin hydration");
+        state
+            .apply(BootstrapCommand::CompleteHydration)
+            .expect("complete hydration");
+        state
+            .apply(BootstrapCommand::InitializeRuntime)
+            .expect("init runtime");
+        assert_eq!(state.snapshot().active_scope_generation, 1);
+
+        state
+            .apply(BootstrapCommand::Navigate {
+                nav: NextjsNavigationType::HardNavigation,
+                route_segment: "/settings".to_string(),
+            })
+            .expect("hard navigation");
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.phase, NextjsBootstrapPhase::ServerRendered);
+        assert!(!snapshot.runtime_initialized);
+        assert_eq!(snapshot.scope_invalidation_count, 1);
+        assert_eq!(snapshot.runtime_reinit_required_count, 1);
+        assert_eq!(snapshot.cancellation_count, 1);
+        assert_eq!(snapshot.last_invalidated_scope_generation, Some(1));
     }
 }

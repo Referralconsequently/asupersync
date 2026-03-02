@@ -2,7 +2,8 @@
 
 use asupersync::types::{NextjsBootstrapPhase, NextjsNavigationType, NextjsRenderEnvironment};
 use asupersync::web::{
-    BootstrapCommand, BootstrapRecoveryAction, NextjsBootstrapError, NextjsBootstrapState,
+    BootstrapCommand, BootstrapRecoveryAction, NextjsBootstrapError, NextjsBootstrapSnapshot,
+    NextjsBootstrapState,
 };
 
 fn bootstrap_to_ready(state: &mut NextjsBootstrapState) {
@@ -15,6 +16,77 @@ fn bootstrap_to_ready(state: &mut NextjsBootstrapState) {
     state
         .apply(BootstrapCommand::InitializeRuntime)
         .expect("initialize runtime");
+}
+
+fn run_navigation_churn_scenario() -> NextjsBootstrapSnapshot {
+    let mut state = NextjsBootstrapState::new();
+    bootstrap_to_ready(&mut state);
+
+    for iteration in 0..6 {
+        if iteration % 2 == 0 {
+            state
+                .apply(BootstrapCommand::Navigate {
+                    nav: NextjsNavigationType::SoftNavigation,
+                    route_segment: format!("/soft-{iteration}"),
+                })
+                .expect("soft nav");
+            assert_eq!(state.snapshot().phase, NextjsBootstrapPhase::RuntimeReady);
+            continue;
+        }
+
+        state
+            .apply(BootstrapCommand::Navigate {
+                nav: NextjsNavigationType::HardNavigation,
+                route_segment: format!("/hard-{iteration}"),
+            })
+            .expect("hard nav");
+        assert_eq!(state.snapshot().phase, NextjsBootstrapPhase::ServerRendered);
+
+        state
+            .apply(BootstrapCommand::BeginHydration)
+            .expect("begin hydration after hard nav");
+        state
+            .apply(BootstrapCommand::CompleteHydration)
+            .expect("complete hydration after hard nav");
+
+        if iteration % 4 == 1 {
+            state
+                .apply(BootstrapCommand::CancelBootstrap {
+                    reason: format!("interleaved-cancel-{iteration}"),
+                })
+                .expect("cancel bootstrap under churn");
+            assert_eq!(state.snapshot().phase, NextjsBootstrapPhase::RuntimeFailed);
+            state
+                .apply(BootstrapCommand::Recover {
+                    action: BootstrapRecoveryAction::RetryRuntimeInit,
+                })
+                .expect("recover after interleaved cancel");
+        }
+
+        state
+            .apply(BootstrapCommand::InitializeRuntime)
+            .expect("initialize runtime after churn cycle");
+        assert_eq!(state.snapshot().phase, NextjsBootstrapPhase::RuntimeReady);
+    }
+
+    state
+        .apply(BootstrapCommand::HydrationMismatch {
+            reason: "post-churn mismatch".to_string(),
+        })
+        .expect("inject hydration mismatch");
+    state
+        .apply(BootstrapCommand::Recover {
+            action: BootstrapRecoveryAction::ResetToHydrating,
+        })
+        .expect("recover mismatch via rehydrate");
+    state
+        .apply(BootstrapCommand::CompleteHydration)
+        .expect("complete rehydrate after mismatch");
+    state
+        .apply(BootstrapCommand::InitializeRuntime)
+        .expect("initialize runtime after mismatch recovery");
+
+    state.snapshot().clone()
 }
 
 #[test]
@@ -136,4 +208,28 @@ fn cache_revalidation_before_hydration_is_rejected() {
             phase: NextjsBootstrapPhase::ServerRendered
         }
     ));
+}
+
+#[test]
+fn rapid_navigation_churn_with_interleaved_recovery_remains_deterministic() {
+    let first = run_navigation_churn_scenario();
+    let second = run_navigation_churn_scenario();
+
+    assert_eq!(first, second, "navigation churn path must be deterministic");
+    assert_eq!(first.phase, NextjsBootstrapPhase::RuntimeReady);
+    assert_eq!(first.environment, NextjsRenderEnvironment::ClientHydrated);
+    assert_eq!(first.soft_navigation_count, 3);
+    assert_eq!(first.hard_navigation_count, 3);
+    // Includes explicit CancelBootstrap events and hard-navigation scope invalidations.
+    assert_eq!(first.cancellation_count, 5);
+    assert_eq!(first.hydration_mismatch_count, 1);
+    assert!(
+        first.runtime_init_attempts >= 5,
+        "expected repeated runtime init attempts during churn"
+    );
+    assert_eq!(
+        first.runtime_init_attempts, first.runtime_init_successes,
+        "churn scenario should end with successful retries"
+    );
+    assert!(first.runtime_initialized);
 }

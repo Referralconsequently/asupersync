@@ -96,8 +96,21 @@ Recovery semantics:
 - `soft_navigation`: runtime survives (`runtime_ready -> runtime_ready`)
 - `hard_navigation`: runtime does not survive; bootstrap restarts from
   `server_rendered`
+- `cache_revalidated` while `runtime_ready`: active runtime scope is
+  deterministically invalidated (`runtime_ready -> hydrated`), outstanding
+  runtime work is cancelled/drained, and runtime re-initialization is required
+  before new side effects
+- `cache_revalidated` while `hydrated`: bookkeeping-only event; does not trigger
+  scope invalidation
 - cancel during bootstrap must emit explicit recovery action metadata (for
   example `retry_after_cancel`) with replayable context
+
+Scope invalidation diagnostics (`NextjsBootstrapSnapshot`):
+
+- `scope_invalidation_count`
+- `runtime_reinit_required_count`
+- `active_scope_generation`
+- `last_invalidated_scope_generation`
 
 Structured log fields for bootstrap diagnostics (deterministic key set):
 

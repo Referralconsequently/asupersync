@@ -32,6 +32,53 @@ Layer contract:
 4. Public exports must be tree-shake safe and must not expose
    `./internal/*` or `./native/*` subpaths.
 
+## Next.js Boundary Strategy and Fallback Contract (WASM-10 / `asupersync-umelq.11.3`)
+
+Source-of-truth runtime mapping lives in `src/types/wasm_abi.rs`:
+
+- `NextjsRenderEnvironment::boundary_mode()`
+- `NextjsRenderEnvironment::runtime_fallback()`
+- `NextjsRenderEnvironment::runtime_fallback_reason()`
+
+Boundary strategy:
+
+1. `client` boundary:
+   - environments: `client_ssr`, `client_hydrated`
+   - direct runtime execution is allowed only in `client_hydrated`
+2. `server` boundary:
+   - environments: `server_component`, `node_server`
+   - runtime execution is not allowed; use serialized server bridge
+3. `edge` boundary:
+   - environment: `edge_runtime`
+   - runtime execution is not allowed; use serialized edge bridge
+
+Deterministic fallback matrix:
+
+| Render environment | Boundary mode | `supports_wasm_runtime` | Fallback policy | Required behavior |
+|---|---|---|---|---|
+| `client_hydrated` | `client` | `true` | `none_required` | execute runtime directly |
+| `client_ssr` | `client` | `false` | `defer_until_hydrated` | defer runtime init until hydration completes |
+| `server_component` | `server` | `false` | `use_server_bridge` | route operation through serialized server companion |
+| `node_server` | `server` | `false` | `use_server_bridge` | route operation through serialized server companion |
+| `edge_runtime` | `edge` | `false` | `use_edge_bridge` | route operation through serialized edge companion |
+
+Mixed deployment guidance:
+
+1. Keep runtime handles in client-only scope; never pass `WasmHandleRef` through server actions.
+2. Treat server/edge requests as bridge requests and return serialized outcomes only.
+3. Keep cancellation ownership in the originating client scope; bridge calls must return explicit cancel-compatible status instead of hidden retries.
+4. If fallback path is selected, emit structured diagnostics with:
+   - `boundary_mode`
+   - `render_environment`
+   - `runtime_fallback`
+   - `repro_command`
+
+Compatibility caveats:
+
+1. `edge_runtime` does not imply `node_apis`; avoid Node-only adapters in edge mode.
+2. `client_ssr` has browser hooks surface but no runtime initialization authority.
+3. Runtime calls in non-hydrated/non-client boundaries must fail closed to fallback policy; no ambient execution escape hatches.
+
 ## Type Surface Ownership
 
 Required symbols and package owners:
