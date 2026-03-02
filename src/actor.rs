@@ -717,19 +717,15 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     cell.state.store(ActorState::Stopping);
 
     // Phase 3: Drain remaining buffered messages.
-    // Two-phase mailbox guarantee: no message silently dropped. Every message
-    // that was successfully sent (committed) into the mailbox will be handled
-    // before the actor's on_stop runs. We cap the drain to the mailbox
-    // capacity to avoid unbounded work if the mailbox is being filled
-    // concurrently during shutdown.
-    let drain_limit = cell.mailbox.capacity() as u64;
+    // Two-phase mailbox guarantee: no message silently dropped. We seal the
+    // mailbox to prevent any new reservations or commits, then drain all
+    // messages currently in the queue before running on_stop.
+    cell.mailbox.close();
+    
     let mut drained: u64 = 0;
     while let Ok(msg) = cell.mailbox.try_recv() {
         actor.handle(&cx, msg).await;
         drained += 1;
-        if drained >= drain_limit {
-            break;
-        }
     }
     if drained > 0 {
         debug!(drained = drained, "actor::mailbox_drained");

@@ -653,6 +653,30 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
 }
 
 impl<T> Receiver<T> {
+    /// Closes the channel, preventing any further messages from being sent.
+    ///
+    /// Existing messages in the queue remain available for receiving.
+    /// Any pending senders will be woken and receive a `Disconnected` error.
+    pub fn close(&mut self) {
+        let wakers = {
+            let mut inner = self.shared.inner.lock();
+            if self.shared.receiver_dropped.load(Ordering::Relaxed) {
+                return;
+            }
+            self.shared.receiver_dropped.store(true, Ordering::Release);
+            let wakers: SmallVec<[Waker; 4]> = inner
+                .send_wakers
+                .drain(..)
+                .map(|waiter| waiter.waker)
+                .collect();
+            drop(inner);
+            wakers
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
     /// Creates a receive future for the next value.
     #[inline]
     #[must_use]
