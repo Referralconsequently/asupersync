@@ -1739,7 +1739,7 @@ fn e2e_obligation_tracked_channel_commit() {
         .create_task(root, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
             let permit = tx.reserve(&cx).await.expect("reserve");
-            let proof = permit.send(7);
+            let proof = permit.send(7).expect("send");
             *proof_kind_clone.lock() = Some(proof.kind());
         })
         .expect("create send task");
@@ -1882,7 +1882,11 @@ fn e2e_obligation_cancel_mid_reserve() {
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
     let (tx, _rx) = tracked_channel::<u32>(1);
-    let proof = tx.try_reserve().expect("reserve slot").send(1);
+    let proof = tx
+        .try_reserve()
+        .expect("reserve slot")
+        .send(1)
+        .expect("send");
     assert_eq!(proof.kind(), ObligationKind::SendPermit);
 
     let reserve_result = Arc::new(Mutex::new(None));
