@@ -20,7 +20,10 @@ impl Ord for TimerEntry {
         other
             .deadline
             .cmp(&self.deadline)
-            .then_with(|| other.generation.cmp(&self.generation))
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation) as i64;
+                diff.cmp(&0)
+            })
     }
 }
 
