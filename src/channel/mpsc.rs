@@ -707,7 +707,9 @@ impl<T> Receiver<T> {
             return Poll::Ready(Ok(value));
         }
 
-        if self.shared.sender_count.load(Ordering::Acquire) == 0 {
+        if self.shared.sender_count.load(Ordering::Acquire) == 0
+            || self.shared.receiver_dropped.load(Ordering::Relaxed)
+        {
             inner.recv_waker = None;
             return Poll::Ready(Err(RecvError::Disconnected));
         }
@@ -733,7 +735,8 @@ impl<T> Receiver<T> {
             }
             Ok(value)
         } else {
-            let disconnected = self.shared.sender_count.load(Ordering::Acquire) == 0;
+            let disconnected = self.shared.sender_count.load(Ordering::Acquire) == 0
+                || self.shared.receiver_dropped.load(Ordering::Relaxed);
             if disconnected {
                 inner.recv_waker = None;
             }
@@ -1257,6 +1260,44 @@ mod tests {
         drop(reserve_fut);
         permit.abort();
         crate::test_complete!("try_reserve_full_when_waiter_queued");
+    }
+
+    #[test]
+    fn receiver_close_returns_disconnected_on_empty() {
+        init_test("receiver_close_returns_disconnected_on_empty");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        block_on(tx.send(&cx, 1)).expect("send failed");
+        rx.close();
+
+        // Should receive the message that was sent before close.
+        let value = rx.try_recv();
+        crate::assert_with_log!(
+            matches!(value, Ok(1)),
+            "try_recv gets message",
+            "Ok(1)",
+            format!("{:?}", value)
+        );
+
+        // Now empty, should return Disconnected, not Empty.
+        let empty_try = rx.try_recv();
+        crate::assert_with_log!(
+            matches!(empty_try, Err(RecvError::Disconnected)),
+            "try_recv returns Disconnected",
+            "Err(Disconnected)",
+            format!("{:?}", empty_try)
+        );
+
+        let empty_recv = block_on(rx.recv(&cx));
+        crate::assert_with_log!(
+            matches!(empty_recv, Err(RecvError::Disconnected)),
+            "recv returns Disconnected",
+            "Err(Disconnected)",
+            format!("{:?}", empty_recv)
+        );
+
+        crate::test_complete!("receiver_close_returns_disconnected_on_empty");
     }
 
     #[test]

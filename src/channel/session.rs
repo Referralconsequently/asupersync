@@ -580,7 +580,7 @@ mod tests {
                     value
                 );
             }
-            other => panic!("expected Disconnected(77), got {other:?}"),
+            other => unreachable!("expected Disconnected(77), got {other:?}"),
         }
 
         crate::test_complete!("tracked_mpsc_send_returns_disconnected_when_receiver_dropped");
