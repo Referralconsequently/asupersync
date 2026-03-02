@@ -661,6 +661,11 @@ Preconditions:
 
 ### 3.3 Region Lifecycle
 
+> **Rule IDs**: `rule.region.close_begin` (#22), `rule.region.close_cancel_children` (#23),
+> `rule.region.close_children_done` (#24), `rule.region.close_run_finalizer` (#25),
+> `rule.region.close_complete` (#26), `inv.region.quiescence` (#27),
+> `prog.region.close_terminates` (#28)
+
 Regions close in phases: Closing → Draining → Finalizing → Closed
 
 #### CLOSE-BEGIN — Region starts closing (`rule.region.close_begin` #22)
@@ -726,6 +731,12 @@ Preconditions:
 ---
 
 ### 3.4 Obligations (Two-Phase Effects)
+
+> **Rule IDs**: `rule.obligation.reserve` (#13), `rule.obligation.commit` (#14),
+> `rule.obligation.abort` (#15), `rule.obligation.leak` (#16),
+> `inv.obligation.no_leak` (#17), `inv.obligation.linear` (#18),
+> `inv.obligation.bounded` (#19), `inv.obligation.ledger_empty_on_close` (#20),
+> `prog.obligation.resolves` (#21)
 
 The obligation registry gives operational teeth to the linear resource discipline (§1.9):
 
@@ -1020,9 +1031,13 @@ Preconditions:
 
 ## 4. Derived Combinators
 
+> **Rule IDs**: `comb.join` (#37), `comb.race` (#38), `comb.timeout` (#39),
+> `inv.combinator.loser_drained` (#40), `law.race.never_abandon` (#41),
+> `def.outcome.join_semantics` (#31)
+
 Combinators are defined in terms of primitives:
 
-### 4.1 join(f1, f2)
+### 4.1 join(f1, f2) — `comb.join` (#37), `def.outcome.join_semantics` (#31)
 
 ```
 join(r, f1, f2) =
@@ -1035,7 +1050,7 @@ join(r, f1, f2) =
 
 Policy handles fail-fast: if o1 errors and policy = FailFast, t2 is cancelled.
 
-### 4.2 race(f1, f2)
+### 4.2 race(f1, f2) — `comb.race` (#38), `inv.combinator.loser_drained` (#40)
 
 ```
 race(r, f1, f2) =
@@ -1049,7 +1064,7 @@ race(r, f1, f2) =
 
 **Critical invariant**: losers are always drained, never abandoned.
 
-### 4.3 timeout(duration, f)
+### 4.3 timeout(duration, f) — `comb.timeout` (#39)
 
 ```
 timeout(r, d, f) =
