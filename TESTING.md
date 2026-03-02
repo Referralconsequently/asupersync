@@ -79,6 +79,9 @@ Trace/replay artifacts follow one explicit lifecycle contract for local and CI w
   - Per-suite rerun command: `bash ./scripts/run_all_e2e.sh --suite <suite>`
   - Matrix verification command: `bash ./scripts/run_all_e2e.sh --verify-matrix`
   - Replay verification pointer: `target/e2e-results/orchestrator_<timestamp>/replay_verification.json`
+  - WASM cross-framework fault mode:
+    - `WASM_FAULT_MATRIX_MODE=reduced` (default gate profile)
+    - `WASM_FAULT_MATRIX_MODE=full` (expanded network-fault matrix)
 
 CI privacy constraints (release blocking):
 - CI redaction modes are restricted to `metadata_only` or `strict`
@@ -96,9 +99,20 @@ The file is deterministic and includes:
 - per-suite artifact roots + replay commands
 
 CI evidence:
+- `.github/workflows/ci.yml` check job runs `scripts/check_ci_matrix_policy.py`
+  against `.github/ci_matrix_policy.json` and uploads
+  `artifacts/ci_matrix_policy_summary.json` +
+  `artifacts/ci_matrix_policy_events.ndjson` as `ci-matrix-policy-report`.
 - `.github/workflows/ci.yml` D4 gate validates `artifact_lifecycle_policy.json`
   against `.github/security_release_policy.json.trace_telemetry_privacy`
   and fails on retention, mode, redaction-field, or storage-scope violations.
+- `.github/workflows/ci.yml` D5 summary step emits `ci-summary/ci_summary_report.json`
+  with deterministic `ci_matrix` + `reproduction` sections:
+  - lane identity/status for required CI lanes
+  - failing lane IDs and replay command pointers
+  - CI context (`run_id`, `run_attempt`, `sha`, `ref`, `workflow`)
+  - replay commands and artifact pointers for failed matrix/forensics rows
+  - status labels: `none_required`, `action_required`, `insufficient_data`
 
 Example structured log entry (start/end markers include the same context):
 

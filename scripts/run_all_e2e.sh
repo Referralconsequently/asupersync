@@ -37,6 +37,7 @@ E2E_TIMEOUT="${E2E_TIMEOUT:-300}"
 ARTIFACT_RETENTION_DAYS_LOCAL="${ARTIFACT_RETENTION_DAYS_LOCAL:-14}"
 ARTIFACT_RETENTION_DAYS_CI="${ARTIFACT_RETENTION_DAYS_CI:-30}"
 ARTIFACT_REDACTION_MODE="${ARTIFACT_REDACTION_MODE:-metadata_only}"
+WASM_FAULT_MATRIX_MODE="${WASM_FAULT_MATRIX_MODE:-reduced}"
 
 # Helpers
 json_escape() {
@@ -183,6 +184,14 @@ validate_artifact_lifecycle_inputs() {
             return 1
             ;;
     esac
+    case "$WASM_FAULT_MATRIX_MODE" in
+        reduced|full)
+            ;;
+        *)
+            echo "WASM_FAULT_MATRIX_MODE must be one of: reduced, full" >&2
+            return 1
+            ;;
+    esac
     return 0
 }
 
@@ -292,6 +301,7 @@ declare -A SUITES=(
     [combinators]="test_combinators.sh"
     [cancel-attribution]="test_cancel_attribution.sh"
     [scheduler]="test_scheduler_wakeup_e2e.sh"
+    [wasm-cross-framework]="test_wasm_cross_framework_e2e.sh"
     [doctor-workspace-scan]="test_doctor_workspace_scan_e2e.sh"
     [doctor-replay-launcher]="test_doctor_replay_launcher_e2e.sh"
     [doctor-orchestration-state-machine]="test_doctor_orchestration_state_machine_e2e.sh"
@@ -314,6 +324,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [combinators]="test_logs"
     [cancel-attribution]="target/test-results/cancel-attribution"
     [scheduler]="target/e2e-results/scheduler"
+    [wasm-cross-framework]="target/e2e-results/wasm_cross_framework"
     [doctor-workspace-scan]="target/e2e-results/doctor_workspace_scan"
     [doctor-replay-launcher]="target/e2e-results/doctor_replay_launcher"
     [doctor-orchestration-state-machine]="target/e2e-results/doctor_orchestration_state_machine"
@@ -336,6 +347,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [combinators]="summary.json"
     [cancel-attribution]="summary_*.json"
     [scheduler]="summary.json"
+    [wasm-cross-framework]="summary.json"
     [doctor-workspace-scan]="summary.json"
     [doctor-replay-launcher]="summary.json"
     [doctor-orchestration-state-machine]="summary.json"
@@ -358,6 +370,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [combinators]="combinators_*"
     [cancel-attribution]=""
     [scheduler]="20*"
+    [wasm-cross-framework]="artifacts_*"
     [doctor-workspace-scan]="artifacts_*"
     [doctor-replay-launcher]="artifacts_*"
     [doctor-orchestration-state-machine]="artifacts_*"
@@ -380,6 +393,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [combinators]="E2E-SUITE-COMBINATORS"
     [cancel-attribution]="E2E-SUITE-CANCEL-ATTRIBUTION"
     [scheduler]="E2E-SUITE-SCHEDULER-WAKEUP"
+    [wasm-cross-framework]="E2E-SUITE-WASM-CROSS-FRAMEWORK"
     [doctor-workspace-scan]="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
     [doctor-replay-launcher]="E2E-SUITE-DOCTOR-REPLAY-LAUNCHER"
     [doctor-orchestration-state-machine]="E2E-SUITE-DOCTOR-ORCHESTRATION-STATE-MACHINE"
@@ -404,7 +418,7 @@ RAPTORQ_REQUIRED_SCENARIOS=(
 SUITE_ORDER=(
     websocket http messaging transport database distributed
     h2-security net-hardening redis
-    combinators cancel-attribution scheduler doctor-workspace-scan
+    combinators cancel-attribution scheduler wasm-cross-framework doctor-workspace-scan
     doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs
     doctor-frankensuite-export
     phase6
@@ -470,6 +484,7 @@ verify_matrix_gate() {
             local replay_route_configured=0
             local row_ok=1
             local replay_command="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} E2E_TIMEOUT=${E2E_TIMEOUT} bash ${SCRIPT_DIR}/run_all_e2e.sh --suite ${name}"
+            local fault_matrix_mode=""
 
             if [[ -f "$script_path" ]]; then
                 script_exists=1
@@ -484,6 +499,11 @@ verify_matrix_gate() {
                 replay_route_configured=1
             fi
 
+            if [[ "$name" == "wasm-cross-framework" ]]; then
+                fault_matrix_mode="${WASM_FAULT_MATRIX_MODE}"
+                replay_command="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} E2E_TIMEOUT=${E2E_TIMEOUT} WASM_FAULT_MATRIX_MODE=${WASM_FAULT_MATRIX_MODE} bash ${SCRIPT_DIR}/run_all_e2e.sh --suite ${name}"
+            fi
+
             if [[ -z "$scenario_id" || "$script_exists" -eq 0 || "$script_executable" -eq 0 || "$artifact_route_configured" -eq 0 || "$replay_route_configured" -eq 0 ]]; then
                 row_ok=0
                 suite_failures=$((suite_failures + 1))
@@ -494,7 +514,7 @@ verify_matrix_gate() {
             else
                 echo ","
             fi
-            printf '    {"scenario_id":"%s","suite":"%s","script":"%s","script_exists":%s,"script_executable":%s,"artifact_root":"%s","summary_glob":"%s","artifact_dir_glob":"%s","artifact_route_configured":%s,"replay_command":"%s","replay_route_configured":%s,"row_ok":%s}' \
+            printf '    {"scenario_id":"%s","suite":"%s","script":"%s","script_exists":%s,"script_executable":%s,"artifact_root":"%s","summary_glob":"%s","artifact_dir_glob":"%s","artifact_route_configured":%s,"fault_matrix_mode":"%s","replay_command":"%s","replay_route_configured":%s,"row_ok":%s}' \
                 "$(json_escape "$scenario_id")" \
                 "$(json_escape "$name")" \
                 "$(json_escape "$script_path")" \
@@ -504,6 +524,7 @@ verify_matrix_gate() {
                 "$(json_escape "$summary_glob")" \
                 "$(json_escape "$artifact_dir_glob")" \
                 "$(json_bool "$artifact_route_configured")" \
+                "$(json_escape "$fault_matrix_mode")" \
                 "$(json_escape "$replay_command")" \
                 "$(json_bool "$replay_route_configured")" \
                 "$(json_bool "$row_ok")"
@@ -639,6 +660,7 @@ echo "Config:"
 echo "  TEST_LOG_LEVEL:  ${TEST_LOG_LEVEL}"
 echo "  RUST_LOG:        ${RUST_LOG}"
 echo "  TEST_SEED:       ${TEST_SEED}"
+echo "  WASM_FAULT_MATRIX_MODE: ${WASM_FAULT_MATRIX_MODE}"
 echo "  Timeout:         ${E2E_TIMEOUT}s per suite"
 echo "  Timestamp:       ${TIMESTAMP}"
 echo "  Report:          ${REPORT_DIR}"
@@ -678,6 +700,9 @@ for name in "${SUITE_ORDER[@]}"; do
     suite_id="${name}_e2e"
     scenario_id="${SUITE_CANONICAL_SCENARIO_ID[$name]:-}"
     replay_command="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} E2E_TIMEOUT=${E2E_TIMEOUT} bash ${SCRIPT_DIR}/run_all_e2e.sh --suite ${name}"
+    if [[ "$name" == "wasm-cross-framework" ]]; then
+        replay_command="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} E2E_TIMEOUT=${E2E_TIMEOUT} WASM_FAULT_MATRIX_MODE=${WASM_FAULT_MATRIX_MODE} bash ${SCRIPT_DIR}/run_all_e2e.sh --suite ${name}"
+    fi
     suite_start_s="$(date +%s)"
     suite_exit_code=0
 
@@ -710,7 +735,11 @@ for name in "${SUITE_ORDER[@]}"; do
     fi
 
     set +e
-    timeout "$E2E_TIMEOUT" bash "$script_path" > "$suite_log" 2>&1
+    if [[ "$name" == "wasm-cross-framework" ]]; then
+        timeout "$E2E_TIMEOUT" env FAULT_MATRIX_MODE="${WASM_FAULT_MATRIX_MODE}" bash "$script_path" > "$suite_log" 2>&1
+    else
+        timeout "$E2E_TIMEOUT" bash "$script_path" > "$suite_log" 2>&1
+    fi
     rc=$?
     set -e
     suite_exit_code="$rc"

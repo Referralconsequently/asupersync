@@ -36,6 +36,8 @@ class Step:
     adapter_path: str = ""
     runtime_profile: str = "FP-BR-DEV"
     diagnostic_category: str = "onboarding"
+    coverage_kind: str = "policy"
+    trace_artifact_hint: str = ""
 
 
 SCENARIOS: dict[str, list[Step]] = {
@@ -90,6 +92,68 @@ SCENARIOS: dict[str, list[Step]] = {
             adapter_path="none",
             runtime_profile="FP-BR-DEV",
             diagnostic_category="security_policy",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/vanilla.security_policy.log",
+        ),
+        Step(
+            "vanilla.behavior_loser_drain_replay",
+            "rch exec -- cargo test --test e2e_combinator "
+            "browser_spork_harness_deterministic_replay -- --nocapture",
+            "Investigate browser loser-drain replay determinism regressions in tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="loser_drain",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/vanilla.behavior_loser_drain_replay.log",
+        ),
+        Step(
+            "vanilla.negative_skipped_loser_detection",
+            "rch exec -- cargo test --test e2e_combinator "
+            "browser_oracle_detects_skipped_loser -- --nocapture",
+            "Ensure loser-drain oracle violations are surfaced with deterministic diagnostics.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="loser_drain_negative",
+            coverage_kind="negative",
+            trace_artifact_hint="artifacts/onboarding/vanilla.negative_skipped_loser_detection.log",
+        ),
+        Step(
+            "vanilla.timing_mid_computation_drain",
+            "rch exec -- cargo test --test e2e_combinator "
+            "browser_mid_computation_task_drained_on_region_close -- --nocapture",
+            "Verify mid-computation cancellation drains under browser-style cooperative scheduling.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="timing_stress",
+            coverage_kind="timing_stress",
+            trace_artifact_hint="artifacts/onboarding/vanilla.timing_mid_computation_drain.log",
+        ),
+        Step(
+            "vanilla.lifecycle_tab_suspension_multi_obligation",
+            "rch exec -- cargo test --test obligation_wasm_parity "
+            "wasm_host_interruption_tab_suspension_multi_obligation -- --nocapture",
+            "Investigate lifecycle chaos drift for multi-obligation tab suspension handling.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="lifecycle_chaos",
+            coverage_kind="lifecycle_chaos",
+            trace_artifact_hint="artifacts/onboarding/vanilla.lifecycle_tab_suspension_multi_obligation.log",
+        ),
+        Step(
+            "vanilla.lifecycle_suspend_resume_cancel_drain",
+            "rch exec -- cargo test --test obligation_wasm_parity "
+            "wasm_host_interruption_during_cancel_drain -- --nocapture",
+            "Verify suspend/resume cancel-drain path stays leak-free under lifecycle interruption.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="lifecycle_chaos",
+            coverage_kind="lifecycle_chaos",
+            trace_artifact_hint="artifacts/onboarding/vanilla.lifecycle_suspend_resume_cancel_drain.log",
         ),
     ],
     "react": [
@@ -145,6 +209,44 @@ SCENARIOS: dict[str, list[Step]] = {
             adapter_path="react/provider",
             runtime_profile="FP-BR-DEV",
             diagnostic_category="obligation_lifecycle",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/react.obligation_lifecycle.log",
+        ),
+        Step(
+            "react.behavior_strict_mode_double_invocation",
+            "rch exec -- cargo test --test react_wasm_strictmode_harness "
+            "strict_mode_double_invocation_is_leak_free_and_cancel_correct -- --nocapture",
+            "Fix React strict-mode lifecycle leaks or cancel/join sequencing drift.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="strict_mode_behavior",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/react.behavior_strict_mode_double_invocation.log",
+        ),
+        Step(
+            "react.timing_restart_churn",
+            "rch exec -- cargo test --test react_wasm_strictmode_harness "
+            "rapid_restart_churn_keeps_event_sequence_balanced -- --nocapture",
+            "Investigate restart-churn race regressions in React adapter task cancellation/join sequencing.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="restart_churn",
+            coverage_kind="timing_stress",
+            trace_artifact_hint="artifacts/onboarding/react.timing_restart_churn.log",
+        ),
+        Step(
+            "react.lifecycle_background_throttle_suspend_resume",
+            "rch exec -- cargo test --test react_wasm_strictmode_harness "
+            "lifecycle_background_throttle_suspend_resume_navigation_churn_is_deterministic -- --nocapture",
+            "Investigate React lifecycle chaos regressions across background throttle, suspend/resume, and navigation churn.",
+            package_entrypoint="@asupersync/react",
+            adapter_path="react/provider",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="lifecycle_chaos",
+            coverage_kind="lifecycle_chaos",
+            trace_artifact_hint="artifacts/onboarding/react.lifecycle_background_throttle_suspend_resume.log",
         ),
     ],
     "next": [
@@ -199,6 +301,31 @@ SCENARIOS: dict[str, list[Step]] = {
             adapter_path="next/app-router",
             runtime_profile="FP-BR-DEV",
             diagnostic_category="bootstrap_contract",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/next.bootstrap_state_machine_contract.log",
+        ),
+        Step(
+            "next.behavior_bootstrap_harness",
+            "rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture",
+            "Investigate Next.js hydration/bootstrap behavior regressions in harness tests.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="bootstrap_harness",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/next.behavior_bootstrap_harness.log",
+        ),
+        Step(
+            "next.timing_navigation_churn",
+            "rch exec -- cargo test --test nextjs_bootstrap_harness "
+            "rapid_navigation_churn_with_interleaved_recovery_remains_deterministic -- --nocapture",
+            "Investigate navigation-churn timing/recovery regressions in Next.js bootstrap state machine.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="lifecycle_chaos",
+            coverage_kind="lifecycle_chaos",
+            trace_artifact_hint="artifacts/onboarding/next.timing_navigation_churn.log",
         ),
         Step(
             "next.optimization_policy",
@@ -209,6 +336,8 @@ SCENARIOS: dict[str, list[Step]] = {
             adapter_path="next/app-router",
             runtime_profile="FP-BR-DEV",
             diagnostic_category="optimization_policy",
+            coverage_kind="policy",
+            trace_artifact_hint="artifacts/onboarding/next.optimization_policy.log",
         ),
     ],
 }
@@ -230,6 +359,7 @@ def tail_excerpt(path: Path, max_lines: int = 30) -> str:
 
 def run_step(
     scenario_id: str,
+    step_index: int,
     step: Step,
     out_dir: Path,
     dry_run: bool,
@@ -243,12 +373,15 @@ def run_step(
         "target": "wasm32-unknown-unknown",
         "runner": "rch",
         "runtime_profile": step.runtime_profile,
+        "framework_lane": scenario_id,
     }
 
     if dry_run:
         return {
             "scenario_id": scenario_id,
+            "step_index": step_index,
             "step_id": step.step_id,
+            "correlation_id": f"{scenario_id}:{step_index:02d}:{step.step_id}",
             "command": step.command,
             "repro_command": step.command,
             "started_at": started_at,
@@ -263,6 +396,8 @@ def run_step(
             "adapter_path": step.adapter_path,
             "runtime_profile": step.runtime_profile,
             "diagnostic_category": step.diagnostic_category,
+            "coverage_kind": step.coverage_kind,
+            "trace_artifact_hint": step.trace_artifact_hint,
         }
 
     with log_path.open("w", encoding="utf-8") as log_f:
@@ -281,7 +416,9 @@ def run_step(
 
     return {
         "scenario_id": scenario_id,
+        "step_index": step_index,
         "step_id": step.step_id,
+        "correlation_id": f"{scenario_id}:{step_index:02d}:{step.step_id}",
         "command": step.command,
         "repro_command": step.command,
         "started_at": started_at,
@@ -297,6 +434,8 @@ def run_step(
         "adapter_path": step.adapter_path,
         "runtime_profile": step.runtime_profile,
         "diagnostic_category": step.diagnostic_category,
+        "coverage_kind": step.coverage_kind,
+        "trace_artifact_hint": step.trace_artifact_hint,
     }
 
 
@@ -305,8 +444,14 @@ def run_scenario(scenario_id: str, out_dir: Path, dry_run: bool) -> int:
     rows: list[dict] = []
     scenario_status = "pass"
 
-    for step in steps:
-        row = run_step(scenario_id=scenario_id, step=step, out_dir=out_dir, dry_run=dry_run)
+    for index, step in enumerate(steps):
+        row = run_step(
+            scenario_id=scenario_id,
+            step_index=index,
+            step=step,
+            out_dir=out_dir,
+            dry_run=dry_run,
+        )
         rows.append(row)
         if row["outcome"] == "fail":
             scenario_status = "fail"
@@ -324,6 +469,7 @@ def run_scenario(scenario_id: str, out_dir: Path, dry_run: bool) -> int:
         "status": scenario_status if not dry_run else "dry_run",
         "step_count": len(rows),
         "failed_steps": [r["step_id"] for r in rows if r["outcome"] == "fail"],
+        "ordered_correlation_ids": [r["correlation_id"] for r in rows],
         "ndjson_path": str(ndjson_path),
         "generated_at": now_iso(),
     }
