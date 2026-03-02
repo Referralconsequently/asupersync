@@ -258,8 +258,9 @@ impl Bulkhead {
 
         let total_executed = self.total_executed_atomic.load(Ordering::Relaxed);
         let total_queued = self.total_queued_atomic.load(Ordering::Relaxed);
-        let avg_queue_wait_ms = if total_queued > 0 {
-            self.total_wait_time_ms.load(Ordering::Relaxed) as f64 / total_queued as f64
+        let completed_queued = total_queued.saturating_sub(u64::from(active));
+        let avg_queue_wait_ms = if completed_queued > 0 {
+            self.total_wait_time_ms.load(Ordering::Relaxed) as f64 / completed_queued as f64
         } else {
             0.0
         };
@@ -327,10 +328,12 @@ impl Bulkhead {
         // First, timeout expired entries — count timeouts locally and batch-update
         // the metrics lock once, instead of acquiring it per timed-out entry.
         let mut timeout_count = 0u64;
+        let mut timeout_wait_ms = 0u64;
         for entry in queue.iter_mut() {
             if entry.result.is_none() && now_millis >= entry.deadline_millis {
                 entry.result = Some(Err(RejectionReason::Timeout));
                 timeout_count += 1;
+                timeout_wait_ms += now_millis.saturating_sub(entry.enqueued_at_millis);
             }
         }
         if timeout_count > 0 {
@@ -339,6 +342,10 @@ impl Bulkhead {
                 .fetch_sub(timeout_count as u32, Ordering::Relaxed);
             self.total_timeout_atomic
                 .fetch_add(timeout_count, Ordering::Relaxed);
+            self.total_wait_time_ms
+                .fetch_add(timeout_wait_ms, Ordering::Relaxed);
+            self.max_queue_wait_ms_atomic
+                .fetch_max(timeout_wait_ms, Ordering::Relaxed);
         }
 
         // Find all waiting entries that can be granted
@@ -504,6 +511,12 @@ impl Bulkhead {
                 let _ = self.process_queue(now);
             } else if entry.result.is_none() {
                 // Still waiting. Mark as cancelled.
+                let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
+                self.total_wait_time_ms
+                    .fetch_add(wait_ms, Ordering::Relaxed);
+                self.max_queue_wait_ms_atomic
+                    .fetch_max(wait_ms, Ordering::Relaxed);
+
                 self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             }
