@@ -327,8 +327,6 @@ fn browser_deterministic_dispatch_order() {
 
 #[test]
 fn browser_scheduler_certificate_trace_id_is_deterministic() {
-    init_scheduler_test("browser_scheduler_certificate_trace_id_is_deterministic");
-
     fn run_once() -> (u64, u64, usize, u64, u64) {
         let state = setup_state(127);
         let mut sched = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 8);
@@ -371,6 +369,8 @@ fn browser_scheduler_certificate_trace_id_is_deterministic() {
             metrics.ready_dispatches,
         )
     }
+
+    init_scheduler_test("browser_scheduler_certificate_trace_id_is_deterministic");
 
     let run_a = run_once();
     let run_b = run_once();

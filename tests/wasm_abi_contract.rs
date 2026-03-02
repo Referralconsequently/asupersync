@@ -300,7 +300,8 @@ fn nextjs_bootstrap_state_machine_paths_are_explicit() {
 
     assert!(!is_valid_bootstrap_transition(ServerRendered, RuntimeReady));
     assert!(!is_valid_bootstrap_transition(Hydrating, RuntimeReady));
-    assert!(!is_valid_bootstrap_transition(RuntimeReady, Hydrating));
+    assert!(is_valid_bootstrap_transition(RuntimeReady, Hydrating)); // Valid for Fast Refresh
+    assert!(is_valid_bootstrap_transition(RuntimeFailed, Hydrating)); // Valid for Retry / Fast Refresh
     assert!(!is_valid_bootstrap_transition(RuntimeFailed, Hydrated));
 }
 

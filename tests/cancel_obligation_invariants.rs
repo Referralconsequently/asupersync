@@ -47,6 +47,7 @@ fn init_test(test_name: &str) {
     test_phase!(test_name);
 }
 
+#[allow(clippy::collection_is_never_read)]
 fn violation_trace_id(violations: &[asupersync::lab::oracle::OracleViolation]) -> u64 {
     let mut labels = violations
         .iter()
@@ -55,7 +56,9 @@ fn violation_trace_id(violations: &[asupersync::lab::oracle::OracleViolation]) -
     labels.sort();
     let mut hasher = DetHasher::default();
     violations.len().hash(&mut hasher);
-    labels.hash(&mut hasher);
+    for label in labels {
+        label.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -1247,8 +1250,6 @@ fn oracle_suite_detects_obligation_leak_in_combined_scenario() {
 
 #[test]
 fn oracle_suite_obligation_leak_trace_id_is_deterministic() {
-    init_test("oracle_suite_obligation_leak_trace_id_is_deterministic");
-
     fn run_once() -> (u64, usize, bool) {
         let mut suite = OracleSuite::new();
 
@@ -1305,6 +1306,8 @@ fn oracle_suite_obligation_leak_trace_id_is_deterministic() {
         );
         (trace_id, violations.len(), has_obligation_leak)
     }
+
+    init_test("oracle_suite_obligation_leak_trace_id_is_deterministic");
 
     let run_a = run_once();
     let run_b = run_once();

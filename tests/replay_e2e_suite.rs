@@ -757,7 +757,7 @@ fn browser_replay_report_artifact_e2e() {
     replayer
         .verify_and_advance(&trace.events[0])
         .expect("first event should match");
-    let bad = ReplayEvent::RngSeed { seed: 0xBAD5_EED };
+    let bad = ReplayEvent::RngSeed { seed: 0x0BAD_5EED };
     let divergence = replayer.verify(&bad).expect_err("must diverge");
 
     test_section!("build-report");

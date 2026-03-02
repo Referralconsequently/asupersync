@@ -769,8 +769,6 @@ fn wasm_reset_simulates_page_reload() {
 
 #[test]
 fn wasm_cancel_drain_trace_reference_is_deterministic() {
-    init_obligation_test("wasm_cancel_drain_trace_reference_is_deterministic");
-
     fn run_once() -> (u64, usize, u64, u64) {
         let mut ledger = ObligationLedger::new();
         let r = region(7);
@@ -821,6 +819,8 @@ fn wasm_cancel_drain_trace_reference_is_deterministic() {
             stats.pending,
         )
     }
+
+    init_obligation_test("wasm_cancel_drain_trace_reference_is_deterministic");
 
     let run_a = run_once();
     let run_b = run_once();
