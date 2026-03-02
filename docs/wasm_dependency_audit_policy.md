@@ -1,72 +1,109 @@
 # WASM Dependency Audit Policy
 
-This document defines the deterministic dependency-audit gate introduced for bead `asupersync-umelq.3.1`.
+Primary beads: `asupersync-umelq.3.1`, `asupersync-umelq.3.5`
 
 ## Goal
 
-Audit browser-target dependency closure and block merges when forbidden runtime crates appear in wasm profiles.
+Enforce dependency minimization and provenance controls for browser profiles so
+WASM builds remain:
+
+- runtime-pure (no Tokio-family contamination),
+- deterministic and replay-auditable,
+- rollback-safe under release automation.
+
+## Invariant Mapping
+
+This policy is part of preserving core runtime guarantees in browser mode:
+
+- `SEM-INV-001` structured ownership (no hidden runtime injection),
+- `SEM-INV-003` cancellation protocol correctness,
+- `SEM-INV-005` no obligation leaks via transitive runtime side effects,
+- `SEM-INV-006` no ambient authority,
+- `SEM-INV-007` deterministic replayability.
 
 ## Canonical Inputs
 
 - Policy: `.github/wasm_dependency_policy.json`
 - Audit script: `scripts/check_wasm_dependency_policy.py`
+- Release gate wrapper: `scripts/check_security_release_gate.py --check-deps`
 
 ## Gate Rules
 
-1. Any `forbidden_crates` match fails the gate.
-2. Any `conditional_crates` finding with an expired transition fails the gate.
-3. Any finding at or above `risk_thresholds.high` without active or resolved transition tracking fails the gate.
+1. Any `forbidden_crates` hit fails immediately.
+2. Any `conditional_crates` hit with expired transition fails.
+3. Any high-risk finding (`risk_thresholds.high`) without active/resolved
+   transition fails.
+4. Policy schema/profile/output metadata must be valid and complete.
+5. Dependency transition records must remain traceable to live replacement
+   bead IDs.
 
 ## Deterministic Profiles
 
-The policy audits the canonical `FP-BR-*` browser profiles on
-`wasm32-unknown-unknown`:
+Policy scans canonical `FP-BR-*` profiles on `wasm32-unknown-unknown`:
 
-- `FP-BR-MIN` (`--no-default-features --features wasm-browser-minimal`)
-- `FP-BR-DEV` (`--no-default-features --features wasm-browser-dev`)
-- `FP-BR-PROD` (`--no-default-features --features wasm-browser-prod`)
-- `FP-BR-DET` (`--no-default-features --features wasm-browser-deterministic`)
+- `FP-BR-MIN`: `--no-default-features --features wasm-browser-minimal`
+- `FP-BR-DEV`: `--no-default-features --features wasm-browser-dev`
+- `FP-BR-PROD`: `--no-default-features --features wasm-browser-prod`
+- `FP-BR-DET`: `--no-default-features --features wasm-browser-deterministic`
 
-Each profile executes `cargo tree` with deterministic flags (`--prefix depth --charset ascii`) so output ordering is stable and machine-parseable.
+Each scan uses deterministic `cargo tree` flags:
+`--prefix depth --charset ascii -e normal`.
 
-## Structured Outputs
+## Provenance and Artifact Contract
 
-- Summary JSON: `artifacts/wasm_dependency_audit_summary.json`
-- NDJSON log: `artifacts/wasm_dependency_audit_log.ndjson`
+Summary artifact:
 
-Each NDJSON event includes:
+- `artifacts/wasm_dependency_audit_summary.json`
+- Required provenance: `audit_run_id`, `policy_path`, `policy_sha256`,
+  `policy_schema_version`, per-profile command metadata.
 
-- `profile_id`
-- `target`
-- `crate`
-- `version`
-- `transitive_chain`
-- `decision`
-- `decision_reason`
-- `risk_score`
-- `remediation`
-- `transition_status`
-- `transition_issue`
+NDJSON log artifact:
+
+- `artifacts/wasm_dependency_audit_log.ndjson`
+- Required provenance per finding: `audit_run_id`, `policy_path`,
+  `policy_sha256`, `policy_schema_version`, plus crate/chain decision fields.
+
+These fields are release-critical because rollback and incident triage require
+exact policy+artifact reproducibility.
+
+## Adversarial Check Expectations
+
+The dependency gate must defend against:
+
+- provenance tampering (policy file swapped without digest change evidence),
+- policy bypass (expired active transitions treated as non-blocking),
+- dependency drift (profile coverage changes without policy metadata updates).
+
+`check_security_release_gate.py` treats dependency policy validity and
+transition freshness as release-blocking.
 
 ## Repro Commands
 
-Unit checks (script internal parser/classifier checks):
+Self-test:
 
 ```bash
 python3 scripts/check_wasm_dependency_policy.py --self-test
 ```
 
-Policy gate run:
+Policy gate:
 
 ```bash
 python3 scripts/check_wasm_dependency_policy.py \
   --policy .github/wasm_dependency_policy.json
 ```
 
-Single-profile debugging:
+Single-profile drill:
 
 ```bash
 python3 scripts/check_wasm_dependency_policy.py \
   --policy .github/wasm_dependency_policy.json \
   --only-profile FP-BR-DET
+```
+
+Release-gate path (dependency checks enabled):
+
+```bash
+python3 scripts/check_security_release_gate.py \
+  --check-deps \
+  --dep-policy .github/wasm_dependency_policy.json
 ```

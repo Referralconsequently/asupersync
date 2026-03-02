@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import pathlib
 import re
@@ -466,6 +467,17 @@ def write_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(8192)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def evaluate_gate(
     findings: list[Finding],
     risk_high_threshold: int,
@@ -580,7 +592,9 @@ def main() -> int:
         raise PolicyError("no profiles selected for scanning")
 
     now_utc = dt.datetime.now(dt.timezone.utc)
+    audit_run_id = now_utc.strftime("wasm-dependency-audit-%Y%m%dT%H%M%SZ")
     risk_high_threshold = int(policy["risk_thresholds"]["high"])
+    policy_sha256 = file_sha256(policy_path)
 
     all_findings: list[Finding] = []
     profile_stats: list[dict[str, Any]] = []
@@ -616,8 +630,10 @@ def main() -> int:
 
     summary = {
         "schema_version": "wasm-dependency-audit-report-v1",
+        "audit_run_id": audit_run_id,
         "generated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
         "policy_path": str(policy_path),
+        "policy_sha256": policy_sha256,
         "policy_schema_version": policy["schema_version"],
         "profiles": sorted(profile_stats, key=lambda item: item["profile_id"]),
         "gate": gate_summary,
@@ -630,6 +646,10 @@ def main() -> int:
         log_row = {
             "event": "wasm_dependency_policy_finding",
             "ts_utc": now_utc.isoformat().replace("+00:00", "Z"),
+            "audit_run_id": audit_run_id,
+            "policy_path": str(policy_path),
+            "policy_sha256": policy_sha256,
+            "policy_schema_version": policy["schema_version"],
             **finding_to_json(finding),
         }
         logs.append(log_row)

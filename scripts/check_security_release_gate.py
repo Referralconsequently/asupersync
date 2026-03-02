@@ -163,7 +163,7 @@ def check_dependency_audit(
     criterion: BlockingCriterion,
     dep_policy_path: pathlib.Path | None,
 ) -> CheckResult:
-    """Verify dependency policy exists and is parseable."""
+    """Verify dependency policy structure, transition freshness, and provenance output paths."""
     if dep_policy_path is None or not dep_policy_path.exists():
         return CheckResult(
             criterion_id=criterion.id,
@@ -188,8 +188,23 @@ def check_dependency_audit(
             detail=f"dependency policy invalid: {exc}",
         )
 
-    # Validate policy structure
+    if policy.get("schema_version") != "wasm-dependency-policy-v1":
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="dependency policy schema_version must be wasm-dependency-policy-v1",
+        )
+
+    # Validate policy structure and provenance output configuration.
     forbidden = policy.get("forbidden_crates", [])
+    conditional = policy.get("conditional_crates", [])
+    profiles = policy.get("profiles", [])
+    output_cfg = policy.get("output", {})
+
     if not isinstance(forbidden, list):
         return CheckResult(
             criterion_id=criterion.id,
@@ -200,25 +215,212 @@ def check_dependency_audit(
             blocks_release=criterion.blocks_release,
             detail="forbidden_crates must be a list",
         )
+    if not isinstance(conditional, list):
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="conditional_crates must be a list",
+        )
+    if not isinstance(profiles, list) or not profiles:
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="profiles must be a non-empty list",
+        )
+    if not isinstance(output_cfg, dict):
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="output must be an object with summary/log artifact paths",
+        )
+    summary_path = output_cfg.get("summary_path", "")
+    log_path = output_cfg.get("log_path", "")
+    if not isinstance(summary_path, str) or not summary_path.strip():
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="output.summary_path must be a non-empty string",
+        )
+    if not isinstance(log_path, str) or not log_path.strip():
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="output.log_path must be a non-empty string",
+        )
 
-    # Check for expired transitions
-    transitions = policy.get("transition_tracking", [])
+    profile_ids: set[str] = set()
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail="profiles entries must be objects",
+            )
+        profile_id = profile.get("id")
+        target = profile.get("target")
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail="each profile must have a non-empty id",
+            )
+        if profile_id in profile_ids:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"duplicate profile id: {profile_id}",
+            )
+        profile_ids.add(profile_id)
+        if target != "wasm32-unknown-unknown":
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"profile {profile_id} has unsupported target: {target}",
+            )
+        features = profile.get("features", [])
+        if not isinstance(features, list) or not all(isinstance(x, str) for x in features):
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"profile {profile_id} features must be list[str]",
+            )
+
+    forbidden_names = {
+        entry.get("name")
+        for entry in forbidden
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    }
+    conditional_names = {
+        entry.get("name")
+        for entry in conditional
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    }
+
+    # Check for expired transitions in the current dependency policy schema.
+    transitions = policy.get("transitions", [])
+    if not isinstance(transitions, list):
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="transitions must be a list",
+        )
     expired = []
     now = dt.datetime.now(dt.timezone.utc)
     for t in transitions:
         if not isinstance(t, dict):
-            continue
-        deadline = t.get("deadline", "")
-        status = t.get("status", "")
-        if status == "active" and deadline:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail="transitions entries must be objects",
+            )
+        crate = t.get("crate")
+        status = t.get("status")
+        expires_at_utc = t.get("expires_at_utc")
+        if not isinstance(crate, str) or not crate.strip():
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail="transition crate must be a non-empty string",
+            )
+        if crate not in forbidden_names and crate not in conditional_names:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"transition crate not defined in policy classes: {crate}",
+            )
+        if status not in {"active", "resolved"}:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"transition {crate} status must be active|resolved",
+            )
+        if status == "active":
+            if not isinstance(expires_at_utc, str) or not expires_at_utc.strip():
+                return CheckResult(
+                    criterion_id=criterion.id,
+                    title=criterion.title,
+                    category=criterion.category,
+                    severity=criterion.severity,
+                    status="fail",
+                    blocks_release=criterion.blocks_release,
+                    detail=f"active transition {crate} missing expires_at_utc",
+                )
             try:
-                dl = dt.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+                dl = dt.datetime.fromisoformat(expires_at_utc.replace("Z", "+00:00"))
                 if dl.tzinfo is None:
                     dl = dl.replace(tzinfo=dt.timezone.utc)
                 if now > dl:
-                    expired.append(t.get("crate", "unknown"))
+                    expired.append(crate)
             except (ValueError, TypeError):
-                pass
+                return CheckResult(
+                    criterion_id=criterion.id,
+                    title=criterion.title,
+                    category=criterion.category,
+                    severity=criterion.severity,
+                    status="fail",
+                    blocks_release=criterion.blocks_release,
+                    detail=f"invalid transition expiry for {crate}: {expires_at_utc}",
+                )
 
     if expired:
         return CheckResult(
@@ -238,7 +440,11 @@ def check_dependency_audit(
         severity=criterion.severity,
         status="pass",
         blocks_release=criterion.blocks_release,
-        detail=f"dependency policy valid ({len(forbidden)} forbidden crates tracked)",
+        detail=(
+            "dependency policy valid "
+            f"(profiles={len(profiles)}, forbidden={len(forbidden)}, "
+            f"conditional={len(conditional)}, transitions={len(transitions)})"
+        ),
     )
 
 
@@ -614,12 +820,31 @@ def run_self_test() -> None:
 
     # Test 3: Dependency audit - valid policy
     dep_policy = {
+        "schema_version": "wasm-dependency-policy-v1",
+        "profiles": [
+            {
+                "id": "FP-BR-DEV",
+                "target": "wasm32-unknown-unknown",
+                "features": ["wasm-browser-dev"],
+            }
+        ],
         "forbidden_crates": [
             {"name": "tokio", "risk_score": 100}
         ],
-        "transition_tracking": [
-            {"crate": "tower", "status": "active", "deadline": "2027-01-01"}
+        "conditional_crates": [
+            {"name": "tower", "risk_score": 70}
         ],
+        "transitions": [
+            {
+                "crate": "tower",
+                "status": "active",
+                "expires_at_utc": "2027-01-01T00:00:00Z",
+            }
+        ],
+        "output": {
+            "summary_path": "artifacts/wasm_dependency_audit_summary.json",
+            "log_path": "artifacts/wasm_dependency_audit_log.ndjson",
+        },
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(dep_policy, f)
@@ -629,10 +854,31 @@ def run_self_test() -> None:
 
     # Test 4: Dependency audit - expired transition
     dep_policy_expired = {
-        "forbidden_crates": [],
-        "transition_tracking": [
-            {"crate": "tower", "status": "active", "deadline": "2020-01-01"}
+        "schema_version": "wasm-dependency-policy-v1",
+        "profiles": [
+            {
+                "id": "FP-BR-DEV",
+                "target": "wasm32-unknown-unknown",
+                "features": ["wasm-browser-dev"],
+            }
         ],
+        "forbidden_crates": [
+            {"name": "tokio", "risk_score": 100}
+        ],
+        "conditional_crates": [
+            {"name": "tower", "risk_score": 70}
+        ],
+        "transitions": [
+            {
+                "crate": "tower",
+                "status": "active",
+                "expires_at_utc": "2020-01-01T00:00:00Z",
+            }
+        ],
+        "output": {
+            "summary_path": "artifacts/wasm_dependency_audit_summary.json",
+            "log_path": "artifacts/wasm_dependency_audit_log.ndjson",
+        },
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(dep_policy_expired, f)

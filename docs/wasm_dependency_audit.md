@@ -1,4 +1,4 @@
-# WASM Dependency Audit (asupersync-umelq.3.1)
+# WASM Dependency Audit (asupersync-umelq.3.1, asupersync-umelq.3.5)
 
 This document defines the deterministic dependency-closure audit for browser-focused
 targets and the runtime policy gate for forbidden async runtimes.
@@ -8,9 +8,10 @@ targets and the runtime policy gate for forbidden async runtimes.
 - Target family: `wasm32-unknown-unknown`
 - Canonical policy: [`.github/wasm_dependency_policy.json`](../.github/wasm_dependency_policy.json)
 - Profiles audited by policy:
-  - `wasm-core-no-default`
-  - `wasm-core-default`
-  - `wasm-audit-all-features`
+  - `FP-BR-MIN`
+  - `FP-BR-DEV`
+  - `FP-BR-PROD`
+  - `FP-BR-DET`
 - Dependency edge mode: `cargo tree -e normal` with deterministic depth-prefix parsing
 
 ## Policy Classes
@@ -30,6 +31,15 @@ Each finding includes:
 - policy reason
 - risk score
 - remediation recommendation
+- transition status and owning replacement bead (when conditional)
+
+Summary-level provenance includes:
+
+- `audit_run_id`
+- `policy_path`
+- `policy_sha256`
+- `policy_schema_version`
+- per-profile scan command metadata
 
 ## Tooling
 
@@ -53,7 +63,16 @@ The CI check job runs:
 
 1. script self-tests (classification/parser checks),
 2. policy audit generation,
-3. merge-blocking failure on forbidden dependencies.
+3. merge-blocking failure on forbidden dependencies or expired transitions,
+4. release-gate dependency validation via `check_security_release_gate.py --check-deps`.
+
+## Adversarial Policy Assertions
+
+Dependency controls are validated against three adversarial classes:
+
+- provenance tampering: policy digest/provenance fields must remain coherent,
+- policy bypass: expired transitions must hard-fail,
+- dependency drift: canonical profile coverage must remain valid and complete.
 
 ## Current Findings Snapshot
 
