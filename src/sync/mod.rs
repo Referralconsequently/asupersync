@@ -37,6 +37,8 @@ mod notify_bug_test;
 mod once_cell;
 mod pool;
 mod rwlock;
+#[cfg(test)]
+mod rwlock_lost_wakeup_test;
 pub(crate) mod semaphore;
 
 pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};

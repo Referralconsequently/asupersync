@@ -504,8 +504,9 @@ impl<R> PooledResource<R> {
         self.notify_return_wakers();
     }
 
-    /// Wake all registered pool waiters so they can re-poll and
-    /// discover the newly available resource/slot.
+    /// Wake the first registered pool waiter to act as a dispatcher.
+    /// When it polls, it will call `process_returns()` which drains the return
+    /// channel and wakes the exact number of subsequent waiters needed based on capacity.
     fn notify_return_wakers(&self) {
         if let Some(ref wakers) = self.return_wakers {
             let waker = {
