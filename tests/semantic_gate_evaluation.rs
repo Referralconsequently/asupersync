@@ -261,7 +261,7 @@ fn gate_report_references_tlc_evidence() {
     assert!(
         report.contains("0 violations")
             || report.contains("violations: 0")
-            || (report.contains("violations") && report.contains("0")),
+            || (report.contains("violations") && report.contains('0')),
         "Report must confirm zero TLC violations"
     );
 }

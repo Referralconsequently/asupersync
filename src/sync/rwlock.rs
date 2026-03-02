@@ -335,7 +335,6 @@ impl<T> RwLock<T> {
                 if waker.is_some() {
                     state.writer_active = true;
                 }
-                drop(state);
                 (waker, SmallVec::new())
             } else {
                 let wakers = Self::drain_reader_waiters(&mut state);
@@ -735,8 +734,8 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             }
             // Dequeued - we were pre-granted the lock by release_writer!
             // `state.readers` was already incremented for us.
-            self.waiter_id = None;
             drop(state);
+            self.waiter_id = None;
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
                 lock: Arc::clone(&self.lock),
             }));
@@ -825,12 +824,12 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                 return Poll::Pending;
             }
             // Dequeued - we were pre-granted the lock!
-            self.waiter_id = None;
             if self.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                self.counted = false;
             }
             drop(state);
+            self.waiter_id = None;
+            self.counted = false;
             return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
         }
 
@@ -840,9 +839,9 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             state.writer_active = true;
             if self.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                self.counted = false;
             }
             drop(state);
+            self.counted = false;
             return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
         }
 

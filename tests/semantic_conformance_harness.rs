@@ -55,17 +55,14 @@ fn t(nanos: u64) -> Time {
 
 /// Drive a task through the full cancel protocol: Running → CancelRequested → Cancelling →
 /// Finalizing → Completed(Cancelled). Reduces boilerplate in multi-task cancel scenarios.
-#[allow(clippy::too_many_arguments)]
 fn drive_cancel_protocol(
     oracle: &mut CancellationProtocolOracle,
     task_id: TaskId,
     reason: &CancelReason,
     cleanup: Budget,
-    request_t: u64,
-    ack_t: u64,
-    finalize_t: u64,
-    complete_t: u64,
+    times: (u64, u64, u64, u64),
 ) {
+    let (request_t, ack_t, finalize_t, complete_t) = times;
     oracle.on_cancel_request(task_id, reason.clone(), t(request_t));
     oracle.on_transition(
         task_id,
@@ -455,10 +452,16 @@ fn conformance_cancel_propagates_down() {
     oracle.on_region_cancel(child, reason.clone(), t(51));
 
     // Child task receives propagated cancellation — full cancel protocol cycle
-    drive_cancel_protocol(&mut oracle, child_task, &reason, cleanup, 55, 60, 70, 80);
+    drive_cancel_protocol(&mut oracle, child_task, &reason, cleanup, (55, 60, 70, 80));
 
     // Parent task also cancels — full cancel protocol cycle
-    drive_cancel_protocol(&mut oracle, parent_task, &reason, cleanup, 50, 85, 90, 100);
+    drive_cancel_protocol(
+        &mut oracle,
+        parent_task,
+        &reason,
+        cleanup,
+        (50, 85, 90, 100),
+    );
 
     let result = oracle.check();
     assert!(
