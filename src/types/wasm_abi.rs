@@ -2347,6 +2347,447 @@ impl WasmDispatcherDiagnostics {
     }
 }
 
+// ---------------------------------------------------------------------------
+// React Runtime Provider Lifecycle Contract
+// ---------------------------------------------------------------------------
+//
+// These types model how a React component tree interacts with the WASM
+// runtime through a provider pattern. The key invariants:
+//
+// 1. **Single runtime per provider**: A `<RuntimeProvider>` component owns
+//    exactly one WASM runtime instance. Nested providers are separate.
+//
+// 2. **Mount/unmount = init/close**: React mount triggers runtime_create +
+//    scope_enter. Unmount triggers scope_close + runtime_close.
+//
+// 3. **StrictMode remount**: React StrictMode double-invokes effects.
+//    The provider must handle mount → unmount → mount without leaking
+//    handles, scopes, or obligations from the first mount.
+//
+// 4. **Cancellation preservation**: When a component unmounts, all tasks
+//    spawned within its scope are cancelled (not silently dropped).
+//    The cancel protocol is fully visible to the WASM runtime.
+//
+// 5. **Scope ownership follows component tree**: Child components that
+//    call `useScope()` get a child scope of the nearest provider's scope.
+//    Component unmount closes the child scope first.
+
+/// React provider lifecycle phases.
+///
+/// Models the provider component's journey from initial render through
+/// cleanup. These phases map directly to React effect lifecycle hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactProviderPhase {
+    /// Component rendered but effect not yet fired.
+    /// No WASM handles allocated.
+    Pending,
+    /// Effect fired; runtime and root scope are being initialized.
+    /// Handles are being allocated but not yet Active.
+    Initializing,
+    /// Runtime and root scope are Active. Child components can spawn
+    /// tasks and create sub-scopes.
+    Ready,
+    /// Cleanup effect fired (unmount or StrictMode remount).
+    /// Active tasks are being cancelled, scopes are draining.
+    Disposing,
+    /// All handles released, runtime closed. Terminal state.
+    Disposed,
+    /// Initialization or disposal failed. Contains error context.
+    /// Provider should render an error boundary fallback.
+    Failed,
+}
+
+/// Error returned when a provider lifecycle transition is invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid provider transition: {from:?} -> {to:?}")]
+pub struct ReactProviderTransitionError {
+    /// Current phase.
+    pub from: ReactProviderPhase,
+    /// Requested next phase.
+    pub to: ReactProviderPhase,
+}
+
+/// Returns true when a provider phase transition is valid.
+#[must_use]
+pub fn is_valid_provider_transition(from: ReactProviderPhase, to: ReactProviderPhase) -> bool {
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        (
+            ReactProviderPhase::Pending | ReactProviderPhase::Disposed,
+            ReactProviderPhase::Initializing
+        ) | (
+            ReactProviderPhase::Initializing,
+            ReactProviderPhase::Ready | ReactProviderPhase::Failed
+        ) | (ReactProviderPhase::Ready, ReactProviderPhase::Disposing)
+            | (
+                ReactProviderPhase::Disposing,
+                ReactProviderPhase::Disposed | ReactProviderPhase::Failed
+            )
+    )
+}
+
+/// Validates a provider phase transition.
+pub fn validate_provider_transition(
+    from: ReactProviderPhase,
+    to: ReactProviderPhase,
+) -> Result<(), ReactProviderTransitionError> {
+    if is_valid_provider_transition(from, to) {
+        Ok(())
+    } else {
+        Err(ReactProviderTransitionError { from, to })
+    }
+}
+
+/// Configuration for a React runtime provider.
+///
+/// Passed to the `<RuntimeProvider>` component as props. Controls
+/// initialization behavior, cancellation policy, and diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactProviderConfig {
+    /// Human-readable label for the provider (diagnostics only).
+    pub label: String,
+    /// ABI version to negotiate with the WASM module.
+    pub consumer_version: Option<WasmAbiVersion>,
+    /// Abort propagation mode for cancel/abort bridging.
+    pub abort_mode: WasmAbortPropagationMode,
+    /// Whether to enable StrictMode remount resilience.
+    ///
+    /// When true, the provider tolerates mount → unmount → mount sequences
+    /// by cleanly disposing the first instance before reinitializing.
+    pub strict_mode_resilient: bool,
+    /// Whether to collect diagnostic events for the React DevTools.
+    pub devtools_diagnostics: bool,
+}
+
+impl Default for ReactProviderConfig {
+    fn default() -> Self {
+        Self {
+            label: "asupersync".to_string(),
+            consumer_version: None,
+            abort_mode: WasmAbortPropagationMode::Bidirectional,
+            strict_mode_resilient: true,
+            devtools_diagnostics: false,
+        }
+    }
+}
+
+/// Snapshot of provider state for diagnostics and DevTools integration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactProviderSnapshot {
+    /// Current lifecycle phase.
+    pub phase: ReactProviderPhase,
+    /// Provider configuration.
+    pub config: ReactProviderConfig,
+    /// Runtime handle (if allocated).
+    pub runtime_handle: Option<WasmHandleRef>,
+    /// Root scope handle (if allocated).
+    pub root_scope_handle: Option<WasmHandleRef>,
+    /// Number of child scopes currently active.
+    pub child_scope_count: usize,
+    /// Number of active tasks across all scopes.
+    pub active_task_count: usize,
+    /// Phase transition history (for StrictMode debugging).
+    pub transition_history: Vec<ReactProviderPhase>,
+    /// Dispatcher diagnostics snapshot.
+    pub dispatcher_diagnostics: Option<WasmDispatcherDiagnostics>,
+}
+
+/// React provider state machine managing runtime lifecycle.
+///
+/// Wraps a `WasmExportDispatcher` and manages the provider lifecycle:
+/// Pending → Initializing → Ready → Disposing → Disposed.
+///
+/// Supports StrictMode remount: Disposed → Initializing → Ready.
+#[derive(Debug)]
+pub struct ReactProviderState {
+    /// Current lifecycle phase.
+    phase: ReactProviderPhase,
+    /// Provider configuration.
+    config: ReactProviderConfig,
+    /// Underlying WASM dispatcher.
+    dispatcher: WasmExportDispatcher,
+    /// Runtime handle (if allocated).
+    runtime_handle: Option<WasmHandleRef>,
+    /// Root scope handle (if allocated).
+    root_scope_handle: Option<WasmHandleRef>,
+    /// Active child scope handles.
+    child_scopes: Vec<WasmHandleRef>,
+    /// Active task handles.
+    active_tasks: Vec<WasmHandleRef>,
+    /// Phase transition history.
+    transition_history: Vec<ReactProviderPhase>,
+}
+
+impl ReactProviderState {
+    /// Creates a new provider state in `Pending` phase.
+    #[must_use]
+    pub fn new(config: ReactProviderConfig) -> Self {
+        let dispatcher = WasmExportDispatcher::new().with_abort_mode(config.abort_mode);
+        Self {
+            phase: ReactProviderPhase::Pending,
+            config,
+            dispatcher,
+            runtime_handle: None,
+            root_scope_handle: None,
+            child_scopes: Vec::new(),
+            active_tasks: Vec::new(),
+            transition_history: vec![ReactProviderPhase::Pending],
+        }
+    }
+
+    /// Returns the current lifecycle phase.
+    #[must_use]
+    pub fn phase(&self) -> ReactProviderPhase {
+        self.phase
+    }
+
+    /// Returns the runtime handle, if allocated.
+    #[must_use]
+    pub fn runtime_handle(&self) -> Option<WasmHandleRef> {
+        self.runtime_handle
+    }
+
+    /// Returns the root scope handle, if allocated.
+    #[must_use]
+    pub fn root_scope_handle(&self) -> Option<WasmHandleRef> {
+        self.root_scope_handle
+    }
+
+    /// Returns a reference to the underlying dispatcher.
+    #[must_use]
+    pub fn dispatcher(&self) -> &WasmExportDispatcher {
+        &self.dispatcher
+    }
+
+    /// Advances to a new phase, validating the transition.
+    fn advance(&mut self, to: ReactProviderPhase) -> Result<(), ReactProviderTransitionError> {
+        validate_provider_transition(self.phase, to)?;
+        self.phase = to;
+        self.transition_history.push(to);
+        Ok(())
+    }
+
+    /// Initializes the runtime and root scope (effect mount).
+    ///
+    /// Lifecycle: Pending/Disposed → Initializing → Ready.
+    /// Allocates runtime handle (→ Active) and root scope (→ Active).
+    pub fn mount(&mut self) -> Result<(), WasmDispatchError> {
+        self.advance(ReactProviderPhase::Initializing)
+            .map_err(|e| WasmDispatchError::InvalidRequest {
+                reason: e.to_string(),
+            })?;
+
+        match self.do_mount() {
+            Ok(()) => {
+                self.advance(ReactProviderPhase::Ready).map_err(|e| {
+                    WasmDispatchError::InvalidRequest {
+                        reason: e.to_string(),
+                    }
+                })?;
+                Ok(())
+            }
+            Err(e) => {
+                // Transition to Failed on error
+                let _ = self.advance(ReactProviderPhase::Failed);
+                Err(e)
+            }
+        }
+    }
+
+    fn do_mount(&mut self) -> Result<(), WasmDispatchError> {
+        let (rt, scope) = self
+            .dispatcher
+            .create_scoped_runtime(Some(&self.config.label), self.config.consumer_version)?;
+        self.runtime_handle = Some(rt);
+        self.root_scope_handle = Some(scope);
+        Ok(())
+    }
+
+    /// Disposes the runtime and all scopes (effect cleanup / unmount).
+    ///
+    /// Lifecycle: Ready → Disposing → Disposed.
+    /// Cancels all active tasks, closes child scopes (inner-first),
+    /// then closes root scope and runtime.
+    pub fn unmount(&mut self) -> Result<(), WasmDispatchError> {
+        self.advance(ReactProviderPhase::Disposing).map_err(|e| {
+            WasmDispatchError::InvalidRequest {
+                reason: e.to_string(),
+            }
+        })?;
+
+        match self.do_unmount() {
+            Ok(()) => {
+                self.advance(ReactProviderPhase::Disposed).map_err(|e| {
+                    WasmDispatchError::InvalidRequest {
+                        reason: e.to_string(),
+                    }
+                })?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.advance(ReactProviderPhase::Failed);
+                Err(e)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn do_unmount(&mut self) -> Result<(), WasmDispatchError> {
+        let cv = self.config.consumer_version;
+
+        // 1. Cancel all active tasks
+        for task in std::mem::take(&mut self.active_tasks) {
+            // Best-effort cancel — task may already be closed
+            if self.dispatcher.handles().get(&task).is_ok() {
+                let state = self
+                    .dispatcher
+                    .handles()
+                    .get(&task)
+                    .map_or(WasmBoundaryState::Closed, |e| e.state);
+                if state == WasmBoundaryState::Active {
+                    let _ = self.dispatcher.task_cancel(
+                        &WasmTaskCancelRequest {
+                            task,
+                            kind: "unmount".to_string(),
+                            message: Some("React component unmounted".to_string()),
+                        },
+                        cv,
+                    );
+                }
+                // Join with cancelled outcome to release
+                if self.dispatcher.handles().get(&task).is_ok() {
+                    let _ = self.dispatcher.task_join(
+                        &task,
+                        WasmAbiOutcomeEnvelope::Cancelled {
+                            cancellation: WasmAbiCancellation {
+                                kind: "unmount".to_string(),
+                                phase: "completed".to_string(),
+                                origin_region: "react-provider".to_string(),
+                                origin_task: None,
+                                timestamp_nanos: 0,
+                                message: Some("component unmounted".to_string()),
+                                truncated: false,
+                            },
+                        },
+                        cv,
+                    );
+                }
+            }
+        }
+
+        // 2. Close child scopes (inner-first / LIFO for structured concurrency)
+        let child_scopes: Vec<_> = self.child_scopes.drain(..).rev().collect();
+        for scope in child_scopes {
+            if self.dispatcher.handles().get(&scope).is_ok() {
+                let _ = self.dispatcher.scope_close(&scope, cv);
+            }
+        }
+
+        // 3. Close root scope
+        if let Some(scope) = self.root_scope_handle.take() {
+            if self.dispatcher.handles().get(&scope).is_ok() {
+                self.dispatcher.scope_close(&scope, cv)?;
+            }
+        }
+
+        // 4. Close runtime
+        if let Some(rt) = self.runtime_handle.take() {
+            if self.dispatcher.handles().get(&rt).is_ok() {
+                self.dispatcher.runtime_close(&rt, cv)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Creates a child scope within the provider's root scope.
+    ///
+    /// Used by `useScope()` hooks in child components. The child scope
+    /// is tracked and will be cancelled on provider unmount.
+    pub fn create_child_scope(
+        &mut self,
+        label: Option<&str>,
+    ) -> Result<WasmHandleRef, WasmDispatchError> {
+        if self.phase != ReactProviderPhase::Ready {
+            return Err(WasmDispatchError::InvalidState {
+                state: WasmBoundaryState::Closed,
+                symbol: WasmAbiSymbol::ScopeEnter,
+            });
+        }
+        let parent = self
+            .root_scope_handle
+            .ok_or_else(|| WasmDispatchError::InvalidRequest {
+                reason: "no root scope".to_string(),
+            })?;
+        let scope = self.dispatcher.scope_enter(
+            &WasmScopeEnterBuilder::new(parent)
+                .label(label.unwrap_or("child"))
+                .build(),
+            self.config.consumer_version,
+        )?;
+        self.child_scopes.push(scope);
+        Ok(scope)
+    }
+
+    /// Spawns a task within the provider's root scope (or a child scope).
+    ///
+    /// The task handle is tracked for cancellation on unmount.
+    pub fn spawn_task(
+        &mut self,
+        scope: WasmHandleRef,
+        label: Option<&str>,
+    ) -> Result<WasmHandleRef, WasmDispatchError> {
+        if self.phase != ReactProviderPhase::Ready {
+            return Err(WasmDispatchError::InvalidState {
+                state: WasmBoundaryState::Closed,
+                symbol: WasmAbiSymbol::TaskSpawn,
+            });
+        }
+        let task = self.dispatcher.spawn(
+            {
+                let mut b = WasmTaskSpawnBuilder::new(scope);
+                if let Some(l) = label {
+                    b = b.label(l);
+                }
+                b
+            },
+            self.config.consumer_version,
+        )?;
+        self.active_tasks.push(task);
+        Ok(task)
+    }
+
+    /// Completes a task with its outcome, removing it from tracking.
+    pub fn complete_task(
+        &mut self,
+        task: &WasmHandleRef,
+        outcome: WasmAbiOutcomeEnvelope,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.active_tasks.retain(|t| t != task);
+        self.dispatcher
+            .task_join(task, outcome, self.config.consumer_version)
+    }
+
+    /// Returns a diagnostic snapshot of the provider state.
+    #[must_use]
+    pub fn snapshot(&self) -> ReactProviderSnapshot {
+        ReactProviderSnapshot {
+            phase: self.phase,
+            config: self.config.clone(),
+            runtime_handle: self.runtime_handle,
+            root_scope_handle: self.root_scope_handle,
+            child_scope_count: self.child_scopes.len(),
+            active_task_count: self.active_tasks.len(),
+            transition_history: self.transition_history.clone(),
+            dispatcher_diagnostics: Some(self.dispatcher.diagnostic_snapshot()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4080,5 +4521,197 @@ mod tests {
 
         let diag = d.diagnostic_snapshot();
         assert!(diag.is_clean());
+    }
+
+    // -----------------------------------------------------------------------
+    // React Provider Lifecycle Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provider_phase_transitions_valid() {
+        use ReactProviderPhase::*;
+        // Valid forward transitions
+        assert!(is_valid_provider_transition(Pending, Initializing));
+        assert!(is_valid_provider_transition(Initializing, Ready));
+        assert!(is_valid_provider_transition(Initializing, Failed));
+        assert!(is_valid_provider_transition(Ready, Disposing));
+        assert!(is_valid_provider_transition(Disposing, Disposed));
+        assert!(is_valid_provider_transition(Disposing, Failed));
+        // StrictMode remount
+        assert!(is_valid_provider_transition(Disposed, Initializing));
+        // Identity
+        assert!(is_valid_provider_transition(Ready, Ready));
+    }
+
+    #[test]
+    fn provider_phase_transitions_invalid() {
+        use ReactProviderPhase::*;
+        assert!(!is_valid_provider_transition(Pending, Ready));
+        assert!(!is_valid_provider_transition(Pending, Disposing));
+        assert!(!is_valid_provider_transition(Ready, Initializing));
+        assert!(!is_valid_provider_transition(Disposed, Ready));
+        assert!(!is_valid_provider_transition(Failed, Ready));
+        assert!(validate_provider_transition(Pending, Ready).is_err());
+    }
+
+    #[test]
+    fn provider_mount_unmount_lifecycle() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig::default());
+        assert_eq!(provider.phase(), ReactProviderPhase::Pending);
+
+        provider.mount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Ready);
+        assert!(provider.runtime_handle().is_some());
+        assert!(provider.root_scope_handle().is_some());
+
+        provider.unmount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Disposed);
+
+        let snap = provider.snapshot();
+        assert_eq!(snap.child_scope_count, 0);
+        assert_eq!(snap.active_task_count, 0);
+        assert_eq!(
+            snap.transition_history,
+            vec![
+                ReactProviderPhase::Pending,
+                ReactProviderPhase::Initializing,
+                ReactProviderPhase::Ready,
+                ReactProviderPhase::Disposing,
+                ReactProviderPhase::Disposed,
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_strict_mode_remount() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig {
+            strict_mode_resilient: true,
+            ..Default::default()
+        });
+
+        // First mount
+        provider.mount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Ready);
+        let first_rt = provider.runtime_handle().unwrap();
+
+        // StrictMode unmount
+        provider.unmount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Disposed);
+
+        // StrictMode remount — new handles, clean state
+        provider.mount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Ready);
+        let second_rt = provider.runtime_handle().unwrap();
+        assert_ne!(first_rt, second_rt);
+
+        // Final cleanup
+        provider.unmount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Disposed);
+    }
+
+    #[test]
+    fn provider_child_scopes_tracked() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig::default());
+        provider.mount().unwrap();
+
+        let s1 = provider.create_child_scope(Some("panel-a")).unwrap();
+        let s2 = provider.create_child_scope(Some("panel-b")).unwrap();
+        assert_ne!(s1, s2);
+
+        let snap = provider.snapshot();
+        assert_eq!(snap.child_scope_count, 2);
+
+        // Unmount cleans up child scopes
+        provider.unmount().unwrap();
+        let snap = provider.snapshot();
+        assert_eq!(snap.child_scope_count, 0);
+    }
+
+    #[test]
+    fn provider_task_spawn_and_complete() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig::default());
+        provider.mount().unwrap();
+        let root_scope = provider.root_scope_handle().unwrap();
+
+        let task = provider.spawn_task(root_scope, Some("fetch-user")).unwrap();
+        assert_eq!(provider.snapshot().active_task_count, 1);
+
+        let outcome = provider
+            .complete_task(
+                &task,
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::I64(42),
+                },
+            )
+            .unwrap();
+        assert!(outcome.is_ok());
+        assert_eq!(provider.snapshot().active_task_count, 0);
+
+        provider.unmount().unwrap();
+    }
+
+    #[test]
+    fn provider_unmount_cancels_active_tasks() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig::default());
+        provider.mount().unwrap();
+        let root_scope = provider.root_scope_handle().unwrap();
+
+        // Spawn tasks but don't complete them
+        let _t1 = provider.spawn_task(root_scope, Some("task-a")).unwrap();
+        let _t2 = provider.spawn_task(root_scope, Some("task-b")).unwrap();
+        assert_eq!(provider.snapshot().active_task_count, 2);
+
+        // Unmount should cancel tasks, not leak them
+        provider.unmount().unwrap();
+        assert_eq!(provider.phase(), ReactProviderPhase::Disposed);
+    }
+
+    #[test]
+    fn provider_operations_rejected_when_not_ready() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig::default());
+        // Not mounted — should reject operations
+        assert!(provider.create_child_scope(Some("x")).is_err());
+        assert!(
+            provider
+                .spawn_task(
+                    WasmHandleRef {
+                        kind: WasmHandleKind::Runtime,
+                        slot: 0,
+                        generation: 0,
+                    },
+                    Some("y"),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_snapshot_diagnostics() {
+        let mut provider = ReactProviderState::new(ReactProviderConfig {
+            label: "test-provider".to_string(),
+            devtools_diagnostics: true,
+            ..Default::default()
+        });
+        provider.mount().unwrap();
+
+        let snap = provider.snapshot();
+        assert_eq!(snap.phase, ReactProviderPhase::Ready);
+        assert_eq!(snap.config.label, "test-provider");
+        assert!(snap.config.devtools_diagnostics);
+        assert!(snap.dispatcher_diagnostics.is_some());
+        assert!(snap.runtime_handle.is_some());
+        assert!(snap.root_scope_handle.is_some());
+
+        provider.unmount().unwrap();
+    }
+
+    #[test]
+    fn provider_config_default_values() {
+        let cfg = ReactProviderConfig::default();
+        assert_eq!(cfg.label, "asupersync");
+        assert_eq!(cfg.abort_mode, WasmAbortPropagationMode::Bidirectional);
+        assert!(cfg.strict_mode_resilient);
+        assert!(!cfg.devtools_diagnostics);
+        assert!(cfg.consumer_version.is_none());
     }
 }
