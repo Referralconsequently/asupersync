@@ -287,10 +287,9 @@ impl SymbolCancelToken {
         let mut children = self.state.children.write();
         if self.is_cancelled() {
             drop(children);
-            if let Some(at) = self.cancelled_at() {
-                let parent_reason = CancelReason::parent_cancelled();
-                child.cancel(&parent_reason, at);
-            }
+            let at = self.cancelled_at().unwrap_or(Time::ZERO);
+            let parent_reason = CancelReason::parent_cancelled();
+            child.cancel(&parent_reason, at);
         } else {
             children.push(child.clone());
         }
@@ -310,9 +309,8 @@ impl SymbolCancelToken {
             let reason = self
                 .reason()
                 .unwrap_or_else(|| CancelReason::new(CancelKind::User));
-            if let Some(at) = self.cancelled_at() {
-                listener.on_cancel(&reason, at);
-            }
+            let at = self.cancelled_at().unwrap_or(Time::ZERO);
+            listener.on_cancel(&reason, at);
         } else {
             listeners.push(Box::new(listener));
         }
