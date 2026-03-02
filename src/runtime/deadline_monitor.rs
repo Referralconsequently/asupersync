@@ -379,13 +379,13 @@ impl DeadlineMonitor {
                 if slot >= self.monitored.len() {
                     self.monitored.resize_with(slot + 1, || None);
                 }
-                
+
                 if let Some(existing) = &self.monitored[slot] {
                     if existing.task_id != task.id {
                         self.monitored[slot] = None;
                     }
                 }
-                
+
                 let entry = self.monitored[slot].get_or_insert_with(|| MonitoredTask {
                     task_id: task.id,
                     region_id: task.owner,

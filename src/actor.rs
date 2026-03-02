@@ -721,7 +721,7 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // mailbox to prevent any new reservations or commits, then drain all
     // messages currently in the queue before running on_stop.
     cell.mailbox.close();
-    
+
     let mut drained: u64 = 0;
     while let Ok(msg) = cell.mailbox.try_recv() {
         actor.handle(&cx, msg).await;
