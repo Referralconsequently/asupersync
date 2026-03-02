@@ -111,6 +111,9 @@ impl fmt::Display for ObligationAbortReason {
 
 /// The state of an obligation.
 ///
+/// Implements `inv.obligation.linear` (#18): each obligation transitions from
+/// Reserved to exactly one of {Committed, Aborted, Leaked}. No re-reservation.
+///
 /// State transitions:
 /// ```text
 /// Reserved ──► Committed

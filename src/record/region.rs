@@ -39,6 +39,8 @@ pub enum RegionState {
     /// Cancelled tasks get scheduled with priority (cancel lane).
     Draining,
     /// Children done, running region finalizers (LIFO order).
+    /// Implements `rule.region.close_run_finalizer` (#25, SEM-INV-002).
+    /// Note: TLA+ omits this step per ADR-004.
     Finalizing,
     /// Terminal state with aggregated outcome.
     Closed,

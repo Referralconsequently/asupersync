@@ -545,6 +545,10 @@ impl<T, E> Outcome<T, E> {
     /// // Err + Cancelled = Cancelled (Cancelled is worse)
     /// assert!(err.join(cancelled).is_cancelled());
     /// ```
+    /// Implements `def.outcome.join_semantics` (#31).
+    /// Left-bias: on equal severity, `self` (left argument) wins.
+    /// This is intentional — join is associative on severity but
+    /// NOT value-commutative. See `law.join.assoc` (#42).
     #[must_use]
     pub fn join(self, other: Self) -> Self {
         if self.severity() >= other.severity() {

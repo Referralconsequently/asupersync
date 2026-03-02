@@ -841,6 +841,9 @@ impl CancelReason {
 
     /// Strengthens this reason with another, keeping the more severe one.
     ///
+    /// Implements `inv.cancel.idempotence` (#5, SEM-INV-003):
+    /// `strengthen(a, b) = max_severity(a, b)`.
+    ///
     /// When strengthening:
     /// - The more severe kind wins
     /// - On equal severity, the earlier timestamp wins

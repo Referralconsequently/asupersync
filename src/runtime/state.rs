@@ -1519,6 +1519,8 @@ impl RuntimeState {
         (action, tasks_to_schedule)
     }
 
+    /// Implements `inv.cancel.propagates_down` (#6, SEM-INV-003):
+    /// cancel(region) -> cancel all non-Completed children.
     fn cancel_sibling_tasks(
         &mut self,
         region: RegionId,

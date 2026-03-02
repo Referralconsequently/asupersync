@@ -411,6 +411,9 @@ impl CancellationProtocolOracle {
     /// Tracks the current mask depth so the oracle can verify that cancel
     /// acknowledgement is deferred while masked (**INV-MASK-DEFER**) and
     /// that mask depth never exceeds the compile-time bound (**INV-MASK-BOUNDED**).
+    ///
+    /// Enforces `rule.cancel.checkpoint_masked` (#10) and
+    /// `inv.cancel.mask_bounded` (#11, `inv.cancel.mask_monotone` #12).
     pub fn on_mask_enter(&mut self, task: TaskId, time: Time) {
         let record = self
             .tasks
