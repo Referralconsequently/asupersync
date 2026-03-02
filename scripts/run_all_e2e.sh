@@ -160,6 +160,9 @@ declare -A SUITES=(
     [cancel-attribution]="test_cancel_attribution.sh"
     [scheduler]="test_scheduler_wakeup_e2e.sh"
     [doctor-workspace-scan]="test_doctor_workspace_scan_e2e.sh"
+    [doctor-replay-launcher]="test_doctor_replay_launcher_e2e.sh"
+    [doctor-orchestration-state-machine]="test_doctor_orchestration_state_machine_e2e.sh"
+    [doctor-frankensuite-export]="test_doctor_frankensuite_export_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
 )
 
@@ -178,6 +181,9 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [cancel-attribution]="target/test-results/cancel-attribution"
     [scheduler]="target/e2e-results/scheduler"
     [doctor-workspace-scan]="target/e2e-results/doctor_workspace_scan"
+    [doctor-replay-launcher]="target/e2e-results/doctor_replay_launcher"
+    [doctor-orchestration-state-machine]="target/e2e-results/doctor_orchestration_state_machine"
+    [doctor-frankensuite-export]="target/e2e-results/doctor_frankensuite_export"
     [phase6]="target/phase6-e2e"
 )
 
@@ -196,6 +202,9 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [cancel-attribution]="summary_*.json"
     [scheduler]="summary.json"
     [doctor-workspace-scan]="summary.json"
+    [doctor-replay-launcher]="summary.json"
+    [doctor-orchestration-state-machine]="summary.json"
+    [doctor-frankensuite-export]="summary.json"
     [phase6]="summary_*.json"
 )
 
@@ -214,6 +223,9 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [cancel-attribution]=""
     [scheduler]="20*"
     [doctor-workspace-scan]="artifacts_*"
+    [doctor-replay-launcher]="artifacts_*"
+    [doctor-orchestration-state-machine]="artifacts_*"
+    [doctor-frankensuite-export]="artifacts_*"
     [phase6]=""
 )
 
@@ -232,6 +244,9 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [cancel-attribution]="E2E-SUITE-CANCEL-ATTRIBUTION"
     [scheduler]="E2E-SUITE-SCHEDULER-WAKEUP"
     [doctor-workspace-scan]="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
+    [doctor-replay-launcher]="E2E-SUITE-DOCTOR-REPLAY-LAUNCHER"
+    [doctor-orchestration-state-machine]="E2E-SUITE-DOCTOR-ORCHESTRATION-STATE-MACHINE"
+    [doctor-frankensuite-export]="E2E-SUITE-DOCTOR-FRANKENSUITE-EXPORT"
     [phase6]="E2E-SUITE-PHASE6"
 )
 
@@ -252,6 +267,7 @@ SUITE_ORDER=(
     websocket http messaging transport database distributed
     h2-security net-hardening redis
     combinators cancel-attribution scheduler doctor-workspace-scan
+    doctor-replay-launcher doctor-orchestration-state-machine doctor-frankensuite-export
     phase6
 )
 

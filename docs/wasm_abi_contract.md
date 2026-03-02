@@ -80,6 +80,42 @@ Boundary states: `WasmBoundaryState`
 
 Validation entrypoint: `validate_wasm_boundary_transition()`.
 
+## Next.js Hydration-safe Bootstrap Contract
+
+This section scopes the client bootstrap protocol used by Next.js App Router
+boundaries (`asupersync-umelq.11.2`) and ties it to deterministic diagnostics.
+
+Bootstrap phases (`NextjsBootstrapPhase`):
+
+- `server_rendered -> hydrating -> hydrated -> runtime_ready`
+- `hydrated -> runtime_failed` for deterministic init failure handling
+- identity transitions are allowed for idempotent re-entry in all phases
+
+Recovery semantics:
+
+- `soft_navigation`: runtime survives (`runtime_ready -> runtime_ready`)
+- `hard_navigation`: runtime does not survive; bootstrap restarts from
+  `server_rendered`
+- cancel during bootstrap must emit explicit recovery action metadata (for
+  example `retry_after_cancel`) with replayable context
+
+Structured log fields for bootstrap diagnostics (deterministic key set):
+
+- `bootstrap_phase`
+- `hydration_context`
+- `boundary_mode` (`client|server|edge`)
+- `navigation_type`
+- `recovery_action`
+- `route_segment`
+- `active_provider_count`
+- `navigation_count`
+- `wasm_module_loaded`
+
+CI/onboarding contract gate:
+
+- `next.bootstrap_state_machine_contract` (see
+  `scripts/run_browser_onboarding_checks.py`)
+
 ## Structured Observability Contract
 
 `WasmAbiBoundaryEvent` must include:

@@ -149,3 +149,51 @@ Scenario flows must preserve correlation and replay lineage with:
 
 These fields align with `doctor-logging-v1` for deterministic joins across
 scenario decisions, execution commands, and diagnostics artifacts.
+
+## Replay Launcher Workflow (Track 3.3)
+
+`asupersync lab replay` is the deterministic replay launcher surface used by
+doctor orchestration to rerun failures with pinned provenance.
+
+### Canonical command shape
+
+```bash
+asupersync lab replay <scenario.yaml> \
+  --seed <u64> \
+  --artifact-pointer <path-or-uri> \
+  --artifact-output <report.json> \
+  --window-start <event-index> \
+  --window-events <count> \
+  --json
+```
+
+### Operational contract
+
+1. `--seed` pins reruns to a deterministic execution seed.
+2. `--artifact-pointer` carries a stable evidence pointer (path/URI/ticket ref)
+   that can be joined with `doctor-logging-v1`.
+3. `--artifact-output` writes the replay report JSON so automation can promote
+   the exact payload into CI artifacts.
+4. `--window-start` and `--window-events` parameterize replay-window reporting
+   (requested vs resolved event range) for targeted forensic slices.
+5. Replay output must include:
+   - certificate identity (`event_hash`, `schedule_hash`, `trace_fingerprint`)
+   - divergence payload when deterministic replay fails
+   - exact rerun command payloads (`provenance.rerun_commands`)
+
+These requirements keep replay execution reproducible across local runs, CI
+jobs, and cross-agent handoffs.
+
+### Troubleshooting workflow
+
+Use the canonical E2E harness to validate replay launcher behavior and capture
+artifactized evidence:
+
+```bash
+bash scripts/test_doctor_replay_launcher_e2e.sh
+```
+
+The harness executes two replay runs with identical seed/window parameters via
+`rch`, verifies deterministic output equivalence, and emits a summary at:
+
+- `target/e2e-results/doctor_replay_launcher/artifacts_<timestamp>/summary.json`

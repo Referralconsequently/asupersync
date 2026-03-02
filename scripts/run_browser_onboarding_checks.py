@@ -192,6 +192,15 @@ SCENARIOS: dict[str, list[Step]] = {
             diagnostic_category="profile_closure",
         ),
         Step(
+            "next.bootstrap_state_machine_contract",
+            "rch exec -- cargo test --test wasm_abi_contract nextjs_bootstrap_ -- --nocapture",
+            "Fix Next.js bootstrap transition/recovery contract regressions and ensure deterministic log fields.",
+            package_entrypoint="@asupersync/next",
+            adapter_path="next/app-router",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="bootstrap_contract",
+        ),
+        Step(
             "next.optimization_policy",
             "python3 scripts/check_wasm_optimization_policy.py "
             "--policy .github/wasm_optimization_policy.json",

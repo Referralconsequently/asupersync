@@ -126,3 +126,32 @@ Every execution lane must retain replay/audit pointers in manifest fields:
 
 These fields align with `doctor-logging-v1` to keep command lineage and replay
 artifacts deterministic across unit and E2E flows.
+
+## State-Machine Verification Workflow (Track 3.7)
+
+Use the canonical E2E harness to validate queue/replay/cancellation state-machine
+invariants and deterministic outcomes:
+
+```bash
+bash scripts/test_doctor_orchestration_state_machine_e2e.sh
+```
+
+The harness executes the `orchestration_state_machine_*` test slice twice via
+`rch`, checks deterministic parity, enforces minimum coverage floor, and writes:
+
+- `target/e2e-results/doctor_orchestration_state_machine/artifacts_<timestamp>/summary.json`
+
+### Invariant-to-Test Mapping
+
+- queue seed requirement for replay templates:
+  `cli::doctor::tests::orchestration_state_machine_requires_seed_for_replay_template`
+- run-id/seed normalization for replay lineage:
+  `cli::doctor::tests::orchestration_state_machine_trims_seed_and_run_id_for_lineage`
+- dispatch determinism + entry preservation:
+  `cli::doctor::tests::orchestration_state_machine_dispatch_is_deterministic_and_preserves_entries`
+- transition matrix closure (no implicit edges):
+  `cli::doctor::tests::orchestration_state_machine_transition_matrix_matches_contract`
+- cancellation terminal-state propagation:
+  `cli::doctor::tests::orchestration_state_machine_cancelled_transcript_terminal_state`
+- deterministic E2E replay of the full state-machine slice:
+  `scripts/test_doctor_orchestration_state_machine_e2e.sh`

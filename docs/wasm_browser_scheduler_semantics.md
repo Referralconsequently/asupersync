@@ -374,6 +374,11 @@ Normative event taxonomy categories:
 
 Required structured-log fields for browser trace diagnostics:
 
+- `capture_host_time_ns`
+- `capture_host_turn_seq`
+- `capture_replay_key`
+- `capture_source`
+- `capture_source_seq`
 - `trace_id`
 - `schema_version`
 - `event_kind`
@@ -383,13 +388,64 @@ Required structured-log fields for browser trace diagnostics:
 - `validation_status`
 - `validation_failure_category`
 
+Capture metadata policy (`asupersync-umelq.12.2`):
+
+- Browser adapters should sample and attach host metadata for time/event/input
+  callbacks using deterministic counters:
+  - `capture_source`: one of `time`, `event`, `host_input`.
+  - `capture_host_turn_seq`: monotonic host turn index.
+  - `capture_source_seq`: monotonic source-local sequence index.
+  - `capture_host_time_ns`: sampled host timestamp in nanoseconds.
+- When explicit capture metadata is unavailable, runtime reconstruction uses
+  deterministic fallback values derived from `(seq, time_ns)` and marks source
+  as `runtime`.
+- `capture_replay_key` is canonicalized as
+  `{capture_source}:{capture_host_turn_seq}:{capture_source_seq}:{capture_host_time_ns}`.
+
 Backward decode policy:
 
 - v1 readers must decode `browser-trace-schema-v0` payloads through the
   compatibility alias path and normalize to v1 semantics.
+- v0 payloads that only provide `event_kind` entries are promoted to full v1
+  event specs using canonical category/required-field/redaction defaults.
+- Unknown legacy event kinds fail closed during decode.
 - Unsupported schema versions fail closed with explicit validation errors.
 
 Redaction policy:
 
 - `user_trace.message` is redacted for browser-oriented diagnostic payloads.
 - `chaos_injection.detail` is redacted for browser-oriented diagnostic payloads.
+
+## Replay Engine Artifact Contract (`asupersync-umelq.12.3`)
+
+Browser incident replay must emit structured artifacts that are replayable in CI
+and local debugging.
+
+Canonical implementation surface:
+
+- `src/trace/replayer.rs`:
+  - `TraceReplayer::browser_replay_report(...)`
+  - `BrowserReplayReport`
+  - `BrowserReplayReport::to_json_pretty(...)`
+
+Required report fields:
+
+- `trace_id`
+- `schema_version`
+- `seed`
+- `event_count`
+- `replayed_events`
+- `completed`
+- `divergence_index`
+- `divergence_context`
+- `minimization_prefix_len`
+- `minimization_reduction_pct`
+- `artifact_pointer`
+- `rerun_commands`
+
+Minimization policy:
+
+- On divergence, replay artifacts must include a deterministic minimal prefix
+  length derived from the first divergent index.
+- `minimization_reduction_pct` quantifies how much shorter the prefix is than
+  the full trace for fast repro loops.
