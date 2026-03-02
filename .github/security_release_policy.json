@@ -73,6 +73,19 @@
       "description": "All conditional dependencies must have active (non-expired) transition plans. Expired transitions are treated as forbidden dependencies.",
       "validation": "scripts/check_wasm_dependency_policy.py",
       "blocks_release": true
+    },
+    {
+      "id": "SEC-BLOCK-07",
+      "category": "supply_chain_artifact_integrity",
+      "title": "SBOM and provenance artifact bundle integrity",
+      "severity": "critical",
+      "description": "Rust/npm release surfaces must publish deterministic SBOM + provenance artifacts, and a SHA-256 integrity manifest must match the committed artifact bytes.",
+      "required_artifacts": [
+        "docs/wasm_browser_sbom_v1.json",
+        "docs/wasm_browser_provenance_attestation_v1.json"
+      ],
+      "integrity_manifest": "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+      "blocks_release": true
     }
   ],
   "release_warning_criteria": [

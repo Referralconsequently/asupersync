@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -107,6 +108,21 @@ def load_json(path: pathlib.Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise PolicyError(f"root of {path} must be an object")
     return raw
+
+
+def parse_iso8601_utc(raw: str) -> dt.datetime:
+    """Parse an ISO-8601 timestamp and normalize to UTC.
+
+    The release policy requires explicit timezone offsets to avoid ambiguous
+    local-time transition expiries.
+    """
+    normalized = raw
+    if raw.endswith("Z"):
+        normalized = raw[:-1] + "+00:00"
+    parsed = dt.datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        raise PolicyError(f"timestamp missing timezone: {raw}")
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def load_policy(path: pathlib.Path) -> tuple[
@@ -349,6 +365,7 @@ def check_dependency_audit(
             detail="transitions must be a list",
         )
     expired = []
+    seen_transition_crates: set[str] = set()
     now = dt.datetime.now(dt.timezone.utc)
     for t in transitions:
         if not isinstance(t, dict):
@@ -363,7 +380,10 @@ def check_dependency_audit(
             )
         crate = t.get("crate")
         status = t.get("status")
+        owner = t.get("owner")
+        replacement_issue = t.get("replacement_issue")
         expires_at_utc = t.get("expires_at_utc")
+        notes = t.get("notes")
         if not isinstance(crate, str) or not crate.strip():
             return CheckResult(
                 criterion_id=criterion.id,
@@ -374,6 +394,17 @@ def check_dependency_audit(
                 blocks_release=criterion.blocks_release,
                 detail="transition crate must be a non-empty string",
             )
+        if crate in seen_transition_crates:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"duplicate transition entry for crate: {crate}",
+            )
+        seen_transition_crates.add(crate)
         if crate not in forbidden_names and crate not in conditional_names:
             return CheckResult(
                 criterion_id=criterion.id,
@@ -394,33 +425,60 @@ def check_dependency_audit(
                 blocks_release=criterion.blocks_release,
                 detail=f"transition {crate} status must be active|resolved",
             )
-        if status == "active":
-            if not isinstance(expires_at_utc, str) or not expires_at_utc.strip():
-                return CheckResult(
-                    criterion_id=criterion.id,
-                    title=criterion.title,
-                    category=criterion.category,
-                    severity=criterion.severity,
-                    status="fail",
-                    blocks_release=criterion.blocks_release,
-                    detail=f"active transition {crate} missing expires_at_utc",
-                )
-            try:
-                dl = dt.datetime.fromisoformat(expires_at_utc.replace("Z", "+00:00"))
-                if dl.tzinfo is None:
-                    dl = dl.replace(tzinfo=dt.timezone.utc)
-                if now > dl:
-                    expired.append(crate)
-            except (ValueError, TypeError):
-                return CheckResult(
-                    criterion_id=criterion.id,
-                    title=criterion.title,
-                    category=criterion.category,
-                    severity=criterion.severity,
-                    status="fail",
-                    blocks_release=criterion.blocks_release,
-                    detail=f"invalid transition expiry for {crate}: {expires_at_utc}",
-                )
+        if not isinstance(owner, str) or not owner.strip():
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"transition {crate} owner must be a non-empty string",
+            )
+        if not isinstance(replacement_issue, str) or not replacement_issue.strip():
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"transition {crate} replacement_issue must be a non-empty string",
+            )
+        if not isinstance(notes, str):
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"transition {crate} notes must be a string",
+            )
+        if not isinstance(expires_at_utc, str) or not expires_at_utc.strip():
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"transition {crate} missing expires_at_utc",
+            )
+        try:
+            deadline = parse_iso8601_utc(expires_at_utc)
+        except (PolicyError, ValueError) as exc:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"invalid transition expiry for {crate}: {exc}",
+            )
+        if status == "active" and now > deadline:
+            expired.append(crate)
 
     if expired:
         return CheckResult(
@@ -474,6 +532,183 @@ def check_test_file_exists(
         status="pass",
         blocks_release=criterion.blocks_release,
         detail=f"all {len(test_files)} test files present",
+    )
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(8192), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def check_supply_chain_artifact_integrity(
+    criterion: BlockingCriterion,
+    required_artifacts: list[str],
+    integrity_manifest: str,
+) -> CheckResult:
+    if not required_artifacts:
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="required_artifacts must contain at least one artifact path",
+        )
+    if not integrity_manifest:
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="integrity_manifest must be configured",
+        )
+
+    manifest_path = pathlib.Path(integrity_manifest)
+    if not manifest_path.exists():
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail=f"integrity manifest not found: {manifest_path}",
+        )
+
+    try:
+        manifest = load_json(manifest_path)
+    except PolicyError as exc:
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail=f"invalid integrity manifest: {exc}",
+        )
+
+    if manifest.get("schema_version") != "asupersync-wasm-artifact-integrity-v1":
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="integrity manifest schema_version mismatch",
+        )
+
+    entries = manifest.get("entries", [])
+    if not isinstance(entries, list) or not entries:
+        return CheckResult(
+            criterion_id=criterion.id,
+            title=criterion.title,
+            category=criterion.category,
+            severity=criterion.severity,
+            status="fail",
+            blocks_release=criterion.blocks_release,
+            detail="integrity manifest entries must be a non-empty list",
+        )
+
+    entry_by_path: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail="integrity manifest entries must be objects",
+            )
+        path = entry.get("path")
+        sha256 = entry.get("sha256")
+        if not isinstance(path, str) or not path.strip():
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail="integrity manifest entry.path must be a non-empty string",
+            )
+        if not isinstance(sha256, str) or len(sha256) != 64:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"integrity manifest entry for {path} has invalid sha256",
+            )
+        if path in entry_by_path:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"duplicate integrity manifest entry: {path}",
+            )
+        entry_by_path[path] = entry
+
+    verified = 0
+    for artifact in required_artifacts:
+        artifact_path = pathlib.Path(artifact)
+        if not artifact_path.exists():
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"required artifact missing: {artifact}",
+            )
+        if artifact not in entry_by_path:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"required artifact missing from integrity manifest: {artifact}",
+            )
+
+        actual = sha256_file(artifact_path)
+        expected = entry_by_path[artifact]["sha256"]
+        if actual != expected:
+            return CheckResult(
+                criterion_id=criterion.id,
+                title=criterion.title,
+                category=criterion.category,
+                severity=criterion.severity,
+                status="fail",
+                blocks_release=criterion.blocks_release,
+                detail=f"artifact hash mismatch for {artifact}: expected {expected}, got {actual}",
+            )
+        verified += 1
+
+    return CheckResult(
+        criterion_id=criterion.id,
+        title=criterion.title,
+        category=criterion.category,
+        severity=criterion.severity,
+        status="pass",
+        blocks_release=criterion.blocks_release,
+        detail=f"verified {verified} artifact(s) against integrity manifest",
     )
 
 
@@ -599,6 +834,21 @@ def check_policy_criterion(
 
     if cat == "supply_chain":
         return check_dependency_audit(criterion, dep_policy_path)
+
+    if cat == "supply_chain_artifact_integrity":
+        raw_blocking = policy.get("release_blocking_criteria", [])
+        required_artifacts: list[str] = []
+        integrity_manifest = ""
+        for entry in raw_blocking:
+            if entry.get("id") == criterion.id:
+                required_artifacts = entry.get("required_artifacts", [])
+                integrity_manifest = entry.get("integrity_manifest", "")
+                break
+        return check_supply_chain_artifact_integrity(
+            criterion,
+            required_artifacts,
+            integrity_manifest,
+        )
 
     if cat == "protocol_bounds":
         raw_blocking = policy.get("release_blocking_criteria", [])
@@ -838,7 +1088,10 @@ def run_self_test() -> None:
             {
                 "crate": "tower",
                 "status": "active",
+                "owner": "runtime-core",
+                "replacement_issue": "asupersync-umelq.3.2",
                 "expires_at_utc": "2027-01-01T00:00:00Z",
+                "notes": "tracked conditional usage",
             }
         ],
         "output": {
@@ -872,7 +1125,10 @@ def run_self_test() -> None:
             {
                 "crate": "tower",
                 "status": "active",
+                "owner": "runtime-core",
+                "replacement_issue": "asupersync-umelq.3.2",
                 "expires_at_utc": "2020-01-01T00:00:00Z",
+                "notes": "tracked conditional usage",
             }
         ],
         "output": {
@@ -890,7 +1146,25 @@ def run_self_test() -> None:
     result = check_dependency_audit(blocking[0], None)
     assert result.status == "skip", f"expected skip, got {result.status}"
 
-    # Test 6: Protocol limits - all valid
+    # Test 6: Dependency audit - missing owner field
+    dep_policy_missing_owner = json.loads(json.dumps(dep_policy))
+    dep_policy_missing_owner["transitions"][0].pop("owner")
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(dep_policy_missing_owner, f)
+        f.flush()
+        result = check_dependency_audit(blocking[0], pathlib.Path(f.name))
+    assert result.status == "fail", f"expected fail for missing owner, got {result.status}"
+
+    # Test 7: Dependency audit - timezone required for transition expiry
+    dep_policy_missing_tz = json.loads(json.dumps(dep_policy))
+    dep_policy_missing_tz["transitions"][0]["expires_at_utc"] = "2027-01-01T00:00:00"
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(dep_policy_missing_tz, f)
+        f.flush()
+        result = check_dependency_audit(blocking[0], pathlib.Path(f.name))
+    assert result.status == "fail", f"expected fail for missing transition timezone, got {result.status}"
+
+    # Test 8: Protocol limits - all valid
     bc = BlockingCriterion("T", "protocol_bounds", "limits", "high", "desc", True)
     limits = {
         "http1_max_headers_size": 65536,
@@ -906,29 +1180,92 @@ def run_self_test() -> None:
     result = check_protocol_limits(bc, limits)
     assert result.status == "pass", f"expected pass, got {result.status}"
 
-    # Test 7: Protocol limits - missing limit
+    # Test 9: Protocol limits - missing limit
     partial_limits = dict(limits)
     del partial_limits["grpc_max_message_size"]
     result = check_protocol_limits(bc, partial_limits)
     assert result.status == "fail", f"expected fail for missing limit, got {result.status}"
 
-    # Test 8: Protocol limits - invalid value
+    # Test 10: Protocol limits - invalid value
     bad_limits = dict(limits)
     bad_limits["http1_max_headers"] = 0
     result = check_protocol_limits(bc, bad_limits)
     assert result.status == "fail", f"expected fail for zero limit, got {result.status}"
 
-    # Test 9: Test file exists - present
+    # Test 11: Test file exists - present
     bc2 = BlockingCriterion("T2", "structured_concurrency", "test", "critical", "desc", True)
     # Use this script as a known-existing file
     result = check_test_file_exists(bc2, [__file__])
     assert result.status == "pass", f"expected pass, got {result.status}"
 
-    # Test 10: Test file exists - missing
+    # Test 12: Test file exists - missing
     result = check_test_file_exists(bc2, ["nonexistent_file.rs"])
     assert result.status == "fail", f"expected fail for missing file, got {result.status}"
 
-    # Test 11: Report aggregation - all pass
+    # Test 13: Supply-chain artifact integrity check - pass
+    sc = BlockingCriterion(
+        "SEC-BLOCK-07",
+        "supply_chain_artifact_integrity",
+        "artifact integrity",
+        "critical",
+        "desc",
+        True,
+    )
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        sbom = root / "sbom.json"
+        provenance = root / "provenance.json"
+        manifest = root / "manifest.json"
+
+        sbom.write_text("{\"schema_version\":\"sbom\"}\n", encoding="utf-8")
+        provenance.write_text("{\"schema_version\":\"provenance\"}\n", encoding="utf-8")
+        manifest_payload = {
+            "schema_version": "asupersync-wasm-artifact-integrity-v1",
+            "entries": [
+                {"path": str(sbom), "sha256": sha256_file(sbom), "kind": "sbom"},
+                {
+                    "path": str(provenance),
+                    "sha256": sha256_file(provenance),
+                    "kind": "provenance",
+                },
+            ],
+        }
+        manifest.write_text(
+            json.dumps(manifest_payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        result = check_supply_chain_artifact_integrity(
+            sc,
+            [str(sbom), str(provenance)],
+            str(manifest),
+        )
+        assert result.status == "pass", f"expected pass, got {result.status}"
+
+        # Test 14: missing artifact should fail
+        result = check_supply_chain_artifact_integrity(
+            sc,
+            [str(sbom), str(root / "missing.json")],
+            str(manifest),
+        )
+        assert result.status == "fail", f"expected fail for missing artifact, got {result.status}"
+
+        # Test 15: hash mismatch should fail
+        bad_manifest = root / "manifest-bad.json"
+        bad_payload = json.loads(json.dumps(manifest_payload))
+        bad_payload["entries"][0]["sha256"] = "0" * 64
+        bad_manifest.write_text(
+            json.dumps(bad_payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        result = check_supply_chain_artifact_integrity(
+            sc,
+            [str(sbom), str(provenance)],
+            str(bad_manifest),
+        )
+        assert result.status == "fail", f"expected fail for hash mismatch, got {result.status}"
+
+    # Test 16: Report aggregation - all pass
     results = [
         CheckResult("A", "a", "cat", "high", "pass", True, "ok"),
         CheckResult("B", "b", "cat", "medium", "pass", False, "ok"),
@@ -937,7 +1274,7 @@ def run_self_test() -> None:
     assert report.gate_status == "pass"
     assert report.summary["pass"] == 2
 
-    # Test 12: Report aggregation - blocking fail
+    # Test 17: Report aggregation - blocking fail
     results = [
         CheckResult("A", "a", "cat", "high", "pass", True, "ok"),
         CheckResult("B", "b", "cat", "critical", "fail", True, "bad"),
@@ -945,7 +1282,7 @@ def run_self_test() -> None:
     report = build_report(results, {}, {}, {})
     assert report.gate_status == "fail"
 
-    # Test 13: Report aggregation - non-blocking fail is warn
+    # Test 18: Report aggregation - non-blocking fail is warn
     results = [
         CheckResult("A", "a", "cat", "high", "pass", True, "ok"),
         CheckResult("B", "b", "cat", "medium", "fail", False, "bad"),
@@ -953,7 +1290,7 @@ def run_self_test() -> None:
     report = build_report(results, {}, {}, {})
     assert report.gate_status == "warn"
 
-    # Test 14: Report aggregation - warn status
+    # Test 19: Report aggregation - warn status
     results = [
         CheckResult("A", "a", "cat", "high", "pass", True, "ok"),
         CheckResult("B", "b", "cat", "medium", "warn", False, "fyi"),
@@ -961,7 +1298,7 @@ def run_self_test() -> None:
     report = build_report(results, {}, {}, {})
     assert report.gate_status == "warn"
 
-    # Test 15: Adversarial coverage
+    # Test 20: Adversarial coverage
     with tempfile.NamedTemporaryFile(mode="w", suffix=".rs", delete=False) as f:
         f.write("fn test_capability_bypass() { assert!(result.is_err()); }")
         f.flush()
@@ -969,13 +1306,13 @@ def run_self_test() -> None:
     assert coverage["total_scenarios"] == 1
     assert coverage["covered"] == 1
 
-    # Test 16: Fuzz coverage - skip when dir missing
+    # Test 21: Fuzz coverage - skip when dir missing
     wc = WarningCriterion("W", "fuzz_coverage", "fuzz", "medium", "desc")
     result = check_fuzz_coverage(wc, ["fuzz_http1_request"], ["fuzz_websocket_frame"])
     # Will warn since fuzz dir likely doesn't exist in test context
     assert result.status in ("pass", "warn")
 
-    print("all 16 self-tests passed")
+    print("all 21 self-tests passed")
 
 
 # ---------------------------------------------------------------------------
