@@ -30,7 +30,7 @@ use std::sync::Arc;
 ///     .alpn_http()
 ///     .build()?;
 ///
-/// let tls_stream = acceptor.accept(&cx, tcp_stream).await?;
+/// let tls_stream = acceptor.accept(tcp_stream).await?;
 /// ```
 #[derive(Clone)]
 pub struct TlsAcceptor {
@@ -760,7 +760,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let err = connector
-                .connect(&cx, "localhost", client_io)
+                .connect("localhost", client_io)
                 .await
                 .unwrap_err();
             assert!(matches!(err, TlsError::Timeout(_)));
