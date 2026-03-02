@@ -223,5 +223,5 @@ All 7 DOC-GAPs resolved by SEM-08.3 (2026-03-02):
 2. **SEM-08.3**: Rule-ID annotations address DOC-GAPs.
 3. **SEM-08.4**: Conformance harness uses this matrix as test target list.
 4. **SEM-08.5**: Property/metamorphic tests address TEST-GAPs for laws.
-5. **SEM-08.6**: Regression tests target ADR-001/005 coverage gaps.
+5. **SEM-08.6**: ADR regression tests in `tests/semantic_adr_regression.rs` (10 tests, all 8 ADRs covered).
 6. **SEM-12**: Verification fabric uses gap counts as release gate metric.
