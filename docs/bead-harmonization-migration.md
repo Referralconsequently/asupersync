@@ -4,6 +4,18 @@
 **Tracking EPIC**: bd-zs64
 **Status**: In progress
 
+## SEM Governance Baseline (2026-03-02)
+
+The SEM harmonization track now has a dedicated governance charter:
+
+- [`docs/semantic_harmonization_charter.md`](semantic_harmonization_charter.md)
+- Program: `asupersync-3cddg`
+- Charter task: `asupersync-3cddg.1.1`
+
+Downstream SEM beads should reference charter rule IDs (`SEM-INV-*`,
+`SEM-DEF-*`, `SEM-GOV-*`, `SEM-SLA-*`) when proposing or validating semantic
+changes.
+
 ## Executive Summary
 
 This migration harmonizes the asupersync bead hierarchy to eliminate duplicates, fix priority misalignments, and establish consistent naming conventions. All changes preserve functionality while improving the coherence of the agent "robot mode" interface.
