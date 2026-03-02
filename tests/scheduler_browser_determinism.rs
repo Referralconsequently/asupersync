@@ -10,6 +10,10 @@
 //! Run with:
 //!   cargo test --test scheduler_browser_determinism --release -- --nocapture
 
+#[macro_use]
+mod common;
+
+use common::init_test_logging;
 use std::time::Instant;
 
 use asupersync::record::task::TaskRecord;
@@ -19,7 +23,8 @@ use asupersync::runtime::scheduler::ThreeLaneWorker;
 use asupersync::runtime::scheduler::three_lane::PreemptionMetrics;
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::ArenaIndex;
+use asupersync::util::{ArenaIndex, DetHasher};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 // =============================================================================
@@ -43,6 +48,26 @@ fn setup_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
         assert_eq!(idx.index(), i);
     }
     Arc::new(ContendedMutex::new("runtime_state", state))
+}
+
+fn init_scheduler_test(test_name: &str) {
+    init_test_logging();
+    test_phase!(test_name);
+}
+
+fn scheduler_trace_id(order: &[TaskId], metrics: &PreemptionMetrics, witness_hash: u64) -> u64 {
+    let mut hasher = DetHasher::default();
+    order.hash(&mut hasher);
+    metrics.cancel_dispatches.hash(&mut hasher);
+    metrics.ready_dispatches.hash(&mut hasher);
+    metrics.timed_dispatches.hash(&mut hasher);
+    metrics.fairness_yields.hash(&mut hasher);
+    metrics.browser_ready_handoff_yields.hash(&mut hasher);
+    metrics.max_cancel_streak.hash(&mut hasher);
+    metrics.base_limit_exceedances.hash(&mut hasher);
+    metrics.effective_limit_exceedances.hash(&mut hasher);
+    witness_hash.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Dispatches all tasks from a single worker, returning the dispatch
@@ -298,6 +323,70 @@ fn browser_deterministic_dispatch_order() {
     assert_eq!(run1.len(), run3.len(), "total dispatched should match");
     // But the ordering may differ due to handoff yield points
     // (not guaranteed to differ, but the mechanism is different)
+}
+
+#[test]
+fn browser_scheduler_certificate_trace_id_is_deterministic() {
+    init_scheduler_test("browser_scheduler_certificate_trace_id_is_deterministic");
+
+    fn run_once() -> (u64, u64, usize, u64, u64) {
+        let state = setup_state(127);
+        let mut sched = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 8);
+        sched.set_browser_ready_handoff_limit(8);
+
+        for i in 0..24u32 {
+            sched.inject_cancel(task(1, i), 100);
+        }
+        for i in 24..128u32 {
+            sched.inject_ready(task(1, i), (i % 16) as u8);
+        }
+
+        let mut workers = sched.take_workers().into_iter();
+        let mut worker = workers.next().expect("single worker required");
+        let (order, metrics) = dispatch_all(&mut worker, 256);
+        let certificate = worker.preemption_fairness_certificate();
+        assert!(
+            certificate.invariant_holds(),
+            "fairness certificate must hold before logging trace reference"
+        );
+        let witness_hash = certificate.witness_hash();
+        let trace_id = scheduler_trace_id(&order, &metrics, witness_hash);
+
+        tracing::info!(
+            test_case = "umelq.18.2.scheduler_certificate",
+            trace_id,
+            witness_hash,
+            cancel_dispatches = metrics.cancel_dispatches,
+            ready_dispatches = metrics.ready_dispatches,
+            fairness_yields = metrics.fairness_yields,
+            effective_limit_exceedances = metrics.effective_limit_exceedances,
+            "scheduler deterministic trace reference"
+        );
+
+        (
+            trace_id,
+            witness_hash,
+            certificate.ready_stall_bound_steps(),
+            metrics.cancel_dispatches,
+            metrics.ready_dispatches,
+        )
+    }
+
+    let run_a = run_once();
+    let run_b = run_once();
+    assert_eq!(
+        run_a, run_b,
+        "same scheduler scenario must emit stable trace and witness IDs"
+    );
+
+    test_complete!(
+        "browser_scheduler_certificate_trace_id_is_deterministic",
+        trace_id = run_a.0,
+        witness_hash = run_a.1,
+        ready_stall_bound = run_a.2,
+        cancel_dispatches = run_a.3,
+        ready_dispatches = run_a.4
+    );
 }
 
 // =============================================================================

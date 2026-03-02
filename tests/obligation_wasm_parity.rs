@@ -34,7 +34,9 @@ use asupersync::obligation::graded::{GradedObligation, GradedScope, Resolution};
 use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
-use asupersync::util::ArenaIndex;
+use asupersync::util::{ArenaIndex, DetHasher};
+use common::init_test_logging;
+use std::hash::{Hash, Hasher};
 
 // ============================================================================
 // Helpers
@@ -50,6 +52,31 @@ fn region(n: u32) -> RegionId {
 
 fn t(nanos: u64) -> Time {
     Time::from_nanos(nanos)
+}
+
+fn init_obligation_test(test_name: &str) {
+    init_test_logging();
+    test_phase!(test_name);
+}
+
+fn obligation_trace_id(
+    region: RegionId,
+    drained_ids: &[ObligationId],
+    total_acquired: u64,
+    total_committed: u64,
+    total_aborted: u64,
+    total_leaked: u64,
+    pending: u64,
+) -> u64 {
+    let mut hasher = DetHasher::default();
+    region.hash(&mut hasher);
+    drained_ids.hash(&mut hasher);
+    total_acquired.hash(&mut hasher);
+    total_committed.hash(&mut hasher);
+    total_aborted.hash(&mut hasher);
+    total_leaked.hash(&mut hasher);
+    pending.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ============================================================================
@@ -738,4 +765,75 @@ fn wasm_reset_simulates_page_reload() {
 
     assert_eq!(ledger.stats().total_acquired, 1);
     assert!(ledger.stats().is_clean());
+}
+
+#[test]
+fn wasm_cancel_drain_trace_reference_is_deterministic() {
+    init_obligation_test("wasm_cancel_drain_trace_reference_is_deterministic");
+
+    fn run_once() -> (u64, usize, u64, u64) {
+        let mut ledger = ObligationLedger::new();
+        let r = region(7);
+
+        let _tok_send = ledger.acquire(ObligationKind::SendPermit, task(0), r, t(10));
+        let tok_ack = ledger.acquire(ObligationKind::Ack, task(1), r, t(20));
+        let _tok_lease = ledger.acquire(ObligationKind::Lease, task(2), r, t(30));
+
+        ledger.commit(tok_ack, t(60));
+        let drained_ids = ledger.pending_ids_for_region(r);
+        assert_eq!(drained_ids.len(), 2, "two obligations remain for drain");
+
+        for id in &drained_ids {
+            ledger.mark_leaked(*id, t(100));
+        }
+
+        let stats = ledger.stats();
+        assert!(
+            ledger.is_region_clean(r),
+            "region must be clean after drain"
+        );
+        let trace_id = obligation_trace_id(
+            r,
+            &drained_ids,
+            stats.total_acquired,
+            stats.total_committed,
+            stats.total_aborted,
+            stats.total_leaked,
+            stats.pending,
+        );
+
+        tracing::info!(
+            test_case = "umelq.18.2.obligation_drain",
+            trace_id,
+            region = ?r,
+            drained_count = drained_ids.len(),
+            total_acquired = stats.total_acquired,
+            total_committed = stats.total_committed,
+            total_leaked = stats.total_leaked,
+            pending = stats.pending,
+            "obligation deterministic trace reference"
+        );
+
+        (
+            trace_id,
+            drained_ids.len(),
+            stats.total_leaked,
+            stats.pending,
+        )
+    }
+
+    let run_a = run_once();
+    let run_b = run_once();
+    assert_eq!(
+        run_a, run_b,
+        "same obligation drain scenario must emit stable trace reference"
+    );
+
+    test_complete!(
+        "wasm_cancel_drain_trace_reference_is_deterministic",
+        trace_id = run_a.0,
+        drained_count = run_a.1,
+        total_leaked = run_a.2,
+        pending = run_a.3
+    );
 }

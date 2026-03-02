@@ -1,6 +1,9 @@
 #![allow(missing_docs)]
 
-use asupersync::types::CancelPhase;
+use asupersync::types::{
+    CancelPhase, NextjsBootstrapPhase, NextjsIntegrationSnapshot, NextjsNavigationType,
+    NextjsRenderEnvironment, is_valid_bootstrap_transition,
+};
 use asupersync::{
     WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
     WASM_ABI_SIGNATURES_V1, WasmAbiBoundaryEvent, WasmAbiCompatibilityDecision,
@@ -9,7 +12,65 @@ use asupersync::{
     apply_runtime_cancel_phase_event, classify_wasm_abi_compatibility,
     wasm_abi_signature_fingerprint,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+fn bootstrap_hydration_context(phase: NextjsBootstrapPhase) -> &'static str {
+    match phase {
+        NextjsBootstrapPhase::ServerRendered => "server_rendered",
+        NextjsBootstrapPhase::Hydrating => "hydrating",
+        NextjsBootstrapPhase::Hydrated => "hydrated",
+        NextjsBootstrapPhase::RuntimeReady => "runtime_ready",
+        NextjsBootstrapPhase::RuntimeFailed => "runtime_failed",
+    }
+}
+
+fn bootstrap_boundary_mode(environment: NextjsRenderEnvironment) -> &'static str {
+    match environment {
+        NextjsRenderEnvironment::ClientSsr | NextjsRenderEnvironment::ClientHydrated => "client",
+        NextjsRenderEnvironment::ServerComponent | NextjsRenderEnvironment::NodeServer => "server",
+        NextjsRenderEnvironment::EdgeRuntime => "edge",
+    }
+}
+
+fn nextjs_bootstrap_log_fields(
+    snapshot: &NextjsIntegrationSnapshot,
+    navigation: NextjsNavigationType,
+    recovery_action: &'static str,
+) -> BTreeMap<&'static str, String> {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "active_provider_count",
+        snapshot.active_provider_count.to_string(),
+    );
+    fields.insert(
+        "bootstrap_phase",
+        bootstrap_hydration_context(snapshot.bootstrap_phase).to_string(),
+    );
+    fields.insert(
+        "boundary_mode",
+        bootstrap_boundary_mode(snapshot.environment).to_string(),
+    );
+    fields.insert(
+        "hydration_context",
+        bootstrap_hydration_context(snapshot.bootstrap_phase).to_string(),
+    );
+    fields.insert("navigation_count", snapshot.navigation_count.to_string());
+    fields.insert(
+        "navigation_type",
+        match navigation {
+            NextjsNavigationType::SoftNavigation => "soft_navigation".to_string(),
+            NextjsNavigationType::HardNavigation => "hard_navigation".to_string(),
+            NextjsNavigationType::PopState => "pop_state".to_string(),
+        },
+    );
+    fields.insert("recovery_action", recovery_action.to_string());
+    fields.insert("route_segment", snapshot.route_segment.clone());
+    fields.insert(
+        "wasm_module_loaded",
+        snapshot.wasm_module_loaded.to_string(),
+    );
+    fields
+}
 
 #[test]
 fn wasm_abi_signature_matrix_matches_v1_contract() {
@@ -216,4 +277,103 @@ fn wasm_abortsignal_interop_contract_is_deterministic() {
         WasmBoundaryState::Closed
     );
     assert!(runtime_completed.abort_signal_aborted);
+}
+
+#[test]
+fn nextjs_bootstrap_state_machine_paths_are_explicit() {
+    use NextjsBootstrapPhase::*;
+
+    assert!(is_valid_bootstrap_transition(ServerRendered, Hydrating));
+    assert!(is_valid_bootstrap_transition(Hydrating, Hydrated));
+    assert!(is_valid_bootstrap_transition(Hydrated, RuntimeReady));
+    assert!(is_valid_bootstrap_transition(Hydrated, RuntimeFailed));
+
+    // Idempotent re-entry is explicitly legal for all phases.
+    assert!(is_valid_bootstrap_transition(
+        ServerRendered,
+        ServerRendered
+    ));
+    assert!(is_valid_bootstrap_transition(Hydrating, Hydrating));
+    assert!(is_valid_bootstrap_transition(Hydrated, Hydrated));
+    assert!(is_valid_bootstrap_transition(RuntimeReady, RuntimeReady));
+    assert!(is_valid_bootstrap_transition(RuntimeFailed, RuntimeFailed));
+
+    assert!(!is_valid_bootstrap_transition(ServerRendered, RuntimeReady));
+    assert!(!is_valid_bootstrap_transition(Hydrating, RuntimeReady));
+    assert!(!is_valid_bootstrap_transition(RuntimeReady, Hydrating));
+    assert!(!is_valid_bootstrap_transition(RuntimeFailed, Hydrated));
+}
+
+#[test]
+fn nextjs_bootstrap_recovery_paths_are_navigation_and_retry_safe() {
+    use NextjsBootstrapPhase::*;
+
+    // Local retry after failure keeps the same phase until a boundary-level
+    // recovery action (remount/hard navigation) starts a new lifecycle.
+    assert!(is_valid_bootstrap_transition(RuntimeFailed, RuntimeFailed));
+
+    // Hard navigation destroys runtime and restarts bootstrap deterministically.
+    assert!(!NextjsNavigationType::HardNavigation.runtime_survives());
+    assert!(is_valid_bootstrap_transition(ServerRendered, Hydrating));
+    assert!(is_valid_bootstrap_transition(Hydrating, Hydrated));
+    assert!(is_valid_bootstrap_transition(Hydrated, RuntimeReady));
+
+    // Soft navigation keeps the runtime alive.
+    assert!(NextjsNavigationType::SoftNavigation.runtime_survives());
+    assert!(is_valid_bootstrap_transition(RuntimeReady, RuntimeReady));
+}
+
+#[test]
+fn nextjs_bootstrap_log_fields_are_deterministic_and_replayable() {
+    let snapshot = NextjsIntegrationSnapshot {
+        bootstrap_phase: NextjsBootstrapPhase::Hydrating,
+        environment: NextjsRenderEnvironment::ClientHydrated,
+        route_segment: "/dashboard".to_string(),
+        active_provider_count: 1,
+        wasm_module_loaded: false,
+        navigation_count: 2,
+    };
+
+    // Cancellation request during bootstrap should map to cancelling boundary
+    // state with deterministic recovery logging.
+    let cancel_requested = apply_runtime_cancel_phase_event(
+        WasmAbortInteropSnapshot {
+            mode: WasmAbortPropagationMode::RuntimeToAbortSignal,
+            boundary_state: WasmBoundaryState::Active,
+            abort_signal_aborted: false,
+        },
+        CancelPhase::Requested,
+    );
+    assert_eq!(
+        cancel_requested.next_boundary_state,
+        WasmBoundaryState::Cancelling
+    );
+
+    let fields = nextjs_bootstrap_log_fields(
+        &snapshot,
+        NextjsNavigationType::SoftNavigation,
+        "retry_after_cancel",
+    );
+    let key_order: Vec<&str> = fields.keys().copied().collect();
+    assert_eq!(
+        key_order,
+        vec![
+            "active_provider_count",
+            "bootstrap_phase",
+            "boundary_mode",
+            "hydration_context",
+            "navigation_count",
+            "navigation_type",
+            "recovery_action",
+            "route_segment",
+            "wasm_module_loaded",
+        ]
+    );
+    assert_eq!(fields["bootstrap_phase"], "hydrating");
+    assert_eq!(fields["hydration_context"], "hydrating");
+    assert_eq!(fields["boundary_mode"], "client");
+    assert_eq!(fields["navigation_type"], "soft_navigation");
+    assert_eq!(fields["recovery_action"], "retry_after_cancel");
+    assert_eq!(fields["route_segment"], "/dashboard");
+    assert_eq!(fields["wasm_module_loaded"], "false");
 }

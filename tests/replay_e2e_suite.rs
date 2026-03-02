@@ -739,6 +739,77 @@ fn log_rich_divergence_at_multiple_points() {
     );
 }
 
+/// Browser replay incident report is artifactized with deterministic
+/// minimization hints for CI/local repro loops.
+#[test]
+fn browser_replay_report_artifact_e2e() {
+    init_test("browser_replay_report_artifact_e2e");
+
+    test_section!("record");
+    let trace = record_trace_with_seed(0x12_34_56_78);
+    assert!(
+        trace.events.len() >= 3,
+        "expected at least three replay events for report e2e"
+    );
+
+    test_section!("induce-divergence");
+    let mut replayer = TraceReplayer::new(trace.clone());
+    replayer
+        .verify_and_advance(&trace.events[0])
+        .expect("first event should match");
+    let bad = ReplayEvent::RngSeed { seed: 0xBAD5_EED };
+    let divergence = replayer.verify(&bad).expect_err("must diverge");
+
+    test_section!("build-report");
+    let rerun_commands = vec![
+        format!("asupersync lab replay --seed {}", trace.metadata.seed),
+        format!(
+            "asupersync lab replay --seed {} --window-start {} --window-events {}",
+            trace.metadata.seed, divergence.index, 16
+        ),
+    ];
+    let report = replayer.browser_replay_report(
+        "trace-browser-report-e2e",
+        Some("artifacts/replay/browser_replay_report_e2e.json"),
+        rerun_commands.clone(),
+        Some(&divergence),
+    );
+
+    assert_eq!(report.trace_id, "trace-browser-report-e2e");
+    assert_eq!(report.divergence_index, Some(divergence.index));
+    assert!(report.minimization_prefix_len.is_some());
+    assert!(report.minimization_reduction_pct.is_some());
+    assert_eq!(report.rerun_commands, rerun_commands);
+    assert_eq!(
+        report.artifact_pointer,
+        Some("artifacts/replay/browser_replay_report_e2e.json".to_string())
+    );
+
+    let min_prefix = report
+        .minimization_prefix_len
+        .expect("minimization prefix length");
+    assert!(
+        min_prefix > divergence.index,
+        "min prefix should contain divergence index"
+    );
+
+    test_section!("artifactize");
+    let json_value = serde_json::to_value(&report).expect("serialize report");
+    write_replay_artifact_json("browser_replay_report_e2e.json", &json_value);
+
+    let json_text = report.to_json_pretty().expect("json pretty");
+    write_replay_artifact_text("browser_replay_report_e2e.txt", &json_text);
+    assert!(json_text.contains("rerun_commands"));
+    assert!(json_text.contains("minimization_prefix_len"));
+
+    test_complete!(
+        "browser_replay_report_artifact_e2e",
+        seed = trace.metadata.seed,
+        divergence_index = divergence.index,
+        minimization_prefix_len = min_prefix
+    );
+}
+
 // =========================================================================
 // Checkpoint + Resume (Streaming)
 // =========================================================================

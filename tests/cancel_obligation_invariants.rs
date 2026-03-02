@@ -22,7 +22,9 @@ use asupersync::lab::oracle::{
 use asupersync::record::task::TaskState;
 use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time};
+use asupersync::util::DetHasher;
 use common::*;
+use std::hash::{Hash, Hasher};
 
 fn region(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)
@@ -43,6 +45,18 @@ fn t(nanos: u64) -> Time {
 fn init_test(test_name: &str) {
     init_test_logging();
     test_phase!(test_name);
+}
+
+fn violation_trace_id(violations: &[asupersync::lab::oracle::OracleViolation]) -> u64 {
+    let mut labels = violations
+        .iter()
+        .map(|violation| format!("{violation:?}"))
+        .collect::<Vec<_>>();
+    labels.sort();
+    let mut hasher = DetHasher::default();
+    violations.len().hash(&mut hasher);
+    labels.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ============================================================================
@@ -1229,6 +1243,82 @@ fn oracle_suite_detects_obligation_leak_in_combined_scenario() {
     );
 
     test_complete!("oracle_suite_detects_obligation_leak_in_combined_scenario");
+}
+
+#[test]
+fn oracle_suite_obligation_leak_trace_id_is_deterministic() {
+    init_test("oracle_suite_obligation_leak_trace_id_is_deterministic");
+
+    fn run_once() -> (u64, usize, bool) {
+        let mut suite = OracleSuite::new();
+
+        let root = region(0);
+        let worker = task(1);
+        let obl = obligation(10);
+
+        suite.region_tree.on_region_create(root, None, t(0));
+        suite.cancellation_protocol.on_region_create(root, None);
+        suite.cancellation_protocol.on_task_create(worker, root);
+        suite.quiescence.on_region_create(root, None);
+        suite.quiescence.on_spawn(worker, root);
+        suite
+            .obligation_leak
+            .on_create(obl, ObligationKind::SendPermit, worker, root);
+
+        suite.cancellation_protocol.on_transition(
+            worker,
+            &TaskState::Created,
+            &TaskState::Running,
+            t(10),
+        );
+        suite.cancellation_protocol.on_transition(
+            worker,
+            &TaskState::Running,
+            &TaskState::Completed(Outcome::Ok(())),
+            t(50),
+        );
+        suite.quiescence.on_task_complete(worker);
+        suite.quiescence.on_region_close(root, t(100));
+        suite.obligation_leak.on_region_close(root, t(100));
+
+        let violations = suite.check_all(t(100));
+        let has_obligation_leak = violations.iter().any(|violation| {
+            matches!(
+                violation,
+                asupersync::lab::oracle::OracleViolation::ObligationLeak(_)
+            )
+        });
+        assert_with_log!(
+            has_obligation_leak,
+            "obligation leak remains detectable for trace reference",
+            true,
+            has_obligation_leak
+        );
+
+        let trace_id = violation_trace_id(&violations);
+        tracing::info!(
+            test_case = "umelq.18.2.cancel_obligation_oracle",
+            trace_id,
+            violation_count = violations.len(),
+            has_obligation_leak,
+            "oracle deterministic trace reference"
+        );
+        (trace_id, violations.len(), has_obligation_leak)
+    }
+
+    let run_a = run_once();
+    let run_b = run_once();
+    assert_eq!(
+        run_a, run_b,
+        "same oracle violation scenario must emit stable deterministic trace reference"
+    );
+
+    test_complete!(
+        "oracle_suite_obligation_leak_trace_id_is_deterministic",
+        trace_id = run_a.0,
+        violation_count = run_a.1,
+        has_obligation_leak = run_a.2
+    );
 }
 
 // ============================================================================
