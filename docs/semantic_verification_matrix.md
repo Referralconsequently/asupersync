@@ -303,11 +303,30 @@ The matrix verdict follows gate thresholds from SEM-09.1:
 
 ---
 
-## 8. Downstream Usage
+## 8. Verification Run Profiles (SEM-12.11)
+
+The unified runner supports profile-scoped execution with explicit inclusion,
+budget, and artifact/log contracts.
+
+| Profile | Included Components | Runtime Budget | Required Artifacts | Required Log Outputs |
+|---------|---------------------|---------------:|--------------------|----------------------|
+| `smoke` | `docs`, `golden` | 180s | `verification_report.json`, `docs_output.txt`, `golden_output.txt` | `profile_selected`, `suite_plan`, `skipped_components`, `suite_results`, `summary` |
+| `full` | `docs`, `golden`, `lean_validation`, `tla_validation`, `logging_schema`, `lean_build`, `tla_check`, `coverage_gate` | 1200s | `verification_report.json`, `docs_output.txt`, `golden_output.txt`, `lean_validation_output.txt`, `tla_validation_output.txt`, `logging_schema_output.txt`, `lean_build_output.txt`, `tla_check_output.txt` | `profile_selected`, `suite_plan`, `skipped_components`, `suite_results`, `coverage_gate`, `summary` |
+| `forensics` | `docs`, `golden`, `lean_validation`, `tla_validation`, `logging_schema`, `lean_build`, `tla_check`, `coverage_gate` | 1800s | `verification_report.json`, `docs_output.txt`, `golden_output.txt`, `lean_validation_output.txt`, `tla_validation_output.txt`, `logging_schema_output.txt`, `lean_build_output.txt`, `tla_check_output.txt`, `coverage_gate_diagnostics` | `profile_selected`, `suite_plan`, `skipped_components`, `suite_results`, `coverage_gate`, `verbose_failure_tail`, `summary` |
+
+Profile-selection consistency policy:
+1. `--profile` is authoritative in both local and CI runs.
+2. `--ci` does not change profile composition; it only changes exit semantics.
+3. `--suite` narrows execution deterministically and logs skipped components.
+
+---
+
+## 9. Downstream Usage
 
 1. **SEM-12.5**: Unit/property/metamorphic test suites — Phase 1 targets complete.
 2. **SEM-12.6**: E2E witness-replay scripts target gaps from §6.2.
 3. **SEM-12.7**: Logging schema targets LOG gaps from §5.1.
 4. **SEM-12.9**: Unified verification runner checks matrix verdicts.
-5. **SEM-10.2**: Traceability checker uses this matrix as authority.
-6. **SEM-09.3**: Gate evaluation references matrix coverage percentages.
+5. **SEM-12.11**: Profile contracts define suite scope, runtime budgets, and artifact/log obligations for smoke/full/forensics runs.
+6. **SEM-10.2**: Traceability checker uses this matrix as authority.
+7. **SEM-09.3**: Gate evaluation references matrix coverage percentages.

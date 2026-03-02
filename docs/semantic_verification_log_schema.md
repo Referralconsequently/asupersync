@@ -334,12 +334,74 @@ The per-run summary aggregates entries into a coverage report:
 
 1. **SEM-12.6**: Cross-artifact witness-replay scripts consume `entries.ndjson`.
 2. **SEM-12.9**: CI runner validates `summary.json` against coverage thresholds.
-3. **SEM-12.14**: Coverage gate reads `coverage.rules_tested / rules_total`.
+3. **SEM-12.14**: Coverage gate enforces global UT/PT/E2E thresholds, per-domain thresholds, and logging completeness checks.
 4. **SEM-09.3**: Gate evaluation reads summary verdicts.
 
 ---
 
-## 11. Schema Evolution Policy
+## 11. SEM-12.14 Coverage and Logging Gate Policy
+
+`scripts/run_semantic_verification.sh` enforces this policy in full/forensics
+profiles (and CI mode without suite filters). The gate is reported as
+`quality_gates.semantic_coverage_logging_gate`.
+
+### 11.1 Global Thresholds
+
+| Evidence class | Minimum coverage |
+|----------------|:----------------:|
+| UT | 100% |
+| PT | 40% |
+| E2E | 60% |
+
+These values are read from `docs/semantic_verification_matrix.md` section 5.1.
+
+### 11.2 Per-Domain Thresholds (UT/PT/E2E)
+
+| Domain | UT min | PT min | E2E min |
+|--------|:------:|:------:|:-------:|
+| cancel | 100% | 25% | 25% |
+| obligation | 100% | 20% | 20% |
+| region | 100% | 15% | 15% |
+| outcome | 100% | 25% | 0% |
+| ownership | 100% | 0% | 0% |
+| combinator | 100% | 40% | 40% |
+| capability | 0% | 0% | 0% |
+| determinism | 100% | 0% | 100% |
+
+Per-domain percentages are computed from the rule rows in section 4 of
+`docs/semantic_verification_matrix.md`.
+
+### 11.3 Logging Completeness Checks
+
+Before verification can pass, the gate requires:
+
+1. `semantic_log_schema_validation` and `semantic_witness_replay_e2e` suites pass.
+2. Required schema field coverage is documented:
+   `schema_version`, `entry_id`, `run_id`, `seq`, `rule_id`, `evidence_class`,
+   `verdict`, `seed`, `repro_command`, `parent_run_id`, `thread_id`,
+   `artifact_path`, `artifact_hash`.
+3. Artifact linkage contract is present (`summary.json`, `entries.ndjson`).
+4. Correlation-link requirement is present (cross-tool correlation language and
+   ID linkage semantics).
+
+### 11.4 Policy Evolution and Audit Trail
+
+Threshold or required-field changes must include:
+
+1. A bead reference in commit metadata (for example `asupersync-3cddg.12.14`).
+2. A policy rationale in this section describing risk/benefit.
+3. Updated runner tests (`tests/semantic_verification_runner.rs`) covering the
+   changed contract.
+4. A deterministic gate run artifact in `target/semantic-verification/`.
+
+Initial policy record:
+- `policy_id`: `sem.coverage.logging.gate.v1`
+- `introduced_by`: `asupersync-3cddg.12.14`
+- `introduced_on`: `2026-03-02`
+
+---
+
+## 12. Schema Evolution Policy
 
 1. **Schema version is immutable.** New fields require a new version string.
 2. **Additive changes** (new optional fields) are permitted within a version

@@ -114,8 +114,9 @@ Verdicts: PASS, FAIL, EXCEPTION (bounded deferral with owner + expiry).
 | Witness inputs are logged for failures | 100% | Log audit |
 | Rerun instructions included in failure output | yes | Manual verification |
 | Structured log format consistent | yes | Schema validation |
+| Deterministic replay variance dashboard is stable | 0 unstable suites in CI baseline | `target/semantic-verification/flake/*/variance_dashboard.json` |
 
-**Pass threshold**: All conformance failures include rule-ID + witness + rerun.
+**Pass threshold**: All conformance failures include rule-ID + witness + rerun, and CI flake dashboards report no unstable deterministic replay suites.
 
 ---
 
@@ -187,3 +188,4 @@ exception:
 2. **SEM-10**: CI enforcement uses gate thresholds as policy.
 3. **SEM-08.5/06**: Property tests target G5 checks.
 4. **SEM-04.5**: Versioning policy references gates for change approval.
+5. **SEM-12.15**: Deterministic replay flake detector feeds G7 stability signals and CI signal-quality tuning.
