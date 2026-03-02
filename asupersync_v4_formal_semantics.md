@@ -43,9 +43,18 @@ When combining outcomes, **worst wins** (monotone aggregation).
 ```
 CancelReason ::= { kind: CancelKind, message: Option<String> }
 
-CancelKind ::= User | Timeout | FailFast | RaceLost | ParentCancelled | Shutdown
+CancelKind ::=
+  | User
+  | Timeout | Deadline
+  | PollQuota | CostBudget
+  | FailFast | RaceLost | LinkedExit
+  | ParentCancelled | ResourceUnavailable
+  | Shutdown
 
-Severity: User < Timeout < FailFast = RaceLost < ParentCancelled < Shutdown
+Severity tiers (total order):
+  User(0) < Timeout=Deadline(1) < PollQuota=CostBudget(2)
+         < FailFast=RaceLost=LinkedExit(3)
+         < ParentCancelled=ResourceUnavailable(4) < Shutdown(5)
 ```
 
 ### 1.4 Budgets
@@ -75,8 +84,8 @@ TaskState ::=
   | Created
   | Running
   | CancelRequested(reason, cleanup_budget)
-  | Cancelling(cleanup_budget)
-  | Finalizing(cleanup_budget)
+  | Cancelling(reason, cleanup_budget)
+  | Finalizing(reason, cleanup_budget)
   | Completed(outcome)
 ```
 
@@ -309,7 +318,7 @@ Task readiness is abstracted by `is_ready(t)` (e.g., a waker fires or a poll yie
 ```
 Preconditions:
   is_ready(t)
-  T[t].state ∈ {Created, Running, CancelRequested(_), Cancelling(_), Finalizing(_)}
+  T[t].state ∈ {Created, Running, CancelRequested(_), Cancelling(_, _), Finalizing(_, _)}
 
 Σ —[τ]→ Σ' where:
   S'[lane(t)].push(t)
@@ -527,8 +536,8 @@ The semantic states correspond directly to runtime records:
 
 ```
 TaskState::CancelRequested  ↔  CancelRequested(reason, cleanup_budget)
-TaskState::Cancelling       ↔  Cancelling(cleanup_budget)
-TaskState::Finalizing       ↔  Finalizing(cleanup_budget)
+TaskState::Cancelling       ↔  Cancelling(reason, cleanup_budget)
+TaskState::Finalizing       ↔  Finalizing(reason, cleanup_budget)
 Outcome::Cancelled(reason)  ↔  Completed(Cancelled(reason))
 ```
 
@@ -555,15 +564,15 @@ Running:
 
 CancelRequested:
   on Request(r) -> CancelRequested(strengthen(reason, r), tighten(budget, r))
-  on Checkpoint when mask = 0 -> Cancelling(budget)
+  on Checkpoint when mask = 0 -> Cancelling(reason, budget)
   on Checkpoint when mask > 0 -> CancelRequested(reason, budget) with mask := mask - 1
 
 Cancelling:
-  on Request(r) -> Cancelling(tighten(budget, r))   // reason strengthens, budget tightens
-  on CleanupDone -> Finalizing(budget)
+  on Request(r) -> Cancelling(strengthen(reason, r), tighten(budget, r))
+  on CleanupDone -> Finalizing(reason, budget)
 
 Finalizing:
-  on Request(r) -> Finalizing(tighten(budget, r))
+  on Request(r) -> Finalizing(strengthen(reason, r), tighten(budget, r))
   on FinalizersDone -> Completed(Cancelled(reason))
 ```
 
@@ -613,7 +622,7 @@ Preconditions:
   T[t].cont = await(checkpoint)
 
 Σ —[τ]→ Σ' where:
-  T'[t].state = Cancelling(budget)
+  T'[t].state = Cancelling(reason, budget)
   T'[t].cont = resume(T[t].cont, Cancelled(reason))
 ```
 
@@ -648,18 +657,18 @@ This perspective turns “bounded masking” into a mathematical promise: if eve
 
 ```
 Preconditions:
-  T[t].state = Cancelling(_)
+  T[t].state = Cancelling(reason, _)
   T[t].cont ∈ {done(_), cancelled}
 
 Σ —[τ]→ Σ' where:
-  T'[t].state = Finalizing(default_finalizer_budget)
+  T'[t].state = Finalizing(reason, default_finalizer_budget)
 ```
 
 #### CANCEL-FINALIZE — Task runs local finalizers
 
 ```
 Preconditions:
-  T[t].state = Finalizing(_)
+  T[t].state = Finalizing(_, _)
   // All task-local cleanup done
 
 Σ —[complete(t, Cancelled(reason))]→ Σ' where:
@@ -1297,7 +1306,7 @@ progress (eventual closure) is handled separately in §6.
 ```
 ∀o ∈ dom(O):
   O[o].state = Reserved ⟹
-    T[O[o].holder].state ∈ {Running, CancelRequested(_), Cancelling(_), Finalizing(_)}
+    T[O[o].holder].state ∈ {Running, CancelRequested(_), Cancelling(_, _), Finalizing(_, _)}
 ```
 
 ### INV-OBLIGATION-LINEAR: Obligations resolve at most once

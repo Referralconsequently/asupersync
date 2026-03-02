@@ -26,9 +26,9 @@ inductive Outcome (Value Error Cancel Panic : Type) where
 /-- Cancellation kinds. -/
 inductive CancelKind where
   | user
-  | timeout
-  | failFast
-  | parentCancelled
+  | timeout | deadline
+  | pollQuota | costBudget | failFast | raceLost | linkedExit
+  | parentCancelled | resourceUnavailable
   | shutdown
   deriving DecidableEq, Repr
 
@@ -40,11 +40,11 @@ structure CancelReason where
 
 def CancelKind.rank : CancelKind -> Nat
   | CancelKind.user => 0
-  | CancelKind.timeout => 1
-  | CancelKind.failFast => 2
-  | CancelKind.parentCancelled => 3
-  | CancelKind.shutdown => 4
-
+  | CancelKind.timeout | CancelKind.deadline => 1
+  | CancelKind.pollQuota | CancelKind.costBudget => 2
+  | CancelKind.failFast | CancelKind.raceLost | CancelKind.linkedExit => 3
+  | CancelKind.parentCancelled | CancelKind.resourceUnavailable => 4
+  | CancelKind.shutdown => 5
 def strengthenReason (a b : CancelReason) : CancelReason :=
   if CancelKind.rank a.kind >= CancelKind.rank b.kind then a else b
 
@@ -441,9 +441,7 @@ inductive Step {Value Error Panic : Type} :
       (hRegion : getRegion s r = some region)
       (hRegionMatch : task.region = r)
       (hNotCompleted :
-        match task.state with
-        | TaskState.completed _ => False
-        | _ => True)
+        task.state = TaskState.created ∨ task.state = TaskState.running)
       (hUpdate :
         s' =
           setTask
@@ -519,9 +517,7 @@ inductive Step {Value Error Panic : Type} :
       (hChild : t ∈ region.children)
       (hTask : getTask s t = some task)
       (hNotCompleted :
-        match task.state with
-        | TaskState.completed _ => False
-        | _ => True)
+        task.state = TaskState.created ∨ task.state = TaskState.running)
       (hUpdate :
         s' =
           setTask s t { task with state := TaskState.cancelRequested reason cleanup }) :
@@ -3975,9 +3971,7 @@ theorem cancelChild_preserves_wellformed_constructor {Value Error Panic : Type}
     (hChild : t ∈ region.children)
     (hTask : getTask s t = some task)
     (hNotCompleted :
-      match task.state with
-      | TaskState.completed _ => False
-      | _ => True)
+      task.state = TaskState.created ∨ task.state = TaskState.running)
     (hUpdate :
       s' = setTask s t { task with state := TaskState.cancelRequested reason cleanup }) :
     WellFormed s' := by
