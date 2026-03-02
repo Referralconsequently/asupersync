@@ -69,14 +69,7 @@ fn cookbook_has_triage_decision_tree() {
 fn cookbook_decision_tree_covers_all_suites() {
     let cookbook = load_cookbook();
 
-    let suites = [
-        "docs",
-        "golden",
-        "lean",
-        "tla",
-        "logging",
-        "coverage",
-    ];
+    let suites = ["docs", "golden", "lean", "tla", "logging", "coverage"];
 
     let mut missing = Vec::new();
     for suite in &suites {
@@ -203,8 +196,17 @@ fn rerun_script_supports_all_suites() {
     let script = load_rerun_script();
 
     let suites = [
-        "docs", "golden", "lean", "tla", "logging",
-        "coverage", "runtime", "laws", "e2e", "all", "forensics",
+        "docs",
+        "golden",
+        "lean",
+        "tla",
+        "logging",
+        "coverage",
+        "runtime",
+        "laws",
+        "e2e",
+        "all",
+        "forensics",
     ];
 
     let mut missing = Vec::new();
