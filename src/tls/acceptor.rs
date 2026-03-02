@@ -89,7 +89,7 @@ impl TlsAcceptor {
     /// # Cancel-Safety
     /// Handshake is NOT cancel-safe. If cancelled mid-handshake, drop the stream.
     #[cfg(feature = "tls")]
-    pub async fn accept<IO>(&self, cx: &crate::cx::Cx, io: IO) -> Result<TlsStream<IO>, TlsError>
+    pub async fn accept<IO>(&self, io: IO) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -97,7 +97,7 @@ impl TlsAcceptor {
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_server(io, conn);
         if let Some(timeout) = self.handshake_timeout {
-            match crate::time::timeout(cx.now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
+            match crate::time::timeout(super::wall_clock_now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
                 .await
             {
                 Ok(result) => result?,
@@ -511,8 +511,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect(&cx, "localhost", client_io),
-                acceptor.accept(&cx, server_io),
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
             )
             .await;
 
@@ -558,8 +558,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect(&cx, "localhost", client_io),
-                acceptor.accept(&cx, server_io),
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
             )
             .await;
 
@@ -600,8 +600,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect(&cx, "localhost", client_io),
-                acceptor.accept(&cx, server_io),
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
             )
             .await;
 
@@ -640,8 +640,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect(&cx, "localhost", client_io),
-                acceptor.accept(&cx, server_io),
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
             )
             .await;
 
@@ -682,8 +682,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect(&cx, "localhost", client_io),
-                acceptor.accept(&cx, server_io),
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
             )
             .await;
 
@@ -725,8 +725,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect(&cx, "localhost", client_io),
-                acceptor.accept(&cx, server_io),
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
             )
             .await;
 

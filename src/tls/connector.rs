@@ -32,7 +32,7 @@ use std::sync::Arc;
 ///     .alpn_http()
 ///     .build()?;
 ///
-/// let tls_stream = connector.connect(&cx, "example.com", tcp_stream).await?;
+/// let tls_stream = connector.connect("example.com", tcp_stream).await?;
 /// ```
 #[derive(Clone)]
 pub struct TlsConnector {
@@ -79,7 +79,6 @@ impl TlsConnector {
     #[cfg(feature = "tls")]
     pub async fn connect<IO>(
         &self,
-        cx: &crate::cx::Cx,
         domain: &str,
         io: IO,
     ) -> Result<TlsStream<IO>, TlsError>
@@ -92,7 +91,7 @@ impl TlsConnector {
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_client(io, conn);
         if let Some(timeout) = self.handshake_timeout {
-            match crate::time::timeout(cx.now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
+            match crate::time::timeout(super::wall_clock_now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
                 .await
             {
                 Ok(result) => result?,
@@ -626,7 +625,7 @@ mod tests {
                 "127.0.0.1:5101".parse().unwrap(),
             );
             let err = connector
-                .connect(&cx, "invalid domain with spaces", client_io)
+                .connect("invalid domain with spaces", client_io)
                 .await
                 .unwrap_err();
             assert!(matches!(err, TlsError::InvalidDnsName(_)));
