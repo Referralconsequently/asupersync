@@ -154,7 +154,7 @@ fn tla_spec_aligns_close_cancel_children_with_canonical_rules() {
     let spec = load_tla_spec();
 
     assert!(
-        spec.contains(r#"CloseCancelChildren(r) =="#),
+        spec.contains(r"CloseCancelChildren(r) =="),
         "TLA+ spec must define CloseCancelChildren action"
     );
     assert!(
@@ -162,7 +162,7 @@ fn tla_spec_aligns_close_cancel_children_with_canonical_rules() {
         "CloseCancelChildren must only re-request cancel for Spawned/Running tasks"
     );
     assert!(
-        spec.contains(r#"ELSE taskMask[t]"#),
+        spec.contains(r"ELSE taskMask[t]"),
         "CloseCancelChildren must preserve existing mask depth for in-flight cancel states"
     );
 }
@@ -172,7 +172,7 @@ fn tla_spec_aligns_reserve_obligation_guards_with_canonical_rules() {
     let spec = load_tla_spec();
 
     assert!(
-        spec.contains(r#"ReserveObligation(o, t, r) =="#),
+        spec.contains(r"ReserveObligation(o, t, r) =="),
         "TLA+ spec must define ReserveObligation action"
     );
     assert!(
@@ -180,7 +180,7 @@ fn tla_spec_aligns_reserve_obligation_guards_with_canonical_rules() {
         "ReserveObligation must allow Running/CancelRequested/CancelMasked holders"
     );
     assert!(
-        spec.contains(r#"taskRegion[t] = r"#),
+        spec.contains(r"taskRegion[t] = r"),
         "ReserveObligation must bind obligation region to holder task region"
     );
     assert!(
@@ -202,6 +202,8 @@ fn tla_spec_defines_invariants() {
         "MaskBoundedInvariant",
         "MaskMonotoneInvariant",
         "CancelIdempotenceStructural",
+        "AssumptionEnvelopeInvariant",
+        "SafetyGuaranteesInvariant",
     ];
 
     let mut missing = Vec::new();
@@ -233,6 +235,34 @@ fn tla_spec_defines_liveness() {
 }
 
 #[test]
+fn tla_spec_splits_safety_guarantees_from_assumptions() {
+    let spec = load_tla_spec();
+
+    assert!(
+        spec.contains("SafetyGuaranteesInvariant == Inv"),
+        "TLA+ spec must explicitly alias safety guarantees"
+    );
+    assert!(
+        spec.contains("AssumptionEnvelopeInvariant =="),
+        "TLA+ spec must define explicit bounded assumption envelope"
+    );
+}
+
+#[test]
+fn tla_spec_declares_fairness_assumptions_for_liveness() {
+    let spec = load_tla_spec();
+
+    assert!(
+        spec.contains("LivenessFairnessAssumptions"),
+        "TLA+ spec must name fairness assumptions for liveness checks"
+    );
+    assert!(
+        spec.contains("LiveSpec"),
+        "TLA+ spec must define LiveSpec with fairness assumptions"
+    );
+}
+
+#[test]
 fn tla_spec_references_fos() {
     let spec = load_tla_spec();
 
@@ -259,6 +289,14 @@ fn tla_config_exists_and_valid() {
     assert!(
         config.contains("INVARIANT") || config.contains("PROPERTY"),
         "TLA+ config must specify at least one INVARIANT or PROPERTY"
+    );
+    assert!(
+        config.contains("AssumptionEnvelopeInvariant"),
+        "TLA+ config must check bounded assumption envelope explicitly"
+    );
+    assert!(
+        config.contains("SPECIFICATION") && config.contains("Spec"),
+        "TLA+ safety config must use Spec as specification"
     );
 }
 
