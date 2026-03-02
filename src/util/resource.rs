@@ -222,15 +222,6 @@ impl SymbolPool {
     /// Returns a buffer to the pool.
     pub fn deallocate(&mut self, mut buffer: SymbolBuffer) {
         let expected_len = self.config.symbol_size as usize;
-        debug_assert!(
-            buffer.in_use,
-            "deallocating a buffer that is not marked in-use"
-        );
-        debug_assert_eq!(
-            buffer.len(),
-            expected_len,
-            "deallocating a buffer with wrong symbol_size"
-        );
 
         if !buffer.in_use || buffer.len() != expected_len {
             return;

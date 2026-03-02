@@ -251,11 +251,11 @@ impl<T: Serialize> Serializer<T> for SerdeCodec {
                 })
             }
             SerializationFormat::Bincode => {
-                bincode::serde::encode_to_vec(value, bincode::config::legacy()).map_err(|err| {
-                    SerializationError::SerializationFailed {
+                bincode::serde::encode_to_vec(value, bincode::config::legacy()).map_err(
+                    |err: bincode::error::EncodeError| SerializationError::SerializationFailed {
                         reason: err.to_string(),
-                    }
-                })
+                    },
+                )
             }
             SerializationFormat::Json => {
                 serde_json::to_vec(value).map_err(|err| SerializationError::SerializationFailed {
@@ -284,8 +284,10 @@ impl<T: DeserializeOwned> Deserializer<T> for SerdeCodec {
             SerializationFormat::Bincode => {
                 bincode::serde::decode_from_slice(bytes, bincode::config::legacy())
                     .map(|(decoded, _)| decoded)
-                    .map_err(|err| DeserializationError::DeserializationFailed {
-                        reason: err.to_string(),
+                    .map_err(|err: bincode::error::DecodeError| {
+                        DeserializationError::DeserializationFailed {
+                            reason: err.to_string(),
+                        }
                     })
             }
             SerializationFormat::Json => serde_json::from_slice(bytes).map_err(|err| {

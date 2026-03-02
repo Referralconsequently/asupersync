@@ -297,7 +297,7 @@ impl Sleep {
         };
 
         for handle in fallback_handles {
-            let _ = handle.join();
+            drop(handle);
         }
 
         // Cancel any existing timer - will be re-registered on next poll
@@ -334,7 +334,7 @@ impl Sleep {
         };
 
         for handle in fallback_handles {
-            let _ = handle.join();
+            drop(handle);
         }
 
         // Cancel any existing timer - will be re-registered on next poll
@@ -524,6 +524,7 @@ impl Future for Sleep {
                         let stop_for_thread = Arc::clone(&stop);
                         let completed = Arc::new(AtomicBool::new(false));
                         let completed_for_thread = Arc::clone(&completed);
+                        // ubs:ignore - intentional detach by dropping JoinHandle in Drop to avoid blocking executor
                         let handle = std::thread::spawn(move || {
                             // Allow prompt cancellation via `unpark()`.
                             let start = Instant::now();
@@ -559,7 +560,7 @@ impl Future for Sleep {
 
                 drop(state);
                 for handle in finished_handles {
-                    let _ = handle.join();
+                    drop(handle);
                 }
 
                 Poll::Pending
@@ -588,7 +589,7 @@ impl Drop for Sleep {
         };
 
         for handle in fallback_handles {
-            let _ = handle.join();
+            drop(handle);
         }
 
         if let (Some(handle), Some(driver)) = (handle, driver) {

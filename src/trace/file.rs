@@ -1022,8 +1022,9 @@ impl TraceReader {
         self.reader.read_exact(&mut compressed)?;
 
         // Decompress
-        self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed)
-            .map_err(|e| TraceFileError::Decompression(e.to_string()))?;
+        self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(
+            |e: lz4_flex::block::DecompressError| TraceFileError::Decompression(e.to_string()),
+        )?;
         self.buffer_pos = 0;
 
         Ok(true)
@@ -1214,8 +1215,9 @@ impl TraceEventIterator {
         self.reader.read_exact(&mut compressed)?;
 
         // Decompress
-        self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed)
-            .map_err(|e| TraceFileError::Decompression(e.to_string()))?;
+        self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(
+            |e: lz4_flex::block::DecompressError| TraceFileError::Decompression(e.to_string()),
+        )?;
         self.buffer_pos = 0;
 
         Ok(true)
