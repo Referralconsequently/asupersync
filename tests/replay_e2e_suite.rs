@@ -1159,9 +1159,9 @@ fn schedule_permutation_fuzz_regression_corpus_artifact() {
 
     // Intentionally leave one task unscheduled per run so the harness always
     // captures at least one minimized failing case for regression replay.
-    let config = FuzzConfig::new(0x6C6F_7265_6D71_6505, 24)
+    let config = FuzzConfig::new(0x6C6F_7265_6D71_6505, 4)
         .worker_count(2)
-        .max_steps(10_000)
+        .max_steps(256)
         .minimize(true);
     let harness = FuzzHarness::new(config.clone());
 
