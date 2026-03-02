@@ -103,10 +103,11 @@ pub use dpor::{
     detect_races, estimated_classes, racing_events, trace_coverage_analysis,
 };
 pub use event::{
-    BROWSER_TRACE_SCHEMA_VERSION, BrowserTraceCategory, BrowserTraceCompatibility,
-    BrowserTraceEventSpec, BrowserTraceSchema, TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent,
-    TraceEventKind, browser_trace_category_for_kind, browser_trace_category_name,
-    browser_trace_log_fields, browser_trace_schema_v1, decode_browser_trace_schema,
+    BROWSER_TRACE_SCHEMA_VERSION, BrowserCaptureMetadata, BrowserCaptureSource,
+    BrowserTraceCategory, BrowserTraceCompatibility, BrowserTraceEventSpec, BrowserTraceSchema,
+    TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind,
+    browser_trace_category_for_kind, browser_trace_category_name, browser_trace_log_fields,
+    browser_trace_log_fields_with_capture, browser_trace_schema_v1, decode_browser_trace_schema,
     redact_browser_trace_event, validate_browser_trace_schema,
 };
 pub use event_structure::{
@@ -147,7 +148,9 @@ pub use replay::{
     CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace,
     ReplayTraceError, TraceMetadata,
 };
-pub use replayer::{Breakpoint, DivergenceError, ReplayError, ReplayMode, TraceReplayer};
+pub use replayer::{
+    Breakpoint, BrowserReplayReport, DivergenceError, ReplayError, ReplayMode, TraceReplayer,
+};
 pub use scoring::{
     ClassId, EvidenceEntry, EvidenceLedger, TopologicalScore, score_boundary_matrix,
     score_persistence, seed_fingerprint,

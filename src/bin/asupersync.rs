@@ -1,26 +1,30 @@
 //! Asupersync CLI tools (feature-gated).
 #![allow(clippy::result_large_err)]
 
-use asupersync::Time;
 use asupersync::cli::{
-    CliError, ColorChoice, CommonArgs, CoreDiagnosticsReportBundle, ExitCode,
-    InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
-    OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
-    StructuredLoggingContract, WorkspaceScanReport, analyze_workspace_invariants,
-    analyze_workspace_lock_contention, core_diagnostics_report_bundle, operator_model_contract,
+    analyze_workspace_invariants, analyze_workspace_lock_contention,
+    core_diagnostics_report_bundle, core_diagnostics_report_contract, operator_model_contract,
     parse_color_choice, parse_output_format, remediation_recipe_bundle, scan_workspace,
-    screen_engine_contract, structured_logging_contract,
+    screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
+    CliError, ColorChoice, CommonArgs, CoreDiagnosticsReport, CoreDiagnosticsReportBundle,
+    ExitCode, InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
+    OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
+    StructuredLoggingContract, WorkspaceScanReport,
 };
 use asupersync::trace::{
-    CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
-    TraceReader, VerificationOptions, verify_trace,
+    verify_trace, CompressionMode, IssueSeverity, ReplayEvent, TraceFileError, TraceReader,
+    VerificationOptions, TRACE_FILE_VERSION, TRACE_MAGIC,
 };
+use asupersync::Time;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use conformance::{
-    ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
-    requirements_from_entries, scan_conformance_attributes,
+    requirements_from_entries, scan_conformance_attributes, ScanWarning, SpecRequirement,
+    TraceabilityMatrix, TraceabilityScanError,
 };
-use std::collections::BTreeSet;
+use franken_decision::DecisionAuditEntry;
+use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder};
+use franken_kernel::{DecisionId, TraceId};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -199,6 +203,26 @@ struct LabReplayArgs {
     /// Path to the scenario YAML file
     scenario: PathBuf,
 
+    /// Override the seed from the scenario file
+    #[arg(long = "seed")]
+    seed: Option<u64>,
+
+    /// Optional stable pointer for artifact pinning (path, URI, or ticket ref)
+    #[arg(long = "artifact-pointer")]
+    artifact_pointer: Option<String>,
+
+    /// Optional path to write replay report JSON for deterministic reruns
+    #[arg(long = "artifact-output")]
+    artifact_output: Option<PathBuf>,
+
+    /// Start event index for replay-window reporting
+    #[arg(long = "window-start", default_value_t = 0)]
+    window_start: usize,
+
+    /// Max events to include in replay-window reporting
+    #[arg(long = "window-events")]
+    window_events: Option<usize>,
+
     /// Output results as JSON
     #[arg(long = "json", action = ArgAction::SetTrue)]
     json: bool,
@@ -250,6 +274,8 @@ enum DoctorCommand {
     RemediationContract,
     /// Emit core diagnostics report contract and deterministic fixture bundle
     ReportContract,
+    /// Export core diagnostics reports into FrankenSuite evidence/decision artifacts
+    FrankenExport(DoctorFrankenExportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -290,6 +316,24 @@ struct DoctorWasmDependencyAuditArgs {
     /// Optional report path to write JSON output
     #[arg(long = "report")]
     report: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct DoctorFrankenExportArgs {
+    /// Optional path to a core diagnostics report JSON payload
+    #[arg(long = "report")]
+    report: Option<PathBuf>,
+
+    /// Optional fixture id from `doctor report-contract` bundle
+    #[arg(long = "fixture-id")]
+    fixture_id: Option<String>,
+
+    /// Output directory for export artifacts
+    #[arg(
+        long = "out-dir",
+        default_value = "target/e2e-results/doctor_frankensuite_export/artifacts"
+    )]
+    out_dir: PathBuf,
 }
 
 // =========================================================================
@@ -650,6 +694,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::LoggingContract => doctor_logging_contract(output),
         DoctorCommand::RemediationContract => doctor_remediation_contract(output),
         DoctorCommand::ReportContract => doctor_report_contract(output),
+        DoctorCommand::FrankenExport(export_args) => doctor_franken_export(&export_args, output),
     }
 }
 
@@ -748,6 +793,427 @@ fn doctor_report_contract(output: &mut Output) -> Result<(), CliError> {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
     Ok(())
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorFrankenExportOutput {
+    schema_version: String,
+    source_schema_version: String,
+    export_root: String,
+    exports: Vec<DoctorFrankenExportArtifact>,
+    rerun_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct DoctorFrankenExportArtifact {
+    fixture_id: String,
+    report_id: String,
+    trace_id: String,
+    evidence_jsonl: String,
+    decision_json: String,
+    evidence_count: usize,
+    decision_count: usize,
+    validation_status: String,
+}
+
+impl Outputtable for DoctorFrankenExportOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Schema: {}", self.schema_version),
+            format!("Source schema: {}", self.source_schema_version),
+            format!("Export root: {}", self.export_root),
+            format!("Artifacts: {}", self.exports.len()),
+        ];
+        for artifact in &self.exports {
+            lines.push(format!(
+                "  - {}: evidence={} decision={} status={}",
+                artifact.fixture_id,
+                artifact.evidence_jsonl,
+                artifact.decision_json,
+                artifact.validation_status
+            ));
+        }
+        lines.push("Rerun commands:".to_string());
+        for command in &self.rerun_commands {
+            lines.push(format!("  {command}"));
+        }
+        lines.join("\n")
+    }
+}
+
+fn doctor_franken_export(
+    args: &DoctorFrankenExportArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let reports = select_core_reports_for_export(args)?;
+    fs::create_dir_all(&args.out_dir).map_err(|err| {
+        CliError::new("doctor_export_error", "Failed to create export directory")
+            .detail(err.to_string())
+            .context("path", args.out_dir.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let mut exports = Vec::with_capacity(reports.len());
+    for (fixture_id, report) in reports {
+        exports.push(export_core_report_to_franken_artifacts(
+            fixture_id.as_str(),
+            &report,
+            &args.out_dir,
+        )?);
+    }
+    exports.sort_by(|left, right| left.fixture_id.cmp(&right.fixture_id));
+
+    let command_tail = if let Some(path) = &args.report {
+        format!(" --report {}", path.display())
+    } else if let Some(fixture_id) = &args.fixture_id {
+        format!(" --fixture-id {fixture_id}")
+    } else {
+        String::new()
+    };
+    let rerun_commands = vec![
+        format!(
+            "asupersync doctor franken-export --out-dir {}{}",
+            args.out_dir.display(),
+            command_tail
+        ),
+        "asupersync doctor report-contract".to_string(),
+    ];
+
+    let payload = DoctorFrankenExportOutput {
+        schema_version: "doctor-frankensuite-export-v1".to_string(),
+        source_schema_version: "doctor-core-report-v1".to_string(),
+        export_root: args.out_dir.display().to_string(),
+        exports,
+        rerun_commands,
+    };
+    output.write(&payload).map_err(output_cli_error)
+}
+
+fn select_core_reports_for_export(
+    args: &DoctorFrankenExportArgs,
+) -> Result<Vec<(String, CoreDiagnosticsReport)>, CliError> {
+    if let Some(path) = &args.report {
+        let report = load_core_report(path)?;
+        return Ok(vec![(sanitize_export_stem(&report.report_id), report)]);
+    }
+
+    let bundle = core_diagnostics_report_bundle();
+    if let Some(fixture_id) = &args.fixture_id {
+        if let Some(fixture) = bundle.fixtures.iter().find(|f| f.fixture_id == *fixture_id) {
+            return Ok(vec![(fixture.fixture_id.clone(), fixture.report.clone())]);
+        }
+        let mut available = bundle
+            .fixtures
+            .iter()
+            .map(|fixture| fixture.fixture_id.as_str())
+            .collect::<Vec<_>>();
+        available.sort_unstable();
+        return Err(
+            CliError::new("invalid_argument", "Unknown --fixture-id value")
+                .detail(fixture_id.clone())
+                .context("available_fixtures", available.join(", "))
+                .exit_code(ExitCode::USER_ERROR),
+        );
+    }
+
+    Ok(bundle
+        .fixtures
+        .into_iter()
+        .map(|fixture| (fixture.fixture_id, fixture.report))
+        .collect())
+}
+
+fn load_core_report(path: &Path) -> Result<CoreDiagnosticsReport, CliError> {
+    let raw = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
+    let report: CoreDiagnosticsReport = serde_json::from_str(&raw).map_err(|err| {
+        CliError::new(
+            "doctor_export_error",
+            "Failed to parse core diagnostics report JSON",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+    validate_exportable_core_report(&report)?;
+    Ok(report)
+}
+
+fn validate_exportable_core_report(report: &CoreDiagnosticsReport) -> Result<(), CliError> {
+    let contract = core_diagnostics_report_contract();
+    validate_core_diagnostics_report(report, &contract).map_err(|reason| {
+        CliError::new(
+            "doctor_export_error",
+            "Core diagnostics report validation failed",
+        )
+        .detail(reason)
+        .context("report_id", report.report_id.clone())
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+    if report.schema_version != "doctor-core-report-v1" {
+        return Err(CliError::new(
+            "doctor_export_error",
+            "Unsupported core diagnostics report schema version",
+        )
+        .detail(report.schema_version.clone())
+        .context("expected", "doctor-core-report-v1".to_string())
+        .context("report_id", report.report_id.clone())
+        .exit_code(ExitCode::USER_ERROR));
+    }
+    Ok(())
+}
+
+fn export_core_report_to_franken_artifacts(
+    fixture_id: &str,
+    report: &CoreDiagnosticsReport,
+    out_dir: &Path,
+) -> Result<DoctorFrankenExportArtifact, CliError> {
+    validate_exportable_core_report(report)?;
+
+    let mut evidence = report.evidence.clone();
+    evidence.sort_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
+
+    let mut findings = report.findings.clone();
+    findings.sort_by(|left, right| left.finding_id.cmp(&right.finding_id));
+
+    let mut evidence_map = BTreeMap::new();
+    for item in &evidence {
+        evidence_map.insert(item.evidence_id.clone(), item.clone());
+    }
+
+    let evidence_ledgers = evidence
+        .iter()
+        .enumerate()
+        .map(|(index, item)| build_evidence_ledger(report, item, index as u64))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let decisions = findings
+        .iter()
+        .enumerate()
+        .map(|(index, finding)| {
+            build_decision_audit_entry(report, finding, &evidence_map, index as u64)
+        })
+        .collect::<Vec<_>>();
+
+    let export_stem = sanitize_export_stem(fixture_id);
+    let evidence_path = out_dir.join(format!("{export_stem}_evidence.jsonl"));
+    let decision_path = out_dir.join(format!("{export_stem}_decision.json"));
+
+    write_evidence_jsonl(&evidence_path, &evidence_ledgers)?;
+    write_decisions_json(&decision_path, &decisions)?;
+
+    Ok(DoctorFrankenExportArtifact {
+        fixture_id: fixture_id.to_string(),
+        report_id: report.report_id.clone(),
+        trace_id: report.provenance.trace_id.clone(),
+        evidence_jsonl: evidence_path.display().to_string(),
+        decision_json: decision_path.display().to_string(),
+        evidence_count: evidence_ledgers.len(),
+        decision_count: decisions.len(),
+        validation_status: "valid".to_string(),
+    })
+}
+
+fn build_evidence_ledger(
+    report: &CoreDiagnosticsReport,
+    evidence: &asupersync::cli::CoreDiagnosticsEvidence,
+    index: u64,
+) -> Result<EvidenceLedger, CliError> {
+    let (
+        posterior,
+        promote_loss,
+        hold_loss,
+        chosen_action,
+        chosen_expected_loss,
+        calibration,
+        fallback,
+    ) = outcome_profile(evidence.outcome_class.as_str());
+    let ts_unix_ms = stable_u64(
+        format!(
+            "{}:{}:{}:{}",
+            report.report_id, report.provenance.generated_at, evidence.evidence_id, index
+        )
+        .as_str(),
+    );
+
+    EvidenceLedgerBuilder::new()
+        .ts_unix_ms(ts_unix_ms)
+        .component(evidence.source.as_str())
+        .action(chosen_action)
+        .posterior(vec![posterior.0, posterior.1])
+        .expected_loss("promote", promote_loss)
+        .expected_loss("hold", hold_loss)
+        .chosen_expected_loss(chosen_expected_loss)
+        .calibration_score(calibration)
+        .fallback_active(fallback)
+        .top_feature("evidence_id", 1.0)
+        .top_feature("outcome_class", 0.8)
+        .build()
+        .map_err(|err| {
+            CliError::new(
+                "doctor_export_error",
+                "Failed to build evidence ledger entry",
+            )
+            .detail(err.to_string())
+            .context("report_id", report.report_id.clone())
+            .context("evidence_id", evidence.evidence_id.clone())
+            .exit_code(ExitCode::USER_ERROR)
+        })
+}
+
+fn build_decision_audit_entry(
+    report: &CoreDiagnosticsReport,
+    finding: &asupersync::cli::CoreDiagnosticsFinding,
+    evidence_map: &BTreeMap<String, asupersync::cli::CoreDiagnosticsEvidence>,
+    index: u64,
+) -> DecisionAuditEntry {
+    let action_chosen = match finding.status.as_str() {
+        "resolved" => "promote_fix",
+        "in_progress" => "continue_investigation",
+        _ => "hold_release",
+    }
+    .to_string();
+    let severity_factor = match finding.severity.as_str() {
+        "critical" => 0.85,
+        "high" => 0.65,
+        "medium" => 0.45,
+        _ => 0.25,
+    };
+    let mut expected_loss_by_action = BTreeMap::new();
+    expected_loss_by_action.insert("continue_investigation".to_string(), severity_factor * 0.35);
+    expected_loss_by_action.insert("hold_release".to_string(), severity_factor * 0.20);
+    expected_loss_by_action.insert("promote_fix".to_string(), severity_factor * 0.55);
+
+    let expected_loss = expected_loss_by_action
+        .get(action_chosen.as_str())
+        .copied()
+        .unwrap_or(severity_factor * 0.5);
+
+    let trace_ref = finding
+        .evidence_refs
+        .iter()
+        .find_map(|id| evidence_map.get(id))
+        .map_or_else(
+            || report.provenance.trace_id.clone(),
+            |evidence| evidence.franken_trace_id.clone(),
+        );
+
+    let posterior_snapshot = if finding.status == "resolved" {
+        vec![0.85, 0.15]
+    } else {
+        vec![0.35, 0.65]
+    };
+
+    let calibration_score = if finding.status == "resolved" {
+        0.90
+    } else {
+        0.55
+    };
+    let fallback_active = finding.status != "resolved";
+    let ts_unix_ms = stable_u64(
+        format!(
+            "{}:{}:{}:{}",
+            report.report_id, report.provenance.generated_at, finding.finding_id, index
+        )
+        .as_str(),
+    );
+
+    DecisionAuditEntry {
+        decision_id: DecisionId::from_raw(stable_u128(
+            format!("decision:{}:{}", report.report_id, finding.finding_id).as_str(),
+        )),
+        trace_id: TraceId::from_raw(stable_u128(trace_ref.as_str())),
+        contract_name: "doctor-core-diagnostics".to_string(),
+        action_chosen,
+        expected_loss,
+        calibration_score,
+        fallback_active,
+        posterior_snapshot,
+        expected_loss_by_action,
+        ts_unix_ms,
+    }
+}
+
+fn write_evidence_jsonl(path: &Path, entries: &[EvidenceLedger]) -> Result<(), CliError> {
+    let mut payload = String::new();
+    for entry in entries {
+        let line = serde_json::to_string(entry).map_err(|err| {
+            CliError::new(
+                "doctor_export_error",
+                "Failed to serialize evidence ledger entry",
+            )
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+        payload.push_str(line.as_str());
+        payload.push('\n');
+    }
+    fs::write(path, payload).map_err(|err| {
+        CliError::new(
+            "doctor_export_error",
+            "Failed to write evidence JSONL artifact",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })
+}
+
+fn write_decisions_json(path: &Path, entries: &[DecisionAuditEntry]) -> Result<(), CliError> {
+    let payload = serde_json::to_vec_pretty(entries).map_err(|err| {
+        CliError::new(
+            "doctor_export_error",
+            "Failed to serialize decision artifact payload",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    fs::write(path, payload).map_err(|err| {
+        CliError::new(
+            "doctor_export_error",
+            "Failed to write decision artifact payload",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })
+}
+
+fn outcome_profile(outcome_class: &str) -> ((f64, f64), f64, f64, &'static str, f64, f64, bool) {
+    match outcome_class {
+        "pass" | "ok" => ((0.88, 0.12), 0.08, 0.25, "promote", 0.08, 0.93, false),
+        "fail" | "error" => ((0.15, 0.85), 0.92, 0.12, "hold", 0.12, 0.42, true),
+        _ => ((0.55, 0.45), 0.45, 0.30, "hold", 0.30, 0.68, true),
+    }
+}
+
+fn stable_u64(input: &str) -> u64 {
+    stable_u128(input) as u64
+}
+
+fn stable_u128(input: &str) -> u128 {
+    const FNV_OFFSET_BASIS_128: u128 = 0x6C62_272E_07BB_0142_62B8_2175_6295_C58D;
+    const FNV_PRIME_128: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013B;
+
+    let mut hash = FNV_OFFSET_BASIS_128;
+    for byte in input.bytes() {
+        hash ^= u128::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME_128);
+    }
+    hash
+}
+
+fn sanitize_export_stem(input: &str) -> String {
+    let mut normalized = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            normalized.push(ch);
+        } else {
+            normalized.push('-');
+        }
+    }
+    normalized.trim_matches('-').to_string()
 }
 
 fn doctor_wasm_dependency_audit(
@@ -1143,17 +1609,61 @@ fn lab_validate(args: &LabValidateArgs, output: &mut Output) -> Result<(), CliEr
 
 fn lab_replay(args: &LabReplayArgs, output: &mut Output) -> Result<(), CliError> {
     let scenario = load_scenario(&args.scenario)?;
-    let result = asupersync::lab::scenario_runner::ScenarioRunner::validate_replay(&scenario)
-        .map_err(scenario_runner_error)?;
+    let first =
+        asupersync::lab::scenario_runner::ScenarioRunner::run_with_seed(&scenario, args.seed)
+            .map_err(scenario_runner_error)?;
+    let second = asupersync::lab::scenario_runner::ScenarioRunner::run_with_seed(
+        &scenario,
+        Some(first.seed),
+    )
+    .map_err(scenario_runner_error)?;
+
+    let deterministic = first.certificate == second.certificate;
+    let replay_events = first.replay_trace.as_ref().map_or(0, |trace| trace.len());
+    let window = resolve_replay_window(replay_events, args.window_start, args.window_events);
+    let rerun_commands = build_replay_rerun_commands(args, first.seed);
+
+    let artifact_pointer = args.artifact_pointer.clone().or_else(|| {
+        args.artifact_output
+            .as_ref()
+            .map(|path| path.display().to_string())
+    });
+
+    let divergence = if deterministic {
+        None
+    } else {
+        Some(ReplayDivergenceDetails {
+            first_event_hash: first.certificate.event_hash,
+            first_schedule_hash: first.certificate.schedule_hash,
+            first_steps: first.certificate.steps,
+            second_event_hash: second.certificate.event_hash,
+            second_schedule_hash: second.certificate.schedule_hash,
+            second_steps: second.certificate.steps,
+        })
+    };
 
     let report = LabReplayOutput {
         scenario: args.scenario.display().to_string(),
-        scenario_id: result.scenario_id.clone(),
-        deterministic: true,
-        seed: result.seed,
-        event_hash: result.certificate.event_hash,
-        schedule_hash: result.certificate.schedule_hash,
+        scenario_id: first.scenario_id.clone(),
+        deterministic,
+        seed: first.seed,
+        event_hash: first.certificate.event_hash,
+        schedule_hash: first.certificate.schedule_hash,
+        trace_fingerprint: first.certificate.trace_fingerprint,
+        steps: first.certificate.steps,
+        replay_events,
+        window,
+        provenance: ReplayProvenance {
+            scenario_path: args.scenario.display().to_string(),
+            artifact_pointer,
+            rerun_commands,
+        },
+        divergence,
     };
+
+    if let Some(path) = &args.artifact_output {
+        write_replay_artifact(path, &report)?;
+    }
 
     if args.json {
         let json = serde_json::to_value(&report).map_err(output_cli_error)?;
@@ -1163,6 +1673,31 @@ fn lab_replay(args: &LabReplayArgs, output: &mut Output) -> Result<(), CliError>
         output.write(&report).map_err(|e| {
             CliError::new("output_error", "Failed to write output").detail(e.to_string())
         })?;
+    }
+
+    if !deterministic {
+        let replay_hint = report
+            .provenance
+            .rerun_commands
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "asupersync lab replay <scenario>".to_string());
+        let detail = format!(
+            "Seed {} diverged (event_hash {} vs {}). Rerun with: {}",
+            report.seed,
+            report.event_hash,
+            report
+                .divergence
+                .as_ref()
+                .map_or(report.event_hash, |d| d.second_event_hash),
+            replay_hint
+        );
+        return Err(CliError::new(
+            "replay_divergence",
+            "Deterministic replay divergence detected",
+        )
+        .detail(detail)
+        .exit_code(ExitCode::DETERMINISM_FAILURE));
     }
 
     Ok(())
@@ -1203,6 +1738,106 @@ fn lab_explore(args: &LabExploreArgs, output: &mut Output) -> Result<(), CliErro
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct ReplayWindowSummary {
+    start: usize,
+    requested_events: usize,
+    resolved_events: usize,
+    end_exclusive: usize,
+    total_events: usize,
+}
+
+fn resolve_replay_window(
+    total_events: usize,
+    requested_start: usize,
+    requested_events: Option<usize>,
+) -> ReplayWindowSummary {
+    let start = requested_start.min(total_events);
+    let max_events = total_events.saturating_sub(start);
+    let requested = requested_events.unwrap_or(max_events);
+    let resolved = requested.min(max_events);
+
+    ReplayWindowSummary {
+        start,
+        requested_events: requested,
+        resolved_events: resolved,
+        end_exclusive: start + resolved,
+        total_events,
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ReplayProvenance {
+    scenario_path: String,
+    artifact_pointer: Option<String>,
+    rerun_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct ReplayDivergenceDetails {
+    first_event_hash: u64,
+    first_schedule_hash: u64,
+    first_steps: u64,
+    second_event_hash: u64,
+    second_schedule_hash: u64,
+    second_steps: u64,
+}
+
+fn build_replay_rerun_commands(args: &LabReplayArgs, seed: u64) -> Vec<String> {
+    let mut replay = format!("asupersync lab replay {}", args.scenario.display());
+    replay.push_str(&format!(" --seed {seed}"));
+
+    if args.window_start > 0 {
+        replay.push_str(&format!(" --window-start {}", args.window_start));
+    }
+    if let Some(window_events) = args.window_events {
+        replay.push_str(&format!(" --window-events {window_events}"));
+    }
+    if let Some(pointer) = &args.artifact_pointer {
+        replay.push_str(&format!(" --artifact-pointer {pointer}"));
+    }
+    if let Some(path) = &args.artifact_output {
+        replay.push_str(&format!(" --artifact-output {}", path.display()));
+    }
+
+    let run = format!(
+        "asupersync lab run {} --seed {seed}",
+        args.scenario.display()
+    );
+    vec![replay, run]
+}
+
+fn write_replay_artifact(path: &Path, report: &LabReplayOutput) -> Result<(), CliError> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|err| {
+            CliError::new(
+                "artifact_output_error",
+                "Failed to create artifact directory",
+            )
+            .detail(err.to_string())
+            .context("path", parent.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    }
+
+    let payload = serde_json::to_vec_pretty(report).map_err(|err| {
+        CliError::new(
+            "artifact_output_error",
+            "Failed to serialize replay artifact",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    fs::write(path, payload).map_err(|err| {
+        CliError::new("artifact_output_error", "Failed to write replay artifact")
+            .detail(err.to_string())
+            .context("path", path.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })
 }
 
 // =========================================================================
@@ -1299,14 +1934,56 @@ struct LabReplayOutput {
     seed: u64,
     event_hash: u64,
     schedule_hash: u64,
+    trace_fingerprint: u64,
+    steps: u64,
+    replay_events: usize,
+    window: ReplayWindowSummary,
+    provenance: ReplayProvenance,
+    divergence: Option<ReplayDivergenceDetails>,
 }
 
 impl Outputtable for LabReplayOutput {
     fn human_format(&self) -> String {
-        format!(
-            "Replay verified: {} (seed={}, event_hash={}, schedule_hash={})",
-            self.scenario_id, self.seed, self.event_hash, self.schedule_hash
-        )
+        let status = if self.deterministic { "PASS" } else { "FAIL" };
+        let mut lines = vec![
+            format!("Replay: {} [{}]", self.scenario_id, status),
+            format!("Scenario: {}", self.scenario),
+            format!("Seed: {}", self.seed),
+            format!(
+                "Certificate: event_hash={}, schedule_hash={}, trace_fingerprint={}, steps={}",
+                self.event_hash, self.schedule_hash, self.trace_fingerprint, self.steps
+            ),
+            format!(
+                "Window: start={}, end={}, requested={}, resolved={}, total_events={}",
+                self.window.start,
+                self.window.end_exclusive,
+                self.window.requested_events,
+                self.window.resolved_events,
+                self.window.total_events
+            ),
+            format!("Replay events recorded: {}", self.replay_events),
+        ];
+
+        if let Some(pointer) = &self.provenance.artifact_pointer {
+            lines.push(format!("Artifact pointer: {pointer}"));
+        }
+        if let Some(divergence) = self.divergence {
+            lines.push(format!(
+                "Divergence: run1(event_hash={}, schedule_hash={}, steps={}) vs run2(event_hash={}, schedule_hash={}, steps={})",
+                divergence.first_event_hash,
+                divergence.first_schedule_hash,
+                divergence.first_steps,
+                divergence.second_event_hash,
+                divergence.second_schedule_hash,
+                divergence.second_steps
+            ));
+        }
+        lines.push("Rerun commands:".to_string());
+        for cmd in &self.provenance.rerun_commands {
+            lines.push(format!("  {cmd}"));
+        }
+
+        lines.join("\n")
     }
 }
 
@@ -1938,6 +2615,7 @@ fn format_scaled(bytes: u64, unit: u64, label: &str) -> String {
 mod tests {
     use super::*;
     use asupersync::trace::{TraceMetadata, TraceWriter};
+    use clap::Parser;
     use tempfile::NamedTempFile;
 
     fn make_sample_trace() -> NamedTempFile {
@@ -2016,5 +2694,212 @@ mod tests {
         }
         let parsed: Vec<ReplayEvent> = serde_json::from_slice(&buf).expect("parse json");
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn lab_replay_args_parse_extended_flags() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "lab",
+            "replay",
+            "examples/scenarios/smoke_happy_path.yaml",
+            "--seed",
+            "77",
+            "--artifact-pointer",
+            "artifacts/replay/failure-77.json",
+            "--artifact-output",
+            "artifacts/replay/report.json",
+            "--window-start",
+            "8",
+            "--window-events",
+            "12",
+            "--json",
+        ])
+        .expect("parse replay args");
+
+        let Command::Lab(LabArgs {
+            command: LabCommand::Replay(args),
+        }) = cli.command
+        else {
+            panic!("expected lab replay command");
+        };
+
+        assert_eq!(args.seed, Some(77));
+        assert_eq!(
+            args.artifact_pointer.as_deref(),
+            Some("artifacts/replay/failure-77.json")
+        );
+        assert_eq!(
+            args.artifact_output.as_deref(),
+            Some(Path::new("artifacts/replay/report.json"))
+        );
+        assert_eq!(args.window_start, 8);
+        assert_eq!(args.window_events, Some(12));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn resolve_replay_window_clamps_to_available_events() {
+        let window = resolve_replay_window(5, 7, Some(4));
+        assert_eq!(window.start, 5);
+        assert_eq!(window.requested_events, 4);
+        assert_eq!(window.resolved_events, 0);
+        assert_eq!(window.end_exclusive, 5);
+        assert_eq!(window.total_events, 5);
+    }
+
+    #[test]
+    fn build_replay_rerun_commands_include_seed_and_window() {
+        let args = LabReplayArgs {
+            scenario: PathBuf::from("examples/scenarios/smoke_happy_path.yaml"),
+            seed: Some(91),
+            artifact_pointer: Some("artifacts/replay/pinned.json".to_string()),
+            artifact_output: Some(PathBuf::from("artifacts/replay/output.json")),
+            window_start: 3,
+            window_events: Some(9),
+            json: false,
+        };
+
+        let commands = build_replay_rerun_commands(&args, 91);
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].contains("--seed 91"));
+        assert!(commands[0].contains("--window-start 3"));
+        assert!(commands[0].contains("--window-events 9"));
+        assert!(commands[0].contains("--artifact-pointer artifacts/replay/pinned.json"));
+        assert!(commands[0].contains("--artifact-output artifacts/replay/output.json"));
+        assert!(commands[1].contains("asupersync lab run"));
+    }
+
+    #[test]
+    fn write_replay_artifact_persists_json_report() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_path = temp.path().join("replay/report.json");
+        let report = LabReplayOutput {
+            scenario: "examples/scenarios/smoke_happy_path.yaml".to_string(),
+            scenario_id: "smoke-happy-path".to_string(),
+            deterministic: true,
+            seed: 42,
+            event_hash: 100,
+            schedule_hash: 200,
+            trace_fingerprint: 300,
+            steps: 400,
+            replay_events: 2,
+            window: ReplayWindowSummary {
+                start: 0,
+                requested_events: 2,
+                resolved_events: 2,
+                end_exclusive: 2,
+                total_events: 2,
+            },
+            provenance: ReplayProvenance {
+                scenario_path: "examples/scenarios/smoke_happy_path.yaml".to_string(),
+                artifact_pointer: Some("artifacts/replay/report.json".to_string()),
+                rerun_commands: vec![
+                    "asupersync lab replay examples/scenarios/smoke_happy_path.yaml --seed 42"
+                        .to_string(),
+                    "asupersync lab run examples/scenarios/smoke_happy_path.yaml --seed 42"
+                        .to_string(),
+                ],
+            },
+            divergence: None,
+        };
+
+        write_replay_artifact(&output_path, &report).expect("write replay artifact");
+        let saved = fs::read_to_string(&output_path).expect("read replay artifact");
+        assert!(saved.contains("\"scenario_id\": \"smoke-happy-path\""));
+        assert!(saved.contains("\"rerun_commands\""));
+    }
+
+    #[test]
+    fn doctor_franken_export_args_parse_flags() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "franken-export",
+            "--report",
+            "artifacts/doctor/core-report.json",
+            "--fixture-id",
+            "baseline_failure_path",
+            "--out-dir",
+            "target/e2e-results/doctor_frankensuite_export",
+        ])
+        .expect("parse doctor franken-export args");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::FrankenExport(args),
+        }) = cli.command
+        else {
+            panic!("expected doctor franken-export command");
+        };
+
+        assert_eq!(
+            args.report.as_deref(),
+            Some(Path::new("artifacts/doctor/core-report.json"))
+        );
+        assert_eq!(args.fixture_id.as_deref(), Some("baseline_failure_path"));
+        assert_eq!(
+            args.out_dir,
+            PathBuf::from("target/e2e-results/doctor_frankensuite_export")
+        );
+    }
+
+    #[test]
+    fn export_core_report_to_franken_artifacts_is_deterministic() {
+        let fixture = core_diagnostics_report_bundle()
+            .fixtures
+            .into_iter()
+            .find(|candidate| candidate.fixture_id == "baseline_failure_path")
+            .expect("fixture exists");
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let first = export_core_report_to_franken_artifacts(
+            fixture.fixture_id.as_str(),
+            &fixture.report,
+            temp.path(),
+        )
+        .expect("first export");
+        let second = export_core_report_to_franken_artifacts(
+            fixture.fixture_id.as_str(),
+            &fixture.report,
+            temp.path(),
+        )
+        .expect("second export");
+
+        assert_eq!(first.evidence_count, second.evidence_count);
+        assert_eq!(first.decision_count, second.decision_count);
+
+        let first_evidence = fs::read_to_string(&first.evidence_jsonl).expect("first evidence");
+        let second_evidence = fs::read_to_string(&second.evidence_jsonl).expect("second evidence");
+        assert_eq!(first_evidence, second_evidence);
+
+        let first_decision = fs::read_to_string(&first.decision_json).expect("first decision");
+        let second_decision = fs::read_to_string(&second.decision_json).expect("second decision");
+        assert_eq!(first_decision, second_decision);
+    }
+
+    #[test]
+    fn validate_exportable_core_report_rejects_unsupported_schema_version() {
+        let mut report = core_diagnostics_report_bundle()
+            .fixtures
+            .into_iter()
+            .next()
+            .expect("fixture exists")
+            .report;
+        report.schema_version = "doctor-core-report-v0".to_string();
+
+        let err = validate_exportable_core_report(&report).expect_err("expected version error");
+        assert_eq!(err.error_type, "doctor_export_error");
+        assert!(err.detail.contains("doctor-core-report-v0"));
+    }
+
+    #[test]
+    fn load_core_report_rejects_malformed_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("malformed_core_report.json");
+        fs::write(&path, "{ not-json ").expect("write malformed");
+
+        let err = load_core_report(&path).expect_err("expected parse failure");
+        assert_eq!(err.error_type, "doctor_export_error");
+        assert!(err.title.contains("parse core diagnostics report JSON"));
     }
 }

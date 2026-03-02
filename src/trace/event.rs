@@ -75,6 +75,33 @@ pub struct BrowserTraceSchema {
     pub compatibility: BrowserTraceCompatibility,
 }
 
+/// Browser capture source for deterministic replay reconstruction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserCaptureSource {
+    /// Runtime-originated event without explicit host sample metadata.
+    Runtime,
+    /// Host-time sample capture.
+    Time,
+    /// Host callback/event-loop sample capture.
+    Event,
+    /// External host input capture (user/input/network-originated trigger).
+    HostInput,
+}
+
+/// Deterministic capture metadata for browser trace events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserCaptureMetadata {
+    /// Monotonic host turn sequence provided by the browser adapter.
+    pub host_turn_seq: u64,
+    /// Capture source class.
+    pub source: BrowserCaptureSource,
+    /// Monotonic source-local sequence number.
+    pub source_seq: u64,
+    /// Host time sample in nanoseconds (`performance.now()`-derived).
+    pub host_time_ns: u64,
+}
+
 /// The kind of trace event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TraceEventKind {
@@ -357,6 +384,13 @@ fn split_required_fields_csv(csv: &str) -> Vec<String> {
     fields
 }
 
+fn trace_event_kind_from_stable_name(name: &str) -> Option<TraceEventKind> {
+    TraceEventKind::ALL
+        .iter()
+        .copied()
+        .find(|kind| kind.stable_name() == name)
+}
+
 fn validate_lexical_string_set(values: &[String], field: &str) -> Result<(), String> {
     if values.is_empty() {
         return Err(format!("{field} must be non-empty"));
@@ -409,10 +443,16 @@ pub fn browser_trace_schema_v1() -> BrowserTraceSchema {
                 .to_string(),
         ],
         structured_log_required_fields: vec![
+            "capture_host_time_ns".to_string(),
+            "capture_host_turn_seq".to_string(),
+            "capture_replay_key".to_string(),
+            "capture_source".to_string(),
+            "capture_source_seq".to_string(),
             "event_kind".to_string(),
             "schema_version".to_string(),
             "seq".to_string(),
             "sequence_group".to_string(),
+            "time_ns".to_string(),
             "trace_id".to_string(),
             "validation_failure_category".to_string(),
             "validation_status".to_string(),
@@ -462,11 +502,19 @@ pub fn validate_browser_trace_schema(schema: &BrowserTraceSchema) -> Result<(), 
     )?;
 
     for required in [
+        "capture_host_time_ns",
+        "capture_host_turn_seq",
+        "capture_replay_key",
+        "capture_source",
+        "capture_source_seq",
         "trace_id",
+        "time_ns",
         "seq",
+        "sequence_group",
         "event_kind",
         "schema_version",
         "validation_failure_category",
+        "validation_status",
     ] {
         if !schema
             .structured_log_required_fields
@@ -562,7 +610,48 @@ struct BrowserTraceSchemaLegacyV0 {
     schema_version: String,
     required_envelope_fields: Vec<String>,
     ordering_semantics: Vec<String>,
-    event_specs: Vec<BrowserTraceEventSpec>,
+    event_specs: Vec<BrowserTraceEventSpecLegacyV0>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserTraceEventSpecLegacyV0 {
+    event_kind: String,
+    category: Option<BrowserTraceCategory>,
+    required_fields: Option<Vec<String>>,
+    redacted_fields: Option<Vec<String>>,
+}
+
+fn upgrade_legacy_event_specs(
+    legacy_specs: Vec<BrowserTraceEventSpecLegacyV0>,
+) -> Result<Vec<BrowserTraceEventSpec>, String> {
+    let mut event_specs = Vec::with_capacity(legacy_specs.len());
+    for legacy in legacy_specs {
+        let kind = trace_event_kind_from_stable_name(legacy.event_kind.as_str())
+            .ok_or_else(|| format!("unknown legacy event kind {}", legacy.event_kind))?;
+
+        let mut required_fields = legacy
+            .required_fields
+            .unwrap_or_else(|| split_required_fields_csv(kind.required_fields()));
+        required_fields.sort();
+        required_fields.dedup();
+
+        let mut redacted_fields = legacy
+            .redacted_fields
+            .unwrap_or_else(|| redacted_fields_for_kind(kind));
+        redacted_fields.sort();
+        redacted_fields.dedup();
+
+        event_specs.push(BrowserTraceEventSpec {
+            event_kind: kind.stable_name().to_string(),
+            category: legacy
+                .category
+                .unwrap_or_else(|| browser_trace_category_for_kind(kind)),
+            required_fields,
+            redacted_fields,
+        });
+    }
+    event_specs.sort_by(|left, right| left.event_kind.cmp(&right.event_kind));
+    Ok(event_specs)
 }
 
 /// Decodes browser trace schema payload with backwards-compatible v0 support.
@@ -593,7 +682,7 @@ pub fn decode_browser_trace_schema(payload: &str) -> Result<BrowserTraceSchema, 
             let mut schema = browser_trace_schema_v1();
             schema.required_envelope_fields = legacy.required_envelope_fields;
             schema.ordering_semantics = legacy.ordering_semantics;
-            schema.event_specs = legacy.event_specs;
+            schema.event_specs = upgrade_legacy_event_specs(legacy.event_specs)?;
             schema.compatibility.backward_decode_aliases =
                 vec!["browser-trace-schema-v0".to_string()];
             schema.compatibility.minimum_reader_version = "browser-trace-schema-v0".to_string();
@@ -635,14 +724,70 @@ pub fn redact_browser_trace_event(event: &TraceEvent) -> TraceEvent {
     redacted
 }
 
+fn default_browser_capture_metadata(event: &TraceEvent) -> BrowserCaptureMetadata {
+    BrowserCaptureMetadata {
+        host_turn_seq: event.seq,
+        source: BrowserCaptureSource::Runtime,
+        source_seq: event.seq,
+        host_time_ns: event.time.as_nanos(),
+    }
+}
+
+fn browser_capture_replay_key(metadata: &BrowserCaptureMetadata) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        match metadata.source {
+            BrowserCaptureSource::Runtime => "runtime",
+            BrowserCaptureSource::Time => "time",
+            BrowserCaptureSource::Event => "event",
+            BrowserCaptureSource::HostInput => "host_input",
+        },
+        metadata.host_turn_seq,
+        metadata.source_seq,
+        metadata.host_time_ns
+    )
+}
+
 /// Returns deterministic structured-log fields for one browser trace event.
+///
+/// When `capture_metadata` is not provided, deterministic fallback values are
+/// reconstructed from event sequence and event time.
 #[must_use]
-pub fn browser_trace_log_fields(
+pub fn browser_trace_log_fields_with_capture(
     event: &TraceEvent,
     trace_id: &str,
     validation_failure_category: Option<&str>,
+    capture_metadata: Option<&BrowserCaptureMetadata>,
 ) -> BTreeMap<String, String> {
+    let capture = capture_metadata
+        .cloned()
+        .unwrap_or_else(|| default_browser_capture_metadata(event));
     let mut fields = BTreeMap::new();
+    fields.insert(
+        "capture_host_time_ns".to_string(),
+        capture.host_time_ns.to_string(),
+    );
+    fields.insert(
+        "capture_host_turn_seq".to_string(),
+        capture.host_turn_seq.to_string(),
+    );
+    fields.insert(
+        "capture_replay_key".to_string(),
+        browser_capture_replay_key(&capture),
+    );
+    fields.insert(
+        "capture_source".to_string(),
+        match capture.source {
+            BrowserCaptureSource::Runtime => "runtime".to_string(),
+            BrowserCaptureSource::Time => "time".to_string(),
+            BrowserCaptureSource::Event => "event".to_string(),
+            BrowserCaptureSource::HostInput => "host_input".to_string(),
+        },
+    );
+    fields.insert(
+        "capture_source_seq".to_string(),
+        capture.source_seq.to_string(),
+    );
     fields.insert(
         "event_kind".to_string(),
         event.kind.stable_name().to_string(),
@@ -674,6 +819,16 @@ pub fn browser_trace_log_fields(
         },
     );
     fields
+}
+
+/// Returns deterministic structured-log fields for one browser trace event.
+#[must_use]
+pub fn browser_trace_log_fields(
+    event: &TraceEvent,
+    trace_id: &str,
+    validation_failure_category: Option<&str>,
+) -> BTreeMap<String, String> {
+    browser_trace_log_fields_with_capture(event, trace_id, validation_failure_category, None)
 }
 
 impl fmt::Display for TraceEventKind {
@@ -2818,6 +2973,65 @@ mod tests {
     }
 
     #[test]
+    fn browser_trace_schema_decode_v0_sparse_event_specs_use_defaults() {
+        let event_specs = TraceEventKind::ALL
+            .iter()
+            .map(|kind| serde_json::json!({ "event_kind": kind.stable_name() }))
+            .collect::<Vec<_>>();
+        let legacy = serde_json::json!({
+            "schema_version": "browser-trace-schema-v0",
+            "required_envelope_fields": [
+                "event_kind",
+                "schema_version",
+                "seq",
+                "time_ns",
+                "trace_id"
+            ],
+            "ordering_semantics": [
+                "events must be strictly ordered by seq ascending",
+                "logical_time must be monotonic for comparable causal domains",
+                "trace streams must be deterministic for identical seed/config/replay inputs"
+            ],
+            "event_specs": event_specs
+        });
+        let payload = serde_json::to_string(&legacy).expect("serialize sparse legacy schema");
+        let decoded = decode_browser_trace_schema(&payload).expect("decode sparse legacy schema");
+
+        let user_trace = decoded
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "user_trace")
+            .expect("user_trace entry should exist");
+        assert_eq!(user_trace.category, BrowserTraceCategory::HostCallback);
+        assert_eq!(user_trace.required_fields, vec!["message".to_string()]);
+        assert_eq!(user_trace.redacted_fields, vec!["message".to_string()]);
+    }
+
+    #[test]
+    fn browser_trace_schema_decode_v0_unknown_event_kind_fails_closed() {
+        let legacy = serde_json::json!({
+            "schema_version": "browser-trace-schema-v0",
+            "required_envelope_fields": [
+                "event_kind",
+                "schema_version",
+                "seq",
+                "time_ns",
+                "trace_id"
+            ],
+            "ordering_semantics": [
+                "events must be strictly ordered by seq ascending",
+                "logical_time must be monotonic for comparable causal domains",
+                "trace streams must be deterministic for identical seed/config/replay inputs"
+            ],
+            "event_specs": [{ "event_kind": "not_a_real_event_kind" }]
+        });
+        let payload = serde_json::to_string(&legacy).expect("serialize invalid legacy schema");
+        let error = decode_browser_trace_schema(&payload)
+            .expect_err("unknown legacy event kinds must fail decode");
+        assert!(error.contains("unknown legacy event kind"));
+    }
+
+    #[test]
     fn browser_trace_redaction_masks_message_payloads() {
         let event = TraceEvent::user_trace(4, Time::ZERO, "secret-token");
         let redacted = redact_browser_trace_event(&event);
@@ -2844,10 +3058,60 @@ mod tests {
         assert_eq!(fields.get("trace_id"), Some(&"trace-browser-1".to_string()));
         assert_eq!(fields.get("event_kind"), Some(&"timer_fired".to_string()));
         assert_eq!(fields.get("seq"), Some(&"9".to_string()));
+        assert_eq!(fields.get("capture_source"), Some(&"runtime".to_string()));
+        assert_eq!(fields.get("capture_host_turn_seq"), Some(&"9".to_string()));
+        assert_eq!(fields.get("capture_source_seq"), Some(&"9".to_string()));
+        assert_eq!(fields.get("capture_host_time_ns"), Some(&"42".to_string()));
+        assert_eq!(
+            fields.get("capture_replay_key"),
+            Some(&"runtime:9:9:42".to_string())
+        );
         assert_eq!(fields.get("validation_status"), Some(&"valid".to_string()));
         assert_eq!(
             fields.get("validation_failure_category"),
             Some(&"none".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_with_capture_include_host_metadata() {
+        let event = TraceEvent::timer_fired(17, Time::from_nanos(200), 11);
+        let capture = BrowserCaptureMetadata {
+            host_turn_seq: 71,
+            source: BrowserCaptureSource::HostInput,
+            source_seq: 4,
+            host_time_ns: 9_001,
+        };
+        let fields =
+            browser_trace_log_fields_with_capture(&event, "trace-browser-2", None, Some(&capture));
+        assert_eq!(
+            fields.get("capture_source"),
+            Some(&"host_input".to_string())
+        );
+        assert_eq!(fields.get("capture_host_turn_seq"), Some(&"71".to_string()));
+        assert_eq!(fields.get("capture_source_seq"), Some(&"4".to_string()));
+        assert_eq!(
+            fields.get("capture_host_time_ns"),
+            Some(&"9001".to_string())
+        );
+        assert_eq!(
+            fields.get("capture_replay_key"),
+            Some(&"host_input:71:4:9001".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_mark_invalid_when_failure_category_is_set() {
+        let event = TraceEvent::timer_fired(9, Time::from_nanos(42), 10);
+        let fields =
+            browser_trace_log_fields(&event, "trace-browser-1", Some("schema_version_mismatch"));
+        assert_eq!(
+            fields.get("validation_status"),
+            Some(&"invalid".to_string())
+        );
+        assert_eq!(
+            fields.get("validation_failure_category"),
+            Some(&"schema_version_mismatch".to_string())
         );
     }
 }

@@ -3343,10 +3343,15 @@ pub fn is_valid_bootstrap_transition(from: NextjsBootstrapPhase, to: NextjsBoots
             NextjsBootstrapPhase::Hydrating
         ) | (
             NextjsBootstrapPhase::Hydrating,
-            NextjsBootstrapPhase::Hydrated
+            NextjsBootstrapPhase::Hydrated | NextjsBootstrapPhase::RuntimeFailed
         ) | (
             NextjsBootstrapPhase::Hydrated,
-            NextjsBootstrapPhase::RuntimeReady | NextjsBootstrapPhase::RuntimeFailed
+            NextjsBootstrapPhase::RuntimeReady
+                | NextjsBootstrapPhase::RuntimeFailed
+                | NextjsBootstrapPhase::ServerRendered
+        ) | (
+            NextjsBootstrapPhase::RuntimeReady | NextjsBootstrapPhase::RuntimeFailed,
+            NextjsBootstrapPhase::Hydrating | NextjsBootstrapPhase::ServerRendered
         )
     )
 }
@@ -3405,6 +3410,516 @@ pub struct NextjsIntegrationSnapshot {
     pub wasm_module_loaded: bool,
     /// Navigation events observed since last snapshot.
     pub navigation_count: u32,
+}
+
+/// Trigger that caused a bootstrap transition.
+///
+/// This keeps bootstrap logs deterministic and machine-readable so hydration
+/// and runtime-init behavior can be replayed and audited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsBootstrapTrigger {
+    /// Initial server-rendered state.
+    InitialState,
+    /// Hydration has started.
+    HydrationStarted,
+    /// Hydration completed successfully.
+    HydrationCompleted,
+    /// Runtime initialization completed successfully.
+    RuntimeInitSucceeded,
+    /// Runtime initialization failed.
+    RuntimeInitFailed,
+    /// Runtime initialization was cancelled.
+    RuntimeInitCancelled,
+    /// Retry after a runtime initialization failure.
+    RetryAfterFailure,
+    /// Navigation event (soft, hard, or popstate).
+    Navigation,
+    /// Hot reload / Fast Refresh event.
+    HotReload,
+}
+
+/// One deterministic bootstrap transition record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextjsBootstrapTransitionRecord {
+    /// Phase before transition processing.
+    pub from: NextjsBootstrapPhase,
+    /// Phase after transition processing.
+    pub to: NextjsBootstrapPhase,
+    /// Trigger that caused this transition.
+    pub trigger: NextjsBootstrapTrigger,
+    /// Optional deterministic detail payload.
+    pub detail: Option<String>,
+}
+
+/// Next.js client bootstrap state machine.
+///
+/// This tracks hydration-safe runtime initialization with explicit phase
+/// transitions, deterministic history, and idempotent re-entry behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextjsBootstrapState {
+    phase: NextjsBootstrapPhase,
+    hydration_cycle_count: u32,
+    runtime_generation: u32,
+    navigation_count: u32,
+    hot_reload_count: u32,
+    last_failure: Option<String>,
+    transition_log: Vec<NextjsBootstrapTransitionRecord>,
+}
+
+impl NextjsBootstrapState {
+    /// Creates a new bootstrap state at `ServerRendered`.
+    #[must_use]
+    pub fn new() -> Self {
+        let initial_phase = NextjsBootstrapPhase::ServerRendered;
+        Self {
+            phase: initial_phase,
+            hydration_cycle_count: 0,
+            runtime_generation: 0,
+            navigation_count: 0,
+            hot_reload_count: 0,
+            last_failure: None,
+            transition_log: vec![NextjsBootstrapTransitionRecord {
+                from: initial_phase,
+                to: initial_phase,
+                trigger: NextjsBootstrapTrigger::InitialState,
+                detail: None,
+            }],
+        }
+    }
+
+    /// Returns current bootstrap phase.
+    #[must_use]
+    pub fn phase(&self) -> NextjsBootstrapPhase {
+        self.phase
+    }
+
+    /// Returns number of hydration cycles observed.
+    #[must_use]
+    pub fn hydration_cycle_count(&self) -> u32 {
+        self.hydration_cycle_count
+    }
+
+    /// Returns runtime generation counter.
+    ///
+    /// This increments every time bootstrap reaches `RuntimeReady`.
+    #[must_use]
+    pub fn runtime_generation(&self) -> u32 {
+        self.runtime_generation
+    }
+
+    /// Returns number of navigation events processed.
+    #[must_use]
+    pub fn navigation_count(&self) -> u32 {
+        self.navigation_count
+    }
+
+    /// Returns number of hot-reload events processed.
+    #[must_use]
+    pub fn hot_reload_count(&self) -> u32 {
+        self.hot_reload_count
+    }
+
+    /// Returns last runtime initialization failure reason, if any.
+    #[must_use]
+    pub fn last_failure(&self) -> Option<&str> {
+        self.last_failure.as_deref()
+    }
+
+    /// Returns deterministic transition history.
+    #[must_use]
+    pub fn transition_log(&self) -> &[NextjsBootstrapTransitionRecord] {
+        &self.transition_log
+    }
+
+    /// Starts hydration.
+    ///
+    /// This is idempotent when already in `Hydrating`.
+    pub fn start_hydration(&mut self) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.transition(
+            NextjsBootstrapPhase::Hydrating,
+            NextjsBootstrapTrigger::HydrationStarted,
+            None,
+        )
+    }
+
+    /// Completes hydration.
+    ///
+    /// This is idempotent when already in `Hydrated`.
+    pub fn complete_hydration(&mut self) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.transition(
+            NextjsBootstrapPhase::Hydrated,
+            NextjsBootstrapTrigger::HydrationCompleted,
+            None,
+        )
+    }
+
+    /// Marks runtime initialization success.
+    ///
+    /// This is idempotent when already in `RuntimeReady`.
+    pub fn mark_runtime_ready(&mut self) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.transition(
+            NextjsBootstrapPhase::RuntimeReady,
+            NextjsBootstrapTrigger::RuntimeInitSucceeded,
+            None,
+        )
+    }
+
+    /// Marks runtime initialization failure with a deterministic reason.
+    pub fn mark_runtime_failed(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.transition(
+            NextjsBootstrapPhase::RuntimeFailed,
+            NextjsBootstrapTrigger::RuntimeInitFailed,
+            Some(reason.into()),
+        )
+    }
+
+    /// Marks runtime initialization cancellation with a deterministic reason.
+    pub fn mark_runtime_cancelled(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.transition(
+            NextjsBootstrapPhase::RuntimeFailed,
+            NextjsBootstrapTrigger::RuntimeInitCancelled,
+            Some(reason.into()),
+        )
+    }
+
+    /// Retries bootstrap after a previous runtime failure.
+    pub fn retry_after_failure(&mut self) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.transition(
+            NextjsBootstrapPhase::Hydrating,
+            NextjsBootstrapTrigger::RetryAfterFailure,
+            None,
+        )
+    }
+
+    /// Applies a navigation event to bootstrap state.
+    ///
+    /// Soft navigations preserve runtime state. Hard and popstate navigations
+    /// reset to `ServerRendered`.
+    pub fn on_navigation(
+        &mut self,
+        navigation: NextjsNavigationType,
+    ) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.navigation_count = self.navigation_count.saturating_add(1);
+        if navigation.runtime_survives() {
+            self.push_transition(
+                self.phase,
+                self.phase,
+                NextjsBootstrapTrigger::Navigation,
+                Some("soft_navigation".to_string()),
+            );
+            return Ok(false);
+        }
+
+        let detail = match navigation {
+            NextjsNavigationType::SoftNavigation => "soft_navigation",
+            NextjsNavigationType::HardNavigation => "hard_navigation",
+            NextjsNavigationType::PopState => "pop_state_navigation",
+        };
+
+        self.transition(
+            NextjsBootstrapPhase::ServerRendered,
+            NextjsBootstrapTrigger::Navigation,
+            Some(detail.to_string()),
+        )
+    }
+
+    /// Applies a hot-reload event (e.g., Fast Refresh).
+    ///
+    /// This forces re-hydration from active or failed runtime phases while
+    /// preserving deterministic bookkeeping.
+    pub fn on_hot_reload(&mut self) -> Result<bool, NextjsBootstrapTransitionError> {
+        self.hot_reload_count = self.hot_reload_count.saturating_add(1);
+        self.transition(
+            NextjsBootstrapPhase::Hydrating,
+            NextjsBootstrapTrigger::HotReload,
+            Some("fast_refresh".to_string()),
+        )
+    }
+
+    fn transition(
+        &mut self,
+        to: NextjsBootstrapPhase,
+        trigger: NextjsBootstrapTrigger,
+        detail: Option<String>,
+    ) -> Result<bool, NextjsBootstrapTransitionError> {
+        let from = self.phase;
+
+        if from != to {
+            validate_bootstrap_transition(from, to)?;
+            self.phase = to;
+        }
+
+        if to == NextjsBootstrapPhase::Hydrating && from != NextjsBootstrapPhase::Hydrating {
+            self.hydration_cycle_count = self.hydration_cycle_count.saturating_add(1);
+        }
+        if to == NextjsBootstrapPhase::RuntimeReady && from != NextjsBootstrapPhase::RuntimeReady {
+            self.runtime_generation = self.runtime_generation.saturating_add(1);
+            self.last_failure = None;
+        } else if to == NextjsBootstrapPhase::RuntimeFailed {
+            self.last_failure.clone_from(&detail);
+        }
+
+        self.push_transition(from, to, trigger, detail);
+        Ok(from != to)
+    }
+
+    fn push_transition(
+        &mut self,
+        from: NextjsBootstrapPhase,
+        to: NextjsBootstrapPhase,
+        trigger: NextjsBootstrapTrigger,
+        detail: Option<String>,
+    ) {
+        self.transition_log.push(NextjsBootstrapTransitionRecord {
+            from,
+            to,
+            trigger,
+            detail,
+        });
+    }
+}
+
+impl Default for NextjsBootstrapState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Suspense, Transitions, and Async Boundary Integration
+// ---------------------------------------------------------------------------
+//
+// These types define how WASM runtime outcomes map to React's async
+// rendering primitives:
+//
+// 1. **Suspense integration**: A running task maps to the "pending" state
+//    of a Suspense boundary. Task completion resolves the boundary; task
+//    failure triggers the nearest error boundary.
+//
+// 2. **Error boundary mapping**: Runtime outcomes (Err, Panic, Cancelled)
+//    each have distinct error boundary behavior. Panics are always fatal;
+//    errors may be retryable; cancellation is not an error (silent unmount).
+//
+// 3. **Transitions (startTransition)**: Tasks spawned within a transition
+//    keep the old UI visible until completion. Cancellation of a transition
+//    task reverts cleanly without UI flash.
+//
+// 4. **Progressive data loading**: Multiple tasks can feed a single Suspense
+//    boundary, with partial results rendered as they arrive. The boundary
+//    resolves when all required tasks complete.
+
+/// How a WASM runtime outcome maps to a React Suspense boundary state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuspenseBoundaryState {
+    /// Task is running; Suspense shows fallback UI.
+    Pending,
+    /// Task completed successfully; Suspense reveals content.
+    Resolved,
+    /// Task failed with a recoverable error; nearest error boundary triggered.
+    ErrorRecoverable,
+    /// Task panicked; nearest error boundary triggered with fatal flag.
+    ErrorFatal,
+    /// Task was cancelled (unmount, dep change, race loser).
+    /// Not an error — Suspense boundary simply unmounts or reverts.
+    Cancelled,
+}
+
+/// Maps a `WasmAbiOutcomeEnvelope` to the appropriate Suspense boundary state.
+#[must_use]
+pub fn outcome_to_suspense_state(outcome: &WasmAbiOutcomeEnvelope) -> SuspenseBoundaryState {
+    match outcome {
+        WasmAbiOutcomeEnvelope::Ok { .. } => SuspenseBoundaryState::Resolved,
+        WasmAbiOutcomeEnvelope::Err { failure } => match failure.recoverability {
+            WasmAbiRecoverability::Permanent => SuspenseBoundaryState::ErrorFatal,
+            WasmAbiRecoverability::Transient | WasmAbiRecoverability::Unknown => {
+                SuspenseBoundaryState::ErrorRecoverable
+            }
+        },
+        WasmAbiOutcomeEnvelope::Cancelled { .. } => SuspenseBoundaryState::Cancelled,
+        WasmAbiOutcomeEnvelope::Panicked { .. } => SuspenseBoundaryState::ErrorFatal,
+    }
+}
+
+/// Error boundary behavior for different outcome types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorBoundaryAction {
+    /// No error boundary involvement (success or cancellation).
+    None,
+    /// Show error UI with retry option.
+    ShowWithRetry,
+    /// Show error UI without retry (permanent failure).
+    ShowFatal,
+    /// Reset the error boundary (e.g., after successful retry).
+    Reset,
+}
+
+/// Maps a `WasmAbiOutcomeEnvelope` to the appropriate error boundary action.
+#[must_use]
+pub fn outcome_to_error_boundary_action(outcome: &WasmAbiOutcomeEnvelope) -> ErrorBoundaryAction {
+    match outcome {
+        WasmAbiOutcomeEnvelope::Ok { .. } | WasmAbiOutcomeEnvelope::Cancelled { .. } => {
+            ErrorBoundaryAction::None
+        }
+        WasmAbiOutcomeEnvelope::Err { failure } => match failure.recoverability {
+            WasmAbiRecoverability::Permanent => ErrorBoundaryAction::ShowFatal,
+            WasmAbiRecoverability::Transient | WasmAbiRecoverability::Unknown => {
+                ErrorBoundaryAction::ShowWithRetry
+            }
+        },
+        WasmAbiOutcomeEnvelope::Panicked { .. } => ErrorBoundaryAction::ShowFatal,
+    }
+}
+
+/// Context for a React transition (`startTransition`) that wraps runtime work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionTaskState {
+    /// Transition started; old UI remains visible.
+    Pending,
+    /// Task completed; transition commits new UI.
+    Committed,
+    /// Task failed; transition reverts to old UI.
+    Reverted,
+    /// Task cancelled; transition reverts cleanly.
+    Cancelled,
+}
+
+/// Maps a `WasmAbiOutcomeEnvelope` to a transition task state.
+#[must_use]
+pub fn outcome_to_transition_state(outcome: &WasmAbiOutcomeEnvelope) -> TransitionTaskState {
+    match outcome {
+        WasmAbiOutcomeEnvelope::Ok { .. } => TransitionTaskState::Committed,
+        WasmAbiOutcomeEnvelope::Err { .. } | WasmAbiOutcomeEnvelope::Panicked { .. } => {
+            TransitionTaskState::Reverted
+        }
+        WasmAbiOutcomeEnvelope::Cancelled { .. } => TransitionTaskState::Cancelled,
+    }
+}
+
+/// Configuration for Suspense-integrated task execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspenseTaskConfig {
+    /// Human-readable label for diagnostics.
+    pub label: String,
+    /// Whether this task participates in a `startTransition`.
+    pub is_transition: bool,
+    /// Whether the Suspense boundary should show fallback on retry.
+    pub show_fallback_on_retry: bool,
+    /// Maximum number of automatic retries for transient errors.
+    pub max_retries: u32,
+}
+
+impl Default for SuspenseTaskConfig {
+    fn default() -> Self {
+        Self {
+            label: "suspense-task".to_string(),
+            is_transition: false,
+            show_fallback_on_retry: true,
+            max_retries: 0,
+        }
+    }
+}
+
+/// Tracks the state of a task integrated with a Suspense boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspenseTaskSnapshot {
+    /// Task configuration.
+    pub config: SuspenseTaskConfig,
+    /// Current Suspense boundary state.
+    pub boundary_state: SuspenseBoundaryState,
+    /// Error boundary action (if any).
+    pub error_action: ErrorBoundaryAction,
+    /// Transition state (if this is a transition task).
+    pub transition_state: Option<TransitionTaskState>,
+    /// Handle to the underlying WASM task.
+    pub task_handle: Option<WasmHandleRef>,
+    /// Number of retries attempted.
+    pub retry_count: u32,
+    /// Whether the task is currently retrying (re-thrown promise).
+    pub is_retrying: bool,
+}
+
+/// Progressive loading slot within a Suspense boundary.
+///
+/// Models one data source in a multi-source Suspense boundary where
+/// partial results render as they arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressiveLoadSlot {
+    /// Slot label for diagnostics.
+    pub label: String,
+    /// Whether this slot is required for boundary resolution.
+    pub required: bool,
+    /// Current Suspense state for this slot.
+    pub state: SuspenseBoundaryState,
+    /// Handle to the underlying task.
+    pub task_handle: Option<WasmHandleRef>,
+}
+
+/// Snapshot of a multi-source progressive loading Suspense boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressiveLoadSnapshot {
+    /// All loading slots.
+    pub slots: Vec<ProgressiveLoadSlot>,
+    /// Overall boundary state (Pending if any required slot is Pending).
+    pub overall_state: SuspenseBoundaryState,
+}
+
+impl ProgressiveLoadSnapshot {
+    /// Computes the overall boundary state from individual slots.
+    #[must_use]
+    pub fn compute_overall_state(slots: &[ProgressiveLoadSlot]) -> SuspenseBoundaryState {
+        let mut has_pending_required = false;
+        let mut has_fatal = false;
+        let mut has_recoverable_error = false;
+
+        for slot in slots {
+            if !slot.required {
+                continue;
+            }
+            match slot.state {
+                SuspenseBoundaryState::Pending => has_pending_required = true,
+                SuspenseBoundaryState::ErrorFatal => has_fatal = true,
+                SuspenseBoundaryState::ErrorRecoverable => has_recoverable_error = true,
+                SuspenseBoundaryState::Resolved | SuspenseBoundaryState::Cancelled => {}
+            }
+        }
+
+        if has_fatal {
+            SuspenseBoundaryState::ErrorFatal
+        } else if has_recoverable_error {
+            SuspenseBoundaryState::ErrorRecoverable
+        } else if has_pending_required {
+            SuspenseBoundaryState::Pending
+        } else {
+            SuspenseBoundaryState::Resolved
+        }
+    }
+}
+
+/// Diagnostic event for Suspense/transition integration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspenseDiagnosticEvent {
+    /// Task label.
+    pub label: String,
+    /// Previous boundary state.
+    pub from_state: SuspenseBoundaryState,
+    /// New boundary state.
+    pub to_state: SuspenseBoundaryState,
+    /// Whether this was a transition task.
+    pub is_transition: bool,
+    /// Error boundary action taken.
+    pub error_action: ErrorBoundaryAction,
+    /// Handle involved.
+    pub task_handle: Option<WasmHandleRef>,
 }
 
 #[cfg(test)]
@@ -5652,8 +6167,13 @@ mod tests {
         use NextjsBootstrapPhase::*;
         assert!(is_valid_bootstrap_transition(ServerRendered, Hydrating));
         assert!(is_valid_bootstrap_transition(Hydrating, Hydrated));
+        assert!(is_valid_bootstrap_transition(Hydrating, RuntimeFailed));
         assert!(is_valid_bootstrap_transition(Hydrated, RuntimeReady));
         assert!(is_valid_bootstrap_transition(Hydrated, RuntimeFailed));
+        assert!(is_valid_bootstrap_transition(RuntimeReady, Hydrating));
+        assert!(is_valid_bootstrap_transition(RuntimeReady, ServerRendered));
+        assert!(is_valid_bootstrap_transition(RuntimeFailed, Hydrating));
+        assert!(is_valid_bootstrap_transition(RuntimeFailed, ServerRendered));
         // Identity
         assert!(is_valid_bootstrap_transition(Hydrated, Hydrated));
     }
@@ -5663,9 +6183,88 @@ mod tests {
         use NextjsBootstrapPhase::*;
         assert!(!is_valid_bootstrap_transition(ServerRendered, Hydrated));
         assert!(!is_valid_bootstrap_transition(ServerRendered, RuntimeReady));
-        assert!(!is_valid_bootstrap_transition(Hydrating, RuntimeReady));
-        assert!(!is_valid_bootstrap_transition(RuntimeReady, Hydrating));
+        assert!(!is_valid_bootstrap_transition(Hydrating, RuntimeReady)); // must pass through Hydrated
+        assert!(!is_valid_bootstrap_transition(RuntimeFailed, RuntimeReady)); // must retry hydration first
         assert!(validate_bootstrap_transition(ServerRendered, RuntimeReady).is_err());
+    }
+
+    #[test]
+    fn bootstrap_state_idempotent_hydration_reentry() {
+        let mut state = NextjsBootstrapState::new();
+        assert_eq!(state.phase(), NextjsBootstrapPhase::ServerRendered);
+
+        let changed = state.start_hydration().expect("start hydration");
+        assert!(changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::Hydrating);
+        assert_eq!(state.hydration_cycle_count(), 1);
+
+        let changed = state.start_hydration().expect("idempotent hydration start");
+        assert!(!changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::Hydrating);
+        assert_eq!(state.hydration_cycle_count(), 1);
+    }
+
+    #[test]
+    fn bootstrap_state_cancelled_then_retry_flow() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+        state.complete_hydration().expect("complete hydration");
+
+        state
+            .mark_runtime_cancelled("navigation interrupted")
+            .expect("mark cancelled");
+        assert_eq!(state.phase(), NextjsBootstrapPhase::RuntimeFailed);
+        assert_eq!(state.last_failure(), Some("navigation interrupted"));
+
+        let changed = state.retry_after_failure().expect("retry after failure");
+        assert!(changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::Hydrating);
+        assert_eq!(state.hydration_cycle_count(), 2);
+    }
+
+    #[test]
+    fn bootstrap_state_soft_navigation_is_non_destructive() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+        state.complete_hydration().expect("complete hydration");
+        state.mark_runtime_ready().expect("runtime ready");
+
+        let changed = state
+            .on_navigation(NextjsNavigationType::SoftNavigation)
+            .expect("soft navigation");
+        assert!(!changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::RuntimeReady);
+        assert_eq!(state.runtime_generation(), 1);
+        assert_eq!(state.navigation_count(), 1);
+    }
+
+    #[test]
+    fn bootstrap_state_hard_navigation_resets_phase() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+        state.complete_hydration().expect("complete hydration");
+        state.mark_runtime_ready().expect("runtime ready");
+
+        let changed = state
+            .on_navigation(NextjsNavigationType::HardNavigation)
+            .expect("hard navigation");
+        assert!(changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::ServerRendered);
+        assert_eq!(state.navigation_count(), 1);
+    }
+
+    #[test]
+    fn bootstrap_state_hot_reload_forces_rehydration() {
+        let mut state = NextjsBootstrapState::new();
+        state.start_hydration().expect("start hydration");
+        state.complete_hydration().expect("complete hydration");
+        state.mark_runtime_ready().expect("runtime ready");
+
+        let changed = state.on_hot_reload().expect("hot reload");
+        assert!(changed);
+        assert_eq!(state.phase(), NextjsBootstrapPhase::Hydrating);
+        assert_eq!(state.hot_reload_count(), 1);
+        assert_eq!(state.hydration_cycle_count(), 2);
     }
 
     #[test]

@@ -47,11 +47,16 @@ pub mod debug;
 pub mod extract;
 pub mod handler;
 pub mod middleware;
+pub mod nextjs_bootstrap;
 pub mod request_region;
 pub mod response;
 pub mod router;
 
 pub use extract::{Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State};
 pub use handler::Handler;
+pub use nextjs_bootstrap::{
+    BootstrapCommand, BootstrapLogEvent, BootstrapRecoveryAction, NextjsBootstrapConfig,
+    NextjsBootstrapError, NextjsBootstrapSnapshot, NextjsBootstrapState,
+};
 pub use response::{Html, IntoResponse, Json, Redirect, Response, StatusCode};
 pub use router::{MethodRouter, Router, delete, get, patch, post, put};

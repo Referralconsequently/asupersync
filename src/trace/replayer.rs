@@ -32,6 +32,7 @@
 //! This indicates either a bug in the code or trace corruption.
 
 use crate::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata};
+use serde::Serialize;
 use std::fmt;
 
 // =============================================================================
@@ -120,6 +121,46 @@ pub enum ReplayError {
         /// Found version.
         found: u32,
     },
+}
+
+/// Structured replay report for browser-incident and CI repro workflows.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrowserReplayReport {
+    /// Trace identifier used by diagnostics and artifacts.
+    pub trace_id: String,
+    /// Replay schema version.
+    pub schema_version: u32,
+    /// Recording seed.
+    pub seed: u64,
+    /// Total events in trace.
+    pub event_count: usize,
+    /// Events consumed by replayer.
+    pub replayed_events: usize,
+    /// True when replay consumed all events.
+    pub completed: bool,
+    /// Optional divergence index.
+    pub divergence_index: Option<usize>,
+    /// Optional divergence summary.
+    pub divergence_context: Option<String>,
+    /// Minimal replay prefix length for divergence reproduction.
+    pub minimization_prefix_len: Option<usize>,
+    /// Percentage reduction from full trace size for the minimal prefix.
+    pub minimization_reduction_pct: Option<u64>,
+    /// Optional artifact pointer for persisted report/replay payload.
+    pub artifact_pointer: Option<String>,
+    /// Deterministic rerun command bundle.
+    pub rerun_commands: Vec<String>,
+}
+
+impl BrowserReplayReport {
+    /// Serializes report to pretty JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when JSON serialization fails.
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 // =============================================================================
@@ -360,6 +401,56 @@ impl TraceReplayer {
     pub fn into_trace(self) -> ReplayTrace {
         self.trace
     }
+
+    /// Builds a structured replay report for CI/browser incident artifacts.
+    #[must_use]
+    pub fn browser_replay_report(
+        &self,
+        trace_id: impl Into<String>,
+        artifact_pointer: Option<impl Into<String>>,
+        rerun_commands: Vec<String>,
+        divergence: Option<&DivergenceError>,
+    ) -> BrowserReplayReport {
+        let (
+            divergence_index,
+            divergence_context,
+            minimization_prefix_len,
+            minimization_reduction_pct,
+        ) = divergence.map_or((None, None, None, None), |divergence| {
+            let prefix =
+                crate::trace::divergence::minimal_divergent_prefix(&self.trace, divergence.index);
+            let reduction_pct = minimization_reduction_pct(self.trace.len(), prefix.len());
+            (
+                Some(divergence.index),
+                Some(divergence.context.clone()),
+                Some(prefix.len()),
+                Some(reduction_pct),
+            )
+        });
+
+        BrowserReplayReport {
+            trace_id: trace_id.into(),
+            schema_version: self.trace.metadata.version,
+            seed: self.trace.metadata.seed,
+            event_count: self.trace.len(),
+            replayed_events: self.current_index,
+            completed: self.completed,
+            divergence_index,
+            divergence_context,
+            minimization_prefix_len,
+            minimization_reduction_pct,
+            artifact_pointer: artifact_pointer.map(Into::into),
+            rerun_commands,
+        }
+    }
+}
+
+fn minimization_reduction_pct(total: usize, prefix: usize) -> u64 {
+    if total == 0 || prefix >= total {
+        return 0;
+    }
+    let reduced = total - prefix;
+    ((reduced * 100) / total) as u64
 }
 
 // =============================================================================
@@ -964,5 +1055,70 @@ mod tests {
         let cloned = bp.clone();
         assert_eq!(bp, cloned);
         assert_ne!(bp, Breakpoint::EventIndex(7));
+    }
+
+    #[test]
+    fn browser_replay_report_without_divergence_records_completion() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+        ];
+        let mut replayer = TraceReplayer::new(make_trace(events.clone()));
+        for event in &events {
+            replayer.verify_and_advance(event).expect("self-consistent");
+        }
+
+        let report = replayer.browser_replay_report(
+            "trace-browser-ok",
+            Some("artifacts/replay/browser-ok.json"),
+            vec!["asupersync lab replay --seed 42".to_string()],
+            None,
+        );
+        assert_eq!(report.trace_id, "trace-browser-ok");
+        assert_eq!(report.event_count, 2);
+        assert_eq!(report.replayed_events, 2);
+        assert!(report.completed);
+        assert!(report.divergence_index.is_none());
+        assert!(report.minimization_prefix_len.is_none());
+        assert_eq!(
+            report.artifact_pointer,
+            Some("artifacts/replay/browser-ok.json".to_string())
+        );
+
+        let json = report.to_json_pretty().expect("serialize report");
+        assert!(json.contains("trace-browser-ok"));
+        assert!(json.contains("rerun_commands"));
+    }
+
+    #[test]
+    fn browser_replay_report_with_divergence_includes_minimization_hint() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0,
+            },
+        ];
+        let replayer = TraceReplayer::new(make_trace(events));
+        let bad = ReplayEvent::RngSeed { seed: 999 };
+        let divergence = replayer.verify(&bad).expect_err("expected divergence");
+        let report = replayer.browser_replay_report(
+            "trace-browser-div",
+            None::<&str>,
+            vec!["asupersync lab replay --seed 42 --window-start 0 --window-events 1".to_string()],
+            Some(&divergence),
+        );
+        assert_eq!(report.divergence_index, Some(0));
+        assert!(report.divergence_context.is_some());
+        assert_eq!(report.minimization_prefix_len, Some(1));
+        assert_eq!(report.minimization_reduction_pct, Some(66));
+        assert!(!report.rerun_commands.is_empty());
     }
 }

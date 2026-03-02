@@ -15350,6 +15350,41 @@ impl RuntimeState {
     }
 
     #[test]
+    fn orchestration_state_machine_requires_seed_for_replay_template() {
+        let contract = scenario_composer_contract();
+        let request = ScenarioRunRequest {
+            run_id: "run-no-seed".to_string(),
+            template_id: "scenario_cancel_recovery".to_string(),
+            correlation_id: "corr-no-seed".to_string(),
+            seed: String::new(),
+            priority_override: None,
+            requested_by: "doctor_cli".to_string(),
+        };
+        let err = compose_scenario_run(&contract, &request).expect_err("must fail");
+        assert!(
+            err.contains("seed must be non-empty for templates requiring replay seed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn orchestration_state_machine_trims_seed_and_run_id_for_lineage() {
+        let contract = scenario_composer_contract();
+        let request = ScenarioRunRequest {
+            run_id: " run-trim ".to_string(),
+            template_id: "scenario_cancel_recovery".to_string(),
+            correlation_id: "corr-trim".to_string(),
+            seed: " seed-77 ".to_string(),
+            priority_override: None,
+            requested_by: "doctor_cli".to_string(),
+        };
+        let entry = compose_scenario_run(&contract, &request).expect("compose should succeed");
+        assert_eq!(entry.queue_id, "queue-run-trim");
+        assert_eq!(entry.run_id, "run-trim");
+        assert_eq!(entry.seed, "seed-77");
+    }
+
+    #[test]
     fn build_scenario_run_queue_orders_by_priority_then_run_id() {
         let contract = scenario_composer_contract();
         let requests = vec![
@@ -15460,6 +15495,119 @@ impl RuntimeState {
     }
 
     #[test]
+    fn orchestration_state_machine_dispatch_is_deterministic_and_preserves_entries() {
+        let contract = scenario_composer_contract();
+        let requests = vec![
+            ScenarioRunRequest {
+                run_id: "run-c".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-c".to_string(),
+                seed: String::new(),
+                priority_override: Some(180),
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-a".to_string(),
+                template_id: "scenario_cancel_recovery".to_string(),
+                correlation_id: "corr-a".to_string(),
+                seed: "seed-a".to_string(),
+                priority_override: Some(220),
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-d".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-d".to_string(),
+                seed: String::new(),
+                priority_override: Some(120),
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-b".to_string(),
+                template_id: "scenario_regression_bundle".to_string(),
+                correlation_id: "corr-b".to_string(),
+                seed: "seed-b".to_string(),
+                priority_override: Some(220),
+                requested_by: "doctor_cli".to_string(),
+            },
+        ];
+        let queue = build_scenario_run_queue(&contract, &requests).expect("queue should build");
+        let first = dispatch_scenario_run_queue(&contract, &queue).expect("first dispatch");
+        let second = dispatch_scenario_run_queue(&contract, &queue).expect("second dispatch");
+
+        assert_eq!(first, second, "dispatch order must be deterministic");
+        assert_eq!(
+            first.len(),
+            requests.len(),
+            "dispatch must preserve entries"
+        );
+
+        let ordered = first
+            .iter()
+            .map(|entry| entry.run_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["run-a", "run-b", "run-c", "run-d"]);
+        assert_eq!(
+            first
+                .iter()
+                .filter(|entry| entry.state == "running")
+                .count(),
+            usize::from(contract.queue_policy.max_concurrent_runs)
+        );
+        assert!(
+            first
+                .iter()
+                .all(|entry| entry.state == "running" || entry.state == "queued")
+        );
+    }
+
+    #[test]
+    fn orchestration_state_machine_transition_matrix_matches_contract() {
+        let contract = execution_adapter_contract();
+        let states = [
+            "planned",
+            "queued",
+            "running",
+            "cancel_requested",
+            "succeeded",
+            "failed",
+            "cancelled",
+        ];
+        let triggers = [
+            "enqueue",
+            "start",
+            "cancel",
+            "process_exit_zero",
+            "process_exit_nonzero",
+            "cancel_completed",
+            "cancel_timeout",
+        ];
+
+        let allowed = contract
+            .state_transitions
+            .iter()
+            .map(|transition| {
+                (
+                    (transition.from_state.as_str(), transition.trigger.as_str()),
+                    transition.to_state.as_str(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for state in states {
+            for trigger in triggers {
+                let next = advance_execution_state(&contract, state, trigger);
+                if let Some(expected) = allowed.get(&(state, trigger)) {
+                    assert_eq!(next.expect("valid transition"), *expected);
+                } else {
+                    let err = next.expect_err("transition should be rejected");
+                    assert!(err.contains("invalid execution state transition"), "{err}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn e2e_harness_core_contract_validates() {
         let contract = e2e_harness_core_contract();
         validate_e2e_harness_core_contract(&contract).expect("valid harness contract");
@@ -15563,6 +15711,41 @@ impl RuntimeState {
         let stages = vec!["stage bootstrap".to_string()];
         let err = build_e2e_harness_transcript(&contract, &config, &stages).expect_err("must fail");
         assert!(err.contains("must be slug-like"), "{err}");
+    }
+
+    #[test]
+    fn orchestration_state_machine_cancelled_transcript_terminal_state() {
+        let contract = e2e_harness_core_contract();
+        let raw = BTreeMap::from([
+            ("correlation_id".to_string(), "corr-e2e".to_string()),
+            ("expected_outcome".to_string(), "cancelled".to_string()),
+            ("requested_by".to_string(), "doctor_cli".to_string()),
+            ("run_id".to_string(), "run-cancel".to_string()),
+            ("scenario_id".to_string(), "scenario-cancel".to_string()),
+            ("script_id".to_string(), "script-cancel".to_string()),
+            ("seed".to_string(), "seed-77".to_string()),
+            ("timeout_secs".to_string(), "120".to_string()),
+        ]);
+        let config = parse_e2e_harness_config(&contract, &raw).expect("parse");
+        let stages = vec![
+            "stage-bootstrap".to_string(),
+            "stage-run".to_string(),
+            "stage-cleanup".to_string(),
+        ];
+        let transcript =
+            build_e2e_harness_transcript(&contract, &config, &stages).expect("transcript");
+
+        assert_eq!(transcript.events[0].state, "started");
+        assert_eq!(transcript.events[1].state, "running");
+        assert_eq!(transcript.events[2].state, "cancelled");
+        assert_eq!(transcript.events[2].outcome_class, "cancelled");
+
+        let seeds = transcript
+            .events
+            .iter()
+            .map(|event| event.propagated_seed.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(seeds.len(), stages.len(), "stage seeds must remain unique");
     }
 
     #[test]
