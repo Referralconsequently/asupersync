@@ -40,13 +40,29 @@ When combining outcomes, **worst wins** (monotone aggregation).
 
 ### 1.3 Cancel Reasons
 
+> **Rule IDs**: `def.cancel.reason_kinds` (#7), `def.cancel.severity_ordering` (#8), `def.cancel.reason_ordering` (#32)
+
 ```
 CancelReason ::= { kind: CancelKind, message: Option<String> }
 
-CancelKind ::= User | Timeout | FailFast | ParentCancelled | Shutdown
+CancelKind ::=
+  | User                     // severity 0 — graceful, user-initiated
+  | Timeout | Deadline       // severity 1 — time-driven
+  | PollQuota | CostBudget   // severity 2 — budget violation
+  | FailFast | RaceLost      // severity 3 — cascading
+  | LinkedExit               // severity 3 — cascading (linked task exit)
+  | ParentCancelled          // severity 4 — cascading (parent region)
+  | ResourceUnavailable      // severity 4 — cascading (resource)
+  | Shutdown                 // severity 5 — urgent, minimal cleanup
 
-Severity: User < Timeout < FailFast < ParentCancelled < Shutdown
+Severity tiers (total order):
+  User(0) < Timeout=Deadline(1) < PollQuota=CostBudget(2)
+         < FailFast=RaceLost=LinkedExit(3)
+         < ParentCancelled=ResourceUnavailable(4) < Shutdown(5)
 ```
+
+Strengthen combines two reasons by taking the more severe kind (max on severity)
+and the tighter budget (min on deadlines/quotas). See `inv.cancel.idempotence` (#5).
 
 ### 1.4 Budgets
 
@@ -373,7 +389,7 @@ This captures the lane priority model without committing to a specific queue imp
 
 ### 3.1 Task Lifecycle
 
-#### SPAWN — Create task in region
+#### SPAWN — Create task in region (`rule.ownership.spawn` #36)
 
 ```
 Preconditions:
@@ -428,6 +444,12 @@ Preconditions:
 
 ### 3.2 Cancellation Protocol
 
+> **Rule IDs**: `rule.cancel.request` (#1), `rule.cancel.acknowledge` (#2),
+> `rule.cancel.drain` (#3), `rule.cancel.finalize` (#4),
+> `inv.cancel.idempotence` (#5), `inv.cancel.propagates_down` (#6),
+> `rule.cancel.checkpoint_masked` (#10),
+> `inv.cancel.mask_bounded` (#11), `inv.cancel.mask_monotone` (#12)
+
 Cancellation flows through a well-defined state machine:
 
 ```
@@ -464,7 +486,7 @@ Finalizing → Completed(Cancelled)
 
 These guards make cancellation **phase-structured** rather than an ambient flag.
 
-#### 3.2.2 Idempotence (proof sketch)
+#### 3.2.2 Idempotence (proof sketch) — `inv.cancel.idempotence` (#5)
 
 Cancellation requests are **idempotent**:
 
@@ -476,7 +498,7 @@ Because `strengthen` is associative, commutative, and idempotent (max on severit
 min on deadlines), repeated cancel requests only **tighten** the reason; they never
 weaken or duplicate state.
 
-#### 3.2.3 Bounded cleanup (proof sketch)
+#### 3.2.3 Bounded cleanup (proof sketch) — `prog.cancel.drains` (#9)
 
 Under fair scheduling and **sufficient cleanup budgets**, every task that enters
 `CancelRequested` eventually reaches `Completed(Cancelled)`:
@@ -546,7 +568,7 @@ This automaton makes two properties explicit:
 - **Idempotence:** repeated Request events only strengthen reason and tighten budget.
 - **Monotonicity:** budgets never increase across cancellation phases.
 
-#### CANCEL-REQUEST — Initiate cancellation
+#### CANCEL-REQUEST — Initiate cancellation (`rule.cancel.request` #1, `inv.cancel.propagates_down` #6)
 
 ```
 Σ —[cancel(r, reason)]→ Σ' where:
@@ -572,7 +594,7 @@ strengthen(Some(old), new) = Some({
 })
 ```
 
-#### CANCEL-ACKNOWLEDGE — Task observes cancellation at checkpoint
+#### CANCEL-ACKNOWLEDGE — Task observes cancellation at checkpoint (`rule.cancel.acknowledge` #2)
 
 ```
 Preconditions:
@@ -585,7 +607,7 @@ Preconditions:
   T'[t].cont = resume(T[t].cont, Cancelled(reason))
 ```
 
-#### CHECKPOINT-MASKED — Defer cancellation (bounded masking)
+#### CHECKPOINT-MASKED — Defer cancellation (bounded masking) (`rule.cancel.checkpoint_masked` #10, `inv.cancel.mask_bounded` #11)
 
 ```
 Preconditions:
@@ -612,7 +634,7 @@ Winning condition: System wins iff every cancellation request is eventually ackn
 
 This perspective turns “bounded masking” into a mathematical promise: if every primitive has a known bound on its cancellation deferrals (mask depth) and checkpoint frequency, then there exists a computable budget that makes System’s winning strategy guaranteed.
 
-#### CANCEL-DRAIN — Task finishes cleanup
+#### CANCEL-DRAIN — Task finishes cleanup (`rule.cancel.drain` #3)
 
 ```
 Preconditions:
@@ -623,7 +645,7 @@ Preconditions:
   T'[t].state = Finalizing(default_finalizer_budget)
 ```
 
-#### CANCEL-FINALIZE — Task runs local finalizers
+#### CANCEL-FINALIZE — Task runs local finalizers (`rule.cancel.finalize` #4)
 
 ```
 Preconditions:
@@ -641,7 +663,7 @@ Preconditions:
 
 Regions close in phases: Closing → Draining → Finalizing → Closed
 
-#### CLOSE-BEGIN — Region starts closing
+#### CLOSE-BEGIN — Region starts closing (`rule.region.close_begin` #22)
 
 ```
 Preconditions:
@@ -652,7 +674,7 @@ Preconditions:
   R'[r].state = Closing
 ```
 
-#### CLOSE-CANCEL-CHILDREN — Cancel remaining children
+#### CLOSE-CANCEL-CHILDREN — Cancel remaining children (`rule.region.close_cancel_children` #23)
 
 ```
 Preconditions:
@@ -664,7 +686,7 @@ Preconditions:
   // CANCEL-REQUEST applied to all non-complete children
 ```
 
-#### CLOSE-CHILDREN-DONE — All children terminated
+#### CLOSE-CHILDREN-DONE — All children terminated (`rule.region.close_children_done` #24)
 
 ```
 Preconditions:
@@ -676,7 +698,7 @@ Preconditions:
   R'[r].state = Finalizing
 ```
 
-#### CLOSE-RUN-FINALIZER — Execute finalizer (LIFO)
+#### CLOSE-RUN-FINALIZER — Execute finalizer (LIFO) (`rule.region.close_run_finalizer` #25)
 
 ```
 Preconditions:
@@ -688,7 +710,7 @@ Preconditions:
   R'[r].finalizers = rest
 ```
 
-#### CLOSE-COMPLETE — Region fully closed
+#### CLOSE-COMPLETE — Region fully closed (`rule.region.close_complete` #26)
 
 ```
 Preconditions:
@@ -711,7 +733,7 @@ The obligation registry gives operational teeth to the linear resource disciplin
 * `commit/abort` resolve it,
 * `leak` is the explicit error transition when a task terminates while still holding one.
 
-#### RESERVE — Acquire obligation
+#### RESERVE — Acquire obligation (`rule.obligation.reserve` #13)
 
 ```
 Preconditions:
@@ -724,7 +746,7 @@ Preconditions:
   T'[t].cont = resume(T[t].cont, Ok(o))
 ```
 
-#### COMMIT — Fulfill obligation
+#### COMMIT — Fulfill obligation (`rule.obligation.commit` #14)
 
 ```
 Preconditions:
@@ -737,7 +759,7 @@ Preconditions:
   // Effect takes place (message sent, etc.)
 ```
 
-#### ABORT — Cancel obligation
+#### ABORT — Cancel obligation (`rule.obligation.abort` #15)
 
 ```
 Preconditions:
@@ -749,7 +771,7 @@ Preconditions:
   // Capacity released, no effect occurred
 ```
 
-#### LEAK — Obligation lost (error state)
+#### LEAK — Obligation lost (error state) (`rule.obligation.leak` #16, `inv.obligation.no_leak` #17)
 
 ```
 Preconditions:
@@ -1040,21 +1062,21 @@ timeout(r, d, f) =
 
 These must hold in all reachable states:
 
-### INV-TREE: Ownership tree structure
+### INV-TREE: Ownership tree structure (`def.ownership.region_tree` #35)
 
 ```
 ∀r ∈ dom(R):
   r = root ∨ (R[r].parent ∈ dom(R) ∧ r ∈ R[R[r].parent].subregions)
 ```
 
-### INV-TASK-OWNED: Every live task has an owner
+### INV-TASK-OWNED: Every live task has an owner (`inv.ownership.task_owned` #34)
 
 ```
 ∀t ∈ dom(T):
   T[t].state ≠ Completed(_) ⟹ t ∈ R[T[t].region].children
 ```
 
-### INV-QUIESCENCE: Closed regions have no live children
+### INV-QUIESCENCE: Closed regions have no live children (`inv.region.quiescence` #27)
 
 ```
 ∀r ∈ dom(R):
@@ -1078,7 +1100,7 @@ Thus, any region that reaches `Closed(_)` must satisfy the quiescence predicate
 `Quiescent(r)` definition (§1.12). This is a safety property (invariant), and
 progress (eventual closure) is handled separately in §6.
 
-### INV-CANCEL-PROPAGATES: Cancel flows downward
+### INV-CANCEL-PROPAGATES: Cancel flows downward (`inv.cancel.propagates_down` #6)
 
 ```
 ∀r ∈ dom(R):
@@ -1086,7 +1108,7 @@ progress (eventual closure) is handled separately in §6.
     ∀r' ∈ R[r].subregions: R[r'].cancel = Some(_)
 ```
 
-### INV-OBLIGATION-BOUNDED: Reserved obligations have live holders
+### INV-OBLIGATION-BOUNDED: Reserved obligations have live holders (`inv.obligation.bounded` #19)
 
 ```
 ∀o ∈ dom(O):
@@ -1094,7 +1116,7 @@ progress (eventual closure) is handled separately in §6.
     T[O[o].holder].state ∈ {Running, CancelRequested(_), Cancelling(_), Finalizing(_)}
 ```
 
-### INV-OBLIGATION-LINEAR: Obligations resolve at most once
+### INV-OBLIGATION-LINEAR: Obligations resolve at most once (`inv.obligation.linear` #18)
 
 ```
 ∀o ∈ dom(O):
@@ -1103,7 +1125,7 @@ progress (eventual closure) is handled separately in §6.
 
 Equivalently: once an obligation is resolved, it cannot be “resolved again” by any transition.
 
-### INV-LEDGER-EMPTY-ON-CLOSE: Closed regions have no reserved obligations
+### INV-LEDGER-EMPTY-ON-CLOSE: Closed regions have no reserved obligations (`inv.obligation.ledger_empty_on_close` #20)
 
 ```
 ∀r ∈ dom(R):
@@ -1112,7 +1134,7 @@ Equivalently: once an obligation is resolved, it cannot be “resolved again” 
 
 This follows from linearity plus the `CLOSE-COMPLETE` precondition.
 
-### INV-MASK-BOUNDED: Masking is finite and monotone
+### INV-MASK-BOUNDED: Masking is finite and monotone (`inv.cancel.mask_bounded` #11, `inv.cancel.mask_monotone` #12)
 
 ```
 ∀t ∈ dom(T):
@@ -1121,14 +1143,14 @@ This follows from linearity plus the `CLOSE-COMPLETE` precondition.
 
 This ensures cancellation is not indefinitely deferrable without consuming an explicit budget.
 
-### INV-DEADLINE-MONOTONE: Children can't outlive parents
+### INV-DEADLINE-MONOTONE: Children can't outlive parents (`inv.cancel.mask_bounded` #11, `inv.obligation.bounded` #19)
 
 ```
 ∀r ∈ dom(R), ∀r' ∈ R[r].subregions:
   deadline(R[r']) ≤ deadline(R[r])    // Tighter or equal
 ```
 
-### INV-LOSER-DRAINED: Race losers always complete
+### INV-LOSER-DRAINED: Race losers always complete (`inv.combinator.loser_drained` #40)
 
 ```
 After race(f1, f2) returns:
@@ -1173,21 +1195,21 @@ T[t].state ∈ {Created, Running} ∧ fair
   ⟹ eventually T[t].state = Completed(_)
 ```
 
-### PROG-CANCEL: Cancelled tasks drain
+### PROG-CANCEL: Cancelled tasks drain (`prog.cancel.drains` #9)
 
 ```
 T[t].state = CancelRequested(_) ∧ fair
   ⟹ eventually T[t].state = Completed(Cancelled(_))
 ```
 
-### PROG-REGION: Closing regions close
+### PROG-REGION: Closing regions close (`prog.region.close_terminates` #28)
 
 ```
 R[r].state = Closing ∧ fair
   ⟹ eventually R[r].state = Closed(_)
 ```
 
-### PROG-OBLIGATION: Obligations resolve
+### PROG-OBLIGATION: Obligations resolve (`prog.obligation.resolves` #21)
 
 ```
 O[o].state = Reserved ∧ fair
@@ -1266,7 +1288,7 @@ Verifier obligations:
 * `side` is well-formed and its referenced summaries/witnesses validate.
 * Hashing/ordering constraints are deterministic and stable across runs.
 
-### LAW-JOIN-ASSOC
+### LAW-JOIN-ASSOC (`law.join.assoc` #42)
 
 ```
 join(join(a, b), c) ≃ join(a, join(b, c))
@@ -1278,19 +1300,19 @@ join(join(a, b), c) ≃ join(a, join(b, c))
 join(a, b) ≃ join(b, a)   // Outcomes may be reordered
 ```
 
-### LAW-RACE-COMM
+### LAW-RACE-COMM (`law.race.comm` #43)
 
 ```
 race(a, b) ≃ race(b, a)   // Winner depends on schedule
 ```
 
-### LAW-TIMEOUT-MIN
+### LAW-TIMEOUT-MIN (`comb.timeout` #39)
 
 ```
 timeout(d1, timeout(d2, f)) ≃ timeout(min(d1, d2), f)
 ```
 
-### LAW-RACE-NEVER
+### LAW-RACE-NEVER (`law.race.never_abandon` #41)
 
 ```
 race(f, never) ≃ f
