@@ -724,6 +724,517 @@ impl BrowserTransportIoCap {
     }
 }
 
+/// Entropy source classes exposed through browser capability checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntropySourceKind {
+    /// Browser Web Crypto random values source.
+    WebCrypto,
+    /// Deterministic seeded source for replay/lab harnesses.
+    DeterministicSeeded,
+}
+
+/// Entropy operation classes requiring explicit authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntropyOperation {
+    /// Generate a single `u64`.
+    NextU64,
+    /// Fill a byte buffer of the requested size.
+    FillBytes,
+}
+
+/// Request envelope for entropy authority checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntropyRequest {
+    /// Entropy source backing the request.
+    pub source: EntropySourceKind,
+    /// Requested operation.
+    pub operation: EntropyOperation,
+    /// Requested byte length for [`EntropyOperation::FillBytes`].
+    pub byte_len: usize,
+}
+
+impl EntropyRequest {
+    /// Creates a request for a `next_u64` style operation.
+    #[must_use]
+    pub fn next_u64(source: EntropySourceKind) -> Self {
+        Self {
+            source,
+            operation: EntropyOperation::NextU64,
+            byte_len: 8,
+        }
+    }
+
+    /// Creates a request for a `fill_bytes` operation.
+    #[must_use]
+    pub fn fill_bytes(source: EntropySourceKind, byte_len: usize) -> Self {
+        Self {
+            source,
+            operation: EntropyOperation::FillBytes,
+            byte_len,
+        }
+    }
+}
+
+/// Deterministic policy errors for entropy capability checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntropyPolicyError {
+    /// Entropy source is outside explicit authority.
+    SourceDenied(EntropySourceKind),
+    /// Operation is outside explicit authority.
+    OperationDenied(EntropyOperation),
+    /// Requested byte length exceeds policy.
+    ByteLengthExceeded {
+        /// Requested byte length.
+        requested: usize,
+        /// Maximum byte length allowed by policy.
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for EntropyPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceDenied(source) => write!(f, "entropy source denied by policy: {source:?}"),
+            Self::OperationDenied(operation) => {
+                write!(f, "entropy operation denied by policy: {operation:?}")
+            }
+            Self::ByteLengthExceeded { requested, limit } => {
+                write!(
+                    f,
+                    "entropy byte length {requested} exceeds policy limit {limit}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for EntropyPolicyError {}
+
+/// Explicit authority boundaries for entropy operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntropyAuthority {
+    /// Allowed entropy source classes.
+    pub allowed_sources: Vec<EntropySourceKind>,
+    /// Allowed entropy operations.
+    pub allowed_operations: Vec<EntropyOperation>,
+    /// Maximum allowed byte length for fill operations.
+    pub max_fill_bytes: usize,
+}
+
+impl Default for EntropyAuthority {
+    fn default() -> Self {
+        Self::deny_all()
+    }
+}
+
+impl EntropyAuthority {
+    /// Creates an authority with no grants (default-deny posture).
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self {
+            allowed_sources: Vec::new(),
+            allowed_operations: Vec::new(),
+            max_fill_bytes: 0,
+        }
+    }
+
+    /// Grants authority for a specific entropy source class.
+    #[must_use]
+    pub fn grant_source(mut self, source: EntropySourceKind) -> Self {
+        if !self.allowed_sources.contains(&source) {
+            self.allowed_sources.push(source);
+        }
+        self
+    }
+
+    /// Grants authority for a specific entropy operation.
+    #[must_use]
+    pub fn grant_operation(mut self, operation: EntropyOperation) -> Self {
+        if !self.allowed_operations.contains(&operation) {
+            self.allowed_operations.push(operation);
+        }
+        self
+    }
+
+    /// Sets maximum allowed byte length for fill operations.
+    #[must_use]
+    pub fn with_max_fill_bytes(mut self, max_fill_bytes: usize) -> Self {
+        self.max_fill_bytes = max_fill_bytes;
+        self
+    }
+}
+
+/// Entropy capability interface surfaced through [`IoCap`].
+pub trait EntropyIoCap: Send + Sync + Debug {
+    /// Validates a request against explicit authority and limits.
+    fn authorize(&self, request: &EntropyRequest) -> Result<(), EntropyPolicyError>;
+
+    /// Returns true when deterministic entropy fallback is available.
+    fn deterministic_fallback_enabled(&self) -> bool;
+}
+
+/// Browser-oriented entropy adapter carrying explicit authority and policy.
+#[derive(Debug, Clone)]
+pub struct BrowserEntropyIoCap {
+    authority: EntropyAuthority,
+    deterministic_fallback: bool,
+}
+
+impl BrowserEntropyIoCap {
+    /// Creates a new browser entropy capability adapter.
+    #[must_use]
+    pub fn new(authority: EntropyAuthority, deterministic_fallback: bool) -> Self {
+        Self {
+            authority,
+            deterministic_fallback,
+        }
+    }
+}
+
+/// Time source classes exposed through browser capability checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimeSourceKind {
+    /// Monotonic browser time (`performance.now`).
+    PerformanceNow,
+    /// Wall-clock browser time (`Date.now`).
+    DateNow,
+    /// Deterministic virtual time source.
+    DeterministicVirtual,
+}
+
+/// Time operation classes requiring explicit authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimeOperation {
+    /// Read current time.
+    Now,
+    /// Schedule one-shot timeout.
+    Sleep,
+    /// Schedule repeating interval callback.
+    Interval,
+}
+
+/// Request envelope for time authority checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeRequest {
+    /// Time source backing the request.
+    pub source: TimeSourceKind,
+    /// Requested operation.
+    pub operation: TimeOperation,
+    /// Duration in milliseconds for timer operations.
+    pub duration_ms: Option<u64>,
+}
+
+impl TimeRequest {
+    /// Creates a `now()` request.
+    #[must_use]
+    pub fn now(source: TimeSourceKind) -> Self {
+        Self {
+            source,
+            operation: TimeOperation::Now,
+            duration_ms: None,
+        }
+    }
+
+    /// Creates a one-shot timer request.
+    #[must_use]
+    pub fn sleep(source: TimeSourceKind, duration_ms: u64) -> Self {
+        Self {
+            source,
+            operation: TimeOperation::Sleep,
+            duration_ms: Some(duration_ms),
+        }
+    }
+
+    /// Creates a repeating interval request.
+    #[must_use]
+    pub fn interval(source: TimeSourceKind, duration_ms: u64) -> Self {
+        Self {
+            source,
+            operation: TimeOperation::Interval,
+            duration_ms: Some(duration_ms),
+        }
+    }
+}
+
+/// Deterministic policy errors for time capability checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimePolicyError {
+    /// Time source is outside explicit authority.
+    SourceDenied(TimeSourceKind),
+    /// Operation is outside explicit authority.
+    OperationDenied(TimeOperation),
+    /// Timer operation omitted required duration.
+    MissingDuration(TimeOperation),
+    /// Requested duration falls below policy floor.
+    DurationBelowMinimum {
+        /// Requested duration in milliseconds.
+        requested_ms: u64,
+        /// Minimum duration in milliseconds.
+        minimum_ms: u64,
+    },
+    /// Requested duration exceeds policy ceiling.
+    DurationAboveMaximum {
+        /// Requested duration in milliseconds.
+        requested_ms: u64,
+        /// Maximum duration in milliseconds.
+        maximum_ms: u64,
+    },
+}
+
+impl std::fmt::Display for TimePolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceDenied(source) => write!(f, "time source denied by policy: {source:?}"),
+            Self::OperationDenied(operation) => {
+                write!(f, "time operation denied by policy: {operation:?}")
+            }
+            Self::MissingDuration(operation) => {
+                write!(f, "time operation requires duration: {operation:?}")
+            }
+            Self::DurationBelowMinimum {
+                requested_ms,
+                minimum_ms,
+            } => write!(
+                f,
+                "time duration {requested_ms}ms below policy minimum {minimum_ms}ms"
+            ),
+            Self::DurationAboveMaximum {
+                requested_ms,
+                maximum_ms,
+            } => write!(
+                f,
+                "time duration {requested_ms}ms exceeds policy maximum {maximum_ms}ms"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TimePolicyError {}
+
+/// Explicit authority boundaries for time operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeAuthority {
+    /// Allowed time source classes.
+    pub allowed_sources: Vec<TimeSourceKind>,
+    /// Allowed time operations.
+    pub allowed_operations: Vec<TimeOperation>,
+    /// Minimum allowed timer duration in milliseconds.
+    pub min_duration_ms: u64,
+    /// Maximum allowed timer duration in milliseconds.
+    pub max_duration_ms: u64,
+}
+
+impl Default for TimeAuthority {
+    fn default() -> Self {
+        Self::deny_all()
+    }
+}
+
+impl TimeAuthority {
+    /// Creates an authority with no grants (default-deny posture).
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self {
+            allowed_sources: Vec::new(),
+            allowed_operations: Vec::new(),
+            min_duration_ms: 0,
+            max_duration_ms: 0,
+        }
+    }
+
+    /// Grants authority for a specific time source class.
+    #[must_use]
+    pub fn grant_source(mut self, source: TimeSourceKind) -> Self {
+        if !self.allowed_sources.contains(&source) {
+            self.allowed_sources.push(source);
+        }
+        self
+    }
+
+    /// Grants authority for a specific time operation.
+    #[must_use]
+    pub fn grant_operation(mut self, operation: TimeOperation) -> Self {
+        if !self.allowed_operations.contains(&operation) {
+            self.allowed_operations.push(operation);
+        }
+        self
+    }
+
+    /// Sets minimum allowed timer duration.
+    #[must_use]
+    pub fn with_min_duration_ms(mut self, min_duration_ms: u64) -> Self {
+        self.min_duration_ms = min_duration_ms;
+        self
+    }
+
+    /// Sets maximum allowed timer duration.
+    #[must_use]
+    pub fn with_max_duration_ms(mut self, max_duration_ms: u64) -> Self {
+        self.max_duration_ms = max_duration_ms;
+        self
+    }
+}
+
+/// Time capability interface surfaced through [`IoCap`].
+pub trait TimeIoCap: Send + Sync + Debug {
+    /// Validates a request against explicit authority and limits.
+    fn authorize(&self, request: &TimeRequest) -> Result<(), TimePolicyError>;
+
+    /// Returns true when monotonic time source is mandatory.
+    fn require_monotonic(&self) -> bool;
+}
+
+/// Browser-oriented time adapter carrying explicit authority and policy.
+#[derive(Debug, Clone)]
+pub struct BrowserTimeIoCap {
+    authority: TimeAuthority,
+    require_monotonic: bool,
+}
+
+impl BrowserTimeIoCap {
+    /// Creates a new browser time capability adapter.
+    #[must_use]
+    pub fn new(authority: TimeAuthority, require_monotonic: bool) -> Self {
+        Self {
+            authority,
+            require_monotonic,
+        }
+    }
+}
+
+/// Host API surfaces requiring explicit authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostApiSurface {
+    /// Browser cryptographic API surface.
+    Crypto,
+    /// Browser performance timing API surface.
+    Performance,
+    /// One-shot timers (`setTimeout` style).
+    TimeoutScheduler,
+    /// Repeating timers (`setInterval` style).
+    IntervalScheduler,
+    /// Worker/message channel bridging.
+    MessageChannel,
+}
+
+/// Request envelope for host API authority checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostApiRequest {
+    /// Requested host API surface.
+    pub surface: HostApiSurface,
+    /// Request requires degraded-mode fallback path.
+    pub degraded_mode: bool,
+}
+
+impl HostApiRequest {
+    /// Creates a request for host API access.
+    #[must_use]
+    pub fn new(surface: HostApiSurface) -> Self {
+        Self {
+            surface,
+            degraded_mode: false,
+        }
+    }
+
+    /// Marks request as degraded-mode fallback.
+    #[must_use]
+    pub fn with_degraded_mode(mut self) -> Self {
+        self.degraded_mode = true;
+        self
+    }
+}
+
+/// Deterministic policy errors for host API capability checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostApiPolicyError {
+    /// Host API surface is outside explicit authority.
+    SurfaceDenied(HostApiSurface),
+    /// Request requires degraded mode but policy disallows it.
+    DegradedModeDenied(HostApiSurface),
+}
+
+impl std::fmt::Display for HostApiPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SurfaceDenied(surface) => write!(f, "host API surface denied: {surface:?}"),
+            Self::DegradedModeDenied(surface) => {
+                write!(f, "host API degraded mode denied: {surface:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HostApiPolicyError {}
+
+/// Explicit authority boundaries for host API surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostApiAuthority {
+    /// Allowed host API surfaces.
+    pub allowed_surfaces: Vec<HostApiSurface>,
+    /// Whether degraded mode fallback calls are allowed.
+    pub allow_degraded_mode: bool,
+}
+
+impl Default for HostApiAuthority {
+    fn default() -> Self {
+        Self::deny_all()
+    }
+}
+
+impl HostApiAuthority {
+    /// Creates an authority with no grants (default-deny posture).
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self {
+            allowed_surfaces: Vec::new(),
+            allow_degraded_mode: false,
+        }
+    }
+
+    /// Grants authority for a specific host API surface.
+    #[must_use]
+    pub fn grant_surface(mut self, surface: HostApiSurface) -> Self {
+        if !self.allowed_surfaces.contains(&surface) {
+            self.allowed_surfaces.push(surface);
+        }
+        self
+    }
+
+    /// Enables degraded-mode fallback behavior.
+    #[must_use]
+    pub fn with_degraded_mode_allowed(mut self) -> Self {
+        self.allow_degraded_mode = true;
+        self
+    }
+}
+
+/// Host API capability interface surfaced through [`IoCap`].
+pub trait HostApiIoCap: Send + Sync + Debug {
+    /// Validates a request against explicit authority policy.
+    fn authorize(&self, request: &HostApiRequest) -> Result<(), HostApiPolicyError>;
+
+    /// Returns true when redaction-safe diagnostics are mandatory.
+    fn require_redaction_safe_diagnostics(&self) -> bool;
+}
+
+/// Browser host API adapter carrying explicit authority and policy.
+#[derive(Debug, Clone)]
+pub struct BrowserHostApiIoCap {
+    authority: HostApiAuthority,
+    require_redaction_safe_diagnostics: bool,
+}
+
+impl BrowserHostApiIoCap {
+    /// Creates a new browser host API capability adapter.
+    #[must_use]
+    pub fn new(authority: HostApiAuthority, require_redaction_safe_diagnostics: bool) -> Self {
+        Self {
+            authority,
+            require_redaction_safe_diagnostics,
+        }
+    }
+}
+
 /// Browser storage backend target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StorageBackend {
@@ -1185,6 +1696,30 @@ pub trait IoCap: Send + Sync + Debug {
     /// Most I/O capabilities do not expose browser storage semantics and return
     /// `None`. Browser-oriented adapters return `Some(...)`.
     fn storage_cap(&self) -> Option<&dyn StorageIoCap> {
+        None
+    }
+
+    /// Returns the entropy adapter capability, when available.
+    ///
+    /// Most I/O capabilities do not expose browser entropy semantics and return
+    /// `None`. Browser-oriented adapters return `Some(...)`.
+    fn entropy_cap(&self) -> Option<&dyn EntropyIoCap> {
+        None
+    }
+
+    /// Returns the time adapter capability, when available.
+    ///
+    /// Most I/O capabilities do not expose browser time semantics and return
+    /// `None`. Browser-oriented adapters return `Some(...)`.
+    fn time_cap(&self) -> Option<&dyn TimeIoCap> {
+        None
+    }
+
+    /// Returns the host API adapter capability, when available.
+    ///
+    /// Most I/O capabilities do not expose browser host API policy and return
+    /// `None`. Browser-oriented adapters return `Some(...)`.
+    fn host_api_cap(&self) -> Option<&dyn HostApiIoCap> {
         None
     }
 }

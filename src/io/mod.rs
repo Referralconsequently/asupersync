@@ -73,14 +73,18 @@ pub use browser_stream::{
 pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
 pub use cap::{
-    BrowserFetchIoCap, BrowserStorageIoCap, BrowserTransportAuthority,
-    BrowserTransportCancellationPolicy, BrowserTransportIoCap, BrowserTransportKind,
-    BrowserTransportPolicyError, BrowserTransportReconnectPolicy, BrowserTransportRequest,
-    BrowserTransportSupport, FetchAuthority, FetchCancellationPolicy, FetchIoCap, FetchMethod,
-    FetchPolicyError, FetchRequest, FetchStreamPolicy, FetchTimeoutPolicy, IoCap, IoNotAvailable,
+    BrowserEntropyIoCap, BrowserFetchIoCap, BrowserHostApiIoCap, BrowserStorageIoCap,
+    BrowserTimeIoCap, BrowserTransportAuthority, BrowserTransportCancellationPolicy,
+    BrowserTransportIoCap, BrowserTransportKind, BrowserTransportPolicyError,
+    BrowserTransportReconnectPolicy, BrowserTransportRequest, BrowserTransportSupport,
+    EntropyAuthority, EntropyIoCap, EntropyOperation, EntropyPolicyError, EntropyRequest,
+    EntropySourceKind, FetchAuthority, FetchCancellationPolicy, FetchIoCap, FetchMethod,
+    FetchPolicyError, FetchRequest, FetchStreamPolicy, FetchTimeoutPolicy, HostApiAuthority,
+    HostApiIoCap, HostApiPolicyError, HostApiRequest, HostApiSurface, IoCap, IoNotAvailable,
     LabIoCap, StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap,
     StorageOperation, StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy,
-    StorageRequest, TransportIoCap,
+    StorageRequest, TimeAuthority, TimeIoCap, TimeOperation, TimePolicyError, TimeRequest,
+    TimeSourceKind, TransportIoCap,
 };
 pub use lines::Lines;
 pub use std::io::SeekFrom;
