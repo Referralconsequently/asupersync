@@ -31,8 +31,9 @@ pub use sqlite::{SqliteConnection, SqliteError, SqliteRow, SqliteTransaction, Sq
 
 #[cfg(feature = "postgres")]
 pub use postgres::{
-    PgColumn, PgConnectOptions, PgConnection, PgError, PgRow, PgTransaction, PgValue, SslMode,
-    oid as pg_oid,
+    Format as PgFormat, FromSql as PgFromSql, IsNull as PgIsNull, PgColumn, PgConnectOptions,
+    PgConnection, PgError, PgRow, PgStatement, PgTransaction, PgValue, SslMode,
+    ToSql as PgToSql, oid as pg_oid,
 };
 
 #[cfg(feature = "mysql")]

@@ -318,6 +318,440 @@ impl fmt::Display for PgValue {
     }
 }
 
+// ============================================================================
+// Type-safe Parameter Encoding/Decoding (Extended Query Protocol)
+// ============================================================================
+
+/// Wire format for parameter and result values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// Text format (default for Simple Query Protocol).
+    Text = 0,
+    /// Binary format (more efficient for numeric types).
+    Binary = 1,
+}
+
+/// Indicates whether a parameter value is NULL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsNull {
+    /// Value is SQL NULL.
+    Yes,
+    /// Value is not NULL.
+    No,
+}
+
+/// Encode a Rust value into a PostgreSQL wire-format parameter.
+///
+/// Implementations write binary-format bytes into `buf` and return
+/// [`IsNull::No`], or write nothing and return [`IsNull::Yes`] for NULL.
+///
+/// # Extensibility
+///
+/// Downstream crates can implement this for custom PostgreSQL types
+/// (pgvector, PostGIS, etc.):
+///
+/// ```ignore
+/// impl ToSql for PgVector {
+///     fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+///         for &v in &self.0 {
+///             buf.extend_from_slice(&v.to_be_bytes());
+///         }
+///         Ok(IsNull::No)
+///     }
+///     fn type_oid(&self) -> u32 { 0 } // let server infer
+/// }
+/// ```
+pub trait ToSql {
+    /// Encode this value into `buf`. Return [`IsNull::Yes`] for NULL
+    /// (leaving `buf` unmodified).
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError>;
+
+    /// PostgreSQL type OID. Return `0` to let the server infer.
+    fn type_oid(&self) -> u32;
+
+    /// Wire format for this parameter. Defaults to [`Format::Binary`].
+    fn format(&self) -> Format {
+        Format::Binary
+    }
+}
+
+/// Decode a PostgreSQL wire-format value into a Rust type.
+///
+/// # Extensibility
+///
+/// Downstream crates can implement this for custom types:
+///
+/// ```ignore
+/// impl FromSql for PgVector {
+///     fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+///         // parse text or binary representation
+///         todo!()
+///     }
+///     fn accepts(oid: u32) -> bool { true } // pgvector OID is dynamic
+/// }
+/// ```
+pub trait FromSql: Sized {
+    /// Decode a non-NULL value from raw wire bytes.
+    fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError>;
+
+    /// Decode a SQL NULL. Defaults to returning an error.
+    fn from_sql_null() -> Result<Self, PgError> {
+        Err(PgError::Protocol("unexpected NULL value".to_string()))
+    }
+
+    /// Whether this type can decode values with the given OID.
+    fn accepts(oid: u32) -> bool;
+}
+
+// ---- Built-in ToSql implementations ----
+
+impl ToSql for bool {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.push(u8::from(*self));
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::BOOL
+    }
+}
+
+impl ToSql for i16 {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(&self.to_be_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::INT2
+    }
+}
+
+impl ToSql for i32 {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(&self.to_be_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::INT4
+    }
+}
+
+impl ToSql for i64 {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(&self.to_be_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::INT8
+    }
+}
+
+impl ToSql for f32 {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(&self.to_be_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::FLOAT4
+    }
+}
+
+impl ToSql for f64 {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(&self.to_be_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::FLOAT8
+    }
+}
+
+impl ToSql for str {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(self.as_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::TEXT
+    }
+    fn format(&self) -> Format {
+        Format::Text
+    }
+}
+
+impl ToSql for String {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(self.as_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::TEXT
+    }
+    fn format(&self) -> Format {
+        Format::Text
+    }
+}
+
+impl ToSql for [u8] {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(self);
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::BYTEA
+    }
+}
+
+impl ToSql for Vec<u8> {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(self);
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::BYTEA
+    }
+}
+
+impl<T: ToSql> ToSql for Option<T> {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        match self {
+            Some(v) => v.to_sql(buf),
+            None => Ok(IsNull::Yes),
+        }
+    }
+    fn type_oid(&self) -> u32 {
+        match self {
+            Some(v) => v.type_oid(),
+            None => 0,
+        }
+    }
+    fn format(&self) -> Format {
+        match self {
+            Some(v) => v.format(),
+            None => Format::Binary,
+        }
+    }
+}
+
+impl<T: ToSql + ?Sized> ToSql for &T {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        (*self).to_sql(buf)
+    }
+    fn type_oid(&self) -> u32 {
+        (*self).type_oid()
+    }
+    fn format(&self) -> Format {
+        (*self).format()
+    }
+}
+
+// ---- Built-in FromSql implementations ----
+
+impl FromSql for bool {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Binary => Ok(data.first() == Some(&1)),
+            Format::Text => {
+                let s = std::str::from_utf8(data)
+                    .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                Ok(matches!(s, "t" | "true" | "1" | "yes" | "on"))
+            }
+        }
+    }
+    fn accepts(oid: u32) -> bool {
+        oid == oid::BOOL
+    }
+}
+
+impl FromSql for i16 {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Binary => {
+                if data.len() < 2 {
+                    return Err(PgError::Protocol("int2 requires 2 bytes".into()));
+                }
+                Ok(i16::from_be_bytes([data[0], data[1]]))
+            }
+            Format::Text => {
+                let s = std::str::from_utf8(data)
+                    .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                s.parse()
+                    .map_err(|e| PgError::Protocol(format!("invalid int2: {e}")))
+            }
+        }
+    }
+    fn accepts(oid: u32) -> bool {
+        oid == oid::INT2
+    }
+}
+
+impl FromSql for i32 {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Binary => {
+                if data.len() < 4 {
+                    return Err(PgError::Protocol("int4 requires 4 bytes".into()));
+                }
+                Ok(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+            }
+            Format::Text => {
+                let s = std::str::from_utf8(data)
+                    .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                s.parse()
+                    .map_err(|e| PgError::Protocol(format!("invalid int4: {e}")))
+            }
+        }
+    }
+    fn accepts(oid: u32) -> bool {
+        matches!(oid, oid::INT4 | oid::OID)
+    }
+}
+
+impl FromSql for i64 {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Binary => {
+                if data.len() < 8 {
+                    return Err(PgError::Protocol("int8 requires 8 bytes".into()));
+                }
+                Ok(i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]))
+            }
+            Format::Text => {
+                let s = std::str::from_utf8(data)
+                    .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                s.parse()
+                    .map_err(|e| PgError::Protocol(format!("invalid int8: {e}")))
+            }
+        }
+    }
+    fn accepts(oid: u32) -> bool {
+        oid == oid::INT8
+    }
+}
+
+impl FromSql for f32 {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Binary => {
+                if data.len() < 4 {
+                    return Err(PgError::Protocol("float4 requires 4 bytes".into()));
+                }
+                Ok(f32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+            }
+            Format::Text => {
+                let s = std::str::from_utf8(data)
+                    .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                s.parse()
+                    .map_err(|e| PgError::Protocol(format!("invalid float4: {e}")))
+            }
+        }
+    }
+    fn accepts(oid: u32) -> bool {
+        oid == oid::FLOAT4
+    }
+}
+
+impl FromSql for f64 {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Binary => {
+                if data.len() < 8 {
+                    return Err(PgError::Protocol("float8 requires 8 bytes".into()));
+                }
+                Ok(f64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]))
+            }
+            Format::Text => {
+                let s = std::str::from_utf8(data)
+                    .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                s.parse()
+                    .map_err(|e| PgError::Protocol(format!("invalid float8: {e}")))
+            }
+        }
+    }
+    fn accepts(oid: u32) -> bool {
+        oid == oid::FLOAT8
+    }
+}
+
+impl FromSql for String {
+    fn from_sql(data: &[u8], _oid: u32, _format: Format) -> Result<Self, PgError> {
+        std::str::from_utf8(data)
+            .map(|s| s.to_string())
+            .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))
+    }
+    fn accepts(oid: u32) -> bool {
+        matches!(
+            oid,
+            oid::TEXT
+                | oid::VARCHAR
+                | oid::CHAR
+                | oid::JSON
+                | oid::JSONB
+                | oid::UUID
+                | oid::DATE
+                | oid::TIMESTAMP
+                | oid::TIMESTAMPTZ
+        )
+    }
+}
+
+impl FromSql for Vec<u8> {
+    fn from_sql(data: &[u8], _oid: u32, format: Format) -> Result<Self, PgError> {
+        match format {
+            Format::Binary => Ok(data.to_vec()),
+            Format::Text => {
+                let s = std::str::from_utf8(data)
+                    .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))?;
+                if let Some(hex_str) = s.strip_prefix("\\x") {
+                    hex::decode(hex_str)
+                        .map_err(|e| PgError::Protocol(format!("invalid bytea hex: {e}")))
+                } else {
+                    Ok(data.to_vec())
+                }
+            }
+        }
+    }
+    fn accepts(oid: u32) -> bool {
+        oid == oid::BYTEA
+    }
+}
+
+impl<T: FromSql> FromSql for Option<T> {
+    fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError> {
+        T::from_sql(data, oid, format).map(Some)
+    }
+    fn from_sql_null() -> Result<Self, PgError> {
+        Ok(None)
+    }
+    fn accepts(oid: u32) -> bool {
+        T::accepts(oid)
+    }
+}
+
+/// Convert a [`PgValue`] to text-format bytes for [`FromSql`] decoding.
+fn pg_value_to_text_bytes(val: &PgValue) -> Vec<u8> {
+    match val {
+        PgValue::Null => unreachable!("caller must handle NULL"),
+        PgValue::Bool(b) => {
+            if *b {
+                b"t".to_vec()
+            } else {
+                b"f".to_vec()
+            }
+        }
+        PgValue::Int2(v) => v.to_string().into_bytes(),
+        PgValue::Int4(v) => v.to_string().into_bytes(),
+        PgValue::Int8(v) => v.to_string().into_bytes(),
+        PgValue::Float4(v) => v.to_string().into_bytes(),
+        PgValue::Float8(v) => v.to_string().into_bytes(),
+        PgValue::Text(s) => s.as_bytes().to_vec(),
+        PgValue::Bytes(b) => b.clone(),
+    }
+}
+
 /// A row from a PostgreSQL query result.
 #[derive(Debug, Clone)]
 pub struct PgRow {
@@ -405,6 +839,48 @@ impl PgRow {
     pub fn columns(&self) -> &[PgColumn] {
         &self.columns
     }
+
+    /// Get a typed value by column name using the [`FromSql`] trait.
+    ///
+    /// This works for rows from both the Simple Query and Extended Query
+    /// protocols. For Simple Query rows, values are re-encoded to text-format
+    /// bytes before calling [`FromSql::from_sql`].
+    ///
+    /// ```ignore
+    /// let id: i32 = row.get_typed("id")?;
+    /// let name: String = row.get_typed("name")?;
+    /// let score: Option<f64> = row.get_typed("score")?;
+    /// ```
+    pub fn get_typed<T: FromSql>(&self, column: &str) -> Result<T, PgError> {
+        let idx = self
+            .column_indices
+            .get(column)
+            .ok_or_else(|| PgError::ColumnNotFound(column.to_string()))?;
+        let col = &self.columns[*idx];
+        let val = &self.values[*idx];
+        if val.is_null() {
+            return T::from_sql_null();
+        }
+        let bytes = pg_value_to_text_bytes(val);
+        T::from_sql(&bytes, col.type_oid, Format::Text)
+    }
+
+    /// Get a typed value by column index using the [`FromSql`] trait.
+    pub fn get_typed_idx<T: FromSql>(&self, idx: usize) -> Result<T, PgError> {
+        let col = self
+            .columns
+            .get(idx)
+            .ok_or_else(|| PgError::ColumnNotFound(format!("index {idx}")))?;
+        let val = self
+            .values
+            .get(idx)
+            .ok_or_else(|| PgError::ColumnNotFound(format!("index {idx}")))?;
+        if val.is_null() {
+            return T::from_sql_null();
+        }
+        let bytes = pg_value_to_text_bytes(val);
+        T::from_sql(&bytes, col.type_oid, Format::Text)
+    }
 }
 
 // ============================================================================
@@ -446,6 +922,7 @@ enum BackendMessage {
     /// Backend key data.
     BackendKeyData = b'K',
     /// Bind complete.
+    #[allow(dead_code)]
     BindComplete = b'2',
     /// Close complete.
     CloseComplete = b'3',
@@ -455,9 +932,13 @@ enum BackendMessage {
     DataRow = b'D',
     /// Error response.
     ErrorResponse = b'E',
+    /// No data (prepared statement returns no columns).
+    #[allow(dead_code)]
+    NoData = b'n',
     /// Notice response.
     NoticeResponse = b'N',
     /// Parameter description.
+    #[allow(dead_code)]
     ParameterDescription = b't',
     /// Parameter status.
     ParameterStatus = b'S',
@@ -964,6 +1445,8 @@ struct PgConnectionInner {
     transaction_status: u8,
     /// Whether the connection is closed.
     closed: bool,
+    /// Counter for generating unique prepared statement names.
+    next_stmt_id: u32,
 }
 
 impl Drop for PgConnectionInner {
@@ -1044,6 +1527,7 @@ impl PgConnection {
                 parameters: BTreeMap::new(),
                 transaction_status: b'I', // Idle
                 closed: false,
+                next_stmt_id: 0,
             },
         };
 
@@ -1592,6 +2076,364 @@ impl PgConnection {
     }
 
     // ========================================================================
+    // Extended Query Protocol — parameterized queries
+    // ========================================================================
+
+    /// Execute a parameterized query using the Extended Query Protocol.
+    ///
+    /// Parameters use `$1`, `$2`, ... placeholders in SQL. This prevents
+    /// SQL injection and enables type-safe binary parameter encoding.
+    ///
+    /// ```ignore
+    /// let rows = conn.query_params(cx,
+    ///     "SELECT id, name FROM users WHERE active = $1 AND age > $2",
+    ///     &[&true, &21i32],
+    /// ).await?;
+    /// for row in &rows {
+    ///     let id: i32 = row.get_typed("id")?;
+    ///     let name: String = row.get_typed("name")?;
+    /// }
+    /// ```
+    pub async fn query_params(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Vec<PgRow>, PgError> {
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
+        let parse = build_parse_msg("", sql, &param_oids);
+        let bind = match build_bind_msg("", "", params, Format::Text) {
+            Ok(b) => b,
+            Err(e) => return Outcome::Err(e),
+        };
+        let describe = build_describe_msg(b'P', "");
+        let execute = build_execute_msg("", 0);
+        let sync = build_sync_msg();
+
+        // Combine into single write for reduced syscalls.
+        let total = parse.len() + bind.len() + describe.len() + execute.len() + sync.len();
+        let mut combined = Vec::with_capacity(total);
+        combined.extend_from_slice(&parse);
+        combined.extend_from_slice(&bind);
+        combined.extend_from_slice(&describe);
+        combined.extend_from_slice(&execute);
+        combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.write_all(&combined).await {
+            return Outcome::Err(e);
+        }
+
+        self.read_extended_query_results().await
+    }
+
+    /// Execute a parameterized query and return the first row.
+    pub async fn query_one_params(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Option<PgRow>, PgError> {
+        match self.query_params(cx, sql, params).await {
+            Outcome::Ok(mut rows) => {
+                if rows.is_empty() {
+                    Outcome::Ok(None)
+                } else {
+                    Outcome::Ok(Some(rows.remove(0)))
+                }
+            }
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(r) => Outcome::Cancelled(r),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
+    /// Execute a parameterized command (INSERT, UPDATE, DELETE) using the
+    /// Extended Query Protocol. Returns the number of affected rows.
+    ///
+    /// ```ignore
+    /// let affected = conn.execute_params(cx,
+    ///     "UPDATE users SET active = $1 WHERE id = $2",
+    ///     &[&false, &42i32],
+    /// ).await?;
+    /// ```
+    pub async fn execute_params(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Outcome<u64, PgError> {
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
+        let parse = build_parse_msg("", sql, &param_oids);
+        let bind = match build_bind_msg("", "", params, Format::Text) {
+            Ok(b) => b,
+            Err(e) => return Outcome::Err(e),
+        };
+        let execute = build_execute_msg("", 0);
+        let sync = build_sync_msg();
+
+        let total = parse.len() + bind.len() + execute.len() + sync.len();
+        let mut combined = Vec::with_capacity(total);
+        combined.extend_from_slice(&parse);
+        combined.extend_from_slice(&bind);
+        combined.extend_from_slice(&execute);
+        combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.write_all(&combined).await {
+            return Outcome::Err(e);
+        }
+
+        self.read_extended_execute_results().await
+    }
+
+    /// Prepare a named statement for repeated execution.
+    ///
+    /// The server parses the SQL once and returns parameter/result metadata.
+    /// Use [`query_prepared`](Self::query_prepared) or
+    /// [`execute_prepared`](Self::execute_prepared) to run with different
+    /// parameter values. Call [`close_statement`](Self::close_statement) when
+    /// done to free server-side resources.
+    ///
+    /// ```ignore
+    /// let stmt = conn.prepare(cx, "SELECT id FROM users WHERE active = $1").await?;
+    /// let rows1 = conn.query_prepared(cx, &stmt, &[&true]).await?;
+    /// let rows2 = conn.query_prepared(cx, &stmt, &[&false]).await?;
+    /// conn.close_statement(cx, &stmt).await?;
+    /// ```
+    pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<PgStatement, PgError> {
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        let stmt_name = format!("__asupersync_s{}", self.inner.next_stmt_id);
+        self.inner.next_stmt_id += 1;
+
+        // Parse with no type hints (let server infer from $N positions).
+        let parse = build_parse_msg(&stmt_name, sql, &[]);
+        let describe = build_describe_msg(b'S', &stmt_name);
+        let sync = build_sync_msg();
+
+        let total = parse.len() + describe.len() + sync.len();
+        let mut combined = Vec::with_capacity(total);
+        combined.extend_from_slice(&parse);
+        combined.extend_from_slice(&describe);
+        combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.write_all(&combined).await {
+            return Outcome::Err(e);
+        }
+
+        // Read ParseComplete, ParameterDescription, RowDescription?, ReadyForQuery.
+        let mut param_oids = Vec::new();
+        let mut columns = Vec::new();
+
+        loop {
+            let (msg_type, data) = match self.read_message().await {
+                Ok(m) => m,
+                Err(e) => return Outcome::Err(e),
+            };
+
+            match msg_type {
+                b'1' => { /* ParseComplete */ }
+                b't' => {
+                    // ParameterDescription
+                    match Self::parse_parameter_description(&data) {
+                        Ok(oids) => param_oids = oids,
+                        Err(e) => return Outcome::Err(e),
+                    }
+                }
+                b'T' => {
+                    // RowDescription
+                    match self.parse_row_description(&data) {
+                        Ok((cols, _)) => columns = cols,
+                        Err(e) => return Outcome::Err(e),
+                    }
+                }
+                b'n' => { /* NoData — statement returns no columns */ }
+                b'Z' => {
+                    if !data.is_empty() {
+                        self.inner.transaction_status = data[0];
+                    }
+                    break;
+                }
+                b'E' => {
+                    let err = match self.parse_error_response(&data) {
+                        Err(e) => e,
+                        Ok(e) => e,
+                    };
+                    self.drain_to_ready().await;
+                    return Outcome::Err(err);
+                }
+                b'N' => { /* NoticeResponse */ }
+                _ => { /* ignore */ }
+            }
+        }
+
+        Outcome::Ok(PgStatement {
+            name: stmt_name,
+            param_oids,
+            columns,
+        })
+    }
+
+    /// Execute a prepared statement returning rows.
+    pub async fn query_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &PgStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Vec<PgRow>, PgError> {
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
+            Ok(b) => b,
+            Err(e) => return Outcome::Err(e),
+        };
+        let describe = build_describe_msg(b'P', "");
+        let execute = build_execute_msg("", 0);
+        let sync = build_sync_msg();
+
+        let total = bind.len() + describe.len() + execute.len() + sync.len();
+        let mut combined = Vec::with_capacity(total);
+        combined.extend_from_slice(&bind);
+        combined.extend_from_slice(&describe);
+        combined.extend_from_slice(&execute);
+        combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.write_all(&combined).await {
+            return Outcome::Err(e);
+        }
+
+        self.read_extended_query_results().await
+    }
+
+    /// Execute a prepared statement returning affected row count.
+    pub async fn execute_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &PgStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<u64, PgError> {
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
+            Ok(b) => b,
+            Err(e) => return Outcome::Err(e),
+        };
+        let execute = build_execute_msg("", 0);
+        let sync = build_sync_msg();
+
+        let total = bind.len() + execute.len() + sync.len();
+        let mut combined = Vec::with_capacity(total);
+        combined.extend_from_slice(&bind);
+        combined.extend_from_slice(&execute);
+        combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.write_all(&combined).await {
+            return Outcome::Err(e);
+        }
+
+        self.read_extended_execute_results().await
+    }
+
+    /// Close a prepared statement, freeing server-side resources.
+    pub async fn close_statement(
+        &mut self,
+        cx: &Cx,
+        stmt: &PgStatement,
+    ) -> Outcome<(), PgError> {
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        let close = build_close_msg(b'S', &stmt.name);
+        let sync = build_sync_msg();
+
+        let mut combined = Vec::with_capacity(close.len() + sync.len());
+        combined.extend_from_slice(&close);
+        combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.write_all(&combined).await {
+            return Outcome::Err(e);
+        }
+
+        loop {
+            let (msg_type, data) = match self.read_message().await {
+                Ok(m) => m,
+                Err(e) => return Outcome::Err(e),
+            };
+            match msg_type {
+                b'3' => { /* CloseComplete */ }
+                b'Z' => {
+                    if !data.is_empty() {
+                        self.inner.transaction_status = data[0];
+                    }
+                    break;
+                }
+                b'E' => {
+                    let err = match self.parse_error_response(&data) {
+                        Err(e) => e,
+                        Ok(e) => e,
+                    };
+                    self.drain_to_ready().await;
+                    return Outcome::Err(err);
+                }
+                b'N' => {}
+                _ => {}
+            }
+        }
+
+        Outcome::Ok(())
+    }
+
+    // ========================================================================
     // Internal helpers
     // ========================================================================
 
@@ -1857,6 +2699,233 @@ impl PgConnection {
             hint,
         })
     }
+
+    /// Parse a ParameterDescription message into a list of OIDs.
+    fn parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError> {
+        let mut reader = MessageReader::new(data);
+        let num = reader.read_i16()?;
+        if num < 0 {
+            return Err(PgError::Protocol(format!(
+                "negative parameter count: {num}"
+            )));
+        }
+        let num = num as usize;
+        let mut oids = Vec::with_capacity(num);
+        for _ in 0..num {
+            oids.push(reader.read_i32()? as u32);
+        }
+        Ok(oids)
+    }
+
+    /// Read results from Extended Query Protocol (query path).
+    ///
+    /// Expects: ParseComplete?, BindComplete, RowDescription?, DataRow*,
+    /// CommandComplete, ReadyForQuery.
+    async fn read_extended_query_results(&mut self) -> Outcome<Vec<PgRow>, PgError> {
+        let mut columns: Option<Arc<Vec<PgColumn>>> = None;
+        let mut column_indices: Option<Arc<BTreeMap<String, usize>>> = None;
+        let mut rows = Vec::with_capacity(16);
+
+        loop {
+            let (msg_type, data) = match self.read_message().await {
+                Ok(m) => m,
+                Err(e) => return Outcome::Err(e),
+            };
+
+            match msg_type {
+                b'1' | b'2' => { /* ParseComplete / BindComplete */ }
+                b'T' => {
+                    match self.parse_row_description(&data) {
+                        Ok((cols, indices)) => {
+                            columns = Some(Arc::new(cols));
+                            column_indices = Some(Arc::new(indices));
+                        }
+                        Err(e) => return Outcome::Err(e),
+                    }
+                }
+                b'n' => { /* NoData */ }
+                b'D' => {
+                    if let (Some(cols), Some(indices)) = (&columns, &column_indices) {
+                        match self.parse_data_row(&data, cols) {
+                            Ok(values) => {
+                                rows.push(PgRow {
+                                    columns: Arc::clone(cols),
+                                    column_indices: Arc::clone(indices),
+                                    values,
+                                });
+                            }
+                            Err(e) => return Outcome::Err(e),
+                        }
+                    }
+                }
+                b'C' | b's' => { /* CommandComplete / PortalSuspended */ }
+                b'Z' => {
+                    if !data.is_empty() {
+                        self.inner.transaction_status = data[0];
+                    }
+                    break;
+                }
+                b'E' => {
+                    let err = match self.parse_error_response(&data) {
+                        Err(e) => e,
+                        Ok(e) => e,
+                    };
+                    self.drain_to_ready().await;
+                    return Outcome::Err(err);
+                }
+                b'N' => { /* NoticeResponse */ }
+                _ => {}
+            }
+        }
+
+        Outcome::Ok(rows)
+    }
+
+    /// Read results from Extended Query Protocol (execute/command path).
+    async fn read_extended_execute_results(&mut self) -> Outcome<u64, PgError> {
+        let mut affected_rows = 0u64;
+
+        loop {
+            let (msg_type, data) = match self.read_message().await {
+                Ok(m) => m,
+                Err(e) => return Outcome::Err(e),
+            };
+
+            match msg_type {
+                b'1' | b'2' => { /* ParseComplete / BindComplete */ }
+                b'C' => {
+                    if let Ok(tag) = std::str::from_utf8(&data) {
+                        let tag = tag.trim_end_matches('\0');
+                        if let Some(num_str) = tag.rsplit(' ').next() {
+                            if let Ok(num) = num_str.parse::<u64>() {
+                                affected_rows = num;
+                            }
+                        }
+                    }
+                }
+                b'T' | b'D' | b'n' | b's' => { /* skip */ }
+                b'Z' => {
+                    if !data.is_empty() {
+                        self.inner.transaction_status = data[0];
+                    }
+                    break;
+                }
+                b'E' => {
+                    let err = match self.parse_error_response(&data) {
+                        Err(e) => e,
+                        Ok(e) => e,
+                    };
+                    self.drain_to_ready().await;
+                    return Outcome::Err(err);
+                }
+                b'N' => {}
+                _ => {}
+            }
+        }
+
+        Outcome::Ok(affected_rows)
+    }
+
+    /// Drain messages until ReadyForQuery to re-synchronize after an error.
+    async fn drain_to_ready(&mut self) {
+        loop {
+            let Ok((msg_type, data)) = self.read_message().await else {
+                break;
+            };
+            if msg_type == b'Z' {
+                if !data.is_empty() {
+                    self.inner.transaction_status = data[0];
+                }
+                break;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Extended Query Protocol — message builders
+// ============================================================================
+
+/// Build a Parse message (Extended Query Protocol).
+fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Vec<u8> {
+    let mut buf = MessageBuffer::with_capacity(sql.len() + 64);
+    buf.write_cstring(stmt_name);
+    buf.write_cstring(sql);
+    buf.write_i16(param_oids.len() as i16);
+    for &o in param_oids {
+        buf.write_i32(o as i32);
+    }
+    buf.build_message(FrontendMessage::Parse as u8)
+}
+
+/// Build a Bind message (Extended Query Protocol).
+fn build_bind_msg(
+    portal: &str,
+    stmt_name: &str,
+    params: &[&dyn ToSql],
+    result_format: Format,
+) -> Result<Vec<u8>, PgError> {
+    let mut buf = MessageBuffer::with_capacity(256);
+    buf.write_cstring(portal);
+    buf.write_cstring(stmt_name);
+
+    // Parameter format codes — one per parameter.
+    buf.write_i16(params.len() as i16);
+    for p in params {
+        buf.write_i16(p.format() as i16);
+    }
+
+    // Parameter values.
+    buf.write_i16(params.len() as i16);
+    let mut val_buf = Vec::with_capacity(64);
+    for p in params {
+        val_buf.clear();
+        match p.to_sql(&mut val_buf)? {
+            IsNull::Yes => {
+                buf.write_i32(-1);
+            }
+            IsNull::No => {
+                buf.write_i32(val_buf.len() as i32);
+                buf.write_bytes(&val_buf);
+            }
+        }
+    }
+
+    // Result format codes — single code applied to all result columns.
+    buf.write_i16(1);
+    buf.write_i16(result_format as i16);
+
+    Ok(buf.build_message(FrontendMessage::Bind as u8))
+}
+
+/// Build a Describe message.
+fn build_describe_msg(target: u8, name: &str) -> Vec<u8> {
+    let mut buf = MessageBuffer::new();
+    buf.write_byte(target); // 'S' for statement, 'P' for portal
+    buf.write_cstring(name);
+    buf.build_message(FrontendMessage::Describe as u8)
+}
+
+/// Build an Execute message.
+fn build_execute_msg(portal: &str, max_rows: i32) -> Vec<u8> {
+    let mut buf = MessageBuffer::new();
+    buf.write_cstring(portal);
+    buf.write_i32(max_rows); // 0 = all rows
+    buf.build_message(FrontendMessage::Execute as u8)
+}
+
+/// Build a Sync message.
+fn build_sync_msg() -> Vec<u8> {
+    let mut buf = MessageBuffer::new();
+    buf.build_message(FrontendMessage::Sync as u8)
+}
+
+/// Build a Close message.
+fn build_close_msg(target: u8, name: &str) -> Vec<u8> {
+    let mut buf = MessageBuffer::new();
+    buf.write_byte(target); // 'S' for statement, 'P' for portal
+    buf.write_cstring(name);
+    buf.build_message(FrontendMessage::Close as u8)
 }
 
 // ============================================================================
@@ -1915,6 +2984,32 @@ impl PgTransaction<'_> {
         }
         self.conn.execute(cx, sql).await
     }
+
+    /// Execute a parameterized query within this transaction.
+    pub async fn query_params(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Vec<PgRow>, PgError> {
+        if self.finished {
+            return Outcome::Err(PgError::TransactionFinished);
+        }
+        self.conn.query_params(cx, sql, params).await
+    }
+
+    /// Execute a parameterized command within this transaction.
+    pub async fn execute_params(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Outcome<u64, PgError> {
+        if self.finished {
+            return Outcome::Err(PgError::TransactionFinished);
+        }
+        self.conn.execute_params(cx, sql, params).await
+    }
 }
 
 impl Drop for PgTransaction<'_> {
@@ -1925,6 +3020,39 @@ impl Drop for PgTransaction<'_> {
             // In practice, the server will auto-rollback when we send another command
             // or close the connection
         }
+    }
+}
+
+// ============================================================================
+// Prepared Statement
+// ============================================================================
+
+/// A prepared PostgreSQL statement.
+///
+/// Created by [`PgConnection::prepare`] and executed with
+/// [`PgConnection::query_prepared`] or [`PgConnection::execute_prepared`].
+/// Call [`PgConnection::close_statement`] to release server-side resources.
+#[derive(Debug, Clone)]
+pub struct PgStatement {
+    /// Server-side statement name.
+    name: String,
+    /// Parameter type OIDs from ParameterDescription.
+    param_oids: Vec<u32>,
+    /// Result column metadata from RowDescription (empty for non-SELECT).
+    columns: Vec<PgColumn>,
+}
+
+impl PgStatement {
+    /// Parameter type OIDs reported by the server.
+    #[must_use]
+    pub fn param_types(&self) -> &[u32] {
+        &self.param_oids
+    }
+
+    /// Result column metadata. Empty for non-SELECT statements.
+    #[must_use]
+    pub fn columns(&self) -> &[PgColumn] {
+        &self.columns
     }
 }
 
@@ -2020,6 +3148,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
+                next_stmt_id: 0,
             },
         }
     }
@@ -2916,5 +4045,555 @@ mod tests {
         let cloned = m;
         assert_eq!(copied, cloned);
         assert_ne!(m, BackendMessage::DataRow);
+    }
+
+    // ================================================================
+    // ToSql / FromSql trait tests
+    // ================================================================
+
+    #[test]
+    fn to_sql_bool() {
+        let mut buf = Vec::new();
+        assert_eq!(true.to_sql(&mut buf).unwrap(), IsNull::No);
+        assert_eq!(buf, [1]);
+        buf.clear();
+        assert_eq!(false.to_sql(&mut buf).unwrap(), IsNull::No);
+        assert_eq!(buf, [0]);
+        assert_eq!(true.type_oid(), oid::BOOL);
+    }
+
+    #[test]
+    fn to_sql_integers() {
+        let mut buf = Vec::new();
+
+        let v: i16 = 0x1234;
+        v.to_sql(&mut buf).unwrap();
+        assert_eq!(buf, [0x12, 0x34]);
+        assert_eq!(v.type_oid(), oid::INT2);
+        buf.clear();
+
+        let v: i32 = 0x12345678;
+        v.to_sql(&mut buf).unwrap();
+        assert_eq!(buf, [0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(v.type_oid(), oid::INT4);
+        buf.clear();
+
+        let v: i64 = 0x0102030405060708;
+        v.to_sql(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(v.type_oid(), oid::INT8);
+    }
+
+    #[test]
+    fn to_sql_floats() {
+        let mut buf = Vec::new();
+        let v: f32 = 1.5;
+        v.to_sql(&mut buf).unwrap();
+        assert_eq!(buf, 1.5f32.to_be_bytes());
+        assert_eq!(v.type_oid(), oid::FLOAT4);
+        buf.clear();
+
+        let v: f64 = 2.5;
+        v.to_sql(&mut buf).unwrap();
+        assert_eq!(buf, 2.5f64.to_be_bytes());
+        assert_eq!(v.type_oid(), oid::FLOAT8);
+    }
+
+    #[test]
+    fn to_sql_text() {
+        let mut buf = Vec::new();
+        "hello".to_sql(&mut buf).unwrap();
+        assert_eq!(buf, b"hello");
+        assert_eq!("hello".type_oid(), oid::TEXT);
+        assert_eq!("hello".format(), Format::Text);
+        buf.clear();
+
+        String::from("world").to_sql(&mut buf).unwrap();
+        assert_eq!(buf, b"world");
+    }
+
+    #[test]
+    fn to_sql_bytes() {
+        let mut buf = Vec::new();
+        let data: &[u8] = &[1, 2, 3];
+        data.to_sql(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3]);
+        assert_eq!(data.type_oid(), oid::BYTEA);
+        buf.clear();
+
+        vec![4u8, 5, 6].to_sql(&mut buf).unwrap();
+        assert_eq!(buf, [4, 5, 6]);
+    }
+
+    #[test]
+    fn to_sql_option() {
+        let mut buf = Vec::new();
+        let some_val: Option<i32> = Some(42);
+        assert_eq!(some_val.to_sql(&mut buf).unwrap(), IsNull::No);
+        assert_eq!(buf, 42i32.to_be_bytes());
+        assert_eq!(some_val.type_oid(), oid::INT4);
+
+        buf.clear();
+        let none_val: Option<i32> = None;
+        assert_eq!(none_val.to_sql(&mut buf).unwrap(), IsNull::Yes);
+        assert!(buf.is_empty());
+        assert_eq!(none_val.type_oid(), 0);
+    }
+
+    #[test]
+    fn to_sql_reference() {
+        let mut buf = Vec::new();
+        let v: &i32 = &42;
+        v.to_sql(&mut buf).unwrap();
+        assert_eq!(buf, 42i32.to_be_bytes());
+    }
+
+    #[test]
+    fn from_sql_bool() {
+        // Binary
+        assert!(bool::from_sql(&[1], oid::BOOL, Format::Binary).unwrap());
+        assert!(!bool::from_sql(&[0], oid::BOOL, Format::Binary).unwrap());
+        // Text
+        assert!(bool::from_sql(b"t", oid::BOOL, Format::Text).unwrap());
+        assert!(bool::from_sql(b"true", oid::BOOL, Format::Text).unwrap());
+        assert!(!bool::from_sql(b"f", oid::BOOL, Format::Text).unwrap());
+        assert!(!bool::from_sql(b"false", oid::BOOL, Format::Text).unwrap());
+        assert!(bool::accepts(oid::BOOL));
+        assert!(!bool::accepts(oid::INT4));
+    }
+
+    #[test]
+    fn from_sql_integers() {
+        // i16 binary
+        assert_eq!(
+            i16::from_sql(&0x1234i16.to_be_bytes(), oid::INT2, Format::Binary).unwrap(),
+            0x1234
+        );
+        // i16 text
+        assert_eq!(i16::from_sql(b"1234", oid::INT2, Format::Text).unwrap(), 1234);
+        // i16 too short
+        assert!(i16::from_sql(&[0], oid::INT2, Format::Binary).is_err());
+
+        // i32 binary
+        assert_eq!(
+            i32::from_sql(&42i32.to_be_bytes(), oid::INT4, Format::Binary).unwrap(),
+            42
+        );
+        // i32 text
+        assert_eq!(i32::from_sql(b"-7", oid::INT4, Format::Text).unwrap(), -7);
+        assert!(i32::accepts(oid::INT4));
+        assert!(i32::accepts(oid::OID));
+
+        // i64
+        assert_eq!(
+            i64::from_sql(&999i64.to_be_bytes(), oid::INT8, Format::Binary).unwrap(),
+            999
+        );
+        assert_eq!(
+            i64::from_sql(b"9999999999", oid::INT8, Format::Text).unwrap(),
+            9_999_999_999
+        );
+    }
+
+    #[test]
+    fn from_sql_floats() {
+        assert_eq!(
+            f32::from_sql(&1.5f32.to_be_bytes(), oid::FLOAT4, Format::Binary).unwrap(),
+            1.5
+        );
+        assert_eq!(
+            f32::from_sql(b"1.5", oid::FLOAT4, Format::Text).unwrap(),
+            1.5
+        );
+        assert_eq!(
+            f64::from_sql(&2.5f64.to_be_bytes(), oid::FLOAT8, Format::Binary).unwrap(),
+            2.5
+        );
+        assert_eq!(
+            f64::from_sql(b"-3.14", oid::FLOAT8, Format::Text).unwrap(),
+            -3.14
+        );
+    }
+
+    #[test]
+    fn from_sql_string() {
+        assert_eq!(
+            String::from_sql(b"hello", oid::TEXT, Format::Text).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            String::from_sql(b"world", oid::VARCHAR, Format::Binary).unwrap(),
+            "world"
+        );
+        assert!(String::accepts(oid::TEXT));
+        assert!(String::accepts(oid::UUID));
+        assert!(String::accepts(oid::JSON));
+        assert!(!String::accepts(oid::INT4));
+    }
+
+    #[test]
+    fn from_sql_bytes() {
+        // Binary format: raw bytes
+        assert_eq!(
+            Vec::<u8>::from_sql(&[1, 2, 3], oid::BYTEA, Format::Binary).unwrap(),
+            vec![1, 2, 3]
+        );
+        // Text format: hex-encoded
+        assert_eq!(
+            Vec::<u8>::from_sql(b"\\x48656c6c6f", oid::BYTEA, Format::Text).unwrap(),
+            b"Hello".to_vec()
+        );
+    }
+
+    #[test]
+    fn from_sql_option() {
+        assert_eq!(
+            Option::<i32>::from_sql(&42i32.to_be_bytes(), oid::INT4, Format::Binary).unwrap(),
+            Some(42)
+        );
+        assert_eq!(Option::<i32>::from_sql_null().unwrap(), None);
+    }
+
+    #[test]
+    fn from_sql_null_error() {
+        // Non-Option types reject NULL
+        assert!(i32::from_sql_null().is_err());
+        assert!(String::from_sql_null().is_err());
+        assert!(bool::from_sql_null().is_err());
+    }
+
+    // ================================================================
+    // Extended Query Protocol message builder tests
+    // ================================================================
+
+    #[test]
+    fn build_parse_msg_structure() {
+        let msg = build_parse_msg("", "SELECT 1", &[]);
+        // Type byte 'P'
+        assert_eq!(msg[0], b'P');
+        // Verify SQL is in the message body
+        let body = &msg[5..]; // skip type + 4-byte length
+        // Empty statement name: just a \0
+        assert_eq!(body[0], 0);
+        // SQL follows
+        assert!(body[1..].starts_with(b"SELECT 1"));
+    }
+
+    #[test]
+    fn build_parse_msg_with_oids() {
+        let msg = build_parse_msg("stmt1", "SELECT $1", &[oid::INT4]);
+        assert_eq!(msg[0], b'P');
+        // Statement name "stmt1" should be in body
+        let body = &msg[5..];
+        assert!(body.starts_with(b"stmt1\0"));
+    }
+
+    #[test]
+    fn build_bind_msg_no_params() {
+        let msg = build_bind_msg("", "", &[], Format::Text).unwrap();
+        assert_eq!(msg[0], b'B');
+    }
+
+    #[test]
+    fn build_bind_msg_with_params() {
+        let params: Vec<&dyn ToSql> = vec![&42i32, &true];
+        let msg = build_bind_msg("", "", &params, Format::Text).unwrap();
+        assert_eq!(msg[0], b'B');
+        // Verify message is non-trivial (has parameter data)
+        assert!(msg.len() > 20);
+    }
+
+    #[test]
+    fn build_bind_msg_with_null() {
+        let val: Option<i32> = None;
+        let params: Vec<&dyn ToSql> = vec![&val];
+        let msg = build_bind_msg("", "", &params, Format::Text).unwrap();
+        assert_eq!(msg[0], b'B');
+        // NULL parameters have length -1 in the message
+        // The -1 should appear as 0xFF 0xFF 0xFF 0xFF somewhere in the body
+        let body = &msg[5..];
+        let has_null_marker = body
+            .windows(4)
+            .any(|w| w == [0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(has_null_marker, "bind message should contain NULL marker (-1)");
+    }
+
+    #[test]
+    fn build_describe_msg_portal() {
+        let msg = build_describe_msg(b'P', "");
+        assert_eq!(msg[0], b'D');
+        assert_eq!(msg[5], b'P'); // portal target
+    }
+
+    #[test]
+    fn build_describe_msg_statement() {
+        let msg = build_describe_msg(b'S', "my_stmt");
+        assert_eq!(msg[0], b'D');
+        assert_eq!(msg[5], b'S'); // statement target
+    }
+
+    #[test]
+    fn build_execute_msg_all_rows() {
+        let msg = build_execute_msg("", 0);
+        assert_eq!(msg[0], b'E');
+    }
+
+    #[test]
+    fn build_sync_msg_structure() {
+        let msg = build_sync_msg();
+        assert_eq!(msg[0], b'S');
+        // Sync has no body, just type + length(4)
+        assert_eq!(msg.len(), 5);
+    }
+
+    #[test]
+    fn build_close_msg_statement() {
+        let msg = build_close_msg(b'S', "stmt1");
+        assert_eq!(msg[0], b'C');
+        assert_eq!(msg[5], b'S');
+    }
+
+    // ================================================================
+    // PgRow::get_typed tests
+    // ================================================================
+
+    #[test]
+    fn pg_row_get_typed_int() {
+        let columns = Arc::new(vec![PgColumn {
+            name: "id".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::INT4,
+            type_size: 4,
+            type_modifier: -1,
+            format_code: 0,
+        }]);
+        let mut indices = BTreeMap::new();
+        indices.insert("id".to_string(), 0);
+        let row = PgRow {
+            columns: Arc::clone(&columns),
+            column_indices: Arc::new(indices),
+            values: vec![PgValue::Int4(42)],
+        };
+        let id: i32 = row.get_typed("id").unwrap();
+        assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn pg_row_get_typed_string() {
+        let columns = Arc::new(vec![PgColumn {
+            name: "name".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::TEXT,
+            type_size: -1,
+            type_modifier: -1,
+            format_code: 0,
+        }]);
+        let mut indices = BTreeMap::new();
+        indices.insert("name".to_string(), 0);
+        let row = PgRow {
+            columns,
+            column_indices: Arc::new(indices),
+            values: vec![PgValue::Text("Alice".to_string())],
+        };
+        let name: String = row.get_typed("name").unwrap();
+        assert_eq!(name, "Alice");
+    }
+
+    #[test]
+    fn pg_row_get_typed_null_option() {
+        let columns = Arc::new(vec![PgColumn {
+            name: "val".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::INT4,
+            type_size: 4,
+            type_modifier: -1,
+            format_code: 0,
+        }]);
+        let mut indices = BTreeMap::new();
+        indices.insert("val".to_string(), 0);
+        let row = PgRow {
+            columns,
+            column_indices: Arc::new(indices),
+            values: vec![PgValue::Null],
+        };
+        let val: Option<i32> = row.get_typed("val").unwrap();
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn pg_row_get_typed_null_non_option_errors() {
+        let columns = Arc::new(vec![PgColumn {
+            name: "val".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::INT4,
+            type_size: 4,
+            type_modifier: -1,
+            format_code: 0,
+        }]);
+        let mut indices = BTreeMap::new();
+        indices.insert("val".to_string(), 0);
+        let row = PgRow {
+            columns,
+            column_indices: Arc::new(indices),
+            values: vec![PgValue::Null],
+        };
+        let result: Result<i32, _> = row.get_typed("val");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pg_row_get_typed_idx() {
+        let columns = Arc::new(vec![PgColumn {
+            name: "x".to_string(),
+            table_oid: 0,
+            column_id: 0,
+            type_oid: oid::FLOAT8,
+            type_size: 8,
+            type_modifier: -1,
+            format_code: 0,
+        }]);
+        let mut indices = BTreeMap::new();
+        indices.insert("x".to_string(), 0);
+        let row = PgRow {
+            columns,
+            column_indices: Arc::new(indices),
+            values: vec![PgValue::Float8(3.14)],
+        };
+        let x: f64 = row.get_typed_idx(0).unwrap();
+        assert!((x - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pg_row_get_typed_column_not_found() {
+        let columns = Arc::new(vec![]);
+        let row = PgRow {
+            columns,
+            column_indices: Arc::new(BTreeMap::new()),
+            values: vec![],
+        };
+        let result: Result<i32, _> = row.get_typed("missing");
+        assert!(result.is_err());
+    }
+
+    // ================================================================
+    // PgStatement tests
+    // ================================================================
+
+    #[test]
+    fn pg_statement_accessors() {
+        let stmt = PgStatement {
+            name: "s1".to_string(),
+            param_oids: vec![oid::INT4, oid::TEXT],
+            columns: vec![PgColumn {
+                name: "id".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::INT4,
+                type_size: 4,
+                type_modifier: -1,
+                format_code: 0,
+            }],
+        };
+        assert_eq!(stmt.param_types(), &[oid::INT4, oid::TEXT]);
+        assert_eq!(stmt.columns().len(), 1);
+        assert_eq!(stmt.columns()[0].name, "id");
+    }
+
+    // ================================================================
+    // Format / IsNull derive coverage
+    // ================================================================
+
+    #[test]
+    fn format_debug_clone_eq() {
+        let f = Format::Binary;
+        let f2 = f;
+        assert_eq!(f, f2);
+        assert_ne!(f, Format::Text);
+        assert!(format!("{f:?}").contains("Binary"));
+    }
+
+    #[test]
+    fn is_null_debug_clone_eq() {
+        let n = IsNull::Yes;
+        let n2 = n;
+        assert_eq!(n, n2);
+        assert_ne!(n, IsNull::No);
+        assert!(format!("{n:?}").contains("Yes"));
+    }
+
+    // ================================================================
+    // parse_parameter_description tests
+    // ================================================================
+
+    #[test]
+    fn parse_parameter_description_empty() {
+        // 0 parameters
+        let data = 0i16.to_be_bytes();
+        let oids = PgConnection::parse_parameter_description(&data).unwrap();
+        assert!(oids.is_empty());
+    }
+
+    #[test]
+    fn parse_parameter_description_two_params() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&2i16.to_be_bytes());
+        data.extend_from_slice(&(oid::INT4 as i32).to_be_bytes());
+        data.extend_from_slice(&(oid::TEXT as i32).to_be_bytes());
+        let oids = PgConnection::parse_parameter_description(&data).unwrap();
+        assert_eq!(oids, vec![oid::INT4, oid::TEXT]);
+    }
+
+    #[test]
+    fn parse_parameter_description_negative_count() {
+        let data = (-1i16).to_be_bytes();
+        assert!(PgConnection::parse_parameter_description(&data).is_err());
+    }
+
+    // ================================================================
+    // pg_value_to_text_bytes roundtrip tests
+    // ================================================================
+
+    #[test]
+    fn pg_value_to_text_bytes_roundtrip() {
+        // Bool
+        let bytes = pg_value_to_text_bytes(&PgValue::Bool(true));
+        assert_eq!(bool::from_sql(&bytes, oid::BOOL, Format::Text).unwrap(), true);
+
+        let bytes = pg_value_to_text_bytes(&PgValue::Bool(false));
+        assert_eq!(bool::from_sql(&bytes, oid::BOOL, Format::Text).unwrap(), false);
+
+        // Int2
+        let bytes = pg_value_to_text_bytes(&PgValue::Int2(123));
+        assert_eq!(i16::from_sql(&bytes, oid::INT2, Format::Text).unwrap(), 123);
+
+        // Int4
+        let bytes = pg_value_to_text_bytes(&PgValue::Int4(-42));
+        assert_eq!(i32::from_sql(&bytes, oid::INT4, Format::Text).unwrap(), -42);
+
+        // Int8
+        let bytes = pg_value_to_text_bytes(&PgValue::Int8(9_000_000_000));
+        assert_eq!(
+            i64::from_sql(&bytes, oid::INT8, Format::Text).unwrap(),
+            9_000_000_000
+        );
+
+        // Float4
+        let bytes = pg_value_to_text_bytes(&PgValue::Float4(1.5));
+        assert_eq!(f32::from_sql(&bytes, oid::FLOAT4, Format::Text).unwrap(), 1.5);
+
+        // Float8
+        let bytes = pg_value_to_text_bytes(&PgValue::Float8(2.5));
+        assert_eq!(f64::from_sql(&bytes, oid::FLOAT8, Format::Text).unwrap(), 2.5);
+
+        // Text
+        let bytes = pg_value_to_text_bytes(&PgValue::Text("hello".to_string()));
+        assert_eq!(
+            String::from_sql(&bytes, oid::TEXT, Format::Text).unwrap(),
+            "hello"
+        );
     }
 }
