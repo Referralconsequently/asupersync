@@ -413,11 +413,14 @@ fn should_close_connection(req: &Request, config: &Http1Config, state: &Connecti
 
 /// Add a `Connection: close` header to the response if not already present.
 fn add_connection_close(resp: &mut Response) {
-    let has_connection = resp
-        .headers
-        .iter()
-        .any(|(n, _)| n.eq_ignore_ascii_case("connection"));
-    if !has_connection {
+    let mut replaced = false;
+    for (name, value) in &mut resp.headers {
+        if name.eq_ignore_ascii_case("connection") {
+            "close".clone_into(value);
+            replaced = true;
+        }
+    }
+    if !replaced {
         resp.headers
             .push(("Connection".to_owned(), "close".to_owned()));
     }
@@ -576,8 +579,10 @@ mod tests {
         resp.headers
             .push(("Connection".to_owned(), "keep-alive".to_owned()));
         add_connection_close(&mut resp);
-        // Should not add duplicate
+        // Should not add duplicate and should overwrite to close
         assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "close");
     }
 
     #[test]

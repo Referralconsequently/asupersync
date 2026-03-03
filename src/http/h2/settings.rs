@@ -192,25 +192,26 @@ impl Settings {
     /// Set `is_client` to `false` when serializing server settings.
     #[must_use]
     pub fn to_settings_minimal_for_role(&self, is_client: bool) -> Vec<Setting> {
-        let default = Self::default();
         let mut settings = Vec::new();
 
-        if self.header_table_size != default.header_table_size {
+        if self.header_table_size != 4096 {
             settings.push(Setting::HeaderTableSize(self.header_table_size));
         }
-        if is_client && self.enable_push != default.enable_push {
+        if is_client && !self.enable_push {
             settings.push(Setting::EnablePush(self.enable_push));
         }
-        if self.max_concurrent_streams != default.max_concurrent_streams {
+        // RFC default is unlimited. Since our default is 256, we should always send it unless it's unlimited (u32::MAX).
+        if self.max_concurrent_streams != u32::MAX {
             settings.push(Setting::MaxConcurrentStreams(self.max_concurrent_streams));
         }
-        if self.initial_window_size != default.initial_window_size {
+        if self.initial_window_size != 65535 {
             settings.push(Setting::InitialWindowSize(self.initial_window_size));
         }
-        if self.max_frame_size != default.max_frame_size {
+        if self.max_frame_size != 16384 {
             settings.push(Setting::MaxFrameSize(self.max_frame_size));
         }
-        if self.max_header_list_size != default.max_header_list_size {
+        // RFC default is unlimited. Since our default is 65536, we should always send it unless it's unlimited (u32::MAX).
+        if self.max_header_list_size != u32::MAX {
             settings.push(Setting::MaxHeaderListSize(self.max_header_list_size));
         }
 
@@ -410,7 +411,11 @@ mod tests {
             .build();
 
         let minimal = settings.to_settings_minimal();
-        assert_eq!(minimal.len(), 2);
+        // EnablePush (false != true), MaxConcurrentStreams (100 != MAX), MaxHeaderListSize (65536 != MAX)
+        assert_eq!(minimal.len(), 3);
+        assert!(minimal.contains(&Setting::EnablePush(false)));
+        assert!(minimal.contains(&Setting::MaxConcurrentStreams(100)));
+        assert!(minimal.contains(&Setting::MaxHeaderListSize(DEFAULT_MAX_HEADER_LIST_SIZE)));
     }
 
     #[test]
