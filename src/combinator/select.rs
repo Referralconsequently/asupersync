@@ -72,11 +72,20 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
-        if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
+        // CRITICAL: Poll both futures to ensure they're initialized.
+        // This is required for cancel-correctness: if a future wraps a JoinFuture,
+        // the JoinFuture must be created (by polling) so its Drop can abort the task
+        // when this Select is dropped. Without this, losers may never be polled,
+        // their JoinFutures never created, and tasks would leak (violating the
+        // "losers are drained" invariant).
+        let a_res = Pin::new(&mut this.a).poll(cx);
+        let b_res = Pin::new(&mut this.b).poll(cx);
+
+        if let Poll::Ready(val) = a_res {
             return Poll::Ready(Either::Left(val));
         }
 
-        if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
+        if let Poll::Ready(val) = b_res {
             return Poll::Ready(Either::Right(val));
         }
 
@@ -699,12 +708,12 @@ mod tests {
 
         // Loser was dropped (cleanup via Drop) but NOT drained (not polled to completion)
         assert!(dropped.load(Ordering::SeqCst), "loser must be dropped");
-        // Loser was NOT polled: left-biased Select returns A's result immediately
-        // without polling B. B is dropped without ever being polled.
+        // Loser MUST be polled at least once to ensure cancel-correctness (initializing its drop guard).
+        // Select now polls all branches on each iteration, just like SelectAll.
         assert_eq!(
             polled.load(Ordering::SeqCst),
-            0,
-            "loser should not be polled when winner is left-biased and immediately ready"
+            1,
+            "loser should be polled exactly once even when winner is left-biased and immediately ready"
         );
     }
 
