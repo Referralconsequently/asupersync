@@ -626,6 +626,130 @@ fn t63_mysql_feature_rows_include_hardening() {
 }
 
 // =============================================================================
+// T6.7 NATS/JetStream Hardening Contract Tests
+// =============================================================================
+
+#[test]
+fn t67_nats_hardening_summary_present() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("T6.7 Hardening Summary"),
+        "baseline must include T6.7 hardening summary"
+    );
+}
+
+#[test]
+fn t67_nats_max_payload_negotiation_documented() {
+    let doc = load_baseline_doc();
+    let nats_section = doc
+        .split("### 2.5 NATS")
+        .nth(1)
+        .and_then(|s| s.split("### 2.6").next())
+        .unwrap_or("");
+    assert!(
+        nats_section.contains("max_payload") || nats_section.contains("server limits"),
+        "T6.7 must document server max_payload negotiation"
+    );
+}
+
+#[test]
+fn t67_nats_msg_payload_guard_documented() {
+    let doc = load_baseline_doc();
+    let nats_section = doc
+        .split("### 2.5 NATS")
+        .nth(1)
+        .and_then(|s| s.split("### 2.6").next())
+        .unwrap_or("");
+    assert!(
+        nats_section.contains("MSG payload size guard") || nats_section.contains("parse_msg"),
+        "T6.7 must document MSG payload size guard"
+    );
+}
+
+#[test]
+fn t67_nats_buffer_overflow_protection_documented() {
+    let doc = load_baseline_doc();
+    let nats_section = doc
+        .split("### 2.5 NATS")
+        .nth(1)
+        .and_then(|s| s.split("### 2.6").next())
+        .unwrap_or("");
+    assert!(
+        nats_section.contains("Read buffer overflow protection")
+            || nats_section.contains("MAX_READ_BUFFER"),
+        "T6.7 must document read buffer overflow protection"
+    );
+}
+
+#[test]
+fn t67_nats_close_flush_documented() {
+    let doc = load_baseline_doc();
+    let nats_section = doc
+        .split("### 2.5 NATS")
+        .nth(1)
+        .and_then(|s| s.split("### 2.6").next())
+        .unwrap_or("");
+    assert!(
+        nats_section.contains("flushes before shutdown") || nats_section.contains("Close flush"),
+        "T6.7 must document close flushes before shutdown"
+    );
+}
+
+#[test]
+fn t67_nats_cancel_correctness_updated() {
+    let doc = load_baseline_doc();
+    let nats_section = doc
+        .split("### 2.5 NATS")
+        .nth(1)
+        .and_then(|s| s.split("### 2.6").next())
+        .unwrap_or("");
+    assert!(
+        nats_section.contains("Cancel-Correctness"),
+        "NATS section must include cancel-correctness assessment"
+    );
+    assert!(
+        nats_section.contains("T6.7"),
+        "cancel-correctness must reference T6.7 hardening"
+    );
+}
+
+#[test]
+fn t67_nats_feature_rows_include_hardening() {
+    let doc = load_baseline_doc();
+    let nats_section = doc
+        .split("### 2.5 NATS")
+        .nth(1)
+        .and_then(|s| s.split("### 2.6").next())
+        .unwrap_or("");
+
+    let hardened_features = [
+        "Server max_payload negotiation",
+        "MSG payload size guard",
+        "Read buffer overflow protection",
+        "Close flushes before shutdown",
+    ];
+    for feature in &hardened_features {
+        assert!(
+            nats_section.contains(feature),
+            "NATS feature table must include hardened feature: {feature}"
+        );
+    }
+}
+
+#[test]
+fn t67_revision_history_updated() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("T6.7"),
+        "revision history must include T6.7 update"
+    );
+    assert!(
+        doc.contains("v1.2"),
+        "revision history must show version bump to v1.2"
+    );
+}
+
+// =============================================================================
 // T6.8 Kafka Parity Contract Tests
 // =============================================================================
 

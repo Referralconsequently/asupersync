@@ -146,6 +146,10 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 | JetStream consumer management | Complete | None | — |
 | JetStream durable subscriptions | Complete | None | — |
 | JetStream ack/nack | Complete | None | — |
+| Server max_payload negotiation | Complete (T6.7) | None | — |
+| MSG payload size guard | Complete (T6.7) | None | — |
+| Read buffer overflow protection | Complete (T6.7) | None | — |
+| Close flushes before shutdown | Complete (T6.7) | None | — |
 | TLS connections | Missing | NT-G1 | Medium |
 | Authentication (token, NKey, JWT) | Missing | NT-G2 | High |
 | Reconnection with subscription recovery | Missing | NT-G3 | High |
@@ -155,7 +159,14 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 
 **Migration Blockers**: NT-G2 (auth) and NT-G3 (reconnection) block production deployment. Core publish/subscribe and JetStream work.
 
-**Cancel-Correctness**: Implemented.
+**Cancel-Correctness**: Implemented. Close path flushes pending writes before shutdown (T6.7).
+
+**T6.7 Hardening Summary**:
+1. **Server max_payload negotiation**: After INFO handshake, client config is clamped to `min(client, server)` to respect server limits.
+2. **MSG payload size guard**: `parse_msg()` rejects payloads exceeding MAX_READ_BUFFER (8 MiB) before allocation.
+3. **Read buffer overflow protection**: `NatsReadBuffer::extend()` returns `Result`, rejecting writes that would exceed MAX_READ_BUFFER.
+4. **Close flushes before shutdown**: `close()` is async, flushes pending writes before TCP shutdown.
+5. **Test coverage**: 17 new unit tests covering hardening paths.
 
 ### 2.6 Kafka (F19)
 
@@ -420,3 +431,4 @@ If the Tokio compatibility layer (Gap G3, score 3.85, highest priority) succeeds
 |------|--------|--------|
 | 2026-03-03 | SapphireHill | Initial baseline (v1.0) |
 | 2026-03-03 | SapphireHill | T6.3: MySQL hardening — transaction safety, URL parsing, packet/memory guards (v1.1) |
+| 2026-03-03 | SapphireHill | T6.7: NATS hardening — max_payload negotiation, MSG guard, buffer overflow protection, close flush (v1.2) |
