@@ -13,6 +13,7 @@ mod common;
 
 use asupersync::lab::{FuzzConfig, FuzzHarness, LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
+use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
 use asupersync::trace::{
     DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TraceEvent, TraceReader,
     TraceReplayer, browser_trace_log_fields, browser_trace_schema_v1, diagnose_divergence,
@@ -174,6 +175,21 @@ fn record_observability_trace_with_seed(seed: u64) -> Vec<TraceEvent> {
     runtime.scheduler.lock().schedule(task_c, 0);
     runtime.run_until_quiescent();
     runtime.trace().snapshot()
+}
+
+fn build_golden_trace_fixture_from_seed(seed: u64) -> GoldenTraceFixture {
+    let config = LabConfig::new(seed).with_default_replay_recording();
+    let events = record_observability_trace_with_seed(seed);
+    let fixture_config = GoldenTraceConfig {
+        seed: config.seed,
+        entropy_seed: config.entropy_seed,
+        worker_count: config.worker_count,
+        trace_capacity: config.trace_capacity,
+        max_steps: config.max_steps,
+        canonical_prefix_layers: 4,
+        canonical_prefix_events: 32,
+    };
+    GoldenTraceFixture::from_events(fixture_config, &events, std::iter::empty::<String>())
 }
 
 fn record_parity_trace_with_seed(seed: u64) -> ReplayTrace {
@@ -1233,5 +1249,118 @@ fn schedule_permutation_fuzz_regression_corpus_artifact() {
         "schedule_permutation_fuzz_regression_corpus_artifact",
         cases = corpus.cases.len(),
         iterations = corpus.iterations
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn golden_trace_replay_delta_report_flags_fixture_drift() {
+    init_test("golden_trace_replay_delta_report_flags_fixture_drift");
+
+    let expected = build_golden_trace_fixture_from_seed(0xD17A_FEED);
+    let clean = expected.delta_report(&expected);
+    assert_with_log!(
+        clean.is_clean(),
+        "clean report has no drift",
+        true,
+        clean.is_clean()
+    );
+
+    let mut actual = expected.clone();
+    actual.fingerprint ^= 0xFFFF;
+    actual.event_count = actual.event_count.saturating_add(1);
+    actual.oracle_summary.violations = vec!["LoserDrain".to_string()];
+    let drift = expected.delta_report(&actual);
+
+    assert_with_log!(
+        drift.semantic_drift,
+        "semantic drift is detected",
+        true,
+        drift.semantic_drift
+    );
+    assert_with_log!(
+        drift.observability_drift,
+        "observability drift is detected",
+        true,
+        drift.observability_drift
+    );
+    assert_with_log!(
+        drift.timing_drift,
+        "timing drift is detected",
+        true,
+        drift.timing_drift
+    );
+    assert_with_log!(
+        drift
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "fingerprint"),
+        "fingerprint mismatch captured",
+        true,
+        drift
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "fingerprint")
+    );
+    assert_with_log!(
+        drift
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "oracle_violations"),
+        "oracle mismatch captured",
+        true,
+        drift
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "oracle_violations")
+    );
+    assert_with_log!(
+        drift
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "event_count"),
+        "event_count timing mismatch captured",
+        true,
+        drift
+            .deltas
+            .iter()
+            .any(|delta| delta.field == "event_count")
+    );
+
+    write_replay_artifact_json(
+        "golden_trace_replay_delta_report.json",
+        &serde_json::to_value(&drift).expect("serialize replay delta report"),
+    );
+    let triage_bundle = serde_json::json!({
+        "schema_version": "golden-replay-delta-triage-v1",
+        "scenario_id": "replay_e2e_suite::golden_trace_replay_delta_report_flags_fixture_drift",
+        "source_seed": "0xD17AFEED",
+        "repro_command": "rch exec -- cargo test -p asupersync --test replay_e2e_suite golden_trace_replay_delta_report_flags_fixture_drift -- --nocapture",
+        "artifact_paths": {
+            "delta_report": "golden_trace_replay_delta_report.json",
+            "triage_bundle": "golden_trace_replay_delta_triage_bundle.json"
+        },
+        "minimized_failure": {
+            "drift_fields": drift
+                .deltas
+                .iter()
+                .map(|delta| delta.field.clone())
+                .collect::<Vec<_>>(),
+            "semantic_drift": drift.semantic_drift,
+            "timing_drift": drift.timing_drift,
+            "observability_drift": drift.observability_drift
+        }
+    });
+    write_replay_artifact_json(
+        "golden_trace_replay_delta_triage_bundle.json",
+        &triage_bundle,
+    );
+
+    test_complete!(
+        "golden_trace_replay_delta_report_flags_fixture_drift",
+        deltas = drift.deltas.len(),
+        semantic_drift = drift.semantic_drift,
+        timing_drift = drift.timing_drift,
+        observability_drift = drift.observability_drift
     );
 }

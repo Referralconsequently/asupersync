@@ -226,6 +226,8 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
         "scripts/test_combinators.sh",
         "scripts/test_cancel_attribution.sh",
         "scripts/test_scheduler_wakeup_e2e.sh",
+        "scripts/test_wasm_cross_framework_e2e.sh",
+        "scripts/test_wasm_incident_forensics_e2e.sh",
         "scripts/run_phase6_e2e.sh",
     ];
 
@@ -253,6 +255,23 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
 }
 
 #[test]
+fn wasm_cross_framework_runner_keeps_replay_delta_drift_bundle_step() {
+    let content = fs::read_to_string("scripts/test_wasm_cross_framework_e2e.sh")
+        .expect("read wasm cross-framework e2e runner script");
+
+    for token in [
+        "vanilla.browser_replay_delta_drift_bundle",
+        "golden_trace_replay_delta_report_flags_fixture_drift",
+        "golden_trace_replay_delta_triage_bundle.json",
+    ] {
+        assert!(
+            content.contains(token),
+            "wasm cross-framework runner missing replay-delta contract token: {token}"
+        );
+    }
+}
+
+#[test]
 fn run_all_orchestrator_keeps_log_quality_enforcement_hooks() {
     let content = fs::read_to_string("scripts/run_all_e2e.sh")
         .expect("read run_all_e2e.sh for quality gate checks");
@@ -268,6 +287,18 @@ fn run_all_orchestrator_keeps_log_quality_enforcement_hooks() {
     assert!(
         content.contains("failure_contract_violations"),
         "run_all_e2e.sh must track failure contract violations"
+    );
+    assert!(
+        content.contains("LOG_QUALITY_MIN_SCORE"),
+        "run_all_e2e.sh must expose a configurable log-quality threshold"
+    );
+    assert!(
+        content.contains("\"log_quality_score\""),
+        "run_all_e2e.sh manifest must emit log_quality_score"
+    );
+    assert!(
+        content.contains("ARTIFACT_REDACTION_MODE=none is forbidden in CI"),
+        "run_all_e2e.sh must reject CI redaction policy violations"
     );
     assert!(
         content.contains("artifact_manifest.ndjson") || content.contains("artifact_manifest.json"),

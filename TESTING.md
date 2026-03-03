@@ -98,6 +98,22 @@ The file is deterministic and includes:
 - redaction policy
 - per-suite artifact roots + replay commands
 
+E2E log quality gate (asupersync-umelq.18.8):
+- `scripts/run_all_e2e.sh` computes a per-suite `log_quality_score` (0-100)
+  from schema validity, replayability, artifact completeness, and log presence.
+- `LOG_QUALITY_MIN_SCORE` (default `80`) is enforced as a contract gate.
+- Each manifest row (`artifact_manifest.ndjson` / `.json`) includes:
+  `log_quality_score`, `log_quality_threshold`, and `log_quality_gate_ok`.
+- `replay_verification.json` reports `log_quality_violations` and
+  `log_quality_violating_suites`.
+
+E2E summary schema extension policy:
+- `e2e-suite-summary-v3` required fields are contract-stable and validated by
+  `validate_suite_summary_contract` in `scripts/run_all_e2e.sh`.
+- Additive optional fields are allowed without schema bumps.
+- Any change to required fields (rename/remove/type change/semantics change)
+  requires a schema version bump plus validator/test updates in the same change.
+
 CI evidence:
 - `.github/workflows/ci.yml` check job runs `scripts/check_ci_matrix_policy.py`
   against `.github/ci_matrix_policy.json` and uploads

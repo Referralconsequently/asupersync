@@ -34,6 +34,7 @@ export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
 E2E_TIMEOUT="${E2E_TIMEOUT:-300}"
+LOG_QUALITY_MIN_SCORE="${LOG_QUALITY_MIN_SCORE:-80}"
 ARTIFACT_RETENTION_DAYS_LOCAL="${ARTIFACT_RETENTION_DAYS_LOCAL:-14}"
 ARTIFACT_RETENTION_DAYS_CI="${ARTIFACT_RETENTION_DAYS_CI:-30}"
 ARTIFACT_REDACTION_MODE="${ARTIFACT_REDACTION_MODE:-metadata_only}"
@@ -176,6 +177,14 @@ validate_artifact_lifecycle_inputs() {
         echo "ARTIFACT_RETENTION_DAYS_CI must be numeric" >&2
         return 1
     fi
+    if [[ ! "$LOG_QUALITY_MIN_SCORE" =~ ^[0-9]+$ ]]; then
+        echo "LOG_QUALITY_MIN_SCORE must be numeric (0-100)" >&2
+        return 1
+    fi
+    if [[ "$LOG_QUALITY_MIN_SCORE" -lt 0 || "$LOG_QUALITY_MIN_SCORE" -gt 100 ]]; then
+        echo "LOG_QUALITY_MIN_SCORE must be within 0..100" >&2
+        return 1
+    fi
     case "$ARTIFACT_REDACTION_MODE" in
         metadata_only|none|strict)
             ;;
@@ -184,6 +193,10 @@ validate_artifact_lifecycle_inputs() {
             return 1
             ;;
     esac
+    if [[ -n "${CI:-}" && "$ARTIFACT_REDACTION_MODE" == "none" ]]; then
+        echo "ARTIFACT_REDACTION_MODE=none is forbidden in CI (use metadata_only or strict)" >&2
+        return 1
+    fi
     case "$WASM_FAULT_MATRIX_MODE" in
         reduced|full)
             ;;
@@ -277,6 +290,9 @@ emit_artifact_lifecycle_policy_from_manifest() {
               artifact_root,
               artifact_dir,
               summary_file,
+              log_quality_score,
+              log_quality_threshold,
+              log_quality_gate_ok,
               replay_command,
               replay_verified,
               artifact_complete
@@ -665,6 +681,7 @@ echo "Config:"
 echo "  TEST_LOG_LEVEL:  ${TEST_LOG_LEVEL}"
 echo "  RUST_LOG:        ${RUST_LOG}"
 echo "  TEST_SEED:       ${TEST_SEED}"
+echo "  LOG_QUALITY_MIN_SCORE: ${LOG_QUALITY_MIN_SCORE}"
 echo "  WASM_FAULT_MATRIX_MODE: ${WASM_FAULT_MATRIX_MODE}"
 echo "  Timeout:         ${E2E_TIMEOUT}s per suite"
 echo "  Timestamp:       ${TIMESTAMP}"
@@ -679,12 +696,14 @@ SKIP=0
 REPLAY_UNVERIFIED=0
 ARTIFACT_INCOMPLETE=0
 FAILURE_CONTRACT_VIOLATIONS=0
+LOG_QUALITY_VIOLATIONS=0
 SELF_SYNTAX_OK=1
 
 declare -A RESULTS
 declare -A EXIT_CODES
 declare -A DURATION_MS
 declare -a FAILURE_VIOLATION_LINES=()
+declare -a LOG_QUALITY_VIOLATION_LINES=()
 
 set +e
 bash -n "$SCRIPT_DIR/run_all_e2e.sh" >/dev/null 2>&1
@@ -724,7 +743,7 @@ for name in "${SUITE_ORDER[@]}"; do
 
         artifact_root_rel="${SUITE_ARTIFACT_ROOTS[$name]:-}"
         artifact_root_abs="$(normalize_path "$artifact_root_rel")"
-        printf -v manifest_json '{"schema_version":"e2e-orchestrator-artifact-entry-v1","suite":"%s","suite_id":"%s","scenario_id":"%s","script":"%s","result":"%s","exit_code":%d,"duration_ms":%d,"suite_log":"%s","artifact_root":"%s","artifact_dir":"","summary_file":"","suite_log_found":false,"suite_log_nonempty":false,"artifact_dir_found":false,"summary_found":false,"summary_schema_required":true,"summary_schema_ok":false,"summary_schema_reason":"script_not_executable","artifact_complete":false,"replay_command":"%s","replay_script_exists":false,"replay_script_executable":false,"replay_script_syntax_ok":false,"replay_verified":false,"failure_contract_ok":false}' \
+        printf -v manifest_json '{"schema_version":"e2e-orchestrator-artifact-entry-v1","suite":"%s","suite_id":"%s","scenario_id":"%s","script":"%s","result":"%s","exit_code":%d,"duration_ms":%d,"suite_log":"%s","artifact_root":"%s","artifact_dir":"","summary_file":"","suite_log_found":false,"suite_log_nonempty":false,"artifact_dir_found":false,"summary_found":false,"summary_schema_required":true,"summary_schema_ok":false,"summary_schema_reason":"script_not_executable","artifact_complete":false,"log_quality_score":0,"log_quality_threshold":%d,"log_quality_gate_ok":false,"replay_command":"%s","replay_script_exists":false,"replay_script_executable":false,"replay_script_syntax_ok":false,"replay_verified":false,"failure_contract_ok":false}' \
             "$(json_escape "$name")" \
             "$(json_escape "$suite_id")" \
             "$(json_escape "$scenario_id")" \
@@ -734,6 +753,7 @@ for name in "${SUITE_ORDER[@]}"; do
             0 \
             "$(json_escape "$suite_log")" \
             "$(json_escape "$artifact_root_abs")" \
+            "$LOG_QUALITY_MIN_SCORE" \
             "$(json_escape "$replay_command")"
         printf '%s\n' "$manifest_json" >> "$MANIFEST_NDJSON"
         continue
@@ -891,6 +911,32 @@ for name in "${SUITE_ORDER[@]}"; do
         FAILURE_VIOLATION_LINES+=("$name")
     fi
 
+    log_quality_score=0
+    if [[ "$summary_schema_ok" -eq 1 ]]; then
+        log_quality_score=$((log_quality_score + 45))
+    fi
+    if [[ "$replay_verified" -eq 1 ]]; then
+        log_quality_score=$((log_quality_score + 25))
+    fi
+    if [[ "$artifact_complete" -eq 1 ]]; then
+        log_quality_score=$((log_quality_score + 20))
+    fi
+    if [[ "$suite_log_nonempty" -eq 1 ]]; then
+        log_quality_score=$((log_quality_score + 10))
+    fi
+
+    log_quality_gate_ok=1
+    if [[ "$log_quality_score" -lt "$LOG_QUALITY_MIN_SCORE" ]]; then
+        log_quality_gate_ok=0
+        LOG_QUALITY_VIOLATIONS=$((LOG_QUALITY_VIOLATIONS + 1))
+        LOG_QUALITY_VIOLATION_LINES+=("$name")
+        if [[ "$failure_contract_ok" -eq 1 ]]; then
+            failure_contract_ok=0
+            FAILURE_CONTRACT_VIOLATIONS=$((FAILURE_CONTRACT_VIOLATIONS + 1))
+            FAILURE_VIOLATION_LINES+=("$name")
+        fi
+    fi
+
     if [[ "$replay_verified" -eq 0 ]]; then
         REPLAY_UNVERIFIED=$((REPLAY_UNVERIFIED + 1))
     fi
@@ -898,7 +944,7 @@ for name in "${SUITE_ORDER[@]}"; do
         ARTIFACT_INCOMPLETE=$((ARTIFACT_INCOMPLETE + 1))
     fi
 
-    printf -v manifest_json '{"schema_version":"e2e-orchestrator-artifact-entry-v1","suite":"%s","suite_id":"%s","scenario_id":"%s","script":"%s","result":"%s","exit_code":%d,"duration_ms":%d,"suite_log":"%s","artifact_root":"%s","artifact_dir":"%s","summary_file":"%s","suite_log_found":%s,"suite_log_nonempty":%s,"artifact_dir_found":%s,"summary_found":%s,"summary_schema_required":%s,"summary_schema_ok":%s,"summary_schema_reason":"%s","artifact_complete":%s,"replay_command":"%s","replay_script_exists":%s,"replay_script_executable":%s,"replay_script_syntax_ok":%s,"replay_verified":%s,"failure_contract_ok":%s}' \
+    printf -v manifest_json '{"schema_version":"e2e-orchestrator-artifact-entry-v1","suite":"%s","suite_id":"%s","scenario_id":"%s","script":"%s","result":"%s","exit_code":%d,"duration_ms":%d,"suite_log":"%s","artifact_root":"%s","artifact_dir":"%s","summary_file":"%s","suite_log_found":%s,"suite_log_nonempty":%s,"artifact_dir_found":%s,"summary_found":%s,"summary_schema_required":%s,"summary_schema_ok":%s,"summary_schema_reason":"%s","artifact_complete":%s,"log_quality_score":%d,"log_quality_threshold":%d,"log_quality_gate_ok":%s,"replay_command":"%s","replay_script_exists":%s,"replay_script_executable":%s,"replay_script_syntax_ok":%s,"replay_verified":%s,"failure_contract_ok":%s}' \
         "$(json_escape "$name")" \
         "$(json_escape "$suite_id")" \
         "$(json_escape "$scenario_id")" \
@@ -918,6 +964,9 @@ for name in "${SUITE_ORDER[@]}"; do
         "$(json_bool "$summary_schema_ok")" \
         "$(json_escape "$summary_schema_reason")" \
         "$(json_bool "$artifact_complete")" \
+        "$log_quality_score" \
+        "$LOG_QUALITY_MIN_SCORE" \
+        "$(json_bool "$log_quality_gate_ok")" \
         "$(json_escape "$replay_command")" \
         "$(json_bool "$replay_script_exists")" \
         "$(json_bool "$replay_script_executable")" \
@@ -967,6 +1016,8 @@ fi
     echo "  \"replay_unverified_count\": ${REPLAY_UNVERIFIED},"
     echo "  \"artifact_incomplete_count\": ${ARTIFACT_INCOMPLETE},"
     echo "  \"failure_contract_violations\": ${FAILURE_CONTRACT_VIOLATIONS},"
+    echo "  \"log_quality_min_score\": ${LOG_QUALITY_MIN_SCORE},"
+    echo "  \"log_quality_violations\": ${LOG_QUALITY_VIOLATIONS},"
     echo "  \"status\": \"${verification_status}\","
     echo "  \"violating_suites\": ["
     if [[ "${#FAILURE_VIOLATION_LINES[@]}" -gt 0 ]]; then
@@ -975,6 +1026,17 @@ fi
                 echo ","
             fi
             printf "    \"%s\"" "$(json_escape "${FAILURE_VIOLATION_LINES[$idx]}")"
+        done
+        echo ""
+    fi
+    echo "  ],"
+    echo "  \"log_quality_violating_suites\": ["
+    if [[ "${#LOG_QUALITY_VIOLATION_LINES[@]}" -gt 0 ]]; then
+        for idx in "${!LOG_QUALITY_VIOLATION_LINES[@]}"; do
+            if [[ "$idx" -gt 0 ]]; then
+                echo ","
+            fi
+            printf "    \"%s\"" "$(json_escape "${LOG_QUALITY_VIOLATION_LINES[$idx]}")"
         done
         echo ""
     fi
@@ -994,6 +1056,8 @@ fi
     echo "  \"passed\": ${PASS},"
     echo "  \"failed\": ${FAIL},"
     echo "  \"skipped\": ${SKIP},"
+    echo "  \"log_quality_min_score\": ${LOG_QUALITY_MIN_SCORE},"
+    echo "  \"log_quality_violations\": ${LOG_QUALITY_VIOLATIONS},"
     echo "  \"manifest_ndjson\": \"$(json_escape "$MANIFEST_NDJSON")\","
     echo "  \"manifest_json\": \"$(json_escape "$MANIFEST_JSON")\","
     echo "  \"artifact_lifecycle\": \"$(json_escape "$ARTIFACT_LIFECYCLE_FILE")\","

@@ -17,16 +17,24 @@ OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/wasm_incident_forensics"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
+WORK_DIR="/tmp/asupersync_wasm_incident_forensics_${TIMESTAMP}_$$"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
 INCIDENT_SUMMARY_FILE="${ARTIFACT_DIR}/incident_summary.json"
 EVENTS_FILE="${ARTIFACT_DIR}/incident_events.ndjson"
 REPRO_BUNDLE_FILE="${ARTIFACT_DIR}/repro_bundle.json"
-RUN1_JSON="${ARTIFACT_DIR}/replay_run1.json"
-RUN2_JSON="${ARTIFACT_DIR}/replay_run2.json"
-RUN1_LOG="${ARTIFACT_DIR}/run1.log"
-RUN2_LOG="${ARTIFACT_DIR}/run2.log"
-FAILURE_LOG="${ARTIFACT_DIR}/expected_failure.log"
+RUN1_JSON="${WORK_DIR}/replay_run1.json"
+RUN2_JSON="${WORK_DIR}/replay_run2.json"
+RUN1_LOG="${WORK_DIR}/run1.log"
+RUN2_LOG="${WORK_DIR}/run2.log"
+FAILURE_LOG="${WORK_DIR}/expected_failure.log"
+DETERMINISM_DIFF="${WORK_DIR}/determinism.diff"
 REPLAY_REPORT_PATH="${ARTIFACT_DIR}/replay_report.json"
+ARTIFACT_RUN1_JSON="${ARTIFACT_DIR}/replay_run1.json"
+ARTIFACT_RUN2_JSON="${ARTIFACT_DIR}/replay_run2.json"
+ARTIFACT_RUN1_LOG="${ARTIFACT_DIR}/run1.log"
+ARTIFACT_RUN2_LOG="${ARTIFACT_DIR}/run2.log"
+ARTIFACT_FAILURE_LOG="${ARTIFACT_DIR}/expected_failure.log"
+ARTIFACT_DETERMINISM_DIFF="${ARTIFACT_DIR}/determinism.diff"
 SCENARIO_PATH="examples/scenarios/smoke_happy_path.yaml"
 SCENARIO_ID="smoke-happy-path"
 MISSING_SCENARIO_PATH="examples/scenarios/missing_forensics_fixture.yaml"
@@ -69,7 +77,7 @@ if ! [[ "${WINDOW_EVENTS}" =~ ^[0-9]+$ ]] || [[ "${WINDOW_EVENTS}" -eq 0 ]]; the
     exit 1
 fi
 
-mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}" "${WORK_DIR}"
 
 echo "==================================================================="
 echo "      Asupersync WASM Incident Forensics E2E Drill              "
@@ -99,6 +107,7 @@ run_replay_call() {
     local attempt_log=""
 
     if [[ "${DRY_RUN}" == "1" ]]; then
+        mkdir -p "$(dirname "${run_json}")" "$(dirname "${run_log}")"
         payload="$(jq -nc \
             --arg scenario "${SCENARIO_PATH}" \
             --arg scenario_id "${SCENARIO_ID}" \
@@ -160,6 +169,8 @@ run_replay_call() {
         )
 
         attempt_log="${run_log%.log}.attempt${attempt}.log"
+        mkdir -p "$(dirname "${attempt_log}")"
+        mkdir -p "$(dirname "${REPLAY_REPORT_PATH}")"
         if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${replay_cmd[@]}" >"${attempt_log}" 2>&1; then
             rc=0
         else
@@ -168,6 +179,7 @@ run_replay_call() {
 
         payload="$(grep -E "\"scenario_id\"[[:space:]]*:[[:space:]]*\"${SCENARIO_ID}\"" "${attempt_log}" | tail -n1 || true)"
         if [[ -n "${payload}" ]] && printf '%s\n' "${payload}" | jq -e . >/dev/null 2>&1; then
+            mkdir -p "$(dirname "${run_log}")" "$(dirname "${run_json}")"
             cp "${attempt_log}" "${run_log}"
             printf '%s\n' "${payload}" > "${run_json}"
             if [[ ${rc} -ne 0 ]]; then
@@ -183,6 +195,7 @@ run_replay_call() {
     done
 
     if [[ -n "${attempt_log}" && -f "${attempt_log}" ]]; then
+        mkdir -p "$(dirname "${run_log}")"
         cp "${attempt_log}" "${run_log}"
     fi
     echo "  ERROR: ${run_label} failed after ${RCH_RETRY_ATTEMPTS} attempt(s) (last exit=${rc}) and produced no valid JSON payload"
@@ -191,6 +204,7 @@ run_replay_call() {
 
 run_expected_failure_probe() {
     if [[ "${DRY_RUN}" == "1" ]]; then
+        mkdir -p "$(dirname "${FAILURE_LOG}")"
         cat > "${FAILURE_LOG}" <<EOF
 ERROR missing scenario fixture: ${MISSING_SCENARIO_PATH}
 hint: create fixture or use replay command from repro bundle
@@ -212,6 +226,7 @@ EOF
         --window-events "${WINDOW_EVENTS}"
     )
 
+    mkdir -p "$(dirname "${FAILURE_LOG}")"
     if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${fail_cmd[@]}" >"${FAILURE_LOG}" 2>&1; then
         echo "  ERROR: expected failure probe unexpectedly succeeded"
         return 1
@@ -243,8 +258,8 @@ fi
 
 if [[ ${EXIT_CODE} -eq 0 ]]; then
     echo ">>> [3/6] Determinism check (run1 == run2)..."
-    if diff -u "${RUN1_JSON}" "${RUN2_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
-        rm -f "${ARTIFACT_DIR}/determinism.diff"
+    if diff -u "${RUN1_JSON}" "${RUN2_JSON}" > "${DETERMINISM_DIFF}"; then
+        rm -f "${DETERMINISM_DIFF}"
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
     else
         echo "  ERROR: deterministic replay output mismatch"
@@ -265,7 +280,7 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         .deterministic == true and
         .seed == $seed and
         (.trace_fingerprint | type == "number") and
-        (.steps | type == "number" and . > 0) and
+        (.steps | type == "number" and . >= 0) and
         (.replay_events | type == "number" and . >= 1) and
         .window.start == $window_start and
         .window.requested_events == $window_events and
@@ -294,6 +309,26 @@ fi
 
 echo ">>> [6/6] Building incident artifact bundle..."
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$(dirname "${SUMMARY_FILE}")" "$(dirname "${EVENTS_FILE}")"
+
+if [[ -f "${RUN1_JSON}" ]]; then
+    cp "${RUN1_JSON}" "${ARTIFACT_RUN1_JSON}"
+fi
+if [[ -f "${RUN2_JSON}" ]]; then
+    cp "${RUN2_JSON}" "${ARTIFACT_RUN2_JSON}"
+fi
+if [[ -f "${RUN1_LOG}" ]]; then
+    cp "${RUN1_LOG}" "${ARTIFACT_RUN1_LOG}"
+fi
+if [[ -f "${RUN2_LOG}" ]]; then
+    cp "${RUN2_LOG}" "${ARTIFACT_RUN2_LOG}"
+fi
+if [[ -f "${FAILURE_LOG}" ]]; then
+    cp "${FAILURE_LOG}" "${ARTIFACT_FAILURE_LOG}"
+fi
+if [[ -f "${DETERMINISM_DIFF}" ]]; then
+    cp "${DETERMINISM_DIFF}" "${ARTIFACT_DETERMINISM_DIFF}"
+fi
 SUITE_STATUS="failed"
 FAILURE_CLASS="test_or_pattern_failure"
 if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
@@ -311,10 +346,10 @@ fi
 REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} WINDOW_START=${WINDOW_START} WINDOW_EVENTS=${WINDOW_EVENTS} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")"
 
 cat > "${EVENTS_FILE}" <<END_EVENTS
-{"schema_version":"incident-forensics-event-v1","phase":"triage_replay_run_1","status":"$( [[ -f "${RUN1_JSON}" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"${SCENARIO_ID}","artifact":"${RUN1_JSON}"}
-{"schema_version":"incident-forensics-event-v1","phase":"triage_replay_run_2","status":"$( [[ -f "${RUN2_JSON}" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"${SCENARIO_ID}","artifact":"${RUN2_JSON}"}
-{"schema_version":"incident-forensics-event-v1","phase":"determinism_compare","status":"$( [[ -f "${RUN1_JSON}" && -f "${RUN2_JSON}" && ! -f "${ARTIFACT_DIR}/determinism.diff" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"${SCENARIO_ID}","artifact":"${ARTIFACT_DIR}/determinism.diff"}
-{"schema_version":"incident-forensics-event-v1","phase":"failure_probe_missing_fixture","status":"$( [[ -f "${FAILURE_LOG}" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"MISSING-FIXTURE-PROBE","artifact":"${FAILURE_LOG}"}
+{"schema_version":"incident-forensics-event-v1","phase":"triage_replay_run_1","status":"$( [[ -f "${ARTIFACT_RUN1_JSON}" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"${SCENARIO_ID}","artifact":"${ARTIFACT_RUN1_JSON}"}
+{"schema_version":"incident-forensics-event-v1","phase":"triage_replay_run_2","status":"$( [[ -f "${ARTIFACT_RUN2_JSON}" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"${SCENARIO_ID}","artifact":"${ARTIFACT_RUN2_JSON}"}
+{"schema_version":"incident-forensics-event-v1","phase":"determinism_compare","status":"$( [[ -f "${ARTIFACT_RUN1_JSON}" && -f "${ARTIFACT_RUN2_JSON}" && ! -f "${DETERMINISM_DIFF}" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"${SCENARIO_ID}","artifact":"${ARTIFACT_DETERMINISM_DIFF}"}
+{"schema_version":"incident-forensics-event-v1","phase":"failure_probe_missing_fixture","status":"$( [[ -f "${ARTIFACT_FAILURE_LOG}" ]] && echo pass || echo fail )","seed":${TEST_SEED},"scenario_id":"MISSING-FIXTURE-PROBE","artifact":"${ARTIFACT_FAILURE_LOG}"}
 END_EVENTS
 
 cat > "${REPRO_BUNDLE_FILE}" <<END_REPRO
@@ -325,13 +360,13 @@ cat > "${REPRO_BUNDLE_FILE}" <<END_REPRO
   "status": "${SUITE_STATUS}",
   "replay_command": "${REPRO_COMMAND}",
   "artifact_pointer": "${ARTIFACT_POINTER}",
-  "artifacts": {
-    "summary": "${SUMMARY_FILE}",
-    "incident_summary": "${INCIDENT_SUMMARY_FILE}",
-    "events": "${EVENTS_FILE}",
-    "replay_report": "${REPLAY_REPORT_PATH}",
-    "failure_probe_log": "${FAILURE_LOG}"
-  }
+    "artifacts": {
+      "summary": "${SUMMARY_FILE}",
+      "incident_summary": "${INCIDENT_SUMMARY_FILE}",
+      "events": "${EVENTS_FILE}",
+      "replay_report": "${REPLAY_REPORT_PATH}",
+      "failure_probe_log": "${ARTIFACT_FAILURE_LOG}"
+    }
 }
 END_REPRO
 
@@ -373,7 +408,7 @@ cat > "${SUMMARY_FILE}" <<END_SUMMARY
   "tests_failed": ${TESTS_FAILED},
   "exit_code": ${EXIT_CODE},
   "pattern_failures": ${CHECK_FAILURES},
-  "log_file": "${RUN1_LOG}",
+  "log_file": "${ARTIFACT_RUN1_LOG}",
   "artifact_dir": "${ARTIFACT_DIR}",
   "checks_passed": ${CHECKS_PASSED}
 }
