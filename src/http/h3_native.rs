@@ -757,6 +757,147 @@ pub fn qpack_plan_to_header_fields(
     Ok(out)
 }
 
+/// Decode a wire-level request field section into a validated request head.
+///
+/// This applies QPACK decode rules for the configured mode and then enforces
+/// HTTP/3 pseudo-header semantics:
+/// - pseudo-headers must appear before regular headers
+/// - duplicate pseudo-headers are rejected
+/// - request-only pseudo-header set is validated
+pub fn qpack_decode_request_field_section(
+    input: &[u8],
+    mode: H3QpackMode,
+) -> Result<H3RequestHead, H3NativeError> {
+    let plan = qpack_decode_field_section(input, mode)?;
+    let fields = qpack_plan_to_header_fields(&plan)?;
+    header_fields_to_request_head(&fields)
+}
+
+/// Decode a wire-level response field section into a validated response head.
+///
+/// This applies QPACK decode rules for the configured mode and then enforces
+/// HTTP/3 pseudo-header semantics:
+/// - pseudo-headers must appear before regular headers
+/// - only `:status` is allowed
+/// - duplicate or malformed `:status` is rejected
+pub fn qpack_decode_response_field_section(
+    input: &[u8],
+    mode: H3QpackMode,
+) -> Result<H3ResponseHead, H3NativeError> {
+    let plan = qpack_decode_field_section(input, mode)?;
+    let fields = qpack_plan_to_header_fields(&plan)?;
+    header_fields_to_response_head(&fields)
+}
+
+fn header_fields_to_request_head(
+    fields: &[(String, String)],
+) -> Result<H3RequestHead, H3NativeError> {
+    let mut pseudo = H3PseudoHeaders::default();
+    let mut headers = Vec::new();
+    let mut saw_regular_headers = false;
+
+    for (name, value) in fields {
+        if name.starts_with(':') {
+            if saw_regular_headers {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    "request pseudo headers must precede regular headers",
+                ));
+            }
+            match name.as_str() {
+                ":method" => {
+                    if pseudo.method.is_some() {
+                        return Err(H3NativeError::InvalidRequestPseudoHeader(
+                            "duplicate :method",
+                        ));
+                    }
+                    pseudo.method = Some(value.clone());
+                }
+                ":scheme" => {
+                    if pseudo.scheme.is_some() {
+                        return Err(H3NativeError::InvalidRequestPseudoHeader(
+                            "duplicate :scheme",
+                        ));
+                    }
+                    pseudo.scheme = Some(value.clone());
+                }
+                ":authority" => {
+                    if pseudo.authority.is_some() {
+                        return Err(H3NativeError::InvalidRequestPseudoHeader(
+                            "duplicate :authority",
+                        ));
+                    }
+                    pseudo.authority = Some(value.clone());
+                }
+                ":path" => {
+                    if pseudo.path.is_some() {
+                        return Err(H3NativeError::InvalidRequestPseudoHeader("duplicate :path"));
+                    }
+                    pseudo.path = Some(value.clone());
+                }
+                ":status" => {
+                    return Err(H3NativeError::InvalidRequestPseudoHeader(
+                        "request must not include :status",
+                    ));
+                }
+                _ => {
+                    return Err(H3NativeError::InvalidRequestPseudoHeader(
+                        "unknown request pseudo header",
+                    ));
+                }
+            }
+        } else {
+            saw_regular_headers = true;
+            headers.push((name.clone(), value.clone()));
+        }
+    }
+
+    H3RequestHead::new(pseudo, headers)
+}
+
+fn header_fields_to_response_head(
+    fields: &[(String, String)],
+) -> Result<H3ResponseHead, H3NativeError> {
+    let mut status: Option<u16> = None;
+    let mut headers = Vec::new();
+    let mut saw_regular_headers = false;
+
+    for (name, value) in fields {
+        if name.starts_with(':') {
+            if saw_regular_headers {
+                return Err(H3NativeError::InvalidResponsePseudoHeader(
+                    "response pseudo headers must precede regular headers",
+                ));
+            }
+            match name.as_str() {
+                ":status" => {
+                    if status.is_some() {
+                        return Err(H3NativeError::InvalidResponsePseudoHeader(
+                            "duplicate :status",
+                        ));
+                    }
+                    let parsed = value.parse::<u16>().map_err(|_| {
+                        H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
+                    })?;
+                    status = Some(parsed);
+                }
+                _ => {
+                    return Err(H3NativeError::InvalidResponsePseudoHeader(
+                        "response must not include request pseudo headers",
+                    ));
+                }
+            }
+        } else {
+            saw_regular_headers = true;
+            headers.push((name.clone(), value.clone()));
+        }
+    }
+
+    let status = status.ok_or(H3NativeError::InvalidResponsePseudoHeader(
+        "missing :status",
+    ))?;
+    H3ResponseHead::new(status, headers)
+}
+
 fn qpack_encode_prefixed_int(
     out: &mut Vec<u8>,
     prefix_bits: u8,
@@ -2324,6 +2465,118 @@ mod tests {
         let response_decoded = qpack_decode_field_section(&response_wire, H3QpackMode::StaticOnly)
             .expect("response decode");
         assert_eq!(response_decoded, response_plan);
+    }
+
+    #[test]
+    fn qpack_wire_decode_request_head_helper_roundtrip() {
+        let request = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("api.example.com".to_string()),
+                path: Some("/v1/items".to_string()),
+                status: None,
+            },
+            vec![("accept".to_string(), "application/json".to_string())],
+        )
+        .expect("request");
+        let wire = qpack_encode_request_field_section(&request).expect("encode");
+        let decoded =
+            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly).expect("decode");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn qpack_wire_decode_response_head_helper_roundtrip() {
+        let response = H3ResponseHead::new(
+            200,
+            vec![
+                ("content-type".to_string(), "text/plain".to_string()),
+                ("server".to_string(), "asupersync".to_string()),
+            ],
+        )
+        .expect("response");
+        let wire = qpack_encode_response_field_section(&response).expect("encode");
+        let decoded =
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect("decode");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn qpack_request_decode_rejects_pseudo_after_regular_header() {
+        let plan = vec![
+            QpackFieldPlan::Literal {
+                name: "accept".to_string(),
+                value: "*/*".to_string(),
+            },
+            QpackFieldPlan::StaticIndex(17), // :method GET
+            QpackFieldPlan::StaticIndex(23), // :scheme https
+            QpackFieldPlan::StaticIndex(1),  // :path /
+        ];
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+        let err =
+            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader(
+                "request pseudo headers must precede regular headers",
+            )
+        );
+    }
+
+    #[test]
+    fn qpack_request_decode_rejects_duplicate_method() {
+        let plan = vec![
+            QpackFieldPlan::StaticIndex(17), // :method GET
+            QpackFieldPlan::Literal {
+                name: ":method".to_string(),
+                value: "POST".to_string(),
+            },
+            QpackFieldPlan::StaticIndex(23), // :scheme https
+            QpackFieldPlan::StaticIndex(1),  // :path /
+        ];
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+        let err =
+            qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("duplicate :method")
+        );
+    }
+
+    #[test]
+    fn qpack_response_decode_rejects_invalid_status_value() {
+        let plan = vec![QpackFieldPlan::Literal {
+            name: ":status".to_string(),
+            value: "ok".to_string(),
+        }];
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+        let err =
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader("invalid :status value")
+        );
+    }
+
+    #[test]
+    fn qpack_response_decode_rejects_request_pseudo_header() {
+        let plan = vec![
+            QpackFieldPlan::StaticIndex(25), // :status 200
+            QpackFieldPlan::Literal {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+        ];
+        let wire = qpack_encode_field_section(&plan).expect("encode");
+        let err =
+            qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly).expect_err("fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader(
+                "response must not include request pseudo headers",
+            )
+        );
     }
 
     #[test]

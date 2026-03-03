@@ -13,6 +13,7 @@ const HTTP_MOD_PATH: &str = "src/http/mod.rs";
 const NET_QUIC_TEST_PATH: &str = "tests/net_quic.rs";
 const QUIC_NATIVE_CONNECTION_PATH: &str = "src/net/quic_native/connection.rs";
 const QUIC_NATIVE_TRANSPORT_PATH: &str = "src/net/quic_native/transport.rs";
+const H3_NATIVE_PATH: &str = "src/http/h3_native.rs";
 const QUIC_H3_VIOLATIONS_TEST_PATH: &str = "tests/quic_h3_e2e_violations.rs";
 const QUIC_H3_LOSS_TEST_PATH: &str = "tests/quic_h3_e2e_loss.rs";
 
@@ -52,6 +53,10 @@ fn load_net_quic_test() -> String {
 
 fn load_quic_native_connection() -> String {
     load_doc(QUIC_NATIVE_CONNECTION_PATH)
+}
+
+fn load_h3_native() -> String {
+    load_doc(H3_NATIVE_PATH)
 }
 
 fn load_quic_h3_violations_test() -> String {
@@ -444,6 +449,7 @@ fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
 #[test]
 fn t4_transport_invariants_are_contract_enforced() {
     let connection = load_quic_native_connection();
+    let h3_native = load_h3_native();
     let transport = load_quic_native_transport();
     let violations = load_quic_h3_violations_test();
     let loss = load_quic_h3_loss_test();
@@ -466,10 +472,19 @@ fn t4_transport_invariants_are_contract_enforced() {
             && connection.contains("set_active_migration_disabled"),
         "connection surface must expose 0-RTT/resumption and migration hardening APIs"
     );
+    assert!(
+        h3_native.contains("qpack_decode_request_field_section")
+            && h3_native.contains("qpack_decode_response_field_section"),
+        "h3 native surface must expose QPACK field-section decode helpers for validated request/response heads"
+    );
 
     assert!(
         violations.contains("appdata_packet_before_1rtt_and_any_packet_after_close_are_rejected"),
         "violations suite must cover packet-space/state legality in transport core"
+    );
+    assert!(
+        violations.contains("h3_qpack_request_pseudo_after_regular_header_is_rejected"),
+        "violations suite must cover malformed H3/QPACK pseudo-header ordering"
     );
 
     assert!(
@@ -481,9 +496,11 @@ fn t4_transport_invariants_are_contract_enforced() {
         "loss e2e suite must cover delayed-loss reporting without double cwnd reduction"
     );
     assert!(
-        std::fs::read_to_string(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/quic_h3_e2e.rs"))
-            .expect("quic_h3_e2e test file should load")
-            .contains("zero_rtt_resumption_send_path_and_migration_guards"),
+        std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/quic_h3_e2e.rs")
+        )
+        .expect("quic_h3_e2e test file should load")
+        .contains("zero_rtt_resumption_send_path_and_migration_guards"),
         "quic_h3 e2e suite must include zero-rtt/resumption/migration coverage"
     );
 }

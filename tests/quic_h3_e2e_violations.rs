@@ -5,7 +5,10 @@
 //! confirms that the stack remains in a valid state after the error.
 
 use asupersync::cx::Cx;
-use asupersync::http::h3_native::{H3ConnectionState, H3ControlState, H3Frame, H3Settings};
+use asupersync::http::h3_native::{
+    H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3QpackMode, H3Settings,
+    QpackFieldPlan, qpack_decode_request_field_section, qpack_encode_field_section,
+};
 use asupersync::net::quic_core::{
     ConnectionId, PacketHeader, QuicCoreError, TransportParameters, encode_varint,
 };
@@ -662,7 +665,36 @@ fn h3_disallowed_frames_on_control_stream_after_settings() {
 }
 
 // ===========================================================================
-// Test 14: Write and open on draining connection -- verify errors
+// Test 14: H3 QPACK field-section pseudo-header ordering violation
+// ===========================================================================
+
+#[test]
+fn h3_qpack_request_pseudo_after_regular_header_is_rejected() {
+    let _rng = DetRng::new(0xE6_000F);
+
+    let plan = vec![
+        QpackFieldPlan::Literal {
+            name: "accept".to_string(),
+            value: "*/*".to_string(),
+        },
+        QpackFieldPlan::StaticIndex(17), // :method GET (invalid placement)
+        QpackFieldPlan::StaticIndex(23), // :scheme https
+        QpackFieldPlan::StaticIndex(1),  // :path /
+    ];
+    let wire = qpack_encode_field_section(&plan).expect("encode field section");
+
+    let err = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly)
+        .expect_err("pseudo header after regular header must fail");
+    assert_eq!(
+        err,
+        H3NativeError::InvalidRequestPseudoHeader(
+            "request pseudo headers must precede regular headers",
+        )
+    );
+}
+
+// ===========================================================================
+// Test 15: Write and open on draining connection -- verify errors
 // ===========================================================================
 
 #[test]

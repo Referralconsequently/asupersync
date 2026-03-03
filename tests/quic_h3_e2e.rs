@@ -6,8 +6,10 @@
 
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
-    H3ConnectionState, H3ControlState, H3Frame, H3PseudoHeaders, H3RequestHead,
-    H3RequestStreamState, H3ResponseHead, H3Settings, qpack_static_plan_for_request,
+    H3ConnectionState, H3ControlState, H3Frame, H3PseudoHeaders, H3QpackMode, H3RequestHead,
+    H3RequestStreamState, H3ResponseHead, H3Settings, qpack_decode_request_field_section,
+    qpack_decode_response_field_section, qpack_encode_request_field_section,
+    qpack_encode_response_field_section, qpack_static_plan_for_request,
     qpack_static_plan_for_response,
 };
 use asupersync::net::quic_core::{
@@ -479,8 +481,10 @@ fn h3_request_response_lifecycle() {
     let req_plan = qpack_static_plan_for_request(&request_head);
     assert!(!req_plan.is_empty(), "plan should have entries");
 
-    // Encode a HEADERS frame (simulated QPACK-encoded block).
-    let headers_frame = H3Frame::Headers(vec![0x00, 0x00, 0x80, 0x17]); // minimal QPACK-encoded block
+    let request_field_block =
+        qpack_encode_request_field_section(&request_head).expect("qpack request encode");
+    // Encode HEADERS with an actual QPACK field section and verify decode path.
+    let headers_frame = H3Frame::Headers(request_field_block.clone());
     let mut request_stream_state = H3RequestStreamState::new();
     request_stream_state
         .on_frame(&headers_frame)
@@ -490,6 +494,10 @@ fn h3_request_response_lifecycle() {
     server_h3
         .on_request_stream_frame(request_stream_id, &headers_frame)
         .expect("server process request headers");
+    let decoded_request =
+        qpack_decode_request_field_section(&request_field_block, H3QpackMode::StaticOnly)
+            .expect("server qpack request decode");
+    assert_eq!(decoded_request, request_head);
 
     // Client sends DATA.
     let data_bytes: Vec<u8> = (0..64).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
@@ -519,8 +527,10 @@ fn h3_request_response_lifecycle() {
     let resp_plan = qpack_static_plan_for_response(&response_head);
     assert!(!resp_plan.is_empty());
 
+    let response_field_block =
+        qpack_encode_response_field_section(&response_head).expect("qpack response encode");
     // Encode response frames.
-    let resp_headers = H3Frame::Headers(vec![0x00, 0x00, 0xD9]); // minimal QPACK-encoded block
+    let resp_headers = H3Frame::Headers(response_field_block.clone());
     let resp_data = H3Frame::Data(b"Hello, world!".to_vec());
 
     let mut resp_wire = Vec::new();
@@ -534,6 +544,13 @@ fn h3_request_response_lifecycle() {
     let (dec_h, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp headers");
     pos += n;
     assert_eq!(dec_h, resp_headers);
+    if let H3Frame::Headers(block) = &dec_h {
+        let decoded_response = qpack_decode_response_field_section(block, H3QpackMode::StaticOnly)
+            .expect("client qpack response decode");
+        assert_eq!(decoded_response, response_head);
+    } else {
+        panic!("expected response HEADERS frame");
+    }
 
     let (dec_d, n) = H3Frame::decode(&resp_wire[pos..]).expect("decode resp data");
     pos += n;
