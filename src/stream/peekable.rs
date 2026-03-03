@@ -17,7 +17,14 @@ use std::task::{Context, Poll};
 pub struct Peekable<S: Stream> {
     #[pin]
     stream: S,
-    peeked: Option<Option<S::Item>>,
+    peeked: PeekSlot<S::Item>,
+}
+
+#[derive(Debug)]
+enum PeekSlot<T> {
+    Empty,
+    Item(T),
+    Exhausted,
 }
 
 impl<S: Stream + Unpin> Peekable<S> {
@@ -25,7 +32,7 @@ impl<S: Stream + Unpin> Peekable<S> {
     pub(crate) fn new(stream: S) -> Self {
         Self {
             stream,
-            peeked: None,
+            peeked: PeekSlot::Empty,
         }
     }
 
@@ -52,15 +59,18 @@ impl<S: Stream + Unpin> Peekable<S> {
     /// `Poll::Ready(None)` if the stream is exhausted, or `Poll::Pending`
     /// if the next item is not yet ready.
     pub fn poll_peek(&mut self, cx: &mut Context<'_>) -> Poll<Option<&S::Item>> {
-        if self.peeked.is_none() {
+        if matches!(self.peeked, PeekSlot::Empty) {
             match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(item) => {
-                    self.peeked = Some(item);
-                }
+                Poll::Ready(Some(item)) => self.peeked = PeekSlot::Item(item),
+                Poll::Ready(None) => self.peeked = PeekSlot::Exhausted,
                 Poll::Pending => return Poll::Pending,
             }
         }
-        Poll::Ready(self.peeked.as_ref().unwrap().as_ref())
+        match &self.peeked {
+            PeekSlot::Item(item) => Poll::Ready(Some(item)),
+            PeekSlot::Exhausted => Poll::Ready(None),
+            PeekSlot::Empty => Poll::Pending,
+        }
     }
 
     /// Returns a reference to the peeked item, if one has been peeked.
@@ -68,7 +78,10 @@ impl<S: Stream + Unpin> Peekable<S> {
     /// Unlike `poll_peek`, this does not poll the underlying stream.
     #[must_use]
     pub fn peek_cached(&self) -> Option<&S::Item> {
-        self.peeked.as_ref().and_then(|opt| opt.as_ref())
+        match &self.peeked {
+            PeekSlot::Item(item) => Some(item),
+            PeekSlot::Empty | PeekSlot::Exhausted => None,
+        }
     }
 }
 
@@ -77,15 +90,16 @@ impl<S: Stream + Unpin> Stream for Peekable<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
-        if let Some(peeked) = this.peeked.take() {
-            return Poll::Ready(peeked);
+        match std::mem::replace(this.peeked, PeekSlot::Empty) {
+            PeekSlot::Item(item) => Poll::Ready(Some(item)),
+            PeekSlot::Exhausted => Poll::Ready(None),
+            PeekSlot::Empty => this.stream.as_mut().poll_next(cx),
         }
-        this.stream.as_mut().poll_next(cx)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lo, hi) = self.stream.size_hint();
-        let peek_len = usize::from(self.peeked.as_ref().is_some_and(|p| p.is_some()));
+        let peek_len = usize::from(matches!(self.peeked, PeekSlot::Item(_)));
         (
             lo.saturating_add(peek_len),
             hi.map(|h| h.saturating_add(peek_len)),
