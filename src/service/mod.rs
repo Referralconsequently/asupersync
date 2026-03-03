@@ -20,6 +20,7 @@ mod builder;
 pub mod concurrency_limit;
 pub mod discover;
 mod layer;
+pub mod load_balance;
 pub mod load_shed;
 pub mod rate_limit;
 pub mod retry;
@@ -33,6 +34,10 @@ pub use discover::{
     Change, Discover, DnsDiscoveryConfig, DnsDiscoveryError, DnsServiceDiscovery, StaticList,
 };
 pub use layer::{Identity, Layer, Stack};
+pub use load_balance::{
+    LoadBalanceError, LoadBalancedFuture, LoadBalancer, PowerOfTwoChoices, RoundRobin, Strategy,
+    Weighted,
+};
 pub use load_shed::{LoadShed, LoadShedError, LoadShedLayer, Overloaded};
 pub use rate_limit::{RateLimit, RateLimitError, RateLimitLayer};
 pub use retry::{LimitedRetry, NoRetry, Policy, Retry, RetryLayer};

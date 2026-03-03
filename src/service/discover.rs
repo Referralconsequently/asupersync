@@ -439,8 +439,8 @@ mod tests {
     #[test]
     fn dns_config_poll_interval() {
         let config =
-            DnsDiscoveryConfig::new("example.com", 80).poll_interval(Duration::from_secs(60));
-        assert_eq!(config.poll_interval, Duration::from_secs(60));
+            DnsDiscoveryConfig::new("example.com", 80).poll_interval(Duration::from_mins(1));
+        assert_eq!(config.poll_interval, Duration::from_mins(1));
     }
 
     #[test]
@@ -448,8 +448,7 @@ mod tests {
         let config = DnsDiscoveryConfig::new("host", 443);
         let dbg = format!("{config:?}");
         assert!(dbg.contains("DnsDiscoveryConfig"));
-        let cloned = config.clone();
-        assert_eq!(cloned.hostname, "host");
+        assert_eq!(config.hostname, "host");
     }
 
     // ================================================================
@@ -491,7 +490,7 @@ mod tests {
     fn dns_discovery_no_change_within_interval() {
         init_test("dns_discovery_no_change_within_interval");
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("localhost", 80).poll_interval(Duration::from_secs(300)),
+            DnsDiscoveryConfig::new("localhost", 80).poll_interval(Duration::from_mins(5)),
         );
 
         let _ = discovery.poll_discover().unwrap();
@@ -506,7 +505,7 @@ mod tests {
     fn dns_discovery_invalidate_forces_resolve() {
         init_test("dns_discovery_invalidate_forces_resolve");
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("localhost", 80).poll_interval(Duration::from_secs(300)),
+            DnsDiscoveryConfig::new("localhost", 80).poll_interval(Duration::from_mins(5)),
         );
 
         let _ = discovery.poll_discover().unwrap();
@@ -553,7 +552,7 @@ mod tests {
 
     #[test]
     fn dns_error_display() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let err = DnsDiscoveryError::Resolve(io_err);
         let display = format!("{err}");
         assert!(display.contains("DNS resolution failed"));
@@ -561,7 +560,7 @@ mod tests {
 
     #[test]
     fn dns_error_debug() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let err = DnsDiscoveryError::Resolve(io_err);
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Resolve"));
@@ -570,7 +569,7 @@ mod tests {
     #[test]
     fn dns_error_source() {
         use std::error::Error;
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let err = DnsDiscoveryError::Resolve(io_err);
         assert!(err.source().is_some());
     }
