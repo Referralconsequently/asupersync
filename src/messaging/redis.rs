@@ -389,6 +389,58 @@ impl RespValue {
     }
 }
 
+/// Pub/Sub subscription acknowledgement kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubSubSubscriptionKind {
+    /// `SUBSCRIBE` acknowledgement.
+    Subscribe,
+    /// `UNSUBSCRIBE` acknowledgement.
+    Unsubscribe,
+    /// `PSUBSCRIBE` acknowledgement.
+    PatternSubscribe,
+    /// `PUNSUBSCRIBE` acknowledgement.
+    PatternUnsubscribe,
+}
+
+/// A Redis Pub/Sub message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PubSubMessage {
+    /// Channel that produced the message.
+    pub channel: String,
+    /// Optional pattern when delivered through `PSUBSCRIBE`.
+    pub pattern: Option<String>,
+    /// Raw message payload bytes.
+    pub payload: Vec<u8>,
+}
+
+/// Event emitted by a Pub/Sub connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PubSubEvent {
+    /// Data message from `SUBSCRIBE`/`PSUBSCRIBE`.
+    Message(PubSubMessage),
+    /// Subscription state change acknowledgement.
+    Subscription {
+        /// Acknowledgement kind.
+        kind: PubSubSubscriptionKind,
+        /// Channel/pattern name.
+        channel: String,
+        /// Remaining active subscriptions on this connection.
+        remaining: i64,
+    },
+    /// `PONG` reply for health checks.
+    Pong(Option<Vec<u8>>),
+}
+
+fn expect_ok_response(resp: RespValue, command: &str) -> Result<(), RedisError> {
+    if resp.is_ok() {
+        Ok(())
+    } else {
+        Err(RedisError::Protocol(format!(
+            "{command} expected +OK, got {resp:?}"
+        )))
+    }
+}
+
 const MAX_RESP_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -850,6 +902,65 @@ impl RedisClient {
         let resp = self.cmd_bytes(cx, &args).await?;
         resp.as_integer()
             .ok_or_else(|| RedisError::Protocol("HDEL did not return integer".to_string()))
+    }
+
+    /// PING health check.
+    pub async fn ping(&self, cx: &Cx) -> Result<(), RedisError> {
+        let resp = self.cmd_bytes(cx, &[b"PING"]).await?;
+        match resp {
+            RespValue::SimpleString(s) if s == "PONG" => Ok(()),
+            RespValue::BulkString(Some(bytes)) if bytes == b"PONG" => Ok(()),
+            other => Err(RedisError::Protocol(format!(
+                "PING expected PONG, got {other:?}"
+            ))),
+        }
+    }
+
+    /// PUBLISH channel payload.
+    ///
+    /// Returns the number of subscribers that received the payload.
+    pub async fn publish(&self, cx: &Cx, channel: &str, payload: &[u8]) -> Result<i64, RedisError> {
+        let resp = self
+            .cmd_bytes(cx, &[b"PUBLISH", channel.as_bytes(), payload])
+            .await?;
+        resp.as_integer()
+            .ok_or_else(|| RedisError::Protocol("PUBLISH did not return integer".to_string()))
+    }
+
+    /// WATCH keys for optimistic transactions.
+    pub async fn watch(&self, cx: &Cx, keys: &[&str]) -> Result<(), RedisError> {
+        if keys.is_empty() {
+            return Err(RedisError::Protocol(
+                "WATCH requires at least one key".to_string(),
+            ));
+        }
+
+        let mut args: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
+        args.push(b"WATCH");
+        for key in keys {
+            args.push(key.as_bytes());
+        }
+        let resp = self.cmd_bytes(cx, &args).await?;
+        expect_ok_response(resp, "WATCH")
+    }
+
+    /// Clear all watched keys on the connection selected for this command.
+    ///
+    /// This mirrors Redis command semantics but does not guarantee the call is
+    /// made on the same pooled connection previously used for `WATCH`.
+    pub async fn unwatch(&self, cx: &Cx) -> Result<(), RedisError> {
+        let resp = self.cmd_bytes(cx, &[b"UNWATCH"]).await?;
+        expect_ok_response(resp, "UNWATCH")
+    }
+
+    /// Start a Redis transaction using `MULTI`/`EXEC`.
+    pub async fn transaction(&self, cx: &Cx) -> Result<Transaction, RedisError> {
+        Transaction::begin(self, cx).await
+    }
+
+    /// Open a dedicated Pub/Sub connection.
+    pub async fn pubsub(&self, cx: &Cx) -> Result<RedisPubSub, RedisError> {
+        RedisPubSub::connect(cx, self.config.clone()).await
     }
 
     /// Start a pipeline (multiple commands on a single pooled connection).
