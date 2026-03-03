@@ -21,7 +21,7 @@
 //! use asupersync::database::PgConnection;
 //!
 //! async fn example(cx: &Cx) -> Result<(), PgError> {
-//!     let conn = PgConnection::connect(cx, "postgres://user:pass@localhost/db").await?;
+//!     let mut conn = PgConnection::connect(cx, "postgres://user:pass@localhost/db").await?;
 //!
 //!     let rows = conn.query_params(cx,
 //!         "SELECT id, name FROM users WHERE active = $1",
@@ -2700,7 +2700,7 @@ impl PgConnection {
             }
         }
 
-        Err(PgError::Server {
+        Ok(PgError::Server {
             code,
             message,
             detail,
@@ -3886,7 +3886,7 @@ mod tests {
         // Terminator
         data.push(0);
 
-        let err = conn.parse_error_response(&data).unwrap_err();
+        let err = conn.parse_error_response(&data).unwrap();
         match err {
             PgError::Server {
                 code,
@@ -3911,7 +3911,7 @@ mod tests {
         data.extend_from_slice(b"syntax error\0");
         data.push(0);
 
-        let err = conn.parse_error_response(&data).unwrap_err();
+        let err = conn.parse_error_response(&data).unwrap();
         match err {
             PgError::Server {
                 code,
