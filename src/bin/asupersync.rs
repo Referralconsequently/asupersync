@@ -2280,8 +2280,10 @@ fn run_doctor_package_install_smoke(
         )
         .exit_code(ExitCode::RUNTIME_ERROR)
     })?;
+    let installed_binary_exec =
+        resolve_install_smoke_binary_path(&installed_binary, "doctor_package_smoke_error")?;
 
-    let startup = ProcessCommand::new(&installed_binary)
+    let startup = ProcessCommand::new(&installed_binary_exec)
         .arg("--help")
         .current_dir(&install_root)
         .output()
@@ -2291,7 +2293,7 @@ fn run_doctor_package_install_smoke(
                 "Failed to execute packaged binary startup probe",
             )
             .detail(err.to_string())
-            .context("binary", installed_binary.display().to_string())
+            .context("binary", installed_binary_exec.display().to_string())
             .context(
                 "remediation",
                 "Confirm packaged binary target architecture matches the current runtime."
@@ -2317,7 +2319,7 @@ fn run_doctor_package_install_smoke(
         .exit_code(ExitCode::RUNTIME_ERROR));
     }
 
-    let command = ProcessCommand::new(&installed_binary)
+    let command = ProcessCommand::new(&installed_binary_exec)
         .arg("--format")
         .arg(config.output_format.as_str())
         .arg("--color")
@@ -2332,7 +2334,7 @@ fn run_doctor_package_install_smoke(
                 "Failed to execute packaged binary doctor command",
             )
             .detail(err.to_string())
-            .context("binary", installed_binary.display().to_string())
+            .context("binary", installed_binary_exec.display().to_string())
             .context(
                 "remediation",
                 "Verify packaged command compatibility and runtime shared-library availability."
@@ -2404,11 +2406,31 @@ fn run_doctor_package_install_smoke(
     }
     Ok(DoctorPackageInstallSmokeResult {
         install_root: install_root.display().to_string(),
-        installed_binary: installed_binary.display().to_string(),
+        installed_binary: installed_binary_exec.display().to_string(),
         startup_status: "ok".to_string(),
         command_status: "ok".to_string(),
         command_output_sha256: sha256_hex(stdout.as_bytes()),
         observed_contract_version,
+    })
+}
+
+fn resolve_install_smoke_binary_path(
+    installed_binary: &Path,
+    error_type: &str,
+) -> Result<PathBuf, CliError> {
+    fs::canonicalize(installed_binary).map_err(|err| {
+        CliError::new(
+            error_type,
+            "Failed to canonicalize install-smoke binary path",
+        )
+        .detail(err.to_string())
+        .context("binary", installed_binary.display().to_string())
+        .context(
+            "remediation",
+            "Use a writable out-dir and verify the packaged binary was created before smoke checks."
+                .to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
     })
 }
 
@@ -4613,6 +4635,23 @@ mod tests {
         let raw = serde_json::to_string(&config).expect("serialize config");
         let err = parse_doctor_package_config(&raw).expect_err("invalid format should fail");
         assert!(err.contains("output_format must be one of"));
+    }
+
+    #[test]
+    fn resolve_install_smoke_binary_path_handles_relative_paths() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let rel_dir = cwd.join("target/test-temp-doctor-package");
+        fs::create_dir_all(&rel_dir).expect("create rel dir");
+        let rel_binary = PathBuf::from("target/test-temp-doctor-package/doctor_asupersync");
+        fs::write(&rel_binary, b"mock-binary").expect("write rel binary");
+
+        let resolved = resolve_install_smoke_binary_path(&rel_binary, "doctor_package_smoke_error")
+            .expect("canonicalize relative smoke path");
+        assert!(resolved.is_absolute());
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&rel_binary).expect("canonicalize reference")
+        );
     }
 
     #[test]

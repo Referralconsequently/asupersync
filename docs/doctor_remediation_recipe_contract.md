@@ -145,6 +145,48 @@ Risk band selection is policy-driven by score interval. Output includes:
 
 Events include rule-evaluation context, confidence contributions, and rejection or override rationale fields when applicable, with stable `run_id`/`scenario_id`/`trace_id` correlation.
 
+## Guided Preview/Apply Pipeline
+
+Track 4 guided remediation uses a staged preview -> apply -> verify flow:
+
+1. `build_guided_remediation_patch_plan` generates a deterministic patch plan with:
+   - explicit diff preview (`---/+++` hunk headers + intent line)
+   - impacted invariants list
+   - staged approval checkpoints before mutation
+   - rollback-point metadata and rollback instructions
+   - operator guidance for accept/reject/recovery decisions
+2. `run_guided_remediation_session` executes one deterministic session:
+   - preview phase logs decision checkpoint and patch metadata without mutation
+   - apply phase enforces checkpoint approval guardrails before mutation
+   - verify phase records trust delta + unresolved risk flags
+   - summary phase records recovery instructions for partial/failing applies
+3. `run_guided_remediation_session_smoke` runs deterministic success/failure sessions and validates replay-ready event streams.
+
+### Staged Approval Checkpoints
+
+The canonical checkpoint sequence is:
+
+- `checkpoint_diff_review`
+- `checkpoint_risk_ack`
+- `checkpoint_rollback_ready`
+- `checkpoint_apply_authorization`
+
+Mutation is blocked until all checkpoints are approved.
+
+### Idempotency and Rollback Semantics
+
+- Re-applying the same `idempotency_key` yields `idempotent_noop` (no mutation).
+- Apply failures are classified deterministically (`blocked_pending_approval`, `partial_apply_failed`, etc.).
+- Every apply attempt includes rollback instructions and rollback-point artifact pointers in structured logs.
+
+### Operator Guidance
+
+Guidance text is embedded in patch plans and summary events:
+
+- when to accept an apply request
+- when to reject and escalate for human approval
+- how to recover from partial application states (rollback + verify + rerun preview)
+
 ## Safe Extension Strategy
 
 1. Additive only within `doctor-remediation-recipe-v1`:

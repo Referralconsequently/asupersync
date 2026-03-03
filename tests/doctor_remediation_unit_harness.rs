@@ -11,10 +11,15 @@
 #![cfg(feature = "cli")]
 
 use asupersync::cli::doctor::{
-    RemediationConfidenceInput, RemediationPrecondition, RemediationRecipe,
-    RemediationRecipeBundle, RemediationRecipeContract, RemediationRollbackPlan,
-    compute_remediation_confidence_score, parse_remediation_recipe, remediation_recipe_bundle,
-    remediation_recipe_contract, remediation_recipe_fixtures, run_remediation_recipe_smoke,
+    GuidedRemediationSessionRequest, RemediationConfidenceInput, RemediationPrecondition,
+    RemediationRecipe, RemediationRecipeBundle, RemediationRecipeContract, RemediationRollbackPlan,
+    build_guided_remediation_patch_plan, compute_remediation_confidence_score,
+    compute_remediation_verification_scorecard,
+    parse_remediation_recipe, remediation_recipe_bundle, remediation_recipe_contract,
+    remediation_verification_scorecard_thresholds,
+    remediation_recipe_fixtures, run_guided_remediation_session,
+    run_guided_remediation_session_smoke, run_remediation_recipe_smoke,
+    run_remediation_verification_loop_smoke,
     structured_logging_contract, validate_remediation_recipe, validate_remediation_recipe_contract,
     validate_structured_logging_event_stream,
 };
@@ -158,6 +163,16 @@ fn make_valid_recipe() -> RemediationRecipe {
         ],
         override_justification: None,
     }
+}
+
+fn all_checkpoint_ids(recipe: &RemediationRecipe) -> Vec<String> {
+    let contract = remediation_recipe_contract();
+    build_guided_remediation_patch_plan(&contract, recipe)
+        .expect("plan")
+        .approval_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.checkpoint_id.clone())
+        .collect()
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1244,7 +1259,223 @@ fn validation_idempotent_across_repeated_calls() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// 10. Document Coverage
+// 10. Guided Preview/Apply Pipeline
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn guided_patch_plan_contains_diff_checkpoints_and_guidance() {
+    let contract = remediation_recipe_contract();
+    let recipe = remediation_recipe_fixtures()
+        .first()
+        .expect("fixture")
+        .recipe
+        .clone();
+    let plan = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan");
+
+    assert_eq!(
+        plan.approval_checkpoints.len(),
+        4,
+        "must stage 4 checkpoints"
+    );
+    assert!(
+        plan.diff_preview
+            .first()
+            .is_some_and(|line| line.starts_with("--- a/")),
+        "diff preview must include canonical before-hunk header"
+    );
+    assert!(
+        plan.operator_guidance
+            .iter()
+            .any(|line| line.contains("accept")),
+        "operator guidance must explain accept behavior"
+    );
+    assert!(
+        plan.operator_guidance
+            .iter()
+            .any(|line| line.contains("reject")),
+        "operator guidance must explain reject behavior"
+    );
+    assert!(
+        plan.operator_guidance
+            .iter()
+            .any(|line| line.contains("partial")),
+        "operator guidance must explain partial recovery behavior"
+    );
+}
+
+#[test]
+fn guided_session_blocks_apply_without_all_approvals() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let recipe = remediation_recipe_fixtures()
+        .first()
+        .expect("fixture")
+        .recipe
+        .clone();
+    let outcome = run_guided_remediation_session(
+        &recipe_contract,
+        &logging_contract,
+        &recipe,
+        &GuidedRemediationSessionRequest {
+            run_id: "run-guided-remediation-tests".to_string(),
+            scenario_id: "guided-remediation-missing-approvals".to_string(),
+            approved_checkpoints: vec!["checkpoint_diff_review".to_string()],
+            simulate_apply_failure: false,
+            previous_idempotency_key: None,
+        },
+    )
+    .expect("guided session");
+
+    assert_eq!(outcome.apply_status, "blocked_pending_approval");
+    assert_eq!(outcome.verify_status, "blocked_pending_approval");
+    let apply_event = outcome
+        .events
+        .iter()
+        .find(|event| {
+            event.event_kind == "remediation_apply"
+                && event.fields.get("mode").is_some_and(|mode| mode == "apply")
+        })
+        .expect("apply event");
+    assert_eq!(
+        apply_event.fields.get("mutation_permitted"),
+        Some(&"false".to_string())
+    );
+}
+
+#[test]
+fn guided_session_apply_success_creates_rollback_point() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let recipe = remediation_recipe_fixtures()
+        .first()
+        .expect("fixture")
+        .recipe
+        .clone();
+    let outcome = run_guided_remediation_session(
+        &recipe_contract,
+        &logging_contract,
+        &recipe,
+        &GuidedRemediationSessionRequest {
+            run_id: "run-guided-remediation-tests".to_string(),
+            scenario_id: "guided-remediation-success".to_string(),
+            approved_checkpoints: all_checkpoint_ids(&recipe),
+            simulate_apply_failure: false,
+            previous_idempotency_key: None,
+        },
+    )
+    .expect("guided session");
+
+    assert_eq!(outcome.apply_status, "applied");
+    assert_eq!(outcome.verify_status, "verified");
+    let apply_event = outcome
+        .events
+        .iter()
+        .find(|event| {
+            event.event_kind == "remediation_apply"
+                && event.fields.get("mode").is_some_and(|mode| mode == "apply")
+        })
+        .expect("apply event");
+    assert_eq!(
+        apply_event.fields.get("rollback_point_created"),
+        Some(&"true".to_string())
+    );
+}
+
+#[test]
+fn guided_session_idempotency_returns_noop() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let recipe = remediation_recipe_fixtures()
+        .first()
+        .expect("fixture")
+        .recipe
+        .clone();
+    let first = run_guided_remediation_session(
+        &recipe_contract,
+        &logging_contract,
+        &recipe,
+        &GuidedRemediationSessionRequest {
+            run_id: "run-guided-remediation-tests".to_string(),
+            scenario_id: "guided-remediation-idempotent-first".to_string(),
+            approved_checkpoints: all_checkpoint_ids(&recipe),
+            simulate_apply_failure: false,
+            previous_idempotency_key: None,
+        },
+    )
+    .expect("first session");
+    let second = run_guided_remediation_session(
+        &recipe_contract,
+        &logging_contract,
+        &recipe,
+        &GuidedRemediationSessionRequest {
+            run_id: "run-guided-remediation-tests".to_string(),
+            scenario_id: "guided-remediation-idempotent-second".to_string(),
+            approved_checkpoints: all_checkpoint_ids(&recipe),
+            simulate_apply_failure: false,
+            previous_idempotency_key: Some(first.patch_plan.idempotency_key.clone()),
+        },
+    )
+    .expect("second session");
+
+    assert_eq!(second.apply_status, "idempotent_noop");
+    assert_eq!(second.verify_status, "verified_noop");
+    assert_eq!(second.trust_score_before, second.trust_score_after);
+}
+
+#[test]
+fn guided_session_smoke_is_deterministic_and_covers_success_and_failure() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let first = run_guided_remediation_session_smoke(&recipe_contract, &logging_contract)
+        .expect("first smoke");
+    let second = run_guided_remediation_session_smoke(&recipe_contract, &logging_contract)
+        .expect("second smoke");
+    assert_eq!(first, second, "guided smoke must be deterministic");
+    assert_eq!(first.len(), 2, "guided smoke must emit two scenarios");
+    assert!(
+        first
+            .iter()
+            .any(|outcome| outcome.apply_status == "applied"),
+        "guided smoke must include success path"
+    );
+    assert!(
+        first
+            .iter()
+            .any(|outcome| outcome.apply_status == "partial_apply_failed"),
+        "guided smoke must include failure path"
+    );
+    for outcome in &first {
+        validate_structured_logging_event_stream(&logging_contract, &outcome.events)
+            .expect("guided event stream valid");
+        let apply_event = outcome
+            .events
+            .iter()
+            .find(|event| {
+                event.event_kind == "remediation_apply"
+                    && event.fields.get("mode").is_some_and(|mode| mode == "apply")
+            })
+            .expect("apply event");
+        assert!(
+            apply_event.fields.contains_key("decision_checkpoint"),
+            "apply event must include decision checkpoint"
+        );
+        assert!(
+            apply_event.fields.contains_key("patch_digest"),
+            "apply event must include patch metadata"
+        );
+        assert!(
+            apply_event.fields.contains_key("risk_flags"),
+            "apply event must include risk flags"
+        );
+        assert!(
+            apply_event.fields.contains_key("rollback_instructions"),
+            "apply event must include rollback instructions"
+        );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 11. Document Coverage
 // ════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -1337,7 +1568,7 @@ fn doc_mentions_rollback() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// 11. Fixture Directory Integrity
+// 12. Fixture Directory Integrity
 // ════════════════════════════════════════════════════════════════════
 
 #[test]
