@@ -3,7 +3,7 @@
   "inventory_id": "lean.theorem_surface.v1",
   "generated_by": "bd-3n3b2",
   "source_file": "formal/lean/Asupersync.lean",
-  "theorem_count": 162,
+  "theorem_count": 170,
   "theorems": [
     {
       "line": 188,
@@ -712,6 +712,38 @@
     {
       "line": 5021,
       "theorem": "leaked_tracked_and_non_blocking"
+    },
+    {
+      "line": 5083,
+      "theorem": "cap_subset_refl"
+    },
+    {
+      "line": 5088,
+      "theorem": "cap_subset_trans"
+    },
+    {
+      "line": 5103,
+      "theorem": "cap_subset_antisymm"
+    },
+    {
+      "line": 5119,
+      "theorem": "spawn_authority_gated"
+    },
+    {
+      "line": 5131,
+      "theorem": "commit_holder_authority"
+    },
+    {
+      "line": 5143,
+      "theorem": "abort_holder_authority"
+    },
+    {
+      "line": 5157,
+      "theorem": "close_authority_gated"
+    },
+    {
+      "line": 5173,
+      "theorem": "no_ambient_effect_without_context"
     }
   ],
   "lemma_canonicalization": {
@@ -898,6 +930,40 @@
           {
             "theorem": "cancelled_child_progress",
             "role": "liveness_guarantee"
+          }
+        ]
+      },
+      {
+        "family_id": "no_ambient_authority",
+        "canonical_theorem": "no_ambient_effect_without_context",
+        "variants": [
+          {
+            "theorem": "cap_subset_refl",
+            "role": "lattice_reflexivity"
+          },
+          {
+            "theorem": "cap_subset_trans",
+            "role": "lattice_transitivity"
+          },
+          {
+            "theorem": "cap_subset_antisymm",
+            "role": "lattice_antisymmetry"
+          },
+          {
+            "theorem": "spawn_authority_gated",
+            "role": "per_label_spawn"
+          },
+          {
+            "theorem": "commit_holder_authority",
+            "role": "per_label_commit"
+          },
+          {
+            "theorem": "abort_holder_authority",
+            "role": "per_label_abort"
+          },
+          {
+            "theorem": "close_authority_gated",
+            "role": "per_label_close"
           }
         ]
       }

@@ -52,7 +52,9 @@
         "spawned_task_in_region",
         "spawn_creates_task",
         "spawn_preserves_other_tasks",
-        "spawn_adds_child"
+        "spawn_adds_child",
+        "spawn_authority_gated",
+        "no_ambient_effect_without_context"
       ]
     },
     {
@@ -106,7 +108,9 @@
         "commit_preserves_wellformed",
         "commit_resolves_obligation",
         "committed_obligation_stable",
-        "non_reserved_excluded_from_ledger"
+        "non_reserved_excluded_from_ledger",
+        "commit_holder_authority",
+        "no_ambient_effect_without_context"
       ]
     },
     {
@@ -120,7 +124,9 @@
         "abort_removes_from_ledger",
         "abort_preserves_wellformed",
         "abort_resolves_obligation",
-        "aborted_obligation_stable"
+        "aborted_obligation_stable",
+        "abort_holder_authority",
+        "no_ambient_effect_without_context"
       ]
     },
     {
@@ -295,7 +301,9 @@
         "close_gate_requires_drain",
         "race_loser_drain_completeness",
         "execution_obligation_lifecycle_completeness",
-        "leaked_tracked_and_non_blocking"
+        "leaked_tracked_and_non_blocking",
+        "close_authority_gated",
+        "no_ambient_effect_without_context"
       ]
     },
     {

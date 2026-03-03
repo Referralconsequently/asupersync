@@ -11,8 +11,8 @@
     "enforce_via_test": "tests/lean_theorem_rule_traceability.rs"
   },
   "traceability_summary": {
-    "row_count": 128,
-    "distinct_theorem_count": 117,
+    "row_count": 136,
+    "distinct_theorem_count": 122,
     "distinct_rule_id_count": 22,
     "rule_id_catalog_parity": "22/22 matched with step_constructor_coverage",
     "audit_bead": "asupersync-3cddg.6.5"
@@ -2416,6 +2416,147 @@
       "artifacts": [
         "formal/lean/Asupersync.lean:5021",
         "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawn_authority_gated",
+      "theorem_line": 5119,
+      "rule_id": "step.spawn",
+      "semantic_intent": "No-ambient-authority: spawn requires open region and task absence — entity existence gates the effect.",
+      "assumptions": [
+        "A spawn step fires"
+      ],
+      "downstream_impact": [
+        "Per-label authority gating for spawn constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5119",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "commit_holder_authority",
+      "theorem_line": 5131,
+      "rule_id": "step.commit",
+      "semantic_intent": "No-ambient-authority: commit requires obligation holder match — entity ownership gates the effect.",
+      "assumptions": [
+        "A commit step fires"
+      ],
+      "downstream_impact": [
+        "Per-label authority gating for commit constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5131",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "abort_holder_authority",
+      "theorem_line": 5143,
+      "rule_id": "step.abort",
+      "semantic_intent": "No-ambient-authority: abort requires obligation holder match — entity ownership gates the effect.",
+      "assumptions": [
+        "An abort step fires"
+      ],
+      "downstream_impact": [
+        "Per-label authority gating for abort constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5143",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_authority_gated",
+      "theorem_line": 5157,
+      "rule_id": "step.close",
+      "semantic_intent": "No-ambient-authority: close requires region existence, finalizing state, and quiescence — entity existence gates the effect.",
+      "assumptions": [
+        "A close step fires"
+      ],
+      "downstream_impact": [
+        "Per-label authority gating for close constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5157",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.spawn",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": [
+        "Step fires with non-tau non-tick label"
+      ],
+      "downstream_impact": [
+        "Central SEM-06.F5 theorem closing inv.authority.no_ambient",
+        "Canonical theorem for no_ambient_authority family"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.commit",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": [
+        "Step fires with non-tau non-tick label"
+      ],
+      "downstream_impact": [
+        "Cross-cutting authority gating coverage for commit constructor"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.abort",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": [
+        "Step fires with non-tau non-tick label"
+      ],
+      "downstream_impact": [
+        "Cross-cutting authority gating coverage for abort constructor"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.close",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": [
+        "Step fires with non-tau non-tick label"
+      ],
+      "downstream_impact": [
+        "Cross-cutting authority gating coverage for close constructor"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/step_constructor_coverage.json"
       ],
       "rule_status": "covered"
     }

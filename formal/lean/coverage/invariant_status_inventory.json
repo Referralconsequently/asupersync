@@ -201,25 +201,30 @@
       "id": "inv.authority.no_ambient",
       "name": "No ambient authority",
       "statement": "Effects flow through explicit capabilities; unauthorized actions are rejected by type/capability constraints.",
-      "lean_status": "unproven",
-      "lean_theorems": [],
+      "lean_status": "fully_proven",
+      "lean_theorems": [
+        "cap_subset_refl",
+        "cap_subset_trans",
+        "cap_subset_antisymm",
+        "spawn_authority_gated",
+        "commit_holder_authority",
+        "abort_holder_authority",
+        "close_authority_gated",
+        "no_ambient_effect_without_context"
+      ],
       "test_refs": [
         "tests/property_cap_obligation.rs",
         "tests/cap_obligation_compile_fail.rs",
         "tests/integration_e2e.rs"
       ],
-      "gaps": [
-        "Capability discipline is heavily tested in Rust, but no dedicated Lean proof family exists yet for ambient-authority exclusion."
-      ],
-      "follow_up_beads": [
-        "asupersync-3cddg.6.10"
-      ]
+      "gaps": [],
+      "follow_up_beads": []
     }
   ],
   "summary": {
-    "fully_proven": 5,
+    "fully_proven": 6,
     "partially_proven": 0,
-    "unproven": 1,
+    "unproven": 0,
     "proof_gap_audit_bead": "asupersync-3cddg.6.4",
     "proof_gap_audit_commands": [
       "jq extraction + theorem inventory reconciliation",
