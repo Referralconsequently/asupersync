@@ -53,6 +53,172 @@ use super::extract::Request;
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
 
+// ─── CorsMiddleware ─────────────────────────────────────────────────────────
+
+/// Origin matching policy for CORS headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CorsAllowOrigin {
+    /// Allow any origin (`*`).
+    Any,
+    /// Allow only the provided set of explicit origins.
+    Exact(Vec<String>),
+}
+
+/// CORS policy configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorsPolicy {
+    /// Allowed origins.
+    pub allow_origin: CorsAllowOrigin,
+    /// Allowed methods for preflight responses.
+    pub allow_methods: Vec<String>,
+    /// Allowed headers for preflight responses.
+    pub allow_headers: Vec<String>,
+    /// Exposed headers for non-preflight responses.
+    pub expose_headers: Vec<String>,
+    /// Optional max-age for preflight cache.
+    pub max_age: Option<Duration>,
+    /// Whether credentials are allowed.
+    pub allow_credentials: bool,
+}
+
+impl Default for CorsPolicy {
+    fn default() -> Self {
+        Self {
+            allow_origin: CorsAllowOrigin::Any,
+            allow_methods: vec![
+                "GET".to_string(),
+                "POST".to_string(),
+                "PUT".to_string(),
+                "PATCH".to_string(),
+                "DELETE".to_string(),
+                "HEAD".to_string(),
+                "OPTIONS".to_string(),
+            ],
+            allow_headers: vec!["*".to_string()],
+            expose_headers: Vec::new(),
+            max_age: Some(Duration::from_secs(60 * 10)),
+            allow_credentials: false,
+        }
+    }
+}
+
+impl CorsPolicy {
+    /// Allow only the provided origins.
+    #[must_use]
+    pub fn with_exact_origins(origins: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            allow_origin: CorsAllowOrigin::Exact(origins.into_iter().collect()),
+            ..Self::default()
+        }
+    }
+}
+
+/// Middleware that applies CORS policy and handles preflight requests.
+pub struct CorsMiddleware<H> {
+    inner: H,
+    policy: CorsPolicy,
+}
+
+impl<H: Handler> CorsMiddleware<H> {
+    /// Wrap a handler with CORS policy.
+    #[must_use]
+    pub fn new(inner: H, policy: CorsPolicy) -> Self {
+        Self { inner, policy }
+    }
+
+    fn is_preflight(req: &Request) -> bool {
+        req.method.eq_ignore_ascii_case("OPTIONS")
+            && header_value(req, "origin").is_some()
+            && header_value(req, "access-control-request-method").is_some()
+    }
+
+    fn allowed_origin_value(&self, origin: &str) -> Option<String> {
+        match &self.policy.allow_origin {
+            CorsAllowOrigin::Any => {
+                if self.policy.allow_credentials {
+                    Some(origin.to_string())
+                } else {
+                    Some("*".to_string())
+                }
+            }
+            CorsAllowOrigin::Exact(origins) => origins
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(origin))
+                .cloned(),
+        }
+    }
+
+    fn apply_common_headers(&self, mut resp: Response, allow_origin: &str) -> Response {
+        resp.headers
+            .insert("access-control-allow-origin".to_string(), allow_origin.to_string());
+        // Cache key must vary by Origin when policy is origin-sensitive.
+        resp.headers
+            .insert("vary".to_string(), "origin".to_string());
+        if self.policy.allow_credentials {
+            resp.headers.insert(
+                "access-control-allow-credentials".to_string(),
+                "true".to_string(),
+            );
+        }
+        if !self.policy.expose_headers.is_empty() {
+            resp.headers.insert(
+                "access-control-expose-headers".to_string(),
+                self.policy.expose_headers.join(", "),
+            );
+        }
+        resp
+    }
+}
+
+impl<H: Handler> Handler for CorsMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        let origin = match header_value(&req, "origin") {
+            Some(value) => value,
+            None => return self.inner.call(req),
+        };
+
+        let Some(allow_origin) = self.allowed_origin_value(&origin) else {
+            // Origin not allowed: pass through without CORS headers.
+            return self.inner.call(req);
+        };
+
+        if Self::is_preflight(&req) {
+            let mut resp = Response::empty(StatusCode::NO_CONTENT);
+            resp = self.apply_common_headers(resp, &allow_origin);
+            resp.headers.insert(
+                "access-control-allow-methods".to_string(),
+                self.policy.allow_methods.join(", "),
+            );
+            resp.headers.insert(
+                "access-control-allow-headers".to_string(),
+                self.policy.allow_headers.join(", "),
+            );
+            if let Some(max_age) = self.policy.max_age {
+                resp.headers.insert(
+                    "access-control-max-age".to_string(),
+                    max_age.as_secs().to_string(),
+                );
+            }
+            resp.headers.insert(
+                "vary".to_string(),
+                "origin, access-control-request-method, access-control-request-headers"
+                    .to_string(),
+            );
+            return resp;
+        }
+
+        let resp = self.inner.call(req);
+        self.apply_common_headers(resp, &allow_origin)
+    }
+}
+
+fn header_value(req: &Request, header_name: &str) -> Option<String> {
+    req.headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(header_name))
+        .map(|(_, value)| value.clone())
+}
+
 // ─── TimeoutMiddleware ──────────────────────────────────────────────────────
 
 /// Middleware that enforces a request deadline.
@@ -411,6 +577,14 @@ impl<H: Handler> MiddlewareStack<H> {
         }
     }
 
+    /// Add a CORS middleware layer.
+    #[must_use]
+    pub fn with_cors(self, policy: CorsPolicy) -> MiddlewareStack<CorsMiddleware<H>> {
+        MiddlewareStack {
+            inner: CorsMiddleware::new(self.inner, policy),
+        }
+    }
+
     /// Add a circuit breaker middleware layer.
     #[must_use]
     pub fn with_circuit_breaker(
@@ -537,6 +711,14 @@ mod tests {
                 || Response::new(StatusCode::BAD_REQUEST, b"missing trace_id".to_vec()),
                 |value| Response::new(StatusCode::OK, value.as_bytes().to_vec()),
             )
+        }
+    }
+
+    struct FailingIfCalled;
+
+    impl Handler for FailingIfCalled {
+        fn call(&self, _req: Request) -> Response {
+            Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"inner-called".to_vec())
         }
     }
 
@@ -758,6 +940,84 @@ mod tests {
         assert!(!is_idempotent("PATCH"));
     }
 
+    // --- CorsMiddleware ---
+
+    #[test]
+    fn cors_adds_headers_for_simple_request() {
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), CorsPolicy::default());
+        let req = Request::new("GET", "/cors").with_header("Origin", "https://example.com");
+
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            Some(&"*".to_string())
+        );
+        assert_eq!(resp.headers.get("vary"), Some(&"origin".to_string()));
+    }
+
+    #[test]
+    fn cors_preflight_short_circuits_inner_handler() {
+        let mw = CorsMiddleware::new(FailingIfCalled, CorsPolicy::default());
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "POST")
+            .with_header("Access-Control-Request-Headers", "content-type");
+
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            Some(&"*".to_string())
+        );
+        assert!(resp.headers.contains_key("access-control-allow-methods"));
+        assert!(resp.headers.contains_key("access-control-allow-headers"));
+    }
+
+    #[test]
+    fn cors_exact_origins_blocks_unknown_origin() {
+        let policy = CorsPolicy::with_exact_origins(vec![
+            "https://allowed.example".to_string(),
+            "https://another.example".to_string(),
+        ]);
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+
+        let blocked = mw.call(
+            Request::new("GET", "/cors").with_header("Origin", "https://blocked.example"),
+        );
+        assert_eq!(blocked.status, StatusCode::OK);
+        assert!(!blocked.headers.contains_key("access-control-allow-origin"));
+
+        let allowed =
+            mw.call(Request::new("GET", "/cors").with_header("Origin", "https://allowed.example"));
+        assert_eq!(allowed.status, StatusCode::OK);
+        assert_eq!(
+            allowed.headers.get("access-control-allow-origin"),
+            Some(&"https://allowed.example".to_string())
+        );
+    }
+
+    #[test]
+    fn cors_with_credentials_echoes_origin() {
+        let policy = CorsPolicy {
+            allow_credentials: true,
+            ..CorsPolicy::default()
+        };
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+        let resp =
+            mw.call(Request::new("GET", "/cors").with_header("Origin", "https://cred.example"));
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            Some(&"https://cred.example".to_string())
+        );
+        assert_eq!(
+            resp.headers.get("access-control-allow-credentials"),
+            Some(&"true".to_string())
+        );
+    }
+
     // --- MiddlewareStack ---
 
     #[test]
@@ -773,6 +1033,7 @@ mod tests {
     #[test]
     fn middleware_stack_composition() {
         let handler = MiddlewareStack::new(FnHandler::new(ok_handler))
+            .with_cors(CorsPolicy::default())
             .with_bulkhead(BulkheadPolicy {
                 max_concurrent: 10,
                 ..Default::default()
