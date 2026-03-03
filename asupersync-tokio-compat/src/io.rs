@@ -257,8 +257,7 @@ where
             b.write(0);
         });
         let len = uninit.len();
-        let buf =
-            unsafe { std::slice::from_raw_parts_mut(uninit.as_mut_ptr().cast::<u8>(), len) };
+        let buf = unsafe { std::slice::from_raw_parts_mut(uninit.as_mut_ptr().cast::<u8>(), len) };
 
         let mut read_buf = asupersync::io::ReadBuf::new(buf);
         match self.project().inner.poll_read(cx, &mut read_buf) {
@@ -313,7 +312,7 @@ mod tests {
 
     #[test]
     fn tokio_io_wraps_and_unwraps() {
-        let data = Vec::new();
+        let data: Vec<u8> = Vec::new();
         let wrapped = TokioIo::new(data);
         assert!(wrapped.inner().is_empty());
         let unwrapped = wrapped.into_inner();
@@ -322,7 +321,7 @@ mod tests {
 
     #[test]
     fn asupersync_io_wraps_and_unwraps() {
-        let data = Vec::new();
+        let data: Vec<u8> = Vec::new();
         let wrapped = AsupersyncIo::new(data);
         assert!(wrapped.inner().is_empty());
         let unwrapped = wrapped.into_inner();
@@ -334,6 +333,7 @@ mod tests {
         use super::*;
         use std::sync::Arc;
         use std::task::{Wake, Waker};
+        use tokio::io::AsyncRead as _;
 
         struct NoopWaker;
         impl Wake for NoopWaker {
@@ -367,12 +367,11 @@ mod tests {
             let waker = noop_waker();
             let mut cx = Context::from_waker(&waker);
 
-            let poll =
-                <TokioIo<Vec<u8>> as tokio::io::AsyncWrite>::poll_write(
-                    Pin::new(&mut wrapper),
-                    &mut cx,
-                    b"written",
-                );
+            let poll = <TokioIo<Vec<u8>> as tokio::io::AsyncWrite>::poll_write(
+                Pin::new(&mut wrapper),
+                &mut cx,
+                b"written",
+            );
             assert!(matches!(poll, Poll::Ready(Ok(7))));
             assert_eq!(wrapper.inner(), b"written");
         }

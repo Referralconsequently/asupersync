@@ -229,6 +229,7 @@ impl hyper::rt::Sleep for AsupersyncSleep {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::rt::Timer;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -291,7 +292,7 @@ mod tests {
         let mut sleep = timer.sleep(Duration::from_millis(50));
 
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag_clone = Arc::clone(&flag);
+        let _flag_clone = Arc::clone(&flag);
 
         // Create a waker that sets the flag when woken.
         struct FlagWaker(std::sync::atomic::AtomicBool);
