@@ -719,7 +719,7 @@ mod tests {
             overall_timeout: Duration::from_secs(2),
         };
 
-        let runtime = crate::runtime::Builder::new().build().unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::new().build().unwrap();
         let result = runtime.block_on(connect(&addrs, &config));
         assert!(
             result.is_ok(),

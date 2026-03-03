@@ -796,20 +796,20 @@ mod tests {
         let mut t = QuicTransportMachine::new();
         let initial_cwnd = t.congestion_window_bytes();
 
-        t.recovery.on_loss_congestion(20_000);
+        t.recovery.on_loss_congestion(20_000, 30_000);
         let cwnd_after_first_loss = t.congestion_window_bytes();
         assert!(cwnd_after_first_loss < initial_cwnd);
 
         // Late ACK processing can report older losses in a later wall-clock tick.
         // Recovery gating must key off lost-packet send-time, not ACK processing time.
-        t.recovery.on_loss_congestion(19_000);
+        t.recovery.on_loss_congestion(19_000, 31_000);
         assert_eq!(
             t.congestion_window_bytes(),
             cwnd_after_first_loss,
             "older lost packets must not trigger an additional reduction"
         );
 
-        t.recovery.on_loss_congestion(25_000);
+        t.recovery.on_loss_congestion(35_000, 40_000);
         assert!(
             t.congestion_window_bytes() < cwnd_after_first_loss,
             "newer lost packets should trigger the next recovery reduction"
