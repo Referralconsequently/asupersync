@@ -30,9 +30,9 @@ use asupersync::grpc::{
     Channel,
     ChannelConfig,
     ClientStreaming,
-    CompressionEncoding,
     // Status types
     Code,
+    CompressionEncoding,
     FramedCodec,
     GrpcClient,
     // Codec types
@@ -51,10 +51,10 @@ use asupersync::grpc::{
     InterceptorLayer,
     // Streaming types
     Metadata,
+    MetadataInterceptor,
     MetadataValue,
     // Service types
     MethodDescriptor,
-    MetadataInterceptor,
     NamedService,
     ReflectedMethod,
     ReflectionDescribeServiceRequest,

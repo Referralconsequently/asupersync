@@ -785,10 +785,7 @@ fn percent_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
-                hex_nibble(bytes[i + 1]),
-                hex_nibble(bytes[i + 2]),
-            ) {
+            if let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
                 out.push((hi << 4) | lo);
                 i += 3;
                 continue;
@@ -836,11 +833,7 @@ impl MySqlConnectOptions {
             let (user, password) = auth
                 .split_once(':')
                 .map_or((auth, None), |(u, p)| (u, Some(p)));
-            (
-                percent_decode(user),
-                password.map(percent_decode),
-                host,
-            )
+            (percent_decode(user), password.map(percent_decode), host)
         } else {
             ("root".to_string(), None, auth_host)
         };
@@ -2396,15 +2389,13 @@ mod tests {
 
     #[test]
     fn test_connect_options_percent_encoded_password() {
-        let opts =
-            MySqlConnectOptions::parse("mysql://user:p%40ss%3Aword@localhost/db").unwrap();
+        let opts = MySqlConnectOptions::parse("mysql://user:p%40ss%3Aword@localhost/db").unwrap();
         assert_eq!(opts.password, Some("p@ss:word".to_string()));
     }
 
     #[test]
     fn test_connect_options_percent_encoded_user() {
-        let opts =
-            MySqlConnectOptions::parse("mysql://user%40domain:pass@localhost/db").unwrap();
+        let opts = MySqlConnectOptions::parse("mysql://user%40domain:pass@localhost/db").unwrap();
         assert_eq!(opts.user, "user@domain");
     }
 
@@ -2431,8 +2422,7 @@ mod tests {
 
     #[test]
     fn test_connect_options_invalid_ssl_mode_rejected() {
-        let result =
-            MySqlConnectOptions::parse("mysql://user@localhost/db?ssl-mode=bogus");
+        let result = MySqlConnectOptions::parse("mysql://user@localhost/db?ssl-mode=bogus");
         assert!(result.is_err());
     }
 
@@ -2451,10 +2441,9 @@ mod tests {
 
     #[test]
     fn test_connect_options_unknown_params_ignored() {
-        let opts = MySqlConnectOptions::parse(
-            "mysql://user@localhost/db?charset=utf8mb4&unknown=value",
-        )
-        .unwrap();
+        let opts =
+            MySqlConnectOptions::parse("mysql://user@localhost/db?charset=utf8mb4&unknown=value")
+                .unwrap();
         // Should parse without error; unknown params silently dropped.
         assert_eq!(opts.host, "localhost");
     }
@@ -2556,7 +2545,9 @@ mod tests {
     #[test]
     fn test_is_eof_packet() {
         // Classic EOF: 0xFE + up to 4 bytes warning/status
-        assert!(MySqlConnection::is_eof_packet(&[0xFE, 0x00, 0x00, 0x00, 0x00]));
+        assert!(MySqlConnection::is_eof_packet(&[
+            0xFE, 0x00, 0x00, 0x00, 0x00
+        ]));
         assert!(MySqlConnection::is_eof_packet(&[0xFE]));
         // Too long to be EOF (would be a legitimate data row)
         assert!(!MySqlConnection::is_eof_packet(&[0xFE; 9]));
