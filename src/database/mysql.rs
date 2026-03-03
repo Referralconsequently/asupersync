@@ -2366,4 +2366,323 @@ mod tests {
             capability::CLIENT_PROTOCOL_41 | capability::CLIENT_DEPRECATE_EOF
         ));
     }
+
+    // ====================================================================
+    // T6.3 Hardening tests
+    // ====================================================================
+
+    #[test]
+    fn test_percent_decode_basic() {
+        assert_eq!(percent_decode("hello"), "hello");
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("user%40host"), "user@host");
+        assert_eq!(percent_decode("pass%2Fword"), "pass/word");
+        assert_eq!(percent_decode("a%3Ab"), "a:b");
+    }
+
+    #[test]
+    fn test_percent_decode_passthrough_malformed() {
+        // Incomplete percent sequences pass through unchanged.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%GG"), "%GG");
+        assert_eq!(percent_decode("%2"), "%2");
+    }
+
+    #[test]
+    fn test_percent_decode_mixed_case() {
+        assert_eq!(percent_decode("%2f"), "/");
+        assert_eq!(percent_decode("%2F"), "/");
+    }
+
+    #[test]
+    fn test_connect_options_percent_encoded_password() {
+        let opts =
+            MySqlConnectOptions::parse("mysql://user:p%40ss%3Aword@localhost/db").unwrap();
+        assert_eq!(opts.password, Some("p@ss:word".to_string()));
+    }
+
+    #[test]
+    fn test_connect_options_percent_encoded_user() {
+        let opts =
+            MySqlConnectOptions::parse("mysql://user%40domain:pass@localhost/db").unwrap();
+        assert_eq!(opts.user, "user@domain");
+    }
+
+    #[test]
+    fn test_connect_options_ssl_mode_from_query() {
+        let opts =
+            MySqlConnectOptions::parse("mysql://user@localhost/db?ssl-mode=required").unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Required);
+
+        let opts =
+            MySqlConnectOptions::parse("mysql://user@localhost/db?sslmode=preferred").unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Preferred);
+    }
+
+    #[test]
+    fn test_connect_options_connect_timeout_from_query() {
+        let opts =
+            MySqlConnectOptions::parse("mysql://user@localhost/db?connect_timeout=5").unwrap();
+        assert_eq!(
+            opts.connect_timeout,
+            Some(std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn test_connect_options_invalid_ssl_mode_rejected() {
+        let result =
+            MySqlConnectOptions::parse("mysql://user@localhost/db?ssl-mode=bogus");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_connect_options_multiple_query_params() {
+        let opts = MySqlConnectOptions::parse(
+            "mysql://user@localhost/db?ssl-mode=required&connect_timeout=10",
+        )
+        .unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Required);
+        assert_eq!(
+            opts.connect_timeout,
+            Some(std::time::Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn test_connect_options_unknown_params_ignored() {
+        let opts = MySqlConnectOptions::parse(
+            "mysql://user@localhost/db?charset=utf8mb4&unknown=value",
+        )
+        .unwrap();
+        // Should parse without error; unknown params silently dropped.
+        assert_eq!(opts.host, "localhost");
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_PACKET_SIZE")]
+    fn test_build_packet_rejects_oversized_payload() {
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        // Write more than MAX_PACKET_SIZE bytes
+        buf.buf = vec![0x41; MAX_PACKET_SIZE as usize + 1];
+        let _ = buf.build_packet();
+    }
+
+    #[test]
+    fn test_build_packet_accepts_max_payload() {
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        buf.buf = vec![0x41; MAX_PACKET_SIZE as usize];
+        let packet = buf.build_packet();
+        assert_eq!(packet.len(), 4 + MAX_PACKET_SIZE as usize);
+    }
+
+    #[test]
+    fn test_default_max_result_rows() {
+        assert_eq!(DEFAULT_MAX_RESULT_ROWS, 1_000_000);
+    }
+
+    #[test]
+    fn test_lenenc_int_null_marker_rejected() {
+        let data = [0xFB];
+        let mut reader = PacketReader::new(&data);
+        let err = reader.read_lenenc_int().unwrap_err();
+        assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_lenenc_int_reserved_0xff_rejected() {
+        let data = [0xFF];
+        let mut reader = PacketReader::new(&data);
+        let err = reader.read_lenenc_int().unwrap_err();
+        assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_packet_reader_read_byte_eof() {
+        let data: [u8; 0] = [];
+        let mut reader = PacketReader::new(&data);
+        assert!(reader.read_byte().is_err());
+    }
+
+    #[test]
+    fn test_packet_reader_read_bytes_eof() {
+        let data = [0x01, 0x02];
+        let mut reader = PacketReader::new(&data);
+        assert!(reader.read_bytes(3).is_err());
+    }
+
+    #[test]
+    fn test_null_terminated_string_missing_null() {
+        let data = [b'a', b'b', b'c']; // No null terminator
+        let mut reader = PacketReader::new(&data);
+        let err = reader.read_null_terminated().unwrap_err();
+        assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_auth_empty_password_returns_empty() {
+        assert!(mysql_native_auth("", b"nonce").is_empty());
+        assert!(caching_sha2_auth("", b"nonce").is_empty());
+    }
+
+    #[test]
+    fn test_mysql_native_auth_deterministic() {
+        let nonce = b"12345678901234567890";
+        let a = mysql_native_auth("secret", nonce);
+        let b = mysql_native_auth("secret", nonce);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 20);
+    }
+
+    #[test]
+    fn test_caching_sha2_auth_deterministic() {
+        let nonce = b"12345678901234567890";
+        let a = caching_sha2_auth("secret", nonce);
+        let b = caching_sha2_auth("secret", nonce);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 32);
+    }
+
+    #[test]
+    fn test_mysql_native_auth_different_passwords_differ() {
+        let nonce = b"12345678901234567890";
+        let a = mysql_native_auth("password1", nonce);
+        let b = mysql_native_auth("password2", nonce);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_is_eof_packet() {
+        // Classic EOF: 0xFE + up to 4 bytes warning/status
+        assert!(MySqlConnection::is_eof_packet(&[0xFE, 0x00, 0x00, 0x00, 0x00]));
+        assert!(MySqlConnection::is_eof_packet(&[0xFE]));
+        // Too long to be EOF (would be a legitimate data row)
+        assert!(!MySqlConnection::is_eof_packet(&[0xFE; 9]));
+        // Wrong marker
+        assert!(!MySqlConnection::is_eof_packet(&[0x00]));
+    }
+
+    #[test]
+    fn test_parse_error_non_error_packet() {
+        let data = [0x00, 0x01]; // Not an error packet (0xFF)
+        let err = MySqlConnection::parse_error(&data);
+        assert!(matches!(err, MySqlError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_parse_error_with_sql_state() {
+        // Error packet: 0xFF, error_code (2 bytes), '#', sql_state (5 bytes), message
+        let mut data = vec![0xFF];
+        data.extend_from_slice(&1045_u16.to_le_bytes()); // Access denied
+        data.push(b'#');
+        data.extend_from_slice(b"28000");
+        data.extend_from_slice(b"Access denied for user");
+        let err = MySqlConnection::parse_error(&data);
+        match err {
+            MySqlError::Server {
+                code,
+                sql_state,
+                message,
+            } => {
+                assert_eq!(code, 1045);
+                assert_eq!(sql_state, "28000");
+                assert!(message.contains("Access denied"));
+            }
+            other => panic!("expected Server error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mysql_row_get_missing_column() {
+        let columns = Arc::new(vec![test_var_string_column("name")]);
+        let indices = Arc::new(BTreeMap::from([("name".to_string(), 0)]));
+        let row = MySqlRow {
+            columns,
+            column_indices: indices,
+            values: vec![MySqlValue::Text("alice".to_string())],
+        };
+        assert!(row.get("name").is_ok());
+        assert!(row.get("missing").is_err());
+    }
+
+    #[test]
+    fn test_mysql_row_len_and_is_empty() {
+        let columns = Arc::new(vec![test_var_string_column("a")]);
+        let indices = Arc::new(BTreeMap::new());
+        let row = MySqlRow {
+            columns: columns.clone(),
+            column_indices: indices.clone(),
+            values: vec![MySqlValue::Null],
+        };
+        assert_eq!(row.len(), 1);
+        assert!(!row.is_empty());
+
+        let empty_row = MySqlRow {
+            columns,
+            column_indices: indices,
+            values: vec![],
+        };
+        assert!(empty_row.is_empty());
+    }
+
+    #[test]
+    fn test_mysql_row_type_conversion_error() {
+        let columns = Arc::new(vec![test_var_string_column("name")]);
+        let indices = Arc::new(BTreeMap::from([("name".to_string(), 0)]));
+        let row = MySqlRow {
+            columns,
+            column_indices: indices,
+            values: vec![MySqlValue::Text("not_a_number".to_string())],
+        };
+        let err = row.get_i32("name").unwrap_err();
+        assert!(matches!(err, MySqlError::TypeConversion { .. }));
+    }
+
+    #[test]
+    fn test_hex_nibble() {
+        assert_eq!(hex_nibble(b'0'), Some(0));
+        assert_eq!(hex_nibble(b'9'), Some(9));
+        assert_eq!(hex_nibble(b'a'), Some(10));
+        assert_eq!(hex_nibble(b'f'), Some(15));
+        assert_eq!(hex_nibble(b'A'), Some(10));
+        assert_eq!(hex_nibble(b'F'), Some(15));
+        assert_eq!(hex_nibble(b'g'), None);
+        assert_eq!(hex_nibble(b' '), None);
+    }
+
+    #[test]
+    fn test_packet_buffer_write_lenenc_int_boundaries() {
+        // 1-byte encoding: 0..250
+        let mut buf = PacketBuffer::new();
+        buf.write_lenenc_int(0);
+        assert_eq!(buf.buf, vec![0]);
+
+        buf.clear();
+        buf.write_lenenc_int(250);
+        assert_eq!(buf.buf, vec![250]);
+
+        // 2-byte encoding: 251..65535
+        buf.clear();
+        buf.write_lenenc_int(256);
+        assert_eq!(buf.buf[0], 0xFC);
+
+        // 3-byte encoding: 65536..16777215
+        buf.clear();
+        buf.write_lenenc_int(70_000);
+        assert_eq!(buf.buf[0], 0xFD);
+
+        // 8-byte encoding: >= 16777216
+        buf.clear();
+        buf.write_lenenc_int(20_000_000);
+        assert_eq!(buf.buf[0], 0xFE);
+    }
+
+    #[test]
+    fn test_connect_options_no_query_params_keeps_defaults() {
+        let opts = MySqlConnectOptions::parse("mysql://user@localhost/db").unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Disabled);
+        assert_eq!(opts.connect_timeout, None);
+    }
 }
