@@ -23,10 +23,13 @@
 //! async fn example(cx: &Cx) -> Result<(), PgError> {
 //!     let conn = PgConnection::connect(cx, "postgres://user:pass@localhost/db").await?;
 //!
-//!     let rows = conn.query(cx, "SELECT id, name FROM users WHERE active = $1", &[&true]).await?;
-//!     for row in rows {
-//!         let id: i32 = row.get("id")?;
-//!         let name: String = row.get("name")?;
+//!     let rows = conn.query_params(cx,
+//!         "SELECT id, name FROM users WHERE active = $1",
+//!         &[&true],
+//!     ).await?;
+//!     for row in &rows {
+//!         let id: i32 = row.get_typed("id")?;
+//!         let name: String = row.get_typed("name")?;
 //!         println!("User {id}: {name}");
 //!     }
 //!
@@ -160,7 +163,7 @@ impl From<io::Error> for PgError {
 pub mod oid {
     /// Boolean type.
     pub const BOOL: u32 = 16;
-    /// 64-bit integer (bytea).
+    /// Binary data.
     pub const BYTEA: u32 = 17;
     /// Single character.
     pub const CHAR: u32 = 18;
@@ -2111,7 +2114,10 @@ impl PgConnection {
         }
 
         let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
-        let parse = build_parse_msg("", sql, &param_oids);
+        let parse = match build_parse_msg("", sql, &param_oids) {
+            Ok(p) => p,
+            Err(e) => return Outcome::Err(e),
+        };
         let bind = match build_bind_msg("", "", params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -2183,7 +2189,10 @@ impl PgConnection {
         }
 
         let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
-        let parse = build_parse_msg("", sql, &param_oids);
+        let parse = match build_parse_msg("", sql, &param_oids) {
+            Ok(p) => p,
+            Err(e) => return Outcome::Err(e),
+        };
         let bind = match build_bind_msg("", "", params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -2234,7 +2243,10 @@ impl PgConnection {
         self.inner.next_stmt_id += 1;
 
         // Parse with no type hints (let server infer from $N positions).
-        let parse = build_parse_msg(&stmt_name, sql, &[]);
+        let parse = match build_parse_msg(&stmt_name, sql, &[]) {
+            Ok(p) => p,
+            Err(e) => return Outcome::Err(e),
+        };
         let describe = build_describe_msg(b'S', &stmt_name);
         let sync = build_sync_msg();
 
@@ -2847,7 +2859,14 @@ impl PgConnection {
 // ============================================================================
 
 /// Build a Parse message (Extended Query Protocol).
-fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Vec<u8> {
+fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Result<Vec<u8>, PgError> {
+    if param_oids.len() > i16::MAX as usize {
+        return Err(PgError::Protocol(format!(
+            "too many parameters ({}, max {})",
+            param_oids.len(),
+            i16::MAX
+        )));
+    }
     let mut buf = MessageBuffer::with_capacity(sql.len() + 64);
     buf.write_cstring(stmt_name);
     buf.write_cstring(sql);
@@ -2855,7 +2874,7 @@ fn build_parse_msg(stmt_name: &str, sql: &str, param_oids: &[u32]) -> Vec<u8> {
     for &o in param_oids {
         buf.write_i32(o as i32);
     }
-    buf.build_message(FrontendMessage::Parse as u8)
+    Ok(buf.build_message(FrontendMessage::Parse as u8))
 }
 
 /// Build a Bind message (Extended Query Protocol).
@@ -2865,6 +2884,13 @@ fn build_bind_msg(
     params: &[&dyn ToSql],
     result_format: Format,
 ) -> Result<Vec<u8>, PgError> {
+    if params.len() > i16::MAX as usize {
+        return Err(PgError::Protocol(format!(
+            "too many parameters ({}, max {})",
+            params.len(),
+            i16::MAX
+        )));
+    }
     let mut buf = MessageBuffer::with_capacity(256);
     buf.write_cstring(portal);
     buf.write_cstring(stmt_name);
@@ -4268,7 +4294,7 @@ mod tests {
 
     #[test]
     fn build_parse_msg_structure() {
-        let msg = build_parse_msg("", "SELECT 1", &[]);
+        let msg = build_parse_msg("", "SELECT 1", &[]).unwrap();
         // Type byte 'P'
         assert_eq!(msg[0], b'P');
         // Verify SQL is in the message body
@@ -4281,7 +4307,7 @@ mod tests {
 
     #[test]
     fn build_parse_msg_with_oids() {
-        let msg = build_parse_msg("stmt1", "SELECT $1", &[oid::INT4]);
+        let msg = build_parse_msg("stmt1", "SELECT $1", &[oid::INT4]).unwrap();
         assert_eq!(msg[0], b'P');
         // Statement name "stmt1" should be in body
         let body = &msg[5..];
