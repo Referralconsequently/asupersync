@@ -53,6 +53,7 @@ pub const COMPATIBILITY_LINE: &str = "0.1.x";
 /// Track-level owner for escalation and exception handling.
 pub const OWNER_TRACK_ID: &str = "asupersync-2oh2u.7";
 
+pub mod blocking;
 pub mod cancel;
 pub mod io;
 
