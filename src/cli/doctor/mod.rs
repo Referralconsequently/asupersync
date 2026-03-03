@@ -916,6 +916,82 @@ pub struct RemediationRecipeBundle {
     pub fixtures: Vec<RemediationRecipeFixture>,
 }
 
+/// One staged approval checkpoint in the guided remediation pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuidedRemediationCheckpoint {
+    /// Stable checkpoint identifier.
+    pub checkpoint_id: String,
+    /// Stage-order index; lower values execute first.
+    pub stage_order: u8,
+    /// Human-readable checkpoint prompt.
+    pub prompt: String,
+}
+
+/// Deterministic patch plan used by guided remediation preview/apply workflows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuidedRemediationPatchPlan {
+    /// Stable plan identifier.
+    pub plan_id: String,
+    /// Recipe identifier used to derive this plan.
+    pub recipe_id: String,
+    /// Target finding identifier.
+    pub finding_id: String,
+    /// Deterministic patch digest for operator review.
+    pub patch_digest: String,
+    /// Deterministic preview of proposed diff hunks.
+    pub diff_preview: Vec<String>,
+    /// Impacted invariant identifiers in lexical order.
+    pub impacted_invariants: Vec<String>,
+    /// Staged approval checkpoints required before mutation.
+    pub approval_checkpoints: Vec<GuidedRemediationCheckpoint>,
+    /// Risk flags derived from confidence and policy guardrails.
+    pub risk_flags: Vec<String>,
+    /// Stable rollback-point artifact pointer.
+    pub rollback_artifact_pointer: String,
+    /// Rollback instructions surfaced to operators.
+    pub rollback_instructions: Vec<String>,
+    /// Operator guidance for accept/reject/recover decisions.
+    pub operator_guidance: Vec<String>,
+    /// Idempotency key for replay-safe re-application checks.
+    pub idempotency_key: String,
+}
+
+/// One guided remediation session request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuidedRemediationSessionRequest {
+    /// Deterministic run identifier.
+    pub run_id: String,
+    /// Deterministic scenario identifier.
+    pub scenario_id: String,
+    /// Approved checkpoint identifiers.
+    pub approved_checkpoints: Vec<String>,
+    /// Whether to inject deterministic apply failure after mutation begins.
+    pub simulate_apply_failure: bool,
+    /// Previously applied idempotency key (if this is a rerun attempt).
+    pub previous_idempotency_key: Option<String>,
+}
+
+/// Deterministic outcome for one guided remediation preview/apply/verify session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuidedRemediationSessionOutcome {
+    /// Run identifier used for this session.
+    pub run_id: String,
+    /// Scenario identifier used for this session.
+    pub scenario_id: String,
+    /// Computed patch plan.
+    pub patch_plan: GuidedRemediationPatchPlan,
+    /// Apply stage status.
+    pub apply_status: String,
+    /// Verify stage status.
+    pub verify_status: String,
+    /// Trust score before apply attempt.
+    pub trust_score_before: u8,
+    /// Trust score after verify stage.
+    pub trust_score_after: u8,
+    /// Structured events emitted for preview/apply/verify summary stages.
+    pub events: Vec<StructuredLogEvent>,
+}
+
 /// Deterministic rch-backed execution-adapter contract for doctor orchestration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionAdapterContract {
@@ -7826,6 +7902,574 @@ pub fn run_remediation_recipe_smoke(
             ))
     });
     Ok(events)
+}
+
+fn remediation_impacted_invariants(fix_intent: &str) -> Vec<String> {
+    let mut invariants = match fix_intent {
+        "add_cancellation_checkpoint" => vec![
+            "inv.cancel.idempotence".to_string(),
+            "rule.cancel.checkpoint_masked".to_string(),
+        ],
+        "adjust_timeout_budget" => vec![
+            "inv.region.quiescence".to_string(),
+            "inv.timer.boundary".to_string(),
+        ],
+        "enforce_lock_order" => vec![
+            "inv.lock.ordering".to_string(),
+            "inv.region.quiescence".to_string(),
+        ],
+        "harden_retry_backoff" => vec![
+            "inv.retry.backoff_monotone".to_string(),
+            "inv.retry.budget_bounded".to_string(),
+        ],
+        "reduce_lock_scope" => vec![
+            "inv.lock.ordering".to_string(),
+            "inv.scheduler.fairness".to_string(),
+        ],
+        _ => vec!["inv.general.safety".to_string()],
+    };
+    invariants.sort();
+    invariants.dedup();
+    invariants
+}
+
+fn guided_remediation_checkpoint_catalog() -> Vec<GuidedRemediationCheckpoint> {
+    vec![
+        GuidedRemediationCheckpoint {
+            checkpoint_id: "checkpoint_diff_review".to_string(),
+            stage_order: 1,
+            prompt: "Review diff preview and confirm mutation scope.".to_string(),
+        },
+        GuidedRemediationCheckpoint {
+            checkpoint_id: "checkpoint_risk_ack".to_string(),
+            stage_order: 2,
+            prompt: "Acknowledge risk flags and confidence guardrails.".to_string(),
+        },
+        GuidedRemediationCheckpoint {
+            checkpoint_id: "checkpoint_rollback_ready".to_string(),
+            stage_order: 3,
+            prompt: "Verify rollback commands and artifact pointer are executable.".to_string(),
+        },
+        GuidedRemediationCheckpoint {
+            checkpoint_id: "checkpoint_apply_authorization".to_string(),
+            stage_order: 4,
+            prompt: "Authorize apply mutation after all prior checkpoints pass.".to_string(),
+        },
+    ]
+}
+
+/// Builds a deterministic guided patch plan for preview/apply remediation workflows.
+///
+/// # Errors
+///
+/// Returns `Err` when recipe validation/scoring fails.
+pub fn build_guided_remediation_patch_plan(
+    contract: &RemediationRecipeContract,
+    recipe: &RemediationRecipe,
+) -> Result<GuidedRemediationPatchPlan, String> {
+    validate_remediation_recipe(contract, recipe)?;
+    let score = compute_remediation_confidence_score(contract, recipe)?;
+    let patch_target = recipe
+        .finding_id
+        .split(':')
+        .nth(1)
+        .filter(|path| !path.trim().is_empty())
+        .map_or_else(|| "src/unknown.rs".to_string(), ToString::to_string);
+
+    let mut risk_flags = Vec::new();
+    if score.requires_human_approval {
+        risk_flags.push("human_approval_required".to_string());
+    }
+    if !score.allow_auto_apply {
+        risk_flags.push("auto_apply_blocked".to_string());
+    }
+    if score.confidence_score < 70 {
+        risk_flags.push("confidence_below_auto_apply_threshold".to_string());
+    }
+    if recipe.override_justification.is_some() {
+        risk_flags.push("operator_override_requested".to_string());
+    }
+    if risk_flags.is_empty() {
+        risk_flags.push("low_residual_risk".to_string());
+    }
+    risk_flags.sort();
+    risk_flags.dedup();
+
+    let rollback_artifact_pointer = format!(
+        "artifacts/run-guided-remediation/{}/rollback.point.json",
+        recipe.recipe_id
+    );
+    let rollback_instructions = vec![
+        format!("rollback_command={}", recipe.rollback.rollback_command),
+        format!("verify_command={}", recipe.rollback.verify_command),
+        format!("timeout_secs={}", recipe.rollback.timeout_secs),
+        format!("rollback_artifact_pointer={rollback_artifact_pointer}"),
+    ];
+
+    Ok(GuidedRemediationPatchPlan {
+        plan_id: format!(
+            "plan-{}",
+            recipe
+                .recipe_id
+                .strip_prefix("recipe-")
+                .unwrap_or(&recipe.recipe_id)
+        ),
+        recipe_id: recipe.recipe_id.clone(),
+        finding_id: recipe.finding_id.clone(),
+        patch_digest: format!(
+            "{}|{}|{}|{}",
+            recipe.recipe_id, recipe.fix_intent, recipe.finding_id, recipe.rollback.strategy
+        ),
+        diff_preview: vec![
+            format!("--- a/{patch_target}"),
+            format!("+++ b/{patch_target}"),
+            format!("@@ fix_intent={} recipe_id={}", recipe.fix_intent, recipe.recipe_id),
+            format!(
+                "+ // remediation_guard: {} ({})",
+                score.risk_band, score.confidence_score
+            ),
+        ],
+        impacted_invariants: remediation_impacted_invariants(&recipe.fix_intent),
+        approval_checkpoints: guided_remediation_checkpoint_catalog(),
+        risk_flags,
+        rollback_artifact_pointer,
+        rollback_instructions,
+        operator_guidance: vec![
+            "accept apply only when diff preview matches intent and all checkpoints are approved."
+                .to_string(),
+            "reject apply when risk flags include human_approval_required without explicit approval."
+                .to_string(),
+            "recover from partial application by executing rollback_command, then verify_command, then rerunning preview."
+                .to_string(),
+        ],
+        idempotency_key: format!(
+            "{}:{}:{}:{}",
+            recipe.recipe_id, recipe.finding_id, recipe.fix_intent, recipe.rollback.strategy
+        ),
+    })
+}
+
+/// Executes deterministic guided remediation preview/apply/verify flow for one recipe.
+///
+/// # Errors
+///
+/// Returns `Err` when request fields are invalid or event emission fails.
+#[allow(clippy::too_many_lines)]
+pub fn run_guided_remediation_session(
+    recipe_contract: &RemediationRecipeContract,
+    logging_contract: &StructuredLoggingContract,
+    recipe: &RemediationRecipe,
+    request: &GuidedRemediationSessionRequest,
+) -> Result<GuidedRemediationSessionOutcome, String> {
+    if request.run_id.trim().is_empty() {
+        return Err("run_id must be non-empty".to_string());
+    }
+    if request.scenario_id.trim().is_empty() {
+        return Err("scenario_id must be non-empty".to_string());
+    }
+
+    let patch_plan = build_guided_remediation_patch_plan(recipe_contract, recipe)?;
+    let score = compute_remediation_confidence_score(recipe_contract, recipe)?;
+
+    let approved = request
+        .approved_checkpoints
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let checkpoint_status = patch_plan
+        .approval_checkpoints
+        .iter()
+        .map(|checkpoint| {
+            format!(
+                "{}={}",
+                checkpoint.checkpoint_id,
+                if approved.contains(&checkpoint.checkpoint_id) {
+                    "approved"
+                } else {
+                    "pending"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let mut preview_fields = BTreeMap::new();
+    preview_fields.insert(
+        "artifact_pointer".to_string(),
+        format!(
+            "artifacts/{}/{}/preview.json",
+            request.run_id, request.scenario_id
+        ),
+    );
+    preview_fields.insert(
+        "command_provenance".to_string(),
+        "asupersync doctor remediation-contract --json".to_string(),
+    );
+    preview_fields.insert("flow_id".to_string(), "remediation".to_string());
+    preview_fields.insert("outcome_class".to_string(), "success".to_string());
+    preview_fields.insert("run_id".to_string(), request.run_id.clone());
+    preview_fields.insert("scenario_id".to_string(), request.scenario_id.clone());
+    preview_fields.insert(
+        "trace_id".to_string(),
+        format!("trace-{}-preview", request.scenario_id),
+    );
+    preview_fields.insert("mode".to_string(), "preview".to_string());
+    preview_fields.insert("finding_id".to_string(), recipe.finding_id.clone());
+    preview_fields.insert("risk_score".to_string(), score.confidence_score.to_string());
+    preview_fields.insert(
+        "decision_checkpoint".to_string(),
+        "checkpoint_diff_review".to_string(),
+    );
+    preview_fields.insert("patch_plan_id".to_string(), patch_plan.plan_id.clone());
+    preview_fields.insert("patch_digest".to_string(), patch_plan.patch_digest.clone());
+    preview_fields.insert(
+        "diff_preview".to_string(),
+        patch_plan.diff_preview.join(" | "),
+    );
+    preview_fields.insert(
+        "impacted_invariants".to_string(),
+        patch_plan.impacted_invariants.join(";"),
+    );
+    preview_fields.insert("risk_flags".to_string(), patch_plan.risk_flags.join(";"));
+    preview_fields.insert(
+        "rollback_instructions".to_string(),
+        patch_plan.rollback_instructions.join(";"),
+    );
+    preview_fields.insert(
+        "operator_guidance".to_string(),
+        patch_plan.operator_guidance.join(" "),
+    );
+    preview_fields.insert("mutation_permitted".to_string(), "false".to_string());
+    let preview_event = emit_structured_log_event(
+        logging_contract,
+        "remediation",
+        "remediation_apply",
+        &preview_fields,
+    )?;
+
+    let required_checkpoints = patch_plan
+        .approval_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.checkpoint_id.clone())
+        .collect::<BTreeSet<_>>();
+    let missing_checkpoints = required_checkpoints
+        .difference(&approved)
+        .cloned()
+        .collect::<Vec<_>>();
+    let prior_applied = request
+        .previous_idempotency_key
+        .as_deref()
+        .is_some_and(|key| key == patch_plan.idempotency_key);
+
+    let (
+        apply_status,
+        verify_status,
+        apply_outcome,
+        verify_outcome,
+        mutation_permitted,
+        rollback_created,
+        trust_after,
+        decision_rationale,
+        recovery_instructions,
+    ) = if prior_applied {
+        (
+            "idempotent_noop".to_string(),
+            "verified_noop".to_string(),
+            "success".to_string(),
+            "success".to_string(),
+            false,
+            false,
+            score.confidence_score,
+            "idempotency key already applied; skipped mutation".to_string(),
+            "none".to_string(),
+        )
+    } else if !missing_checkpoints.is_empty() {
+        (
+            "blocked_pending_approval".to_string(),
+            "blocked_pending_approval".to_string(),
+            "failed".to_string(),
+            "failed".to_string(),
+            false,
+            false,
+            score.confidence_score.saturating_sub(6),
+            format!(
+                "apply blocked: missing checkpoints {}",
+                missing_checkpoints.join(",")
+            ),
+            "approve all checkpoints and rerun apply".to_string(),
+        )
+    } else if request.simulate_apply_failure {
+        (
+            "partial_apply_failed".to_string(),
+            "rollback_recommended".to_string(),
+            "failed".to_string(),
+            "failed".to_string(),
+            true,
+            true,
+            score.confidence_score.saturating_sub(20),
+            "simulated failure after mutation; rollback required".to_string(),
+            "execute rollback_command, run verify_command, then rerun preview".to_string(),
+        )
+    } else {
+        (
+            "applied".to_string(),
+            "verified".to_string(),
+            "success".to_string(),
+            "success".to_string(),
+            true,
+            true,
+            score.confidence_score.saturating_add(10).min(100),
+            "all checkpoints approved; mutation applied and verified".to_string(),
+            "none".to_string(),
+        )
+    };
+
+    let mut apply_fields = BTreeMap::new();
+    apply_fields.insert(
+        "artifact_pointer".to_string(),
+        format!(
+            "artifacts/{}/{}/apply.json",
+            request.run_id, request.scenario_id
+        ),
+    );
+    apply_fields.insert(
+        "command_provenance".to_string(),
+        "rch exec -- cargo test --lib cli::doctor::tests::guided_remediation_session".to_string(),
+    );
+    apply_fields.insert("flow_id".to_string(), "remediation".to_string());
+    apply_fields.insert("outcome_class".to_string(), apply_outcome);
+    apply_fields.insert("run_id".to_string(), request.run_id.clone());
+    apply_fields.insert("scenario_id".to_string(), request.scenario_id.clone());
+    apply_fields.insert(
+        "trace_id".to_string(),
+        format!("trace-{}-apply", request.scenario_id),
+    );
+    apply_fields.insert("mode".to_string(), "apply".to_string());
+    apply_fields.insert("finding_id".to_string(), recipe.finding_id.clone());
+    apply_fields.insert("risk_score".to_string(), score.confidence_score.to_string());
+    apply_fields.insert(
+        "decision_checkpoint".to_string(),
+        "checkpoint_apply_authorization".to_string(),
+    );
+    apply_fields.insert("patch_plan_id".to_string(), patch_plan.plan_id.clone());
+    apply_fields.insert("patch_digest".to_string(), patch_plan.patch_digest.clone());
+    apply_fields.insert("approval_status".to_string(), checkpoint_status);
+    apply_fields.insert("risk_flags".to_string(), patch_plan.risk_flags.join(";"));
+    apply_fields.insert(
+        "rollback_instructions".to_string(),
+        patch_plan.rollback_instructions.join(";"),
+    );
+    apply_fields.insert(
+        "rollback_artifact_pointer".to_string(),
+        patch_plan.rollback_artifact_pointer.clone(),
+    );
+    apply_fields.insert(
+        "idempotency_key".to_string(),
+        patch_plan.idempotency_key.clone(),
+    );
+    apply_fields.insert("apply_status".to_string(), apply_status.clone());
+    apply_fields.insert(
+        "mutation_permitted".to_string(),
+        mutation_permitted.to_string(),
+    );
+    apply_fields.insert(
+        "rollback_point_created".to_string(),
+        rollback_created.to_string(),
+    );
+    apply_fields.insert("decision_rationale".to_string(), decision_rationale.clone());
+    let apply_event = emit_structured_log_event(
+        logging_contract,
+        "remediation",
+        "remediation_apply",
+        &apply_fields,
+    )?;
+
+    let mut verify_fields = BTreeMap::new();
+    verify_fields.insert(
+        "artifact_pointer".to_string(),
+        format!(
+            "artifacts/{}/{}/verify.json",
+            request.run_id, request.scenario_id
+        ),
+    );
+    verify_fields.insert(
+        "command_provenance".to_string(),
+        recipe.rollback.verify_command.clone(),
+    );
+    verify_fields.insert("flow_id".to_string(), "remediation".to_string());
+    verify_fields.insert("outcome_class".to_string(), verify_outcome);
+    verify_fields.insert("run_id".to_string(), request.run_id.clone());
+    verify_fields.insert("scenario_id".to_string(), request.scenario_id.clone());
+    verify_fields.insert(
+        "trace_id".to_string(),
+        format!("trace-{}-verify", request.scenario_id),
+    );
+    verify_fields.insert("mode".to_string(), "apply".to_string());
+    verify_fields.insert("finding_id".to_string(), recipe.finding_id.clone());
+    verify_fields.insert("risk_score".to_string(), trust_after.to_string());
+    verify_fields.insert(
+        "decision_checkpoint".to_string(),
+        "checkpoint_post_apply_verification".to_string(),
+    );
+    verify_fields.insert("patch_plan_id".to_string(), patch_plan.plan_id.clone());
+    verify_fields.insert("apply_status".to_string(), apply_status.clone());
+    verify_fields.insert("verify_status".to_string(), verify_status.clone());
+    verify_fields.insert(
+        "verification_summary".to_string(),
+        format!(
+            "trust_before={} trust_after={} apply_status={} verify_status={}",
+            score.confidence_score, trust_after, apply_status, verify_status
+        ),
+    );
+    verify_fields.insert(
+        "unresolved_risk_flags".to_string(),
+        if verify_status == "verified" || verify_status == "verified_noop" {
+            "none".to_string()
+        } else {
+            patch_plan.risk_flags.join(";")
+        },
+    );
+    verify_fields.insert(
+        "rollback_instructions".to_string(),
+        patch_plan.rollback_instructions.join(";"),
+    );
+    let verify_event = emit_structured_log_event(
+        logging_contract,
+        "remediation",
+        "remediation_verify",
+        &verify_fields,
+    )?;
+
+    let mut summary_fields = BTreeMap::new();
+    summary_fields.insert(
+        "artifact_pointer".to_string(),
+        format!(
+            "artifacts/{}/{}/summary.json",
+            request.run_id, request.scenario_id
+        ),
+    );
+    summary_fields.insert(
+        "command_provenance".to_string(),
+        "asupersync doctor remediation-contract --json".to_string(),
+    );
+    summary_fields.insert("flow_id".to_string(), "remediation".to_string());
+    summary_fields.insert(
+        "outcome_class".to_string(),
+        if verify_status == "verified" || verify_status == "verified_noop" {
+            "success".to_string()
+        } else {
+            "failed".to_string()
+        },
+    );
+    summary_fields.insert("run_id".to_string(), request.run_id.clone());
+    summary_fields.insert("scenario_id".to_string(), request.scenario_id.clone());
+    summary_fields.insert(
+        "trace_id".to_string(),
+        format!("trace-{}-summary", request.scenario_id),
+    );
+    summary_fields.insert(
+        "decision_rationale".to_string(),
+        format!("{decision_rationale}; apply_status={apply_status}; verify_status={verify_status}"),
+    );
+    summary_fields.insert(
+        "operator_guidance".to_string(),
+        patch_plan.operator_guidance.join(" "),
+    );
+    summary_fields.insert("recovery_instructions".to_string(), recovery_instructions);
+    summary_fields.insert("patch_plan_id".to_string(), patch_plan.plan_id.clone());
+    let summary_event = emit_structured_log_event(
+        logging_contract,
+        "remediation",
+        "verification_summary",
+        &summary_fields,
+    )?;
+
+    let mut events = vec![preview_event, apply_event, verify_event, summary_event];
+    events.sort_by(|left, right| {
+        (
+            left.flow_id.as_str(),
+            left.event_kind.as_str(),
+            left.fields
+                .get("trace_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+            .cmp(&(
+                right.flow_id.as_str(),
+                right.event_kind.as_str(),
+                right
+                    .fields
+                    .get("trace_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ))
+    });
+    validate_structured_logging_event_stream(logging_contract, &events)?;
+
+    Ok(GuidedRemediationSessionOutcome {
+        run_id: request.run_id.clone(),
+        scenario_id: request.scenario_id.clone(),
+        patch_plan,
+        apply_status,
+        verify_status,
+        trust_score_before: score.confidence_score,
+        trust_score_after: trust_after,
+        events,
+    })
+}
+
+/// Executes deterministic smoke sessions for guided preview/apply/verify remediation flow.
+///
+/// # Errors
+///
+/// Returns `Err` when guided session planning or execution fails.
+pub fn run_guided_remediation_session_smoke(
+    recipe_contract: &RemediationRecipeContract,
+    logging_contract: &StructuredLoggingContract,
+) -> Result<Vec<GuidedRemediationSessionOutcome>, String> {
+    validate_remediation_recipe_contract(recipe_contract)?;
+    let recipe = remediation_recipe_fixtures()
+        .first()
+        .ok_or_else(|| "missing remediation fixture for guided smoke".to_string())?
+        .recipe
+        .clone();
+    let plan = build_guided_remediation_patch_plan(recipe_contract, &recipe)?;
+    let approvals = plan
+        .approval_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.checkpoint_id.clone())
+        .collect::<Vec<_>>();
+
+    let mut outcomes = vec![
+        run_guided_remediation_session(
+            recipe_contract,
+            logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-guided-remediation-smoke".to_string(),
+                scenario_id: "guided-remediation-apply-success".to_string(),
+                approved_checkpoints: approvals.clone(),
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )?,
+        run_guided_remediation_session(
+            recipe_contract,
+            logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-guided-remediation-smoke".to_string(),
+                scenario_id: "guided-remediation-apply-failure".to_string(),
+                approved_checkpoints: approvals,
+                simulate_apply_failure: true,
+                previous_idempotency_key: None,
+            },
+        )?,
+    ];
+    outcomes.sort_by(|left, right| left.scenario_id.cmp(&right.scenario_id));
+    Ok(outcomes)
 }
 
 /// Returns the canonical rch-backed execution-adapter contract.
@@ -17086,6 +17730,557 @@ impl RuntimeState {
             "smoke stream should include rejection rationale"
         );
     }
+
+    // ── guided remediation pipeline tests (2b4jj.4.2) ──────────────────
+
+    #[test]
+    fn guided_patch_plan_high_confidence_recipe_has_low_residual_risk() {
+        let contract = remediation_recipe_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan");
+
+        assert_eq!(plan.plan_id, "plan-lock-order-001");
+        assert_eq!(plan.recipe_id, "recipe-lock-order-001");
+        assert_eq!(plan.finding_id, recipe.finding_id);
+        assert_eq!(plan.risk_flags, vec!["low_residual_risk"]);
+        assert_eq!(plan.approval_checkpoints.len(), 4);
+        assert!(!plan.rollback_artifact_pointer.is_empty());
+        assert!(!plan.rollback_instructions.is_empty());
+        assert!(!plan.operator_guidance.is_empty());
+        assert!(!plan.idempotency_key.is_empty());
+        assert!(!plan.diff_preview.is_empty());
+        assert!(!plan.impacted_invariants.is_empty());
+    }
+
+    #[test]
+    fn guided_patch_plan_low_confidence_recipe_flags_risk_guardrails() {
+        let contract = remediation_recipe_contract();
+        let recipe = remediation_recipe_fixtures()
+            .get(1)
+            .expect("low-confidence fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan");
+
+        assert!(
+            plan.risk_flags
+                .contains(&"human_approval_required".to_string()),
+            "low-confidence plan must flag human_approval_required: {:?}",
+            plan.risk_flags
+        );
+        assert!(
+            plan.risk_flags.contains(&"auto_apply_blocked".to_string()),
+            "low-confidence plan must flag auto_apply_blocked: {:?}",
+            plan.risk_flags
+        );
+        assert!(
+            plan.risk_flags
+                .contains(&"confidence_below_auto_apply_threshold".to_string()),
+            "score<70 must flag confidence_below_auto_apply_threshold: {:?}",
+            plan.risk_flags
+        );
+        assert!(
+            plan.risk_flags
+                .contains(&"operator_override_requested".to_string()),
+            "recipe with override_justification must flag operator_override_requested: {:?}",
+            plan.risk_flags
+        );
+    }
+
+    #[test]
+    fn guided_patch_plan_diff_preview_references_correct_file() {
+        let contract = remediation_recipe_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan");
+
+        let expected_path = "src/runtime/state.rs";
+        assert!(
+            plan.diff_preview
+                .iter()
+                .any(|line| line.contains(expected_path)),
+            "diff_preview should reference patch target from finding_id: {:?}",
+            plan.diff_preview
+        );
+    }
+
+    #[test]
+    fn guided_patch_plan_rollback_instructions_contain_all_components() {
+        let contract = remediation_recipe_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan");
+
+        let joined = plan.rollback_instructions.join("|");
+        assert!(
+            joined.contains("rollback_command="),
+            "must include rollback_command"
+        );
+        assert!(
+            joined.contains("verify_command="),
+            "must include verify_command"
+        );
+        assert!(
+            joined.contains("timeout_secs="),
+            "must include timeout_secs"
+        );
+        assert!(
+            joined.contains("rollback_artifact_pointer="),
+            "must include rollback_artifact_pointer"
+        );
+    }
+
+    #[test]
+    fn guided_patch_plan_idempotency_key_is_deterministic() {
+        let contract = remediation_recipe_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan1 = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan1");
+        let plan2 = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan2");
+
+        assert_eq!(plan1.idempotency_key, plan2.idempotency_key);
+        assert_eq!(plan1.patch_digest, plan2.patch_digest);
+        assert_eq!(plan1.plan_id, plan2.plan_id);
+    }
+
+    #[test]
+    fn guided_session_apply_success_bumps_trust_and_emits_four_events() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&recipe_contract, &recipe).expect("plan");
+        let approvals = plan
+            .approval_checkpoints
+            .iter()
+            .map(|cp| cp.checkpoint_id.clone())
+            .collect::<Vec<_>>();
+
+        let outcome = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-success".to_string(),
+                scenario_id: "test-apply-success".to_string(),
+                approved_checkpoints: approvals,
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect("session");
+
+        assert_eq!(outcome.apply_status, "applied");
+        assert_eq!(outcome.verify_status, "verified");
+        assert!(
+            outcome.trust_score_after > outcome.trust_score_before,
+            "trust should increase on success: before={} after={}",
+            outcome.trust_score_before,
+            outcome.trust_score_after
+        );
+        assert_eq!(
+            outcome.trust_score_after,
+            outcome.trust_score_before.saturating_add(10).min(100)
+        );
+        assert_eq!(
+            outcome.events.len(),
+            4,
+            "must emit preview+apply+verify+summary"
+        );
+
+        validate_structured_logging_event_stream(&logging_contract, &outcome.events)
+            .expect("event stream valid");
+    }
+
+    #[test]
+    fn guided_session_blocked_pending_approval_lowers_trust() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+
+        let outcome = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-blocked".to_string(),
+                scenario_id: "test-blocked".to_string(),
+                approved_checkpoints: vec![],
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect("session");
+
+        assert_eq!(outcome.apply_status, "blocked_pending_approval");
+        assert_eq!(outcome.verify_status, "blocked_pending_approval");
+        assert_eq!(
+            outcome.trust_score_after,
+            outcome.trust_score_before.saturating_sub(6),
+            "trust penalty for blocked should be -6"
+        );
+    }
+
+    #[test]
+    fn guided_session_partial_checkpoints_still_blocked() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+
+        let outcome = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-partial".to_string(),
+                scenario_id: "test-partial-checkpoints".to_string(),
+                approved_checkpoints: vec![
+                    "checkpoint_diff_review".to_string(),
+                    "checkpoint_risk_ack".to_string(),
+                ],
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect("session");
+
+        assert_eq!(
+            outcome.apply_status, "blocked_pending_approval",
+            "partial approvals should still block"
+        );
+    }
+
+    #[test]
+    fn guided_session_simulate_failure_triggers_rollback_recommended() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&recipe_contract, &recipe).expect("plan");
+        let approvals = plan
+            .approval_checkpoints
+            .iter()
+            .map(|cp| cp.checkpoint_id.clone())
+            .collect::<Vec<_>>();
+
+        let outcome = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-failure".to_string(),
+                scenario_id: "test-apply-failure".to_string(),
+                approved_checkpoints: approvals,
+                simulate_apply_failure: true,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect("session");
+
+        assert_eq!(outcome.apply_status, "partial_apply_failed");
+        assert_eq!(outcome.verify_status, "rollback_recommended");
+        assert_eq!(
+            outcome.trust_score_after,
+            outcome.trust_score_before.saturating_sub(20),
+            "trust penalty for simulated failure should be -20"
+        );
+    }
+
+    #[test]
+    fn guided_session_idempotency_noop_preserves_trust() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&recipe_contract, &recipe).expect("plan");
+        let approvals = plan
+            .approval_checkpoints
+            .iter()
+            .map(|cp| cp.checkpoint_id.clone())
+            .collect::<Vec<_>>();
+
+        let outcome = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-idempotent".to_string(),
+                scenario_id: "test-idempotent-noop".to_string(),
+                approved_checkpoints: approvals,
+                simulate_apply_failure: false,
+                previous_idempotency_key: Some(plan.idempotency_key.clone()),
+            },
+        )
+        .expect("session");
+
+        assert_eq!(outcome.apply_status, "idempotent_noop");
+        assert_eq!(outcome.verify_status, "verified_noop");
+        assert_eq!(
+            outcome.trust_score_before, outcome.trust_score_after,
+            "idempotent noop must not change trust score"
+        );
+    }
+
+    #[test]
+    fn guided_session_rejects_empty_run_id() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+
+        let err = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "".to_string(),
+                scenario_id: "test-empty-run-id".to_string(),
+                approved_checkpoints: vec![],
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect_err("must fail");
+        assert!(err.contains("run_id must be non-empty"), "{err}");
+    }
+
+    #[test]
+    fn guided_session_rejects_empty_scenario_id() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+
+        let err = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-empty-scenario".to_string(),
+                scenario_id: "   ".to_string(),
+                approved_checkpoints: vec![],
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect_err("must fail");
+        assert!(err.contains("scenario_id must be non-empty"), "{err}");
+    }
+
+    #[test]
+    fn guided_session_smoke_is_deterministic_and_covers_both_paths() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+
+        let first = run_guided_remediation_session_smoke(&recipe_contract, &logging_contract)
+            .expect("smoke1");
+        let second = run_guided_remediation_session_smoke(&recipe_contract, &logging_contract)
+            .expect("smoke2");
+        assert_eq!(first, second, "smoke must be deterministic");
+        assert_eq!(
+            first.len(),
+            2,
+            "smoke must cover success and failure scenarios"
+        );
+
+        let success = first
+            .iter()
+            .find(|o| o.apply_status == "applied")
+            .expect("must include success scenario");
+        assert_eq!(success.verify_status, "verified");
+
+        let failure = first
+            .iter()
+            .find(|o| o.apply_status == "partial_apply_failed")
+            .expect("must include failure scenario");
+        assert_eq!(failure.verify_status, "rollback_recommended");
+    }
+
+    #[test]
+    fn guided_session_smoke_event_streams_validate() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+
+        let outcomes = run_guided_remediation_session_smoke(&recipe_contract, &logging_contract)
+            .expect("smoke");
+        for outcome in &outcomes {
+            validate_structured_logging_event_stream(&logging_contract, &outcome.events)
+                .expect("each outcome's event stream must validate");
+            assert_eq!(
+                outcome.events.len(),
+                4,
+                "each outcome must emit exactly 4 events (preview, apply, verify, summary)"
+            );
+        }
+    }
+
+    #[test]
+    fn guided_session_success_verify_event_has_no_unresolved_risk() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&recipe_contract, &recipe).expect("plan");
+        let approvals = plan
+            .approval_checkpoints
+            .iter()
+            .map(|cp| cp.checkpoint_id.clone())
+            .collect::<Vec<_>>();
+
+        let outcome = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-risk-flags".to_string(),
+                scenario_id: "test-risk-flag-check".to_string(),
+                approved_checkpoints: approvals,
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect("session");
+
+        let verify_event = outcome
+            .events
+            .iter()
+            .find(|e| e.event_kind == "remediation_verify")
+            .expect("must have verify event");
+        assert_eq!(
+            verify_event
+                .fields
+                .get("unresolved_risk_flags")
+                .map(String::as_str),
+            Some("none"),
+            "verified outcome should have no unresolved risk flags"
+        );
+    }
+
+    #[test]
+    fn guided_session_failure_verify_event_preserves_risk_flags() {
+        let recipe_contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        let plan = build_guided_remediation_patch_plan(&recipe_contract, &recipe).expect("plan");
+        let approvals = plan
+            .approval_checkpoints
+            .iter()
+            .map(|cp| cp.checkpoint_id.clone())
+            .collect::<Vec<_>>();
+
+        let outcome = run_guided_remediation_session(
+            &recipe_contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-fail-risk".to_string(),
+                scenario_id: "test-fail-risk-flags".to_string(),
+                approved_checkpoints: approvals,
+                simulate_apply_failure: true,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect("session");
+
+        let verify_event = outcome
+            .events
+            .iter()
+            .find(|e| e.event_kind == "remediation_verify")
+            .expect("must have verify event");
+        let flags = verify_event
+            .fields
+            .get("unresolved_risk_flags")
+            .expect("must have unresolved_risk_flags field");
+        assert_ne!(
+            flags, "none",
+            "failed outcome should preserve risk flags, got: {flags}"
+        );
+    }
+
+    #[test]
+    fn guided_session_trust_score_capped_at_100() {
+        let contract = remediation_recipe_contract();
+        let logging_contract = structured_logging_contract();
+        let mut recipe = remediation_recipe_fixtures()
+            .first()
+            .expect("fixture")
+            .recipe
+            .clone();
+        for input in &mut recipe.confidence_inputs {
+            input.score = 99;
+        }
+        let plan = build_guided_remediation_patch_plan(&contract, &recipe).expect("plan");
+        let approvals = plan
+            .approval_checkpoints
+            .iter()
+            .map(|cp| cp.checkpoint_id.clone())
+            .collect::<Vec<_>>();
+
+        let outcome = run_guided_remediation_session(
+            &contract,
+            &logging_contract,
+            &recipe,
+            &GuidedRemediationSessionRequest {
+                run_id: "run-test-cap".to_string(),
+                scenario_id: "test-trust-cap".to_string(),
+                approved_checkpoints: approvals,
+                simulate_apply_failure: false,
+                previous_idempotency_key: None,
+            },
+        )
+        .expect("session");
+
+        assert!(
+            outcome.trust_score_after <= 100,
+            "trust score must cap at 100, got {}",
+            outcome.trust_score_after
+        );
+    }
+
+    // ── end guided remediation pipeline tests ─────────────────────────
 
     #[test]
     fn execution_adapter_contract_validates() {
