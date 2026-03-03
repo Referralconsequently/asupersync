@@ -23,10 +23,12 @@
 
 // Phase 0 stubs return errors immediately; async is for API consistency
 // with eventual rdkafka integration.
-#![allow(clippy::unused_async)]
+
 
 use crate::cx::Cx;
 use parking_lot::Mutex;
+#[cfg(feature = "kafka")]
+use rdkafka::producer::Producer;
 #[cfg(not(feature = "kafka"))]
 use std::collections::HashMap;
 use std::fmt;
