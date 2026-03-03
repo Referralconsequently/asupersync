@@ -481,7 +481,7 @@ fn t4_transport_invariants_are_contract_enforced() {
         "loss e2e suite must cover delayed-loss reporting without double cwnd reduction"
     );
     assert!(
-        std::fs::read_to_string(repo_root().join("tests/quic_h3_e2e.rs"))
+        std::fs::read_to_string(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/quic_h3_e2e.rs"))
             .expect("quic_h3_e2e test file should load")
             .contains("zero_rtt_resumption_send_path_and_migration_guards"),
         "quic_h3 e2e suite must include zero-rtt/resumption/migration coverage"
