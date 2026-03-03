@@ -98,7 +98,7 @@ impl TlsAcceptor {
         let mut stream = TlsStream::new_server(io, conn);
         if let Some(timeout) = self.handshake_timeout {
             match crate::time::timeout(
-                super::wall_clock_now(),
+                super::timeout_now(),
                 timeout,
                 poll_fn(|cx| stream.poll_handshake(cx)),
             )
@@ -129,7 +129,7 @@ impl TlsAcceptor {
 
     /// Accept a connection (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
-    pub async fn accept<IO>(&self, _cx: &crate::cx::Cx, _io: IO) -> Result<TlsStream<IO>, TlsError>
+    pub async fn accept<IO>(&self, _io: IO) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -249,7 +249,11 @@ impl TlsAcceptorBuilder {
 
     /// Convenience method for HTTP/1.1 and HTTP/2 ALPN.
     ///
-    /// HTTP/2 is preferred over HTTP/1.1.
+    /// HTTP/2 is preferred over HTTP/1.1. Unlike [`alpn_h2`](Self::alpn_h2)
+    /// and [`alpn_grpc`](Self::alpn_grpc), this does **not** set
+    /// `alpn_required`: clients that omit the ALPN extension fall back to
+    /// HTTP/1.1, which is the correct behavior per RFC 7301 for servers
+    /// that support both protocols.
     pub fn alpn_http(self) -> Self {
         self.alpn_protocols(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
     }

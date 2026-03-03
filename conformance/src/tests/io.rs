@@ -343,12 +343,13 @@ pub fn io_003_tcp_echo<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     )
 }
 
-/// IO-004: TCP concurrent connections
+/// IO-004: TCP multiple connections
 ///
-/// Tests handling multiple simultaneous TCP connections.
-/// Note: Clients run sequentially in the main async context to avoid
-/// capturing &RT in spawned tasks. The server handles all connections
-/// concurrently via its spawned task.
+/// Tests handling multiple TCP connections through a single server task.
+/// The server accepts connections sequentially in a spawned task while
+/// clients connect sequentially from the main async context (to avoid
+/// capturing `&RT` in spawned tasks). Concurrency exists between the
+/// server task and the client code, not between individual connections.
 pub fn io_004_tcp_concurrent<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     ConformanceTest::new(
         TestMeta {

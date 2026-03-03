@@ -88,7 +88,7 @@ impl TlsConnector {
         let mut stream = TlsStream::new_client(io, conn);
         if let Some(timeout) = self.handshake_timeout {
             match crate::time::timeout(
-                super::wall_clock_now(),
+                super::timeout_now(),
                 timeout,
                 poll_fn(|cx| stream.poll_handshake(cx)),
             )
@@ -119,12 +119,7 @@ impl TlsConnector {
 
     /// Establish a TLS connection (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
-    pub async fn connect<IO>(
-        &self,
-        _cx: &crate::cx::Cx,
-        _domain: &str,
-        _io: IO,
-    ) -> Result<TlsStream<IO>, TlsError>
+    pub async fn connect<IO>(&self, _domain: &str, _io: IO) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -333,7 +328,11 @@ impl TlsConnectorBuilder {
 
     /// Convenience method for HTTP/1.1 and HTTP/2 ALPN.
     ///
-    /// HTTP/2 is preferred over HTTP/1.1.
+    /// HTTP/2 is preferred over HTTP/1.1. Unlike [`alpn_h2`](Self::alpn_h2)
+    /// and [`alpn_grpc`](Self::alpn_grpc), this does **not** set
+    /// `alpn_required`: servers that omit the ALPN extension fall back to
+    /// HTTP/1.1, which is the correct behavior per RFC 7301 for clients
+    /// that support both protocols.
     pub fn alpn_http(self) -> Self {
         self.alpn_protocols(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
     }
