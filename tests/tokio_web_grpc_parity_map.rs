@@ -85,10 +85,7 @@ fn parity_covers_middleware_surface() {
         "must cover Service trait"
     );
     assert!(doc.contains("Layer"), "must cover Layer trait");
-    assert!(
-        doc.contains("ServiceBuilder"),
-        "must cover ServiceBuilder"
-    );
+    assert!(doc.contains("ServiceBuilder"), "must cover ServiceBuilder");
     assert!(
         doc.contains("TimeoutLayer") && doc.contains("RateLimitLayer"),
         "must cover core middleware layers"
@@ -138,14 +135,8 @@ fn parity_covers_http_transport() {
 #[test]
 fn parity_covers_websocket() {
     let doc = load_parity_doc();
-    assert!(
-        doc.contains("WebSocket"),
-        "must cover WebSocket protocol"
-    );
-    assert!(
-        doc.contains("RFC 6455"),
-        "must reference WebSocket RFC"
-    );
+    assert!(doc.contains("WebSocket"), "must cover WebSocket protocol");
+    assert!(doc.contains("RFC 6455"), "must reference WebSocket RFC");
 }
 
 #[test]
@@ -225,10 +216,7 @@ fn parity_has_hard_blockers_identified() {
 #[test]
 fn parity_has_gap_summary_table() {
     let doc = load_parity_doc();
-    assert!(
-        doc.contains("Gap Summary"),
-        "must have gap summary section"
-    );
+    assert!(doc.contains("Gap Summary"), "must have gap summary section");
     let summary_section = doc
         .split("Gap Summary")
         .nth(1)
