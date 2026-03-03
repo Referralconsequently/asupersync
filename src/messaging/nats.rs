@@ -603,7 +603,7 @@ impl NatsClient {
             return Err(NatsError::Closed);
         }
 
-        self.read_buf.extend(&tmp[..n]);
+        self.read_buf.extend(&tmp[..n])?;
         Ok(())
     }
 
@@ -723,6 +723,13 @@ impl NatsClient {
                     .map_err(|_| NatsError::Protocol(format!("invalid payload length: {third}")))?,
             )
         };
+
+        // Guard against oversized payloads from the server to prevent OOM.
+        if payload_len > MAX_READ_BUFFER {
+            return Err(NatsError::Protocol(format!(
+                "MSG payload length {payload_len} exceeds maximum ({MAX_READ_BUFFER})"
+            )));
+        }
 
         // Check if we have the full payload + trailing CRLF
         let payload_start = header_end + 2;
