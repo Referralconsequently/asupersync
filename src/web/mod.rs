@@ -52,6 +52,7 @@ pub mod nextjs_bootstrap;
 pub mod request_region;
 pub mod response;
 pub mod router;
+pub mod security;
 
 pub use extract::{Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State};
 pub use handler::{
