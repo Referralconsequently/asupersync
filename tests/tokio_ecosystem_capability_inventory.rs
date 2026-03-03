@@ -8,7 +8,6 @@ const INVENTORY_DOC_PATH: &str = "docs/tokio_ecosystem_capability_inventory.md";
 const EVIDENCE_MAP_DOC_PATH: &str = "docs/tokio_capability_evidence_map.md";
 const RISK_REGISTER_DOC_PATH: &str = "docs/tokio_capability_risk_register.md";
 const CARGO_TOML_PATH: &str = "Cargo.toml";
-const CARGO_TOML_PATH: &str = "Cargo.toml";
 const NET_MOD_PATH: &str = "src/net/mod.rs";
 const HTTP_MOD_PATH: &str = "src/http/mod.rs";
 const NET_QUIC_TEST_PATH: &str = "tests/net_quic.rs";
@@ -29,10 +28,6 @@ fn load_evidence_map_doc() -> String {
 
 fn load_risk_register_doc() -> String {
     load_doc(RISK_REGISTER_DOC_PATH)
-}
-
-fn load_cargo_toml() -> String {
-    load_doc(CARGO_TOML_PATH)
 }
 
 fn load_cargo_toml() -> String {
