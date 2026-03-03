@@ -67,7 +67,7 @@ Higher values indicate higher urgency for remediation.
 | F12 | TLS | M3 | R2 | D2 | 134 | 4 | rustls-only (no native-tls). Feature-gated, well-tested. |
 | F13 | WebSocket | M3 | R2 | D2 | 185 | 4 | Native impl (no tungstenite). Good test coverage. |
 | F14 | HTTP/1+2 | M3 | R2 | D2 | 717 | 4 | Native impl. Pre-existing compile error in h2/connection.rs (in-flight fix by another agent). |
-| F15 | QUIC + HTTP/3 | M1 | **R4** | D1 | 472 | **48** | **CRITICAL.** Native `quic`/`http3` feature surfaces are now exposed; RFC 9002 closure is still incomplete. Legacy quinn/h3 wrappers remain compat-only and off by default due Tokio-transitive risk. |
+| F15 | QUIC + HTTP/3 | M1 | **R4** | D1 | 472 | **48** | **CRITICAL.** T4.2/T4.3 transport parity is closed (handshake lifecycle, stream transitions, loss-recovery, flow/congestion stress correctness) and native `quic`/`http3` surfaces are exposed. Remaining blockers are migration/0-RTT/resumption and interop closure. Legacy quinn/h3 wrappers remain compat-only and off by default due Tokio-transitive risk. |
 | F16 | Web Framework | M3 | R2 | D2 | 111 | 4 | Missing: multipart, SSE, cookie extraction, CORS. Moderate gap. |
 | F17 | gRPC | M3 | R2 | D2 | 235 | 4 | Native impl (no tonic). Good coverage for unary/streaming. |
 | F18 | Database | M3 | R2 | D2 | 168 | 4 | Feature-gated. Missing: connection pool abstraction. Wire protocols present. |

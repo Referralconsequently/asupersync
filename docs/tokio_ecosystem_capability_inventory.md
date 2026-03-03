@@ -223,11 +223,11 @@ Asupersync surface. Each family is classified on four axes:
 | Tokio surface | `quinn`, `h3`, `h3-quinn` |
 | Asupersync surface | `src/net/{quic/, quic_core/, quic_native/}`, `src/http/{h3/, h3_native.rs}` |
 | Ownership | **feature-gated** (`quic`, `http3`) for native rollout; **compat-only** (`quic-compat`, `http3-compat`) for legacy wrapper boundary |
-| Parity | **partial** — native QUIC transport and native HTTP/3 framing are exposed/testable; RFC-complete transport behavior remains in progress |
+| Parity | **partial** — T4.2/T4.3 transport parity is closed for handshake lifecycle, stream transitions, loss-recovery, and flow/congestion stress correctness; advanced RFC-complete QUIC/H3 behavior remains in progress |
 | Maturity | **active** — feature surfaces are unparked in Cargo/public API while native closure continues |
 | Determinism | N/A |
 | Key files | `http/h3_native.rs` (84K), `net/quic_core/` directory, `net/quic_native/` directory |
-| Gaps | **CRITICAL for full-replacement claim.** QUIC handshake, connection migration, 0-RTT, congestion control (RFC 9002) still need completion. Legacy quinn/h3 wrappers remain quarantined behind compat-only feature gates. |
+| Gaps | **CRITICAL for full-replacement claim.** Remaining closure work is concentrated in connection migration, 0-RTT/resumption, and interop matrix coverage. Legacy quinn/h3 wrappers remain quarantined behind compat-only feature gates. |
 
 ### F16 — Web Framework
 

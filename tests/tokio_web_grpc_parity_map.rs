@@ -368,10 +368,17 @@ fn parity_includes_t52_router_closure_scope() {
         "T5.2",
         "Router Composition and Route-Matching Closure Contract",
         "Version",
-        "1.2.0",
     ] {
         assert!(doc.contains(token), "missing T5.2 scope token: {token}");
     }
+    // Version must be at least 1.2.0 (may be bumped by subsequent beads)
+    assert!(
+        doc.contains("1.2.0")
+            || doc.contains("1.3.0")
+            || doc.contains("1.4.0")
+            || doc.contains("1.5.0"),
+        "version must be >= 1.2.0"
+    );
 }
 
 #[test]
@@ -444,5 +451,583 @@ fn parity_revision_history_tracks_t52_update() {
     assert!(
         doc.contains("| 2026-03-03 | SapphireHill | Initial parity map (v1.0) |"),
         "revision history should retain initial baseline row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5.3 Contract Tests — Extractor and Body Handling Closure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parity_includes_t53_extractor_closure_scope() {
+    let doc = load_parity_doc();
+    for token in [
+        "asupersync-2oh2u.5.3",
+        "T5.3",
+        "Extractor and Body Handling Closure Contract",
+    ] {
+        assert!(doc.contains(token), "missing T5.3 scope token: {token}");
+    }
+    // Version must be at least 1.3.0 (may be bumped by subsequent beads)
+    assert!(
+        doc.contains("1.3.0") || doc.contains("1.4.0") || doc.contains("1.5.0"),
+        "version must be >= 1.3.0"
+    );
+}
+
+#[test]
+fn parity_has_t53_success_failure_cancellation_contract_rows() {
+    let doc = load_parity_doc();
+    for token in [
+        "T53-EXTRACT-01",
+        "T53-EXTRACT-02",
+        "T53-EXTRACT-03",
+        "T53-EXTRACT-04",
+        "T53-EXTRACT-05",
+        "T53-EXTRACT-06",
+        "T53-EXTRACT-07",
+        "T53-EXTRACT-08",
+        "T53-EXTRACT-09",
+        "T53-EXTRACT-10",
+    ] {
+        assert!(doc.contains(token), "missing T5.3 contract row: {token}");
+    }
+    // Verify contract table columns
+    let contract_section = doc
+        .split("T5.3 Extractor and Body Handling Closure Contract")
+        .nth(1)
+        .expect("must have T5.3 contract section");
+    for col in [
+        "Contract ID",
+        "Success Path",
+        "Failure Path",
+        "Cancellation Path",
+        "Deterministic Assertion",
+    ] {
+        assert!(
+            contract_section.contains(col),
+            "T5.3 contract table missing column: {col}"
+        );
+    }
+}
+
+#[test]
+fn parity_has_t53_deterministic_scenario_pack() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.3 Deterministic Scenario Pack"),
+        "must include T5.3 deterministic scenario pack section"
+    );
+    // Verify scenario coverage across extractors
+    for token in [
+        "T53-EXTRACT-01",
+        "T53-EXTRACT-06",
+        "T53-EXTRACT-10",
+        "T53-EXTRACT-14",
+        "T53-EXTRACT-16",
+        "T53-EXTRACT-19",
+        "T53-EXTRACT-20",
+    ] {
+        assert!(doc.contains(token), "missing scenario pack entry: {token}");
+    }
+    // Verify all three outcome classes are present
+    let pack_section = doc
+        .split("T5.3 Deterministic Scenario Pack")
+        .nth(1)
+        .expect("must have scenario pack section");
+    for status in ["| success |", "| failure |", "| cancelled |"] {
+        assert!(
+            pack_section.contains(status),
+            "scenario pack missing status: {status}"
+        );
+    }
+}
+
+#[test]
+fn parity_t53_covers_all_extractor_types() {
+    let doc = load_parity_doc();
+    let t53_section = doc
+        .split("T5.3 Extractor and Body Handling Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for extractor in [
+        "Path<T>",
+        "Query<T>",
+        "Json<T>",
+        "Form<T>",
+        "State<T>",
+        "RawBody",
+        "FromRequestParts",
+        "FromRequest",
+    ] {
+        assert!(
+            t53_section.contains(extractor),
+            "T5.3 contract must cover extractor: {extractor}"
+        );
+    }
+}
+
+#[test]
+fn parity_t53_covers_body_size_enforcement() {
+    let doc = load_parity_doc();
+    let t53_section = doc
+        .split("T5.3 Extractor and Body Handling Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for token in [
+        "MAX_JSON_BODY_SIZE",
+        "MAX_FORM_BODY_SIZE",
+        "413",
+        "Payload Too Large",
+    ] {
+        assert!(
+            t53_section.contains(token),
+            "T5.3 must cover body size enforcement token: {token}"
+        );
+    }
+}
+
+#[test]
+fn parity_t53_covers_content_type_validation() {
+    let doc = load_parity_doc();
+    let t53_section = doc
+        .split("T5.3 Extractor and Body Handling Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for token in [
+        "content-type",
+        "415",
+        "Unsupported Media Type",
+        "application/json",
+        "application/x-www-form-urlencoded",
+    ] {
+        assert!(
+            t53_section.contains(token),
+            "T5.3 must cover content-type token: {token}"
+        );
+    }
+}
+
+#[test]
+fn parity_t53_scenario_pack_has_required_log_fields() {
+    let doc = load_parity_doc();
+    let pack_section = doc
+        .split("T5.3 Deterministic Scenario Pack")
+        .nth(1)
+        .unwrap_or("");
+    for field in [
+        "scenario_id",
+        "extractor",
+        "outcome_class",
+        "status_code",
+        "body_size",
+    ] {
+        assert!(
+            pack_section.contains(field),
+            "scenario pack missing required log field: {field}"
+        );
+    }
+}
+
+#[test]
+fn parity_t53_validation_bundle_references() {
+    let doc = load_parity_doc();
+    // T5.3 should be referenced in the evidence/validation section
+    assert!(
+        doc.contains("br show asupersync-2oh2u.5.3"),
+        "evidence section must reference T5.3 bead"
+    );
+    assert!(
+        doc.contains("cargo test --lib web::extract::tests"),
+        "evidence section must include extractor unit test command"
+    );
+}
+
+#[test]
+fn parity_revision_history_tracks_t53_update() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.3 extractor/body handling closure contract"),
+        "revision history must reference T5.3 closure contract"
+    );
+    assert!(
+        doc.contains("WEB-G2") && doc.contains("WEB-G10"),
+        "revision history must note closed gaps WEB-G2 and WEB-G10"
+    );
+}
+
+#[test]
+fn parity_gap_closures_reflected_in_table() {
+    let doc = load_parity_doc();
+    // WEB-G2 and WEB-G10 should be marked as closed in the gap summary
+    assert!(
+        doc.contains("WEB-G2") && doc.contains("Closed"),
+        "WEB-G2 (fallback handler) must be marked closed"
+    );
+    assert!(
+        doc.contains("WEB-G10") && doc.contains("Closed"),
+        "WEB-G10 (FromRequestParts) must be marked closed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5.4 Contract Tests — Middleware Stack Parity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parity_includes_t54_middleware_closure_scope() {
+    let doc = load_parity_doc();
+    for token in [
+        "asupersync-2oh2u.5.4",
+        "T5.4",
+        "Middleware Stack Closure Contract",
+    ] {
+        assert!(doc.contains(token), "missing T5.4 scope token: {token}");
+    }
+    // Version must be at least 1.4.0 (may be bumped by subsequent beads)
+    assert!(
+        doc.contains("1.4.0") || doc.contains("1.5.0") || doc.contains("1.6.0"),
+        "version must be >= 1.4.0"
+    );
+}
+
+#[test]
+fn parity_has_t54_success_failure_cancellation_contract_rows() {
+    let doc = load_parity_doc();
+    for token in [
+        "T54-MW-01",
+        "T54-MW-05",
+        "T54-MW-08",
+        "T54-MW-10",
+        "T54-MW-14",
+        "T54-MW-17",
+    ] {
+        assert!(doc.contains(token), "missing T5.4 contract row: {token}");
+    }
+    let contract_section = doc
+        .split("T5.4 Middleware Stack Closure Contract")
+        .nth(1)
+        .expect("must have T5.4 contract section");
+    for col in [
+        "Contract ID",
+        "Success Path",
+        "Failure Path",
+        "Cancellation Path",
+        "Deterministic Assertion",
+    ] {
+        assert!(
+            contract_section.contains(col),
+            "T5.4 contract table missing column: {col}"
+        );
+    }
+}
+
+#[test]
+fn parity_has_t54_deterministic_scenario_pack() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.4 Deterministic Scenario Pack"),
+        "must include T5.4 deterministic scenario pack section"
+    );
+    for token in [
+        "T54-MW-01",
+        "T54-MW-06",
+        "T54-MW-12",
+        "T54-MW-16",
+        "T54-MW-20",
+        "T54-MW-24",
+    ] {
+        assert!(doc.contains(token), "missing scenario pack entry: {token}");
+    }
+    let pack_section = doc
+        .split("T5.4 Deterministic Scenario Pack")
+        .nth(1)
+        .expect("must have T5.4 scenario pack section");
+    for status in ["| success |", "| failure |", "| cancelled |"] {
+        assert!(
+            pack_section.contains(status),
+            "T5.4 scenario pack missing status: {status}"
+        );
+    }
+}
+
+#[test]
+fn parity_t54_covers_all_middleware_types() {
+    let doc = load_parity_doc();
+    let t54_section = doc
+        .split("T5.4 Middleware Stack Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for mw in [
+        "CorsMiddleware",
+        "CompressionMiddleware",
+        "AuthMiddleware",
+        "NormalizePathMiddleware",
+        "RequestBodyLimitMiddleware",
+        "CatchPanicMiddleware",
+        "TimeoutMiddleware",
+        "CircuitBreakerMiddleware",
+        "RateLimitMiddleware",
+        "BulkheadMiddleware",
+        "RetryMiddleware",
+        "MiddlewareStack",
+        "LoadShedMiddleware",
+        "RequestIdMiddleware",
+        "SetResponseHeaderMiddleware",
+    ] {
+        assert!(
+            t54_section.contains(mw),
+            "T5.4 contract must cover middleware: {mw}"
+        );
+    }
+}
+
+#[test]
+fn parity_t54_covers_status_codes() {
+    let doc = load_parity_doc();
+    let t54_section = doc
+        .split("T5.4 Middleware Stack Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for token in ["401", "429", "503", "504", "413", "500", "406", "301"] {
+        assert!(
+            t54_section.contains(token),
+            "T5.4 must cover HTTP status code: {token}"
+        );
+    }
+}
+
+#[test]
+fn parity_t54_scenario_pack_has_required_log_fields() {
+    let doc = load_parity_doc();
+    let pack_section = doc
+        .split("T5.4 Deterministic Scenario Pack")
+        .nth(1)
+        .unwrap_or("");
+    for field in ["scenario_id", "middleware", "outcome_class", "status_code"] {
+        assert!(
+            pack_section.contains(field),
+            "T5.4 scenario pack missing required log field: {field}"
+        );
+    }
+}
+
+#[test]
+fn parity_t54_validation_bundle_references() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("br show asupersync-2oh2u.5.4"),
+        "evidence section must reference T5.4 bead"
+    );
+    assert!(
+        doc.contains("cargo test --lib web::middleware::tests"),
+        "evidence section must include middleware unit test command"
+    );
+}
+
+#[test]
+fn parity_revision_history_tracks_t54_update() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.4 middleware stack closure contract"),
+        "revision history must reference T5.4 closure contract"
+    );
+    assert!(
+        doc.contains("MW-G2") && doc.contains("MW-G5") && doc.contains("MW-G9"),
+        "revision history must note closed middleware gaps"
+    );
+}
+
+#[test]
+fn parity_t54_gap_closures_reflected_in_table() {
+    let doc = load_parity_doc();
+    let summary = doc
+        .split("Gap Summary")
+        .nth(1)
+        .expect("must have gap summary");
+    for gap in ["MW-G2", "MW-G5", "MW-G6", "MW-G8", "MW-G9"] {
+        assert!(
+            summary.contains(gap) && summary.contains("Closed"),
+            "{gap} must be marked closed in gap summary"
+        );
+    }
+}
+
+#[test]
+fn parity_t54_gap_total_updated() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("7 closed"),
+        "gap total must reflect T5.4 closures (7 closed)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5.5 Contract Tests — Server Lifecycle Parity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parity_includes_t55_lifecycle_closure_scope() {
+    let doc = load_parity_doc();
+    for token in [
+        "asupersync-2oh2u.5.5",
+        "T5.5",
+        "Server Lifecycle Closure Contract",
+        "1.5.0",
+    ] {
+        assert!(doc.contains(token), "missing T5.5 scope token: {token}");
+    }
+}
+
+#[test]
+fn parity_has_t55_success_failure_cancellation_contract_rows() {
+    let doc = load_parity_doc();
+    for token in [
+        "T55-LIFE-01",
+        "T55-LIFE-03",
+        "T55-LIFE-06",
+        "T55-LIFE-09",
+        "T55-LIFE-12",
+    ] {
+        assert!(doc.contains(token), "missing T5.5 contract row: {token}");
+    }
+    let contract_section = doc
+        .split("T5.5 Server Lifecycle Closure Contract")
+        .nth(1)
+        .expect("must have T5.5 contract section");
+    for col in [
+        "Contract ID",
+        "Success Path",
+        "Failure Path",
+        "Cancellation Path",
+        "Deterministic Assertion",
+    ] {
+        assert!(
+            contract_section.contains(col),
+            "T5.5 contract table missing column: {col}"
+        );
+    }
+}
+
+#[test]
+fn parity_has_t55_deterministic_scenario_pack() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.5 Deterministic Scenario Pack"),
+        "must include T5.5 deterministic scenario pack section"
+    );
+    for token in [
+        "T55-LIFE-01",
+        "T55-LIFE-05",
+        "T55-LIFE-10",
+        "T55-LIFE-16",
+        "T55-LIFE-18",
+    ] {
+        assert!(doc.contains(token), "missing scenario pack entry: {token}");
+    }
+    let pack_section = doc
+        .split("T5.5 Deterministic Scenario Pack")
+        .nth(1)
+        .expect("must have T5.5 scenario pack section");
+    for status in ["| success |", "| failure |", "| cancelled |"] {
+        assert!(
+            pack_section.contains(status),
+            "T5.5 scenario pack missing status: {status}"
+        );
+    }
+}
+
+#[test]
+fn parity_t55_covers_lifecycle_phases() {
+    let doc = load_parity_doc();
+    // Check lifecycle concepts across both the parity table (5.4) and contract (5.5) sections
+    let lifecycle_area = doc.split("Server Lifecycle Parity").nth(1).unwrap_or("");
+    for phase in [
+        "Running",
+        "Draining",
+        "ForceClosing",
+        "Stopped",
+        "ShutdownSignal",
+        "ConnectionManager",
+        "ConnectionGuard",
+        "ShutdownStats",
+    ] {
+        assert!(
+            lifecycle_area.contains(phase),
+            "T5.5 lifecycle sections must cover concept: {phase}"
+        );
+    }
+}
+
+#[test]
+fn parity_t55_covers_backpressure_mechanisms() {
+    let doc = load_parity_doc();
+    let lifecycle_section = doc.split("Server Lifecycle Parity").nth(1).unwrap_or("");
+    for token in [
+        "max_connections",
+        "max_requests_per_connection",
+        "idle_timeout",
+        "keep_alive",
+        "max_headers_size",
+        "max_body_size",
+    ] {
+        assert!(
+            lifecycle_section.contains(token),
+            "T5.5 parity table must cover backpressure token: {token}"
+        );
+    }
+}
+
+#[test]
+fn parity_t55_scenario_pack_has_required_log_fields() {
+    let doc = load_parity_doc();
+    let pack_section = doc
+        .split("T5.5 Deterministic Scenario Pack")
+        .nth(1)
+        .unwrap_or("");
+    for field in ["scenario_id", "outcome_class", "phase"] {
+        assert!(
+            pack_section.contains(field),
+            "T5.5 scenario pack missing required log field: {field}"
+        );
+    }
+}
+
+#[test]
+fn parity_t55_validation_bundle_references() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("br show asupersync-2oh2u.5.5"),
+        "evidence section must reference T5.5 bead"
+    );
+}
+
+#[test]
+fn parity_revision_history_tracks_t55_update() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.5 server lifecycle closure contract"),
+        "revision history must reference T5.5 closure contract"
+    );
+    assert!(
+        doc.contains("HT-G4") && doc.contains("HT-G5"),
+        "revision history must note new HT-G4 and HT-G5 gaps"
+    );
+}
+
+#[test]
+fn parity_t55_new_gaps_in_summary() {
+    let doc = load_parity_doc();
+    let summary = doc
+        .split("Gap Summary")
+        .nth(1)
+        .expect("must have gap summary");
+    assert!(
+        summary.contains("HT-G4") && summary.contains("HTTP/2 server lifecycle"),
+        "HT-G4 must appear in gap summary"
+    );
+    assert!(
+        summary.contains("HT-G5") && summary.contains("Multi-listener"),
+        "HT-G5 must appear in gap summary"
     );
 }

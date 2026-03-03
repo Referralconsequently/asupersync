@@ -39,6 +39,17 @@ Each track-level unit suite MUST publish and enforce all required categories:
 Minimum per-track category coverage is `>= 1` test per category. In practice, each
 track SHOULD exceed this baseline substantially.
 
+### 2.1 Cross-Track Minimum Quality Thresholds
+
+| Threshold ID | Requirement | Hard-Fail Condition |
+|---|---|---|
+| `TQ-01` | Per-track unit test count `>= 20` | count below 20 for any track |
+| `TQ-02` | `(edge + error) / happy >= 0.50` | ratio below 0.50 for any track |
+| `TQ-03` | `(cancel + leak) >= 4` | fewer than 4 cancellation/leak-focused tests |
+| `TQ-04` | flaky retry pass rate = 0 tolerated | any retry-only pass in gated unit runs |
+
+Thresholds are deterministic policy floors and cannot be waived silently.
+
 ---
 
 ## 3. Deterministic Quality Gates (Normative)
@@ -81,6 +92,10 @@ Required command tokens:
 - `rch exec -- cargo clippy --all-targets -- -D warnings`
 - `rch exec -- cargo fmt --check`
 - `rch exec -- cargo test --test tokio_unit_quality_threshold_contract -- --nocapture`
+- `rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture`
+- `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture`
+- `rch exec -- cargo test --test tokio_web_grpc_parity_map -- --nocapture`
+- `rch exec -- cargo test --test tokio_ecosystem_capability_inventory -- --nocapture`
 
 Track unit suites are expected to publish dedicated commands in their own contracts;
 this gate validates their aggregated quality manifests and threshold outcomes.
@@ -112,6 +127,7 @@ Each track entry in `tokio_unit_quality_manifest.json` MUST include:
 | `category_counts` | yes | counts for happy/edge/error/cancel/leak |
 | `threshold_result` | yes | pass/fail for each `UQ-*` gate |
 | `oracle_status` | yes | leak-oracle execution outcomes |
+| `threshold_metrics` | yes | numeric values for `TQ-01`..`TQ-04` evaluation |
 | `repro_commands` | yes | deterministic rerun commands for failures |
 | `artifact_links` | yes | pointers to logs/traces/failure payloads |
 

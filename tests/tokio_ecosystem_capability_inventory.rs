@@ -11,6 +11,10 @@ const CARGO_TOML_PATH: &str = "Cargo.toml";
 const NET_MOD_PATH: &str = "src/net/mod.rs";
 const HTTP_MOD_PATH: &str = "src/http/mod.rs";
 const NET_QUIC_TEST_PATH: &str = "tests/net_quic.rs";
+const QUIC_NATIVE_CONNECTION_PATH: &str = "src/net/quic_native/connection.rs";
+const QUIC_NATIVE_TRANSPORT_PATH: &str = "src/net/quic_native/transport.rs";
+const QUIC_H3_VIOLATIONS_TEST_PATH: &str = "tests/quic_h3_e2e_violations.rs";
+const QUIC_H3_LOSS_TEST_PATH: &str = "tests/quic_h3_e2e_loss.rs";
 
 fn load_doc(path: &str) -> String {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
@@ -44,6 +48,22 @@ fn load_http_mod() -> String {
 
 fn load_net_quic_test() -> String {
     load_doc(NET_QUIC_TEST_PATH)
+}
+
+fn load_quic_native_connection() -> String {
+    load_doc(QUIC_NATIVE_CONNECTION_PATH)
+}
+
+fn load_quic_h3_violations_test() -> String {
+    load_doc(QUIC_H3_VIOLATIONS_TEST_PATH)
+}
+
+fn load_quic_h3_loss_test() -> String {
+    load_doc(QUIC_H3_LOSS_TEST_PATH)
+}
+
+fn load_quic_native_transport() -> String {
+    load_doc(QUIC_NATIVE_TRANSPORT_PATH)
 }
 
 #[test]
@@ -385,11 +405,13 @@ fn quic_http3_public_boundary_wiring_is_explicit() {
 fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
     let inventory = load_inventory_doc();
     let risk = load_risk_register_doc();
+    let evidence = load_evidence_map_doc();
 
     for token in [
         "feature-gated** (`quic`, `http3`)",
         "compat-only** (`quic-compat`, `http3-compat`)",
         "feature surfaces are unparked",
+        "T4.2/T4.3 transport parity",
     ] {
         assert!(
             inventory.contains(token),
@@ -398,7 +420,8 @@ fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
     }
 
     for token in [
-        "Native `quic`/`http3` feature surfaces are now exposed",
+        "T4.2/T4.3 transport parity is closed",
+        "native `quic`/`http3` surfaces are exposed",
         "compat-only and off by default",
     ] {
         assert!(
@@ -406,4 +429,49 @@ fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
             "risk register F15 row missing token: {token}"
         );
     }
+
+    for token in [
+        "T4.2/T4.3 transport parity is closed",
+        "violation/loss E2E suites",
+    ] {
+        assert!(
+            evidence.contains(token),
+            "evidence map F15 row missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn t4_transport_invariants_are_contract_enforced() {
+    let connection = load_quic_native_connection();
+    let transport = load_quic_native_transport();
+    let violations = load_quic_h3_violations_test();
+    let loss = load_quic_h3_loss_test();
+
+    assert!(
+        connection.contains("self.ensure_packet_send_state(space)?;"),
+        "connection send path must enforce packet-space/state checks"
+    );
+    assert!(
+        connection.contains("application-data packets require established 1-RTT state"),
+        "connection guard must reject appdata sends before 1-RTT"
+    );
+    assert!(
+        connection.contains("packet send requires non-closed connection state"),
+        "connection guard must reject sends after close"
+    );
+
+    assert!(
+        violations.contains("appdata_packet_before_1rtt_and_any_packet_after_close_are_rejected"),
+        "violations suite must cover packet-space/state legality in transport core"
+    );
+
+    assert!(
+        transport.contains("fn congestion_recovery_uses_lost_packet_send_time_epoch()"),
+        "transport unit tests must cover recovery-epoch gating on lost packet send-time"
+    );
+    assert!(
+        loss.contains("delayed_ack_report_for_older_loss_does_not_double_reduce_cwnd"),
+        "loss e2e suite must cover delayed-loss reporting without double cwnd reduction"
+    );
 }

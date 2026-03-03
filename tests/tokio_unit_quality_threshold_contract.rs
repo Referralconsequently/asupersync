@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 fn load_doc() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/tokio_unit_quality_threshold_contract.md");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_unit_quality_threshold_contract.md");
     std::fs::read_to_string(path).expect("unit quality threshold contract must exist")
 }
 
@@ -94,6 +94,23 @@ fn doc_defines_full_uq_gate_set() {
 }
 
 #[test]
+fn doc_defines_cross_track_threshold_set() {
+    let doc = load_doc();
+    for token in [
+        "TQ-01",
+        "TQ-02",
+        "TQ-03",
+        "TQ-04",
+        ">= 20",
+        ">= 0.50",
+        ">= 4",
+        "retry-only pass",
+    ] {
+        assert!(doc.contains(token), "missing threshold token: {token}");
+    }
+}
+
+#[test]
 fn doc_requires_leak_oracles_for_concurrency_paths() {
     let doc = load_doc();
     for token in [
@@ -122,6 +139,10 @@ fn doc_defines_required_ci_commands_with_rch() {
         "rch exec -- cargo clippy --all-targets -- -D warnings",
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo test --test tokio_unit_quality_threshold_contract -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture",
+        "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture",
+        "rch exec -- cargo test --test tokio_web_grpc_parity_map -- --nocapture",
+        "rch exec -- cargo test --test tokio_ecosystem_capability_inventory -- --nocapture",
     ] {
         assert!(doc.contains(token), "missing CI command token: {token}");
     }
@@ -149,6 +170,7 @@ fn doc_defines_manifest_schema_fields() {
         "commit_sha",
         "category_counts",
         "threshold_result",
+        "threshold_metrics",
         "oracle_status",
         "repro_commands",
         "artifact_links",
