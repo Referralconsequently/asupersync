@@ -321,9 +321,17 @@ impl<T> Sender<T> {
     /// version, so it will only see future changes.
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
-        self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
-
-        let current_version = self.inner.current_version();
+        // Hold the value read-lock while incrementing receiver_count and
+        // sampling the version.  send() holds the write-lock when it
+        // updates the version, so this guarantees we cannot observe a
+        // post-send version while the sender believed there were fewer
+        // receivers (the same TOCTOU class fixed in broadcast subscribe
+        // by commit e9314df5).
+        let current_version = {
+            let guard = self.inner.value.read();
+            self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
+            guard.1
+        };
         Receiver {
             inner: Arc::clone(&self.inner),
             seen_version: current_version,
@@ -1512,6 +1520,86 @@ mod tests {
         let count = tx.inner.receiver_count.load(Ordering::Acquire);
         crate::assert_with_log!(count == 0, "count after drop", 0usize, count);
         crate::test_complete!("receiver_drop_decrements_count_atomically");
+    }
+
+    #[test]
+    fn subscribe_version_is_consistent_with_send() {
+        // Regression test: subscribe() must sample the version under the
+        // value read-lock so a concurrent send cannot slip a version bump
+        // between the receiver_count increment and the version read.
+        //
+        // We cannot perfectly reproduce the race in a single thread, but
+        // we CAN verify the structural invariant: a freshly subscribed
+        // receiver's seen_version equals the current channel version at
+        // the instant the receiver becomes visible (receiver_count > 0).
+        init_test("subscribe_version_is_consistent_with_send");
+        let (tx, _rx) = channel(0i32);
+
+        // Send a few values to advance the version.
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+        tx.send(3).unwrap();
+
+        let pre_version = tx.inner.current_version();
+        let rx2 = tx.subscribe();
+        let post_version = tx.inner.current_version();
+
+        // The subscribed receiver must see a version in [pre, post].
+        // Without concurrent sends they should all be equal.
+        crate::assert_with_log!(
+            rx2.seen_version == pre_version,
+            "subscribe version matches current",
+            pre_version,
+            rx2.seen_version
+        );
+        crate::assert_with_log!(
+            pre_version == post_version,
+            "no concurrent version change",
+            pre_version,
+            post_version
+        );
+
+        // The new receiver should NOT see a pending change (it starts
+        // at the current version).
+        assert!(!rx2.has_changed());
+
+        // After a new send the receiver should observe the change.
+        tx.send(4).unwrap();
+        assert!(rx2.has_changed());
+        crate::test_complete!("subscribe_version_is_consistent_with_send");
+    }
+
+    #[test]
+    fn subscribe_under_read_lock_blocks_concurrent_send() {
+        // Demonstrates the lock ordering: subscribe holds value.read()
+        // so a concurrent send (which needs value.write()) must wait,
+        // ensuring the version + count are consistent.
+        init_test("subscribe_under_read_lock_blocks_concurrent_send");
+        let (tx, _rx) = channel(0i32);
+
+        // Grab a read lock manually to simulate the window.
+        let guard = tx.inner.value.read();
+        let version_under_lock = guard.1;
+
+        // While the read lock is held, receiver_count can be bumped
+        // but send() cannot advance the version.
+        tx.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
+        let count = tx.inner.receiver_count.load(Ordering::Acquire);
+        crate::assert_with_log!(count == 2, "count bumped under lock", 2usize, count);
+
+        // Version cannot have changed while we hold the read lock.
+        let version_still = tx.inner.current_version();
+        crate::assert_with_log!(
+            version_still == version_under_lock,
+            "version stable under read lock",
+            version_under_lock,
+            version_still
+        );
+
+        // Clean up the extra receiver_count we added.
+        tx.inner.receiver_count.fetch_sub(1, Ordering::Release);
+        drop(guard);
+        crate::test_complete!("subscribe_under_read_lock_blocks_concurrent_send");
     }
 
     #[test]
