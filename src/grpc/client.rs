@@ -17,6 +17,24 @@ use super::codec::{Codec, FramedCodec, IdentityCodec};
 use super::status::{GrpcError, Status};
 use super::streaming::{Metadata, Request, Response, Streaming};
 
+/// Supported gRPC message compression encodings for channel negotiation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionEncoding {
+    /// No compression.
+    Identity,
+    /// Gzip compression.
+    Gzip,
+}
+
+impl CompressionEncoding {
+    fn as_header_value(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Gzip => "gzip",
+        }
+    }
+}
+
 /// gRPC channel configuration.
 #[derive(Debug, Clone)]
 pub struct ChannelConfig {
@@ -38,6 +56,10 @@ pub struct ChannelConfig {
     pub keepalive_timeout: Option<Duration>,
     /// Whether to use TLS.
     pub use_tls: bool,
+    /// Compression used for outbound messages.
+    pub send_compression: Option<CompressionEncoding>,
+    /// Compression encodings accepted by this client.
+    pub accept_compression: Vec<CompressionEncoding>,
 }
 
 impl Default for ChannelConfig {
@@ -52,6 +74,8 @@ impl Default for ChannelConfig {
             keepalive_interval: None,
             keepalive_timeout: None,
             use_tls: false,
+            send_compression: None,
+            accept_compression: vec![CompressionEncoding::Identity],
         }
     }
 }
@@ -131,6 +155,31 @@ impl ChannelBuilder {
         self
     }
 
+    /// Set the outbound compression encoding.
+    #[must_use]
+    pub fn send_compression(mut self, encoding: CompressionEncoding) -> Self {
+        self.config.send_compression = Some(encoding);
+        self
+    }
+
+    /// Add one accepted compression encoding.
+    #[must_use]
+    pub fn accept_compression(mut self, encoding: CompressionEncoding) -> Self {
+        self.config.accept_compression.push(encoding);
+        self
+    }
+
+    /// Replace accepted compression encodings.
+    #[must_use]
+    pub fn accept_compressions(
+        mut self,
+        encodings: impl IntoIterator<Item = CompressionEncoding>,
+    ) -> Self {
+        self.config.accept_compression.clear();
+        self.config.accept_compression.extend(encodings);
+        self
+    }
+
     /// Enable TLS.
     #[must_use]
     pub fn tls(mut self) -> Self {
@@ -189,21 +238,41 @@ impl Channel {
 }
 
 /// A gRPC client for making RPC calls.
-#[derive(Debug)]
 pub struct GrpcClient<C = IdentityCodec> {
     /// The underlying channel.
     channel: Channel,
     /// The codec for message serialization.
     codec: FramedCodec<C>,
+    /// Client interceptor chain.
+    client_interceptors: Vec<Arc<dyn ClientInterceptor>>,
+}
+
+impl<C: fmt::Debug> fmt::Debug for GrpcClient<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GrpcClient")
+            .field("channel", &self.channel)
+            .field("codec", &self.codec)
+            .field(
+                "client_interceptors",
+                &format!("[{} interceptors]", self.client_interceptors.len()),
+            )
+            .finish()
+    }
 }
 
 impl GrpcClient<IdentityCodec> {
     /// Create a new client with an identity codec.
     #[must_use]
     pub fn new(channel: Channel) -> Self {
+        let codec = if channel.config.send_compression.is_some() {
+            FramedCodec::new(IdentityCodec).with_identity_frame_codec()
+        } else {
+            FramedCodec::new(IdentityCodec)
+        };
         Self {
             channel,
-            codec: FramedCodec::new(IdentityCodec),
+            codec,
+            client_interceptors: Vec::new(),
         }
     }
 }
@@ -212,15 +281,110 @@ impl<C: Codec> GrpcClient<C> {
     /// Create a new client with a custom codec.
     #[must_use]
     pub fn with_codec(channel: Channel, codec: C) -> Self {
+        let codec = if channel.config.send_compression.is_some() {
+            FramedCodec::new(codec).with_identity_frame_codec()
+        } else {
+            FramedCodec::new(codec)
+        };
         Self {
             channel,
-            codec: FramedCodec::new(codec),
+            codec,
+            client_interceptors: Vec::new(),
         }
     }
 
     /// Get the underlying channel.
     pub fn channel(&self) -> &Channel {
         &self.channel
+    }
+
+    /// Add one client interceptor and return the updated client.
+    #[must_use]
+    pub fn with_interceptor<I>(mut self, interceptor: I) -> Self
+    where
+        I: ClientInterceptor + 'static,
+    {
+        self.client_interceptors.push(Arc::new(interceptor));
+        self
+    }
+
+    /// Add multiple client interceptors and return the updated client.
+    #[must_use]
+    pub fn with_interceptors<I>(mut self, interceptors: impl IntoIterator<Item = I>) -> Self
+    where
+        I: ClientInterceptor + 'static,
+    {
+        let interceptors = interceptors.into_iter();
+        let (lower, upper) = interceptors.size_hint();
+        self.client_interceptors.reserve(upper.unwrap_or(lower));
+        for interceptor in interceptors {
+            self.client_interceptors.push(Arc::new(interceptor));
+        }
+        self
+    }
+
+    /// Register one client interceptor in place.
+    pub fn add_interceptor<I>(&mut self, interceptor: I)
+    where
+        I: ClientInterceptor + 'static,
+    {
+        self.client_interceptors.push(Arc::new(interceptor));
+    }
+
+    /// Returns the number of registered client interceptors.
+    #[must_use]
+    pub fn interceptor_count(&self) -> usize {
+        self.client_interceptors.len()
+    }
+
+    fn build_outbound_metadata<Req>(
+        &self,
+        request: &Request<Req>,
+        path: &str,
+    ) -> Result<Metadata, Status> {
+        let mut metadata_request = Request::with_metadata(Bytes::new(), request.metadata().clone());
+        self.apply_channel_metadata_defaults(metadata_request.metadata_mut());
+        self.apply_client_interceptors(&mut metadata_request)?;
+
+        let mut metadata = metadata_request.metadata().clone();
+        metadata.insert("x-asupersync-grpc-path", path);
+        metadata.insert("x-asupersync-grpc-transport", "loopback");
+        Ok(metadata)
+    }
+
+    fn apply_channel_metadata_defaults(&self, metadata: &mut Metadata) {
+        if metadata.get("grpc-timeout").is_none()
+            && let Some(timeout) = self.channel.config.timeout
+        {
+            metadata.insert("grpc-timeout", encode_grpc_timeout(timeout));
+        }
+
+        if metadata.get("grpc-encoding").is_none()
+            && let Some(encoding) = self.channel.config.send_compression
+        {
+            metadata.insert("grpc-encoding", encoding.as_header_value());
+        }
+
+        if metadata.get("grpc-accept-encoding").is_none()
+            && !self.channel.config.accept_compression.is_empty()
+        {
+            let encodings = self
+                .channel
+                .config
+                .accept_compression
+                .iter()
+                .map(|encoding| encoding.as_header_value())
+                .collect::<Vec<_>>()
+                .join(",");
+            metadata.insert("grpc-accept-encoding", encodings);
+        }
+    }
+
+    fn apply_client_interceptors(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+        for interceptor in &self.client_interceptors {
+            interceptor.intercept(request)?;
+        }
+        Ok(())
     }
 
     /// Make a unary RPC call.
@@ -237,10 +401,8 @@ impl<C: Codec> GrpcClient<C> {
         validate_rpc_path(path)?;
         enforce_deadline_budget(self.channel.config.timeout)?;
 
+        let metadata = self.build_outbound_metadata(&request, path)?;
         let payload = convert_message::<Req, Resp>(request.into_inner(), "unary call")?;
-        let mut metadata = Metadata::new();
-        metadata.insert("x-asupersync-grpc-path", path);
-        metadata.insert("x-asupersync-grpc-transport", "loopback");
         Ok(Response::with_metadata(payload, metadata))
     }
 
@@ -258,14 +420,12 @@ impl<C: Codec> GrpcClient<C> {
         validate_rpc_path(path)?;
         enforce_deadline_budget(self.channel.config.timeout)?;
 
+        let metadata = self.build_outbound_metadata(&request, path)?;
         let mut stream = ResponseStream::open();
         let payload = convert_message::<Req, Resp>(request.into_inner(), "server streaming call")?;
         stream.push(Ok(payload))?;
         stream.close();
 
-        let mut metadata = Metadata::new();
-        metadata.insert("x-asupersync-grpc-path", path);
-        metadata.insert("x-asupersync-grpc-transport", "loopback");
         Ok(Response::with_metadata(stream, metadata))
     }
 
@@ -282,9 +442,11 @@ impl<C: Codec> GrpcClient<C> {
         validate_rpc_path(path)?;
         enforce_deadline_budget(self.channel.config.timeout)?;
 
+        let request = Request::new(Bytes::new());
+        let metadata = self.build_outbound_metadata(&request, path)?;
         let state = Arc::new(Mutex::new(RequestSinkState::new()));
         let sink = RequestSink::from_state(state.clone());
-        let future = ResponseFuture::with_resolver(state, |state| {
+        let future = ResponseFuture::with_resolver(state, move |state| {
             let Some(last) = state.last_message.take() else {
                 return Err(Status::invalid_argument(
                     "client stream closed without any request messages",
@@ -292,7 +454,7 @@ impl<C: Codec> GrpcClient<C> {
             };
             let response =
                 downcast_boxed_message::<Resp>(last, "client streaming response conversion")?;
-            Ok(Response::new(response))
+            Ok(Response::with_metadata(response, metadata.clone()))
         });
         Ok((sink, future))
     }
@@ -371,6 +533,27 @@ fn enforce_deadline_budget(timeout: Option<Duration>) -> Result<(), Status> {
         ));
     }
     Ok(())
+}
+
+fn encode_grpc_timeout(timeout: Duration) -> String {
+    const MAX_GRPC_TIMEOUT_VALUE: u128 = 99_999_999;
+    const GRPC_TIMEOUT_UNITS: [(u128, char); 6] = [
+        (3_600_000_000_000, 'H'),
+        (60_000_000_000, 'M'),
+        (1_000_000_000, 'S'),
+        (1_000_000, 'm'),
+        (1_000, 'u'),
+        (1, 'n'),
+    ];
+
+    let timeout_nanos = timeout.as_nanos().max(1);
+    for (unit_nanos, suffix) in GRPC_TIMEOUT_UNITS {
+        let value = timeout_nanos.div_ceil(unit_nanos);
+        if value <= MAX_GRPC_TIMEOUT_VALUE {
+            return format!("{value}{suffix}");
+        }
+    }
+    "99999999H".to_owned()
 }
 
 fn convert_message<Req, Resp>(request: Req, context: &str) -> Result<Resp, Status>
@@ -756,6 +939,15 @@ pub trait ClientInterceptor: Send + Sync {
     fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status>;
 }
 
+impl<T> ClientInterceptor for T
+where
+    T: super::server::Interceptor,
+{
+    fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+        self.intercept_request(request)
+    }
+}
+
 /// A client interceptor that adds metadata to requests.
 #[derive(Debug, Clone)]
 pub struct MetadataInterceptor {
@@ -855,6 +1047,18 @@ mod tests {
         let timeout_none = config.timeout.is_none();
         crate::assert_with_log!(timeout_none, "timeout none", true, timeout_none);
         crate::assert_with_log!(!config.use_tls, "use_tls", false, config.use_tls);
+        crate::assert_with_log!(
+            config.send_compression.is_none(),
+            "send compression default",
+            true,
+            config.send_compression.is_none()
+        );
+        crate::assert_with_log!(
+            config.accept_compression == vec![CompressionEncoding::Identity],
+            "accept compression default",
+            vec![CompressionEncoding::Identity],
+            config.accept_compression.clone()
+        );
         crate::test_complete!("test_channel_config_default");
     }
 
@@ -899,6 +1103,8 @@ mod tests {
         assert!(cfg.keepalive_interval.is_none());
         assert!(cfg.keepalive_timeout.is_none());
         assert!(!cfg.use_tls);
+        assert!(cfg.send_compression.is_none());
+        assert_eq!(cfg.accept_compression, vec![CompressionEncoding::Identity]);
     }
 
     #[test]
@@ -920,6 +1126,8 @@ mod tests {
             .initial_stream_window_size(256)
             .keepalive_interval(Duration::from_secs(10))
             .keepalive_timeout(Duration::from_secs(5))
+            .send_compression(CompressionEncoding::Gzip)
+            .accept_compressions([CompressionEncoding::Identity, CompressionEncoding::Gzip])
             .tls();
 
         assert_eq!(builder.config.connect_timeout, Duration::from_secs(30));
@@ -935,6 +1143,14 @@ mod tests {
         assert_eq!(
             builder.config.keepalive_timeout,
             Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            builder.config.send_compression,
+            Some(CompressionEncoding::Gzip)
+        );
+        assert_eq!(
+            builder.config.accept_compression,
+            vec![CompressionEncoding::Identity, CompressionEncoding::Gzip]
         );
         assert!(builder.config.use_tls);
     }
@@ -973,6 +1189,84 @@ mod tests {
         let channel = make_channel("http://svc:80");
         let client = GrpcClient::new(channel);
         assert_eq!(client.channel().uri(), "http://svc:80");
+    }
+
+    #[test]
+    fn grpc_client_applies_deadline_metadata_by_default() {
+        let channel = futures_lite::future::block_on(
+            Channel::builder("http://svc:80")
+                .timeout(Duration::from_secs(2))
+                .connect(),
+        )
+        .expect("channel");
+        let mut client = GrpcClient::new(channel);
+        let response: Response<String> = futures_lite::future::block_on(
+            client.unary("/pkg.Service/Method", Request::new("hello".to_owned())),
+        )
+        .expect("unary");
+
+        match response.metadata().get("grpc-timeout") {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "2S");
+            }
+            other => panic!("expected grpc-timeout metadata, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grpc_client_interceptors_and_compression_metadata_are_applied() {
+        use crate::grpc::timeout_interceptor;
+
+        let channel = futures_lite::future::block_on(
+            Channel::builder("http://svc:80")
+                .send_compression(CompressionEncoding::Gzip)
+                .accept_compressions([CompressionEncoding::Identity, CompressionEncoding::Gzip])
+                .connect(),
+        )
+        .expect("channel");
+
+        let mut client = GrpcClient::new(channel)
+            .with_interceptor(timeout_interceptor(777))
+            .with_interceptor(MetadataInterceptor::new().with_metadata("x-client-id", "cobalt"));
+
+        let response: Response<String> = futures_lite::future::block_on(
+            client.unary("/pkg.Service/Method", Request::new("hello".to_owned())),
+        )
+        .expect("unary");
+
+        let metadata = response.metadata();
+        match metadata.get("grpc-timeout") {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "777m");
+            }
+            other => panic!("expected interceptor timeout metadata, got: {other:?}"),
+        }
+        match metadata.get("grpc-encoding") {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "gzip");
+            }
+            other => panic!("expected grpc-encoding metadata, got: {other:?}"),
+        }
+        match metadata.get("grpc-accept-encoding") {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "identity,gzip");
+            }
+            other => panic!("expected grpc-accept-encoding metadata, got: {other:?}"),
+        }
+        match metadata.get("x-client-id") {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "cobalt");
+            }
+            other => panic!("expected interceptor metadata, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encode_grpc_timeout_prefers_largest_unit_with_eight_digit_limit() {
+        assert_eq!(encode_grpc_timeout(Duration::from_secs(2)), "2S");
+        assert_eq!(encode_grpc_timeout(Duration::from_millis(1)), "1m");
+        assert_eq!(encode_grpc_timeout(Duration::from_nanos(1)), "1n");
+        assert_eq!(encode_grpc_timeout(Duration::from_micros(1500)), "1500u");
     }
 
     #[test]
