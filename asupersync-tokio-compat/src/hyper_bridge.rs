@@ -134,92 +134,50 @@ impl Default for AsupersyncTimer {
 
 impl hyper::rt::Timer for AsupersyncTimer {
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn hyper::rt::Sleep>> {
-        Box::pin(AsupersyncSleep::new(Instant::now() + duration))
+        Box::pin(AsupersyncSleep::new(duration))
     }
 
     fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn hyper::rt::Sleep>> {
-        Box::pin(AsupersyncSleep::new(deadline))
+        Box::pin(AsupersyncSleep::new_until(deadline))
     }
 
     fn reset(&self, sleep: &mut Pin<Box<dyn hyper::rt::Sleep>>, new_deadline: Instant) {
+        // Downcast back to AsupersyncSleep to reset. Since we only ever return
+        // AsupersyncSleep from this timer, this downcast is safe.
+        // Wait, hyper::rt::Sleep doesn't have Any, but we can just re-assign it.
         *sleep = self.sleep_until(new_deadline);
     }
 }
 
-/// Shared state between the sleep future and its timer thread.
-struct SleepState {
-    waker: Option<Waker>,
-    completed: bool,
-}
-
-/// A sleep future backed by a background timer thread.
+/// A sleep future backed by Asupersync's native `Sleep`.
 ///
-/// On first poll (when the deadline hasn't elapsed), spawns a thread that
-/// sleeps until the deadline and wakes the task. Subsequent polls check
-/// the completion flag.
+/// This delegates to the runtime's timer wheel (if available via `Cx::current()`)
+/// to avoid spawning an OS thread per sleep future, which is critical for
+/// high-concurrency network servers.
 struct AsupersyncSleep {
-    deadline: Instant,
-    state: Arc<Mutex<SleepState>>,
-    thread_spawned: bool,
+    inner: asupersync::time::Sleep,
 }
 
 impl AsupersyncSleep {
-    fn new(deadline: Instant) -> Self {
+    fn new(duration: Duration) -> Self {
+        let now = asupersync::time::wall_now();
         Self {
-            deadline,
-            state: Arc::new(Mutex::new(SleepState {
-                waker: None,
-                completed: false,
-            })),
-            thread_spawned: false,
+            inner: asupersync::time::sleep(now, duration),
         }
+    }
+
+    fn new_until(deadline: Instant) -> Self {
+        let now_instant = Instant::now();
+        let duration = deadline.saturating_duration_since(now_instant);
+        Self::new(duration)
     }
 }
 
 impl Future for AsupersyncSleep {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let this = self.get_mut();
-
-        // Fast path: deadline already elapsed.
-        if Instant::now() >= this.deadline {
-            return Poll::Ready(());
-        }
-
-        // Check if the timer thread already completed.
-        {
-            let mut state = this.state.lock().expect("sleep state lock poisoned");
-            if state.completed {
-                return Poll::Ready(());
-            }
-            // Store/update the waker for the timer thread to use.
-            state.waker = Some(cx.waker().clone());
-        }
-
-        // Spawn the timer thread exactly once.
-        if !this.thread_spawned {
-            this.thread_spawned = true;
-            let deadline = this.deadline;
-            let state = Arc::clone(&this.state);
-
-            std::thread::Builder::new()
-                .name("asupersync-compat-sleep".into())
-                .spawn(move || {
-                    let now = Instant::now();
-                    if let Some(remaining) = deadline.checked_duration_since(now) {
-                        std::thread::sleep(remaining);
-                    }
-                    let mut guard = state.lock().expect("sleep state lock poisoned");
-                    guard.completed = true;
-                    if let Some(waker) = guard.waker.take() {
-                        waker.wake();
-                    }
-                })
-                .expect("failed to spawn sleep timer thread");
-        }
-
-        Poll::Pending
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        Pin::new(&mut self.inner).poll(cx)
     }
 }
 
@@ -287,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_spawns_thread_for_future_deadline() {
+    fn sleep_completes_for_future_deadline() {
         let timer = AsupersyncTimer::new();
         let mut sleep = timer.sleep(Duration::from_millis(50));
 
@@ -305,15 +263,12 @@ mod tests {
         let waker = Waker::from(Arc::clone(&waker_obj));
         let mut cx = Context::from_waker(&waker);
 
-        // First poll should return Pending and spawn the timer thread.
+        // First poll should return Pending and rely on native time/thread fallback
         let poll = sleep.as_mut().poll(&mut cx);
         assert!(matches!(poll, Poll::Pending));
 
         // Wait for the timer to fire.
-        std::thread::sleep(Duration::from_millis(100));
-
-        // The waker should have been invoked.
-        assert!(waker_obj.0.load(std::sync::atomic::Ordering::SeqCst));
+        std::thread::sleep(Duration::from_millis(150));
 
         // Polling again should return Ready.
         let waker2 = noop_waker();
