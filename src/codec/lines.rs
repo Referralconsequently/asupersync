@@ -94,7 +94,6 @@ impl Decoder for LinesCodec {
                     let _ = src.split_to(newline_index + 1);
                     self.next_index = 0;
                     self.is_discarding = false;
-                    continue;
                 }
                 (true, None) => {
                     // Keep memory bounded while discarding an oversized line.
@@ -115,8 +114,8 @@ impl Decoder for LinesCodec {
                         line.truncate(line.len().saturating_sub(1));
                     }
 
-                    let s =
-                        String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
+                    let s = String::from_utf8(line.to_vec())
+                        .map_err(|_| LinesCodecError::InvalidUtf8)?;
                     return Ok(Some(s));
                 }
                 (false, None) => {
@@ -153,7 +152,8 @@ impl Decoder for LinesCodec {
                     line.truncate(line.len().saturating_sub(1));
                 }
 
-                let s = String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
+                let s =
+                    String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
                 Ok(Some(s))
             }
         }

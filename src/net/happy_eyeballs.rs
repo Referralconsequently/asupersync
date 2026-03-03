@@ -110,8 +110,16 @@ pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
 /// operates on full `SocketAddr` values so each address keeps its original port.
 #[must_use]
 fn sort_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
-    let v6: Vec<SocketAddr> = addrs.iter().copied().filter(|addr| addr.is_ipv6()).collect();
-    let v4: Vec<SocketAddr> = addrs.iter().copied().filter(|addr| addr.is_ipv4()).collect();
+    let v6: Vec<SocketAddr> = addrs
+        .iter()
+        .copied()
+        .filter(SocketAddr::is_ipv6)
+        .collect();
+    let v4: Vec<SocketAddr> = addrs
+        .iter()
+        .copied()
+        .filter(SocketAddr::is_ipv4)
+        .collect();
 
     let mut result = Vec::with_capacity(v6.len() + v4.len());
     let mut v6_iter = v6.into_iter();
@@ -550,9 +558,15 @@ mod tests {
         let sorted = sort_socket_addrs(&addrs);
 
         assert_eq!(sorted.len(), 4);
-        assert_eq!(sorted[0], "[2001:db8::1]:443".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            sorted[0],
+            "[2001:db8::1]:443".parse::<SocketAddr>().unwrap()
+        );
         assert_eq!(sorted[1], "192.0.2.10:8443".parse::<SocketAddr>().unwrap());
-        assert_eq!(sorted[2], "[2001:db8::2]:444".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            sorted[2],
+            "[2001:db8::2]:444".parse::<SocketAddr>().unwrap()
+        );
         assert_eq!(sorted[3], "192.0.2.11:8080".parse::<SocketAddr>().unwrap());
 
         crate::test_complete!("sort_socket_addrs_preserves_ports");
@@ -686,6 +700,41 @@ mod tests {
         let result = futures_lite::future::block_on(connect(&addrs, &config));
         assert!(result.is_err());
         crate::test_complete!("connect_multiple_unreachable_tries_all");
+    }
+
+    #[test]
+    fn connect_uses_per_address_ports() {
+        init_test("connect_uses_per_address_ports");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open_addr = listener.local_addr().unwrap();
+
+        let accept_thread = std::thread::spawn(move || {
+            // Accept exactly one connection so the connect future can succeed.
+            let _ = listener.accept();
+        });
+
+        // First address should fail quickly, second should succeed. This test
+        // guards against regressions that accidentally reuse the first port for
+        // all attempts.
+        let closed_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let addrs = vec![closed_addr, open_addr];
+
+        let config = HappyEyeballsConfig {
+            first_family_delay: Duration::from_millis(5),
+            attempt_delay: Duration::from_millis(5),
+            connect_timeout: Duration::from_millis(200),
+            overall_timeout: Duration::from_secs(2),
+        };
+
+        let result = futures_lite::future::block_on(connect(&addrs, &config));
+        assert!(
+            result.is_ok(),
+            "connect should succeed via second address with distinct port: {result:?}"
+        );
+
+        let _ = accept_thread.join();
+        crate::test_complete!("connect_uses_per_address_ports");
     }
 
     // =======================================================================

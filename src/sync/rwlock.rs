@@ -331,7 +331,8 @@ impl<T> RwLock<T> {
             let mut state = self.state.lock();
             state.writer_active = false;
 
-            let wake_writer = if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
+            let wake_writer = if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty()
+            {
                 // Both are waiting. Wake the oldest to ensure fairness.
                 let writer_id = state.writer_queue.front().unwrap().id;
                 let reader_id = state.reader_waiters.front().unwrap().id;
@@ -541,13 +542,14 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 state.writer_active = false;
 
-                let wake_writer = if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
-                    let writer_id = state.writer_queue.front().unwrap().id;
-                    let reader_id = state.reader_waiters.front().unwrap().id;
-                    writer_id < reader_id
-                } else {
-                    !state.writer_queue.is_empty()
-                };
+                let wake_writer =
+                    if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
+                        let writer_id = state.writer_queue.front().unwrap().id;
+                        let reader_id = state.reader_waiters.front().unwrap().id;
+                        writer_id < reader_id
+                    } else {
+                        !state.writer_queue.is_empty()
+                    };
 
                 if wake_writer {
                     writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
@@ -903,13 +905,14 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 state.writer_active = false;
 
-                let wake_writer = if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
-                    let writer_id = state.writer_queue.front().unwrap().id;
-                    let reader_id = state.reader_waiters.front().unwrap().id;
-                    writer_id < reader_id
-                } else {
-                    !state.writer_queue.is_empty()
-                };
+                let wake_writer =
+                    if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
+                        let writer_id = state.writer_queue.front().unwrap().id;
+                        let reader_id = state.reader_waiters.front().unwrap().id;
+                        writer_id < reader_id
+                    } else {
+                        !state.writer_queue.is_empty()
+                    };
 
                 if wake_writer {
                     writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
