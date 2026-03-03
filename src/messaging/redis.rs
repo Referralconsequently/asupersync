@@ -6,6 +6,8 @@
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use crate::messaging::redis_pubsub::RedisPubSub;
+use crate::messaging::redis_transaction::Transaction;
 use crate::net::TcpStream;
 use crate::sync::{GenericPool, Pool as _, PoolConfig, PoolError, PooledResource};
 use std::fmt;
