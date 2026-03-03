@@ -40,13 +40,16 @@
 //! Request → Timeout → RateLimit → Handler → Response
 //! ```
 
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy};
 use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
+use crate::http::compress::{ContentEncoding, negotiate_encoding};
 use crate::types::Time;
 
 use super::extract::Request;
@@ -96,7 +99,7 @@ impl Default for CorsPolicy {
             ],
             allow_headers: vec!["*".to_string()],
             expose_headers: Vec::new(),
-            max_age: Some(Duration::from_secs(60 * 10)),
+            max_age: Some(Duration::from_mins(10)),
             allow_credentials: false,
         }
     }
@@ -149,8 +152,10 @@ impl<H: Handler> CorsMiddleware<H> {
     }
 
     fn apply_common_headers(&self, mut resp: Response, allow_origin: &str) -> Response {
-        resp.headers
-            .insert("access-control-allow-origin".to_string(), allow_origin.to_string());
+        resp.headers.insert(
+            "access-control-allow-origin".to_string(),
+            allow_origin.to_string(),
+        );
         // Cache key must vary by Origin when policy is origin-sensitive.
         resp.headers
             .insert("vary".to_string(), "origin".to_string());
@@ -172,9 +177,8 @@ impl<H: Handler> CorsMiddleware<H> {
 
 impl<H: Handler> Handler for CorsMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let origin = match header_value(&req, "origin") {
-            Some(value) => value,
-            None => return self.inner.call(req),
+        let Some(origin) = header_value(&req, "origin") else {
+            return self.inner.call(req);
         };
 
         let Some(allow_origin) = self.allowed_origin_value(&origin) else {
@@ -201,8 +205,7 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
             }
             resp.headers.insert(
                 "vary".to_string(),
-                "origin, access-control-request-method, access-control-request-headers"
-                    .to_string(),
+                "origin, access-control-request-method, access-control-request-headers".to_string(),
             );
             return resp;
         }
@@ -217,6 +220,24 @@ fn header_value(req: &Request, header_name: &str) -> Option<String> {
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(header_name))
         .map(|(_, value)| value.clone())
+}
+
+fn append_vary_header(resp: &mut Response, token: &str) {
+    let existing = resp.headers.get("vary").cloned().unwrap_or_default();
+    if existing
+        .split(',')
+        .map(str::trim)
+        .any(|value| value.eq_ignore_ascii_case(token))
+    {
+        return;
+    }
+
+    let updated = if existing.is_empty() {
+        token.to_string()
+    } else {
+        format!("{existing}, {token}")
+    };
+    resp.headers.insert("vary".to_string(), updated);
 }
 
 // ─── TimeoutMiddleware ──────────────────────────────────────────────────────
@@ -540,6 +561,489 @@ impl<H: Handler> Handler for RetryMiddleware<H> {
     }
 }
 
+// ─── CompressionMiddleware ─────────────────────────────────────────────────
+
+/// Supported compression encodings for the compression middleware.
+#[derive(Debug, Clone)]
+pub struct CompressionConfig {
+    /// Encodings the server supports, in preference order.
+    pub supported: Vec<ContentEncoding>,
+    /// Minimum response body size (bytes) before compression is applied.
+    /// Bodies smaller than this threshold are sent uncompressed.
+    pub min_body_size: usize,
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            supported: vec![ContentEncoding::Identity],
+            min_body_size: 256,
+        }
+    }
+}
+
+/// Middleware that compresses response bodies based on Accept-Encoding
+/// negotiation.
+///
+/// Uses [`negotiate_encoding`] to select the best encoding from the
+/// client's Accept-Encoding header against the server's supported set.
+/// Only compresses when the response body exceeds `min_body_size`.
+///
+/// Compression is currently identity-only for correctness. Non-identity
+/// encodings are negotiated only when real compressors are available.
+pub struct CompressionMiddleware<H> {
+    inner: H,
+    config: CompressionConfig,
+}
+
+impl<H: Handler> CompressionMiddleware<H> {
+    /// Wrap a handler with response compression.
+    #[must_use]
+    pub fn new(inner: H, config: CompressionConfig) -> Self {
+        Self { inner, config }
+    }
+}
+
+impl<H: Handler> Handler for CompressionMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        let accept_encoding = header_value(&req, "accept-encoding");
+        let mut resp = self.inner.call(req);
+
+        // Skip compression for small bodies or when no Accept-Encoding.
+        if resp.body.len() < self.config.min_body_size {
+            return resp;
+        }
+
+        let accept = accept_encoding.as_deref().unwrap_or("");
+        let Some(encoding) = negotiate_encoding(accept, &self.config.supported) else {
+            if accept_encoding.is_some() {
+                return Response::new(
+                    StatusCode::from_u16(406),
+                    b"No acceptable response encoding".to_vec(),
+                );
+            }
+            return resp;
+        };
+
+        // Identity means no transformation needed.
+        if encoding == ContentEncoding::Identity {
+            append_vary_header(&mut resp, "accept-encoding");
+            return resp;
+        }
+
+        // Future extension point for real compressors. Until then, return
+        // identity payload while still marking cache variance.
+        append_vary_header(&mut resp, "accept-encoding");
+        let _ = encoding;
+        resp
+    }
+}
+
+// ─── RequestBodyLimitMiddleware ───────────────────────────────────────────
+
+/// Middleware that enforces a maximum request body size.
+///
+/// If the request body exceeds the limit, a 413 Payload Too Large response
+/// is returned without invoking the inner handler. This provides a global
+/// safety net independent of per-extractor limits.
+pub struct RequestBodyLimitMiddleware<H> {
+    inner: H,
+    max_bytes: usize,
+}
+
+impl<H: Handler> RequestBodyLimitMiddleware<H> {
+    /// Wrap a handler with a request body size limit.
+    #[must_use]
+    pub fn new(inner: H, max_bytes: usize) -> Self {
+        Self { inner, max_bytes }
+    }
+}
+
+impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        if req.body.len() > self.max_bytes {
+            return Response::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Payload Too Large: body is {} bytes, limit is {} bytes",
+                    req.body.len(),
+                    self.max_bytes
+                )
+                .into_bytes(),
+            );
+        }
+        self.inner.call(req)
+    }
+}
+
+// ─── RequestIdMiddleware ──────────────────────────────────────────────────
+
+/// Middleware that generates or propagates a request ID.
+///
+/// If the request contains a header matching `header_name`, its value is
+/// used. Otherwise, a monotonically increasing ID is generated. The ID
+/// is stored in the request extensions under `"request_id"` and echoed
+/// in the response header.
+pub struct RequestIdMiddleware<H> {
+    inner: H,
+    header_name: String,
+    counter: Arc<AtomicU64>,
+}
+
+impl<H: Handler> RequestIdMiddleware<H> {
+    /// Wrap a handler with request ID generation.
+    ///
+    /// `header_name` specifies which request/response header carries the ID
+    /// (e.g., `"x-request-id"`).
+    #[must_use]
+    pub fn new(inner: H, header_name: impl Into<String>) -> Self {
+        Self {
+            inner,
+            header_name: header_name.into(),
+            counter: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Wrap a handler with request ID generation using a shared counter.
+    ///
+    /// Use this to ensure unique IDs across multiple middleware instances.
+    #[must_use]
+    pub fn shared(inner: H, header_name: impl Into<String>, counter: Arc<AtomicU64>) -> Self {
+        Self {
+            inner,
+            header_name: header_name.into(),
+            counter,
+        }
+    }
+}
+
+impl<H: Handler> Handler for RequestIdMiddleware<H> {
+    fn call(&self, mut req: Request) -> Response {
+        let request_id = header_value(&req, &self.header_name).unwrap_or_else(|| {
+            let id = self.counter.fetch_add(1, Ordering::Relaxed);
+            format!("req-{id}")
+        });
+
+        req.extensions.insert("request_id", request_id.clone());
+        req.extensions.insert("trace_id", request_id.clone());
+
+        let mut resp = self.inner.call(req);
+        resp.headers.insert(self.header_name.clone(), request_id);
+        resp
+    }
+}
+
+// ─── AuthMiddleware ────────────────────────────────────────────────────────
+
+/// Authorization policy for bearer-token middleware.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AuthPolicy {
+    /// Any well-formed bearer token is accepted.
+    #[default]
+    AnyBearer,
+    /// Only the listed bearer tokens are accepted.
+    ExactBearer(Vec<String>),
+}
+
+impl AuthPolicy {
+    /// Require exactly one bearer token.
+    #[must_use]
+    pub fn exact_bearer(token: impl Into<String>) -> Self {
+        Self::ExactBearer(vec![token.into()])
+    }
+
+    fn allows(&self, req: &Request) -> bool {
+        let Some(value) = header_value(req, "authorization") else {
+            return false;
+        };
+        let Some(token) = parse_bearer_token(&value) else {
+            return false;
+        };
+        match self {
+            Self::AnyBearer => !token.is_empty(),
+            Self::ExactBearer(tokens) => tokens.iter().any(|expected| expected == token),
+        }
+    }
+}
+
+fn parse_bearer_token(header: &str) -> Option<&str> {
+    let (scheme, token) = header.trim().split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(token.trim())
+    } else {
+        None
+    }
+}
+
+/// Middleware that enforces bearer-token authorization.
+pub struct AuthMiddleware<H> {
+    inner: H,
+    policy: AuthPolicy,
+}
+
+impl<H: Handler> AuthMiddleware<H> {
+    /// Wrap a handler with authorization checks.
+    #[must_use]
+    pub fn new(inner: H, policy: AuthPolicy) -> Self {
+        Self { inner, policy }
+    }
+}
+
+impl<H: Handler> Handler for AuthMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        if !self.policy.allows(&req) {
+            return Response::new(StatusCode::UNAUTHORIZED, b"Unauthorized".to_vec())
+                .header("www-authenticate", "Bearer");
+        }
+        self.inner.call(req)
+    }
+}
+
+// ─── LoadShedMiddleware ────────────────────────────────────────────────────
+
+/// Policy for request-level load shedding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadShedPolicy {
+    /// Max in-flight requests before shedding starts.
+    pub max_in_flight: usize,
+}
+
+impl Default for LoadShedPolicy {
+    fn default() -> Self {
+        Self {
+            max_in_flight: 1024,
+        }
+    }
+}
+
+struct InFlightGuard<'a> {
+    counter: &'a AtomicUsize,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Middleware that sheds requests when in-flight count exceeds policy.
+pub struct LoadShedMiddleware<H> {
+    inner: H,
+    policy: LoadShedPolicy,
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl<H: Handler> LoadShedMiddleware<H> {
+    /// Wrap a handler with load-shedding checks.
+    #[must_use]
+    pub fn new(inner: H, policy: LoadShedPolicy) -> Self {
+        Self {
+            inner,
+            policy,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl<H: Handler> Handler for LoadShedMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        let previous = self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if previous >= self.policy.max_in_flight {
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            return Response::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                b"Service Unavailable: overloaded".to_vec(),
+            );
+        }
+
+        let _guard = InFlightGuard {
+            counter: &self.in_flight,
+        };
+        self.inner.call(req)
+    }
+}
+
+// ─── CatchPanicMiddleware ─────────────────────────────────────────────────
+
+/// Middleware that catches panics in the inner handler and returns a
+/// 500 Internal Server Error response instead of unwinding.
+///
+/// This is a safety net for production servers: a panicking handler
+/// should not take down the entire server. The panic message is logged
+/// but not exposed to the client (to avoid information leakage).
+pub struct CatchPanicMiddleware<H> {
+    inner: H,
+}
+
+impl<H: Handler> CatchPanicMiddleware<H> {
+    /// Wrap a handler with panic recovery.
+    #[must_use]
+    pub fn new(inner: H) -> Self {
+        Self { inner }
+    }
+}
+
+impl<H: Handler> Handler for CatchPanicMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        match panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(req))) {
+            Ok(resp) => resp,
+            Err(_payload) => {
+                // Do not expose panic details to the client.
+                Response::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    b"Internal Server Error".to_vec(),
+                )
+            }
+        }
+    }
+}
+
+// ─── NormalizePathMiddleware ──────────────────────────────────────────────
+
+/// Path normalization strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrailingSlash {
+    /// Remove trailing slashes: `/foo/` becomes `/foo`.
+    Trim,
+    /// Add trailing slashes: `/foo` becomes `/foo/`.
+    Always,
+    /// Redirect to the canonical form (301). The `Trim` or `Always`
+    /// variant determines the canonical form.
+    RedirectTrim,
+    /// Redirect to the canonical form (301) with trailing slash.
+    RedirectAlways,
+}
+
+/// Middleware that normalizes request paths.
+///
+/// Handles trailing slash normalization according to the configured
+/// strategy. This prevents routing mismatches when clients send `/api/`
+/// vs `/api`.
+pub struct NormalizePathMiddleware<H> {
+    inner: H,
+    strategy: TrailingSlash,
+}
+
+impl<H: Handler> NormalizePathMiddleware<H> {
+    /// Wrap a handler with path normalization.
+    #[must_use]
+    pub fn new(inner: H, strategy: TrailingSlash) -> Self {
+        Self { inner, strategy }
+    }
+}
+
+impl<H: Handler> Handler for NormalizePathMiddleware<H> {
+    fn call(&self, mut req: Request) -> Response {
+        let path = &req.path;
+
+        match self.strategy {
+            TrailingSlash::Trim => {
+                if path.len() > 1 && path.ends_with('/') {
+                    req.path = path.trim_end_matches('/').to_string();
+                    if req.path.is_empty() {
+                        req.path = "/".to_string();
+                    }
+                }
+                self.inner.call(req)
+            }
+            TrailingSlash::Always => {
+                if !path.ends_with('/') && !path.contains('.') {
+                    req.path = format!("{path}/");
+                }
+                self.inner.call(req)
+            }
+            TrailingSlash::RedirectTrim => {
+                if path.len() > 1 && path.ends_with('/') {
+                    let mut trimmed = path.trim_end_matches('/').to_string();
+                    if trimmed.is_empty() {
+                        trimmed = "/".to_string();
+                    }
+                    return Response::empty(StatusCode::MOVED_PERMANENTLY)
+                        .header("location", trimmed);
+                }
+                self.inner.call(req)
+            }
+            TrailingSlash::RedirectAlways => {
+                if !path.ends_with('/') && !path.contains('.') {
+                    let with_slash = format!("{path}/");
+                    return Response::empty(StatusCode::MOVED_PERMANENTLY)
+                        .header("location", with_slash);
+                }
+                self.inner.call(req)
+            }
+        }
+    }
+}
+
+// ─── SetResponseHeaderMiddleware ─────────────────────────────────────────
+
+/// Strategy for setting response headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderOverwrite {
+    /// Always set the header, overwriting any existing value.
+    Always,
+    /// Only set the header if it is not already present.
+    IfMissing,
+}
+
+/// Middleware that injects headers into every response.
+///
+/// Useful for security headers (e.g., `x-content-type-options: nosniff`,
+/// `x-frame-options: DENY`) or custom metadata headers.
+pub struct SetResponseHeaderMiddleware<H> {
+    inner: H,
+    name: String,
+    value: String,
+    mode: HeaderOverwrite,
+}
+
+impl<H: Handler> SetResponseHeaderMiddleware<H> {
+    /// Wrap a handler to inject a response header.
+    #[must_use]
+    pub fn new(
+        inner: H,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        mode: HeaderOverwrite,
+    ) -> Self {
+        Self {
+            inner,
+            name: name.into(),
+            value: value.into(),
+            mode,
+        }
+    }
+
+    /// Convenience: always-overwrite mode.
+    #[must_use]
+    pub fn always(inner: H, name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::new(inner, name, value, HeaderOverwrite::Always)
+    }
+
+    /// Convenience: set only if the header is not already present.
+    #[must_use]
+    pub fn if_missing(inner: H, name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::new(inner, name, value, HeaderOverwrite::IfMissing)
+    }
+}
+
+impl<H: Handler> Handler for SetResponseHeaderMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        let mut resp = self.inner.call(req);
+        match self.mode {
+            HeaderOverwrite::Always => {
+                resp.headers.insert(self.name.clone(), self.value.clone());
+            }
+            HeaderOverwrite::IfMissing => {
+                resp.headers
+                    .entry(self.name.clone())
+                    .or_insert_with(|| self.value.clone());
+            }
+        }
+        resp
+    }
+}
+
 // ─── MiddlewareStack ────────────────────────────────────────────────────────
 
 /// Builder for composing multiple middleware layers around a handler.
@@ -656,6 +1160,87 @@ impl<H: Handler> MiddlewareStack<H> {
         }
     }
 
+    /// Add a response compression middleware layer.
+    #[must_use]
+    pub fn with_compression(
+        self,
+        config: CompressionConfig,
+    ) -> MiddlewareStack<CompressionMiddleware<H>> {
+        MiddlewareStack {
+            inner: CompressionMiddleware::new(self.inner, config),
+        }
+    }
+
+    /// Add a request body size limit middleware layer.
+    #[must_use]
+    pub fn with_body_limit(
+        self,
+        max_bytes: usize,
+    ) -> MiddlewareStack<RequestBodyLimitMiddleware<H>> {
+        MiddlewareStack {
+            inner: RequestBodyLimitMiddleware::new(self.inner, max_bytes),
+        }
+    }
+
+    /// Add a bearer auth middleware layer.
+    #[must_use]
+    pub fn with_auth(self, policy: AuthPolicy) -> MiddlewareStack<AuthMiddleware<H>> {
+        MiddlewareStack {
+            inner: AuthMiddleware::new(self.inner, policy),
+        }
+    }
+
+    /// Add request-level load shedding middleware.
+    #[must_use]
+    pub fn with_load_shed(self, policy: LoadShedPolicy) -> MiddlewareStack<LoadShedMiddleware<H>> {
+        MiddlewareStack {
+            inner: LoadShedMiddleware::new(self.inner, policy),
+        }
+    }
+
+    /// Add a request ID middleware layer.
+    #[must_use]
+    pub fn with_request_id(
+        self,
+        header_name: impl Into<String>,
+    ) -> MiddlewareStack<RequestIdMiddleware<H>> {
+        MiddlewareStack {
+            inner: RequestIdMiddleware::new(self.inner, header_name),
+        }
+    }
+
+    /// Add a panic recovery middleware layer.
+    #[must_use]
+    pub fn with_catch_panic(self) -> MiddlewareStack<CatchPanicMiddleware<H>> {
+        MiddlewareStack {
+            inner: CatchPanicMiddleware::new(self.inner),
+        }
+    }
+
+    /// Add a path normalization middleware layer.
+    #[must_use]
+    pub fn with_normalize_path(
+        self,
+        strategy: TrailingSlash,
+    ) -> MiddlewareStack<NormalizePathMiddleware<H>> {
+        MiddlewareStack {
+            inner: NormalizePathMiddleware::new(self.inner, strategy),
+        }
+    }
+
+    /// Add a response header injection middleware layer.
+    #[must_use]
+    pub fn with_response_header(
+        self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        mode: HeaderOverwrite,
+    ) -> MiddlewareStack<SetResponseHeaderMiddleware<H>> {
+        MiddlewareStack {
+            inner: SetResponseHeaderMiddleware::new(self.inner, name, value, mode),
+        }
+    }
+
     /// Finish building and return the composed handler.
     #[must_use]
     pub fn build(self) -> H {
@@ -719,6 +1304,22 @@ mod tests {
     impl Handler for FailingIfCalled {
         fn call(&self, _req: Request) -> Response {
             Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"inner-called".to_vec())
+        }
+    }
+
+    struct InspectPathHandler;
+
+    impl Handler for InspectPathHandler {
+        fn call(&self, req: Request) -> Response {
+            Response::new(StatusCode::OK, req.path.into_bytes())
+        }
+    }
+
+    struct PanicHandler;
+
+    impl Handler for PanicHandler {
+        fn call(&self, _req: Request) -> Response {
+            panic!("boom");
         }
     }
 
@@ -940,6 +1541,161 @@ mod tests {
         assert!(!is_idempotent("PATCH"));
     }
 
+    // --- CompressionMiddleware ---
+
+    #[test]
+    fn compression_identity_sets_vary_header() {
+        let mw = CompressionMiddleware::new(
+            FnHandler::new(ok_handler),
+            CompressionConfig {
+                supported: vec![ContentEncoding::Identity],
+                min_body_size: 0,
+            },
+        );
+        let req = Request::new("GET", "/compress").with_header("accept-encoding", "identity");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-encoding".to_string())
+        );
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn compression_rejects_not_acceptable_encodings() {
+        let mw = CompressionMiddleware::new(
+            FnHandler::new(ok_handler),
+            CompressionConfig {
+                supported: vec![ContentEncoding::Identity],
+                min_body_size: 0,
+            },
+        );
+        let req = Request::new("GET", "/compress")
+            .with_header("accept-encoding", "gzip;q=1, identity;q=0");
+        let resp = mw.call(req);
+        assert_eq!(resp.status.as_u16(), 406);
+    }
+
+    // --- RequestBodyLimitMiddleware ---
+
+    #[test]
+    fn body_limit_short_circuits_large_payload() {
+        let mw = RequestBodyLimitMiddleware::new(FailingIfCalled, 3);
+        let req = Request::new("POST", "/upload").with_body(b"abcdef".to_vec());
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // --- RequestIdMiddleware ---
+
+    #[test]
+    fn request_id_generates_when_missing() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id");
+        let resp = mw.call(Request::new("GET", "/req-id"));
+        let request_id = resp
+            .headers
+            .get("x-request-id")
+            .expect("request id header should be present");
+        assert!(request_id.starts_with("req-"));
+    }
+
+    #[test]
+    fn request_id_preserves_incoming_header_value() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id");
+        let req = Request::new("GET", "/req-id").with_header("x-request-id", "abc-123");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("x-request-id"),
+            Some(&"abc-123".to_string())
+        );
+    }
+
+    // --- AuthMiddleware ---
+
+    #[test]
+    fn auth_rejects_missing_authorization_header() {
+        let mw = AuthMiddleware::new(FnHandler::new(ok_handler), AuthPolicy::AnyBearer);
+        let resp = mw.call(Request::new("GET", "/auth"));
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers.get("www-authenticate"),
+            Some(&"Bearer".to_string())
+        );
+    }
+
+    #[test]
+    fn auth_accepts_matching_bearer_token() {
+        let mw = AuthMiddleware::new(
+            FnHandler::new(ok_handler),
+            AuthPolicy::exact_bearer("token-123"),
+        );
+        let req = Request::new("GET", "/auth").with_header("authorization", "Bearer token-123");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn auth_rejects_non_matching_bearer_token() {
+        let mw = AuthMiddleware::new(
+            FnHandler::new(ok_handler),
+            AuthPolicy::exact_bearer("token-123"),
+        );
+        let req = Request::new("GET", "/auth").with_header("authorization", "Bearer nope");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+    }
+
+    // --- LoadShedMiddleware ---
+
+    #[test]
+    fn load_shed_rejects_when_capacity_zero() {
+        let mw = LoadShedMiddleware::new(
+            FnHandler::new(ok_handler),
+            LoadShedPolicy { max_in_flight: 0 },
+        );
+        let resp = mw.call(Request::new("GET", "/shed"));
+        assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // --- CatchPanicMiddleware ---
+
+    #[test]
+    fn catch_panic_returns_internal_server_error() {
+        let mw = CatchPanicMiddleware::new(PanicHandler);
+        let resp = mw.call(Request::new("GET", "/panic"));
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // --- NormalizePathMiddleware ---
+
+    #[test]
+    fn normalize_path_trim_rewrites_trailing_slash() {
+        let mw = NormalizePathMiddleware::new(InspectPathHandler, TrailingSlash::Trim);
+        let resp = mw.call(Request::new("GET", "/users/"));
+        assert_eq!(&resp.body[..], b"/users");
+    }
+
+    #[test]
+    fn normalize_path_redirect_always_redirects_without_slash() {
+        let mw = NormalizePathMiddleware::new(InspectPathHandler, TrailingSlash::RedirectAlways);
+        let resp = mw.call(Request::new("GET", "/users"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(resp.headers.get("location"), Some(&"/users/".to_string()));
+    }
+
+    // --- SetResponseHeaderMiddleware ---
+
+    #[test]
+    fn set_response_header_if_missing_preserves_existing() {
+        let inner = FnHandler::new(|| {
+            Response::new(StatusCode::OK, b"ok".to_vec()).header("x-env", "existing")
+        });
+        let mw = SetResponseHeaderMiddleware::if_missing(inner, "x-env", "new");
+        let resp = mw.call(Request::new("GET", "/"));
+        assert_eq!(resp.headers.get("x-env"), Some(&"existing".to_string()));
+    }
+
     // --- CorsMiddleware ---
 
     #[test]
@@ -982,9 +1738,8 @@ mod tests {
         ]);
         let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
 
-        let blocked = mw.call(
-            Request::new("GET", "/cors").with_header("Origin", "https://blocked.example"),
-        );
+        let blocked =
+            mw.call(Request::new("GET", "/cors").with_header("Origin", "https://blocked.example"));
         assert_eq!(blocked.status, StatusCode::OK);
         assert!(!blocked.headers.contains_key("access-control-allow-origin"));
 
@@ -1034,6 +1789,8 @@ mod tests {
     fn middleware_stack_composition() {
         let handler = MiddlewareStack::new(FnHandler::new(ok_handler))
             .with_cors(CorsPolicy::default())
+            .with_auth(AuthPolicy::AnyBearer)
+            .with_load_shed(LoadShedPolicy { max_in_flight: 16 })
             .with_bulkhead(BulkheadPolicy {
                 max_concurrent: 10,
                 ..Default::default()
@@ -1046,7 +1803,7 @@ mod tests {
             .with_timeout(Duration::from_secs(30))
             .build();
 
-        let resp = handler.call(make_request());
+        let resp = handler.call(make_request().with_header("authorization", "Bearer token"));
         assert_eq!(resp.status, StatusCode::OK);
     }
 
@@ -1132,5 +1889,376 @@ mod tests {
         let metrics = mw.bulkhead().metrics();
         // After call completes, permit should be released.
         assert_eq!(metrics.active_permits, 0);
+    }
+
+    // --- CompressionMiddleware ---
+
+    #[test]
+    fn compression_skips_small_bodies() {
+        let config = CompressionConfig {
+            min_body_size: 1000,
+            ..Default::default()
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(ok_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn compression_negotiates_encoding() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'x'; 512])
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 256,
+            supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        // Non-identity compression is not yet wired, so payload remains
+        // identity and no content-encoding header is emitted.
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-encoding".to_string())
+        );
+    }
+
+    #[test]
+    fn compression_identity_passthrough() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'x'; 512])
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 256,
+            supported: vec![ContentEncoding::Identity],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "identity");
+        let resp = mw.call(req);
+        // Identity encoding means no content-encoding header.
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    // --- RequestBodyLimitMiddleware ---
+
+    #[test]
+    fn body_limit_allows_within_limit() {
+        let mw = RequestBodyLimitMiddleware::new(FnHandler::new(ok_handler), 1024);
+        let mut req = make_request();
+        req.body = vec![0u8; 512].into();
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn body_limit_rejects_over_limit() {
+        let mw = RequestBodyLimitMiddleware::new(FnHandler::new(ok_handler), 100);
+        let mut req = make_request();
+        req.body = vec![0u8; 200].into();
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+        let body_str = String::from_utf8_lossy(&resp.body);
+        assert!(body_str.contains("200 bytes"));
+        assert!(body_str.contains("100 bytes"));
+    }
+
+    #[test]
+    fn body_limit_allows_exact_limit() {
+        let mw = RequestBodyLimitMiddleware::new(FnHandler::new(ok_handler), 100);
+        let mut req = make_request();
+        req.body = vec![0u8; 100].into();
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn body_limit_short_circuits_handler() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let handler = CountingHandler {
+            calls: Arc::clone(&calls),
+            delay: Duration::ZERO,
+            status: StatusCode::OK,
+        };
+        let mw = RequestBodyLimitMiddleware::new(handler, 10);
+        let mut req = make_request();
+        req.body = vec![0u8; 20].into();
+        let _ = mw.call(req);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    // --- RequestIdMiddleware ---
+
+    #[test]
+    fn request_id_generates_id() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id");
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::OK);
+        let id = resp.headers.get("x-request-id").unwrap();
+        assert!(id.starts_with("req-"));
+    }
+
+    #[test]
+    fn request_id_propagates_existing() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id");
+        let req = make_request().with_header("x-request-id", "custom-42");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("x-request-id"),
+            Some(&"custom-42".to_string())
+        );
+    }
+
+    #[test]
+    fn request_id_monotonic_counter() {
+        let counter = Arc::new(AtomicU64::new(100));
+        let mw = RequestIdMiddleware::shared(
+            FnHandler::new(ok_handler),
+            "x-request-id",
+            Arc::clone(&counter),
+        );
+        let resp1 = mw.call(make_request());
+        let resp2 = mw.call(make_request());
+        assert_eq!(
+            resp1.headers.get("x-request-id"),
+            Some(&"req-100".to_string())
+        );
+        assert_eq!(
+            resp2.headers.get("x-request-id"),
+            Some(&"req-101".to_string())
+        );
+    }
+
+    #[test]
+    fn request_id_stores_in_extensions() {
+        struct RequestIdEchoHandler;
+        impl Handler for RequestIdEchoHandler {
+            fn call(&self, req: Request) -> Response {
+                req.extensions.get("request_id").map_or_else(
+                    || Response::new(StatusCode::BAD_REQUEST, b"no id".to_vec()),
+                    |val| Response::new(StatusCode::OK, val.as_bytes().to_vec()),
+                )
+            }
+        }
+
+        let mw = RequestIdMiddleware::new(RequestIdEchoHandler, "x-request-id");
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::OK);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.starts_with("req-"));
+    }
+
+    // --- CatchPanicMiddleware ---
+
+    #[test]
+    fn catch_panic_recovers() {
+        let mw = CatchPanicMiddleware::new(PanicHandler);
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert_eq!(body, "Internal Server Error");
+    }
+
+    #[test]
+    fn catch_panic_passes_normal_responses() {
+        let mw = CatchPanicMiddleware::new(FnHandler::new(ok_handler));
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    // --- NormalizePathMiddleware ---
+
+    #[test]
+    fn normalize_path_trim_trailing_slash() {
+        let mw = NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::Trim);
+        let resp = mw.call(Request::new("GET", "/api/users/"));
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn normalize_path_trim_preserves_root() {
+        struct PathEchoHandler;
+        impl Handler for PathEchoHandler {
+            fn call(&self, req: Request) -> Response {
+                Response::new(StatusCode::OK, req.path.into_bytes())
+            }
+        }
+
+        let mw = NormalizePathMiddleware::new(PathEchoHandler, TrailingSlash::Trim);
+        let resp = mw.call(Request::new("GET", "/"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(&resp.body[..], b"/");
+    }
+
+    #[test]
+    fn normalize_path_always_adds_slash() {
+        struct PathEchoHandler;
+        impl Handler for PathEchoHandler {
+            fn call(&self, req: Request) -> Response {
+                Response::new(StatusCode::OK, req.path.into_bytes())
+            }
+        }
+
+        let mw = NormalizePathMiddleware::new(PathEchoHandler, TrailingSlash::Always);
+        let resp = mw.call(Request::new("GET", "/api/users"));
+        assert_eq!(String::from_utf8_lossy(&resp.body), "/api/users/");
+    }
+
+    #[test]
+    fn normalize_path_always_skips_dotfiles() {
+        struct PathEchoHandler;
+        impl Handler for PathEchoHandler {
+            fn call(&self, req: Request) -> Response {
+                Response::new(StatusCode::OK, req.path.into_bytes())
+            }
+        }
+
+        let mw = NormalizePathMiddleware::new(PathEchoHandler, TrailingSlash::Always);
+        // Paths with dots (like /style.css) should NOT get trailing slash.
+        let resp = mw.call(Request::new("GET", "/style.css"));
+        assert_eq!(String::from_utf8_lossy(&resp.body), "/style.css");
+    }
+
+    #[test]
+    fn normalize_path_redirect_trim() {
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
+        let resp = mw.call(Request::new("GET", "/api/users/"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"/api/users".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_path_redirect_always() {
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
+        let resp = mw.call(Request::new("GET", "/api/users"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"/api/users/".to_string())
+        );
+    }
+
+    // --- SetResponseHeaderMiddleware ---
+
+    #[test]
+    fn set_header_always_overwrites() {
+        fn header_handler() -> Response {
+            Response::new(StatusCode::OK, b"ok".to_vec()).header("x-custom", "original")
+        }
+
+        let mw = SetResponseHeaderMiddleware::always(
+            FnHandler::new(header_handler),
+            "x-custom",
+            "overwritten",
+        );
+        let resp = mw.call(make_request());
+        assert_eq!(
+            resp.headers.get("x-custom"),
+            Some(&"overwritten".to_string())
+        );
+    }
+
+    #[test]
+    fn set_header_if_missing_preserves_existing() {
+        fn header_handler() -> Response {
+            Response::new(StatusCode::OK, b"ok".to_vec()).header("x-custom", "original")
+        }
+
+        let mw = SetResponseHeaderMiddleware::if_missing(
+            FnHandler::new(header_handler),
+            "x-custom",
+            "default",
+        );
+        let resp = mw.call(make_request());
+        assert_eq!(resp.headers.get("x-custom"), Some(&"original".to_string()));
+    }
+
+    #[test]
+    fn set_header_if_missing_adds_when_absent() {
+        let mw = SetResponseHeaderMiddleware::if_missing(
+            FnHandler::new(ok_handler),
+            "x-content-type-options",
+            "nosniff",
+        );
+        let resp = mw.call(make_request());
+        assert_eq!(
+            resp.headers.get("x-content-type-options"),
+            Some(&"nosniff".to_string())
+        );
+    }
+
+    // --- Expanded MiddlewareStack tests ---
+
+    #[test]
+    fn middleware_stack_with_body_limit() {
+        let handler = MiddlewareStack::new(FnHandler::new(ok_handler))
+            .with_body_limit(1024)
+            .build();
+
+        let resp = handler.call(make_request());
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn middleware_stack_with_request_id() {
+        let handler = MiddlewareStack::new(FnHandler::new(ok_handler))
+            .with_request_id("x-request-id")
+            .build();
+
+        let resp = handler.call(make_request());
+        assert!(resp.headers.contains_key("x-request-id"));
+    }
+
+    #[test]
+    fn middleware_stack_with_catch_panic() {
+        let handler = MiddlewareStack::new(PanicHandler)
+            .with_catch_panic()
+            .build();
+
+        let resp = handler.call(make_request());
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn middleware_stack_full_production_composition() {
+        let handler = MiddlewareStack::new(FnHandler::new(ok_handler))
+            .with_catch_panic()
+            .with_body_limit(10 * 1024 * 1024)
+            .with_request_id("x-request-id")
+            .with_normalize_path(TrailingSlash::Trim)
+            .with_timeout(Duration::from_secs(30))
+            .with_cors(CorsPolicy::default())
+            .with_rate_limit(RateLimitPolicy {
+                rate: 100,
+                burst: 50,
+                ..Default::default()
+            })
+            .with_response_header(
+                "x-content-type-options",
+                "nosniff",
+                HeaderOverwrite::IfMissing,
+            )
+            .build();
+
+        let req = Request::new("GET", "/api/test/").with_header("Origin", "https://example.com");
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(resp.headers.contains_key("x-request-id"));
+        assert!(resp.headers.contains_key("access-control-allow-origin"));
+        assert_eq!(
+            resp.headers.get("x-content-type-options"),
+            Some(&"nosniff".to_string())
+        );
     }
 }

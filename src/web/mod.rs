@@ -48,6 +48,7 @@ pub mod debug;
 pub mod extract;
 pub mod handler;
 pub mod middleware;
+pub mod negotiate;
 pub mod nextjs_bootstrap;
 pub mod request_region;
 pub mod response;
