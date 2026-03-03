@@ -132,3 +132,62 @@ fn dependency_audit_docs_reference_supply_chain_bundle_and_repro_commands() {
         );
     }
 }
+
+#[test]
+fn publish_workflow_declares_release_contract_traceability_controls() {
+    let workflow = fs::read_to_string(".github/workflows/publish.yml")
+        .expect("failed to read publish workflow");
+
+    for expected in [
+        "WASM_RELEASE_CONTRACT_ID: wasm-release-channel-strategy-v1",
+        "WASM_RELEASE_BEAD_ID: asupersync-umelq.15.2",
+        "security_policy = Path(\".github/security_release_policy.json\")",
+        "\"release_blocking_criteria\": criteria",
+        "Path(\"artifacts/wasm/release/release_traceability.json\").write_text",
+        "artifacts/wasm/release/release_traceability.json",
+        "if: ${{ always() }}",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "publish workflow missing release traceability control token: {expected}"
+        );
+    }
+}
+
+#[test]
+fn publish_workflow_and_strategy_doc_align_on_npm_artifact_contract() {
+    let workflow = fs::read_to_string(".github/workflows/publish.yml")
+        .expect("failed to read publish workflow");
+    let strategy = fs::read_to_string("docs/wasm_release_channel_strategy.md")
+        .expect("failed to read wasm release strategy");
+
+    for expected in [
+        "artifacts/npm/package_json_paths.txt",
+        "artifacts/npm/npm_release_assumptions.json",
+        "artifacts/npm/publish_outcome.json",
+        "artifacts/npm/rollback_outcome.json",
+        "packages/*/package.json",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "publish workflow missing npm artifact contract token: {expected}"
+        );
+        assert!(
+            strategy.contains(expected),
+            "strategy doc missing npm artifact contract token: {expected}"
+        );
+    }
+
+    assert!(
+        workflow.contains("rollback_reason is required when rollback_npm_to_version is set."),
+        "publish workflow must enforce rollback reason requirement"
+    );
+    assert!(
+        strategy.contains("Rollback mode requires both target version and operator reason"),
+        "strategy doc must document rollback reason requirement"
+    );
+    assert!(
+        strategy.contains("Missing package manifests are treated as an explicit controlled skip"),
+        "strategy doc must document controlled skip behavior for missing package manifests"
+    );
+}
