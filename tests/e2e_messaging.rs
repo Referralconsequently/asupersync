@@ -8,7 +8,8 @@ use asupersync::channel::session::tracked_channel;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::messaging::{
-    KafkaConsumer, KafkaConsumerConfig, KafkaError, KafkaProducer, ProducerConfig, TopicPartitionOffset,
+    KafkaConsumer, KafkaConsumerConfig, KafkaError, KafkaProducer, ProducerConfig,
+    TopicPartitionOffset,
 };
 use asupersync::types::{Budget, CancelReason};
 use parking_lot::Mutex;

@@ -256,11 +256,7 @@ impl Stream {
         // Check for overflow using wider arithmetic
         let new_window = i64::from(self.send_window) + i64::from(delta);
         let new_window = i32::try_from(new_window).map_err(|_| {
-            H2Error::stream(
-                self.id,
-                ErrorCode::FlowControlError,
-                "window size overflow",
-            )
+            H2Error::stream(self.id, ErrorCode::FlowControlError, "window size overflow")
         })?;
         self.send_window = new_window;
         Ok(())
@@ -271,11 +267,7 @@ impl Stream {
         // Check for overflow using wider arithmetic
         let new_window = i64::from(self.recv_window) + i64::from(delta);
         let new_window = i32::try_from(new_window).map_err(|_| {
-            H2Error::stream(
-                self.id,
-                ErrorCode::FlowControlError,
-                "window size overflow",
-            )
+            H2Error::stream(self.id, ErrorCode::FlowControlError, "window size overflow")
         })?;
         self.recv_window = new_window;
         Ok(())

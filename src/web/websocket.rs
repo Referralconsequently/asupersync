@@ -280,7 +280,7 @@ impl IntoResponse for WebSocketUpgrade {
         if !self.selected_extensions.is_empty() {
             resp = resp.header(
                 "sec-websocket-extensions",
-                &self.selected_extensions.join(", "),
+                self.selected_extensions.join(", "),
             );
         }
 

@@ -1405,7 +1405,11 @@ impl LabRuntime {
         self.steps += 1;
         let rng_value = self.rng.next_u64();
         if self.steps < 50 {
-            println!("rng_value = {}, worker_hint = {}", rng_value, (rng_value >> 32) as usize % self.config.worker_count.max(1));
+            println!(
+                "rng_value = {}, worker_hint = {}",
+                rng_value,
+                (rng_value >> 32) as usize % self.config.worker_count.max(1)
+            );
         }
         self.replay_recorder.record_rng_value(rng_value);
         self.check_futurelocks();
