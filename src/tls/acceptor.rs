@@ -97,12 +97,8 @@ impl TlsAcceptor {
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_server(io, conn);
         if let Some(timeout) = self.handshake_timeout {
-            match crate::time::timeout(
-                super::timeout_now(),
-                timeout,
-                poll_fn(|cx| stream.poll_handshake(cx)),
-            )
-            .await
+            match crate::time::timeout(super::timeout_now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
+                .await
             {
                 Ok(result) => result?,
                 Err(_) => return Err(TlsError::Timeout(timeout)),
