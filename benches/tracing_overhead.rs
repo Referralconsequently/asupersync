@@ -38,7 +38,7 @@ fn write_trace_file(path: &Path, config: TraceFileConfig, events: &[ReplayEvent]
 fn bench_region_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("tracing_overhead");
 
-    group.bench_function("create_root_region", |b| {
+    group.bench_function("create_root_region", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let mut state = RuntimeState::new();
             // This triggers RegionRecord::new which has the span creation
@@ -52,7 +52,7 @@ fn bench_region_creation(c: &mut Criterion) {
 fn bench_task_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("tracing_overhead");
 
-    group.bench_function("create_task", |b| {
+    group.bench_function("create_task", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let mut state = RuntimeState::new();
             let region = state.create_root_region(Budget::INFINITE);
@@ -71,7 +71,7 @@ fn bench_trace_write_uncompressed(c: &mut Criterion) {
     let temp = NamedTempFile::new().expect("create temp file");
     let path = temp.path().to_path_buf();
 
-    c.bench_function("trace_write_uncompressed", |b| {
+    c.bench_function("trace_write_uncompressed", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let config = TraceFileConfig::new().with_compression(CompressionMode::None);
             write_trace_file(&path, config, &events);
@@ -86,7 +86,7 @@ fn bench_trace_read_uncompressed(c: &mut Criterion) {
 
     write_trace_file(&path, TraceFileConfig::new(), &events);
 
-    c.bench_function("trace_read_uncompressed", |b| {
+    c.bench_function("trace_read_uncompressed", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let reader = TraceReader::open(&path).expect("open trace reader");
             let loaded = reader.load_all().expect("load trace");
@@ -101,7 +101,7 @@ fn bench_trace_write_lz4(c: &mut Criterion) {
     let temp = NamedTempFile::new().expect("create temp file");
     let path = temp.path().to_path_buf();
 
-    c.bench_function("trace_write_lz4", |b| {
+    c.bench_function("trace_write_lz4", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let config = TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
             write_trace_file(&path, config, &events);
@@ -118,7 +118,7 @@ fn bench_trace_read_lz4(c: &mut Criterion) {
     let config = TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
     write_trace_file(&path, config, &events);
 
-    c.bench_function("trace_read_lz4", |b| {
+    c.bench_function("trace_read_lz4", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let reader = TraceReader::open(&path).expect("open trace reader");
             let loaded = reader.load_all().expect("load trace");

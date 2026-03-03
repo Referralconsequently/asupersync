@@ -240,7 +240,7 @@ fn bench_extract_balanced_tree(c: &mut Criterion) {
 
 fn bench_extract_after_merge(c: &mut Criterion) {
     let mut group = c.benchmark_group("egraph_extract_after_merge");
-    group.bench_function("race_of_joins_merged", |b| {
+    group.bench_function("race_of_joins_merged", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let mut eg = EGraph::new();

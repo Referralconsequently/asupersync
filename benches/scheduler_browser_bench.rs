@@ -103,7 +103,7 @@ fn bench_browser_ready_handoff(c: &mut Criterion) {
     {
         let task_count = 256u32;
         group.throughput(Throughput::Elements(u64::from(task_count)));
-        group.bench_function("ready_burst_no_handoff", |b| {
+        group.bench_function("ready_burst_no_handoff", |b: &mut criterion::Bencher| {
             b.iter_batched(
                 || {
                     let state = setup_runtime_state(task_count);

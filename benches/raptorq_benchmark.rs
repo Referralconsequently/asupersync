@@ -919,61 +919,73 @@ fn bench_encode_decode(c: &mut Criterion) {
         group.throughput(Throughput::Bytes((k * symbol_size) as u64));
 
         // Benchmark encoding
-        group.bench_function(BenchmarkId::new("encode", &label), |b| {
-            b.iter(|| {
-                let encoder =
-                    SystematicEncoder::new(std::hint::black_box(&source), symbol_size, seed)
-                        .unwrap();
-                // Generate some repair symbols
-                for esi in (k as u32)..((k + 4) as u32) {
-                    let _ = std::hint::black_box(encoder.repair_symbol(esi));
-                }
-            });
-        });
+        group.bench_function(
+            BenchmarkId::new("encode", &label),
+            |b: &mut criterion::Bencher| {
+                b.iter(|| {
+                    let encoder =
+                        SystematicEncoder::new(std::hint::black_box(&source), symbol_size, seed)
+                            .unwrap();
+                    // Generate some repair symbols
+                    for esi in (k as u32)..((k + 4) as u32) {
+                        let _ = std::hint::black_box(encoder.repair_symbol(esi));
+                    }
+                });
+            },
+        );
 
         // Benchmark decoding (with all source symbols - best case)
-        group.bench_function(BenchmarkId::new("decode_source_only", &label), |b| {
-            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
-            let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
+        group.bench_function(
+            BenchmarkId::new("decode_source_only", &label),
+            |b: &mut criterion::Bencher| {
+                let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+                let decoder = InactivationDecoder::new(k, symbol_size, seed);
+                let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
 
-            b.iter(|| {
-                let result = decoder.decode(std::hint::black_box(&received));
-                std::hint::black_box(result)
-            });
-        });
+                b.iter(|| {
+                    let result = decoder.decode(std::hint::black_box(&received));
+                    std::hint::black_box(result)
+                });
+            },
+        );
 
         // Benchmark decoding (repair only - worst case for Gaussian elimination)
-        group.bench_function(BenchmarkId::new("decode_repair_only", &label), |b| {
-            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
-            let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let all_source_dropped: Vec<usize> = (0..k).collect();
-            let received =
-                build_decode_received(&source, &encoder, &decoder, &all_source_dropped, 0);
+        group.bench_function(
+            BenchmarkId::new("decode_repair_only", &label),
+            |b: &mut criterion::Bencher| {
+                let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+                let decoder = InactivationDecoder::new(k, symbol_size, seed);
+                let all_source_dropped: Vec<usize> = (0..k).collect();
+                let received =
+                    build_decode_received(&source, &encoder, &decoder, &all_source_dropped, 0);
 
-            b.iter(|| {
-                let result = decoder.decode(std::hint::black_box(&received));
-                std::hint::black_box(result)
-            });
-        });
+                b.iter(|| {
+                    let result = decoder.decode(std::hint::black_box(&received));
+                    std::hint::black_box(result)
+                });
+            },
+        );
 
         // Repair-heavy decode benchmark (drops 75% of source symbols, then adds repair margin).
-        group.bench_function(BenchmarkId::new("decode_repair_heavy", &label), |b| {
-            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
-            let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let heavy_drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();
-            let received = build_decode_received(&source, &encoder, &decoder, &heavy_drop, 3);
+        group.bench_function(
+            BenchmarkId::new("decode_repair_heavy", &label),
+            |b: &mut criterion::Bencher| {
+                let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+                let decoder = InactivationDecoder::new(k, symbol_size, seed);
+                let heavy_drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();
+                let received = build_decode_received(&source, &encoder, &decoder, &heavy_drop, 3);
 
-            b.iter(|| {
-                let result = decoder.decode(std::hint::black_box(&received));
-                std::hint::black_box(result)
-            });
-        });
+                b.iter(|| {
+                    let result = decoder.decode(std::hint::black_box(&received));
+                    std::hint::black_box(result)
+                });
+            },
+        );
 
         // Near-rank-deficient decode benchmark: clustered 50% source loss with minimal overhead.
         group.bench_function(
             BenchmarkId::new("decode_near_rank_deficient", &label),
-            |b| {
+            |b: &mut criterion::Bencher| {
                 let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
                 let decoder = InactivationDecoder::new(k, symbol_size, seed);
                 let near_rank_drop: Vec<usize> = (0..(k / 2)).collect();

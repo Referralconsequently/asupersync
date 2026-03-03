@@ -76,7 +76,7 @@ fn bench_reactor_registration(c: &mut Criterion) {
     let mut group = c.benchmark_group("reactor/registration");
 
     // Benchmark Lab reactor registration
-    group.bench_function("lab_register", |b| {
+    group.bench_function("lab_register", |b: &mut criterion::Bencher| {
         let reactor = LabReactor::new();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let mut token_id = 0usize;
@@ -92,18 +92,21 @@ fn bench_reactor_registration(c: &mut Criterion) {
     });
 
     // Benchmark Lab reactor register/deregister cycle
-    group.bench_function("lab_register_deregister_cycle", |b| {
-        let reactor = LabReactor::new();
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let token = Token::new(0);
+    group.bench_function(
+        "lab_register_deregister_cycle",
+        |b: &mut criterion::Bencher| {
+            let reactor = LabReactor::new();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let token = Token::new(0);
 
-        b.iter(|| {
-            reactor
-                .register(&listener, token, Interest::READABLE)
-                .expect("register");
-            reactor.deregister(token).expect("deregister");
-        });
-    });
+            b.iter(|| {
+                reactor
+                    .register(&listener, token, Interest::READABLE)
+                    .expect("register");
+                reactor.deregister(token).expect("deregister");
+            });
+        },
+    );
 
     // Batch registration throughput
     for &count in &[10_usize, 100] {
@@ -149,24 +152,27 @@ fn bench_reactor_wake(c: &mut Criterion) {
     let mut group = c.benchmark_group("reactor/wake");
 
     // Benchmark Lab reactor poll with wake
-    group.bench_function("lab_poll_with_pending_wake", |b| {
-        let reactor = LabReactor::new();
-        let mut events = Events::with_capacity(64);
+    group.bench_function(
+        "lab_poll_with_pending_wake",
+        |b: &mut criterion::Bencher| {
+            let reactor = LabReactor::new();
+            let mut events = Events::with_capacity(64);
 
-        b.iter(|| {
-            // Schedule a wake
-            reactor.wake().expect("wake");
-            // Poll should return quickly
-            events.clear();
-            let count = reactor
-                .poll(&mut events, Some(Duration::from_millis(0)))
-                .expect("poll");
-            std::hint::black_box(count);
-        });
-    });
+            b.iter(|| {
+                // Schedule a wake
+                reactor.wake().expect("wake");
+                // Poll should return quickly
+                events.clear();
+                let count = reactor
+                    .poll(&mut events, Some(Duration::from_millis(0)))
+                    .expect("poll");
+                std::hint::black_box(count);
+            });
+        },
+    );
 
     // Benchmark wake overhead
-    group.bench_function("lab_wake_overhead", |b| {
+    group.bench_function("lab_wake_overhead", |b: &mut criterion::Bencher| {
         let reactor = LabReactor::new();
 
         b.iter(|| {
@@ -175,7 +181,7 @@ fn bench_reactor_wake(c: &mut Criterion) {
     });
 
     // Benchmark poll without events (should return quickly with timeout)
-    group.bench_function("lab_poll_empty_instant", |b| {
+    group.bench_function("lab_poll_empty_instant", |b: &mut criterion::Bencher| {
         let reactor = LabReactor::new();
         let mut events = Events::with_capacity(64);
 
@@ -199,7 +205,7 @@ fn bench_waker_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("reactor/waker");
 
     // Benchmark waker creation
-    group.bench_function("create_noop_waker", |b| {
+    group.bench_function("create_noop_waker", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let waker = noop_waker();
             std::hint::black_box(waker);
@@ -207,7 +213,7 @@ fn bench_waker_throughput(c: &mut Criterion) {
     });
 
     // Benchmark waker clone
-    group.bench_function("clone_waker", |b| {
+    group.bench_function("clone_waker", |b: &mut criterion::Bencher| {
         let waker = noop_waker();
         b.iter(|| {
             let cloned = waker.clone();
@@ -216,7 +222,7 @@ fn bench_waker_throughput(c: &mut Criterion) {
     });
 
     // Benchmark wake_by_ref
-    group.bench_function("wake_by_ref", |b| {
+    group.bench_function("wake_by_ref", |b: &mut criterion::Bencher| {
         let (waker, count) = counting_waker();
         b.iter(|| {
             waker.wake_by_ref();
@@ -225,7 +231,7 @@ fn bench_waker_throughput(c: &mut Criterion) {
     });
 
     // Benchmark wake (consumes waker)
-    group.bench_function("wake_consuming", |b| {
+    group.bench_function("wake_consuming", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let (waker, _) = counting_waker();
             waker.wake();
@@ -242,24 +248,24 @@ fn bench_waker_throughput(c: &mut Criterion) {
 fn bench_interest_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("reactor/interest");
 
-    group.bench_function("create_readable", |b| {
+    group.bench_function("create_readable", |b: &mut criterion::Bencher| {
         b.iter(|| std::hint::black_box(Interest::READABLE));
     });
 
-    group.bench_function("create_writable", |b| {
+    group.bench_function("create_writable", |b: &mut criterion::Bencher| {
         b.iter(|| std::hint::black_box(Interest::WRITABLE));
     });
 
-    group.bench_function("combine_interests", |b| {
+    group.bench_function("combine_interests", |b: &mut criterion::Bencher| {
         b.iter(|| std::hint::black_box(Interest::READABLE | Interest::WRITABLE));
     });
 
-    group.bench_function("check_contains", |b| {
+    group.bench_function("check_contains", |b: &mut criterion::Bencher| {
         let interest = Interest::READABLE | Interest::WRITABLE;
         b.iter(|| std::hint::black_box(interest.contains(Interest::READABLE)));
     });
 
-    group.bench_function("intersect_interests", |b| {
+    group.bench_function("intersect_interests", |b: &mut criterion::Bencher| {
         let a = Interest::READABLE | Interest::WRITABLE;
         let b_int = Interest::READABLE;
         b.iter(|| std::hint::black_box(a & b_int));
@@ -278,7 +284,7 @@ fn bench_tcp_connection(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5));
 
     // Benchmark TCP listener accept (blocking)
-    group.bench_function("blocking_accept", |b| {
+    group.bench_function("blocking_accept", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let addr = listener.local_addr().expect("local_addr");
@@ -305,7 +311,7 @@ fn bench_tcp_connection(c: &mut Criterion) {
     });
 
     // Benchmark connect throughput
-    group.bench_function("blocking_connect", |b| {
+    group.bench_function("blocking_connect", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let addr = listener.local_addr().expect("local_addr");
@@ -344,7 +350,7 @@ fn bench_echo_latency(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("blocking_echo", size),
             &size,
-            |b, &size| {
+            |b: &mut criterion::Bencher, &size: &usize| {
                 // Set up echo server
                 let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
                 let addr = listener.local_addr().expect("local_addr");
@@ -449,20 +455,20 @@ fn bench_scalability(c: &mut Criterion) {
 fn bench_token_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("reactor/token");
 
-    group.bench_function("create_token", |b| {
+    group.bench_function("create_token", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let token = Token(std::hint::black_box(42));
             std::hint::black_box(token);
         });
     });
 
-    group.bench_function("compare_tokens", |b| {
+    group.bench_function("compare_tokens", |b: &mut criterion::Bencher| {
         let t1 = Token(1);
         let t2 = Token(2);
         b.iter(|| std::hint::black_box(t1 == t2));
     });
 
-    group.bench_function("hash_token", |b| {
+    group.bench_function("hash_token", |b: &mut criterion::Bencher| {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -485,7 +491,7 @@ fn bench_lab_reactor(c: &mut Criterion) {
     let mut group = c.benchmark_group("lab_reactor");
 
     // Benchmark Lab reactor creation
-    group.bench_function("create", |b| {
+    group.bench_function("create", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let reactor = LabReactor::new();
             std::hint::black_box(reactor);
@@ -493,7 +499,7 @@ fn bench_lab_reactor(c: &mut Criterion) {
     });
 
     // Benchmark Lab reactor with multiple registrations
-    group.bench_function("multi_registration_poll", |b| {
+    group.bench_function("multi_registration_poll", |b: &mut criterion::Bencher| {
         let reactor = LabReactor::new();
         let listeners: Vec<_> = (0..10)
             .map(|_| TcpListener::bind("127.0.0.1:0").expect("bind"))

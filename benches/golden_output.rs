@@ -619,12 +619,15 @@ fn bench_golden_scheduler(c: &mut Criterion) {
     let mut group = c.benchmark_group("golden/scheduler");
 
     // --- Priority lane ordering ---
-    group.bench_function("priority_lane_ordering_100", |b| {
-        b.iter(|| {
-            let output = scenario_priority_lane_ordering(100);
-            std::hint::black_box(&output);
-        })
-    });
+    group.bench_function(
+        "priority_lane_ordering_100",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                let output = scenario_priority_lane_ordering(100);
+                std::hint::black_box(&output);
+            })
+        },
+    );
 
     // Verify golden checksum (run once outside measurement)
     {
@@ -637,12 +640,15 @@ fn bench_golden_scheduler(c: &mut Criterion) {
     }
 
     // --- Mixed cancel/ready/timed ---
-    group.bench_function("mixed_cancel_ready_timed_200", |b| {
-        b.iter(|| {
-            let output = scenario_mixed_cancel_ready_timed(200);
-            std::hint::black_box(&output);
-        })
-    });
+    group.bench_function(
+        "mixed_cancel_ready_timed_200",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                let output = scenario_mixed_cancel_ready_timed(200);
+                std::hint::black_box(&output);
+            })
+        },
+    );
 
     {
         let output = scenario_mixed_cancel_ready_timed(200);
@@ -654,7 +660,7 @@ fn bench_golden_scheduler(c: &mut Criterion) {
     }
 
     // --- Global inject then pop ---
-    group.bench_function("global_inject_pop_50", |b| {
+    group.bench_function("global_inject_pop_50", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_global_inject_pop(50);
             std::hint::black_box(&output);
@@ -692,7 +698,7 @@ fn bench_golden_channels(c: &mut Criterion) {
     let mut group = c.benchmark_group("golden/channel");
 
     // --- MPSC try_send/try_recv ---
-    group.bench_function("mpsc_try_send_recv_1000", |b| {
+    group.bench_function("mpsc_try_send_recv_1000", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_mpsc_try_send_recv(1000);
             std::hint::black_box(&output);
@@ -709,12 +715,15 @@ fn bench_golden_channels(c: &mut Criterion) {
     }
 
     // --- MPSC multi-producer interleave ---
-    group.bench_function("mpsc_multi_producer_interleave", |b| {
-        b.iter(|| {
-            let output = scenario_mpsc_multi_producer_interleave();
-            std::hint::black_box(&output);
-        })
-    });
+    group.bench_function(
+        "mpsc_multi_producer_interleave",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                let output = scenario_mpsc_multi_producer_interleave();
+                std::hint::black_box(&output);
+            })
+        },
+    );
 
     {
         let output = scenario_mpsc_multi_producer_interleave();
@@ -726,12 +735,15 @@ fn bench_golden_channels(c: &mut Criterion) {
     }
 
     // --- Oneshot send/recv ---
-    group.bench_function("oneshot_send_recv_sequence", |b| {
-        b.iter(|| {
-            let output = scenario_oneshot_send_recv();
-            std::hint::black_box(&output);
-        })
-    });
+    group.bench_function(
+        "oneshot_send_recv_sequence",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                let output = scenario_oneshot_send_recv();
+                std::hint::black_box(&output);
+            })
+        },
+    );
 
     {
         let output = scenario_oneshot_send_recv();
@@ -764,7 +776,7 @@ fn bench_golden_cancel(c: &mut Criterion) {
     let mut group = c.benchmark_group("golden/cancel");
 
     // --- Tree propagation ---
-    group.bench_function("tree_propagation_depth_5", |b| {
+    group.bench_function("tree_propagation_depth_5", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_cancel_tree_propagation(5);
             std::hint::black_box(&output);
@@ -781,7 +793,7 @@ fn bench_golden_cancel(c: &mut Criterion) {
     }
 
     // --- Cancel with budgets ---
-    group.bench_function("cancel_budgets", |b| {
+    group.bench_function("cancel_budgets", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_cancel_budgets();
             std::hint::black_box(&output);
@@ -821,12 +833,15 @@ fn bench_golden_lab(c: &mut Criterion) {
     group.sample_size(20); // Lab setup is heavier
 
     // --- Deterministic schedule seed 42 ---
-    group.bench_function("deterministic_schedule_seed_42", |b| {
-        b.iter(|| {
-            let output = scenario_lab_deterministic(42);
-            std::hint::black_box(&output);
-        })
-    });
+    group.bench_function(
+        "deterministic_schedule_seed_42",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                let output = scenario_lab_deterministic(42);
+                std::hint::black_box(&output);
+            })
+        },
+    );
 
     {
         let output = scenario_lab_deterministic(42);
@@ -838,12 +853,15 @@ fn bench_golden_lab(c: &mut Criterion) {
     }
 
     // --- Deterministic schedule seed 1337 ---
-    group.bench_function("deterministic_schedule_seed_1337", |b| {
-        b.iter(|| {
-            let output = scenario_lab_deterministic(1337);
-            std::hint::black_box(&output);
-        })
-    });
+    group.bench_function(
+        "deterministic_schedule_seed_1337",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                let output = scenario_lab_deterministic(1337);
+                std::hint::black_box(&output);
+            })
+        },
+    );
 
     {
         let output = scenario_lab_deterministic(1337);
@@ -871,7 +889,7 @@ fn bench_golden_budget(c: &mut Criterion) {
     let mut group = c.benchmark_group("golden/budget");
 
     // --- Combine chain ---
-    group.bench_function("combine_chain", |b| {
+    group.bench_function("combine_chain", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_budget_combine_chain();
             std::hint::black_box(&output);
@@ -888,7 +906,7 @@ fn bench_golden_budget(c: &mut Criterion) {
     }
 
     // --- Deadline checks ---
-    group.bench_function("deadline_check_matrix", |b| {
+    group.bench_function("deadline_check_matrix", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_budget_deadline_check();
             std::hint::black_box(&output);
@@ -911,7 +929,7 @@ fn bench_golden_obligation(c: &mut Criterion) {
     let mut group = c.benchmark_group("golden/obligation");
 
     // --- SendPermit lifecycle ---
-    group.bench_function("send_permit_lifecycle", |b| {
+    group.bench_function("send_permit_lifecycle", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_obligation_send_permit();
             std::hint::black_box(&output);
@@ -928,7 +946,7 @@ fn bench_golden_obligation(c: &mut Criterion) {
     }
 
     // --- Region cancel propagation ---
-    group.bench_function("region_cancel_propagation", |b| {
+    group.bench_function("region_cancel_propagation", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let output = scenario_region_cancel_propagation();
             std::hint::black_box(&output);
@@ -953,7 +971,9 @@ fn bench_flush_golden_updates(c: &mut Criterion) {
         flush_updates();
     }
     // No-op benchmark to ensure this function runs last
-    c.bench_function("golden/_flush", |b| b.iter(|| std::hint::black_box(0)));
+    c.bench_function("golden/_flush", |b: &mut criterion::Bencher| {
+        b.iter(|| std::hint::black_box(0))
+    });
 }
 
 criterion_group!(

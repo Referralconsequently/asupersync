@@ -148,7 +148,7 @@ fn bench_cancel_protocol(c: &mut Criterion) {
     let mut group = c.benchmark_group("cancel/protocol");
 
     // Cancel request on a single root region (no children)
-    group.bench_function("request_root_only", |b| {
+    group.bench_function("request_root_only", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let mut state = RuntimeState::new();
@@ -193,7 +193,7 @@ fn bench_cancel_protocol(c: &mut Criterion) {
     }
 
     // Cancel reason construction and strengthening
-    group.bench_function("reason_strengthen", |b| {
+    group.bench_function("reason_strengthen", |b: &mut criterion::Bencher| {
         let r1 = CancelReason::new(CancelKind::User);
         let r2 = CancelReason::new(CancelKind::Timeout);
         b.iter(|| black_box(r1.clone().strengthen(&r2)))
@@ -228,7 +228,7 @@ fn bench_cancel_protocol(c: &mut Criterion) {
     }
 
     // Obligation lifecycle: create → commit (happy path)
-    group.bench_function("obligation_create_commit", |b| {
+    group.bench_function("obligation_create_commit", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let mut state = RuntimeState::new();
@@ -253,7 +253,7 @@ fn bench_cancel_protocol(c: &mut Criterion) {
     });
 
     // Obligation lifecycle: create → abort (cancel path)
-    group.bench_function("obligation_create_abort", |b| {
+    group.bench_function("obligation_create_abort", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let mut state = RuntimeState::new();
@@ -311,7 +311,7 @@ fn bench_trace_canonicalize(c: &mut Criterion) {
     }
 
     // Monoid concatenation (composability)
-    group.bench_function("monoid_concat", |b| {
+    group.bench_function("monoid_concat", |b: &mut criterion::Bencher| {
         let events_a = generate_trace(500);
         let events_b = generate_trace(500);
         let m_a = TraceMonoid::from_events(&events_a);
@@ -320,7 +320,7 @@ fn bench_trace_canonicalize(c: &mut Criterion) {
     });
 
     // Equivalence checking
-    group.bench_function("monoid_equivalent", |b| {
+    group.bench_function("monoid_equivalent", |b: &mut criterion::Bencher| {
         let events = generate_trace(500);
         let m1 = TraceMonoid::from_events(&events);
         let m2 = TraceMonoid::from_events(&events);
@@ -328,15 +328,18 @@ fn bench_trace_canonicalize(c: &mut Criterion) {
     });
 
     // Foata trace depth and parallelism queries
-    group.bench_function("foata_depth_and_parallelism", |b| {
-        let events = generate_trace(1000);
-        let monoid = TraceMonoid::from_events(&events);
-        b.iter(|| {
-            let depth = monoid.critical_path_length();
-            let par = monoid.max_parallelism();
-            black_box((depth, par))
-        })
-    });
+    group.bench_function(
+        "foata_depth_and_parallelism",
+        |b: &mut criterion::Bencher| {
+            let events = generate_trace(1000);
+            let monoid = TraceMonoid::from_events(&events);
+            b.iter(|| {
+                let depth = monoid.critical_path_length();
+                let par = monoid.max_parallelism();
+                black_box((depth, par))
+            })
+        },
+    );
 
     group.finish();
 }
@@ -382,7 +385,7 @@ fn bench_dpor_analysis(c: &mut Criterion) {
     }
 
     // RaceDetector construction + query
-    group.bench_function("race_detector_build_query", |b| {
+    group.bench_function("race_detector_build_query", |b: &mut criterion::Bencher| {
         let events = generate_racy_trace(4, 100);
         b.iter(|| {
             let detector = RaceDetector::from_trace(&events);

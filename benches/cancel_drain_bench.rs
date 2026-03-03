@@ -182,7 +182,7 @@ fn bench_governor_suggest(c: &mut Criterion) {
     let mut group = c.benchmark_group("governor_suggest");
 
     // Quiescent state — fast path (early return)
-    group.bench_function("quiescent", |b| {
+    group.bench_function("quiescent", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::with_defaults();
         let snapshot = StateSnapshot {
             time: Time::ZERO,
@@ -204,7 +204,7 @@ fn bench_governor_suggest(c: &mut Criterion) {
     });
 
     // Obligation-dominated state → DrainObligations
-    group.bench_function("obligation_dominated", |b| {
+    group.bench_function("obligation_dominated", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::with_defaults();
         let snapshot = StateSnapshot {
             time: Time::ZERO,
@@ -226,7 +226,7 @@ fn bench_governor_suggest(c: &mut Criterion) {
     });
 
     // Deadline-dominated state → MeetDeadlines
-    group.bench_function("deadline_dominated", |b| {
+    group.bench_function("deadline_dominated", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::with_defaults();
         let snapshot = StateSnapshot {
             time: Time::ZERO,
@@ -248,7 +248,7 @@ fn bench_governor_suggest(c: &mut Criterion) {
     });
 
     // Region-drain dominated state → DrainRegions
-    group.bench_function("region_drain", |b| {
+    group.bench_function("region_drain", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::with_defaults();
         let snapshot = StateSnapshot {
             time: Time::ZERO,
@@ -298,22 +298,22 @@ fn bench_potential_compute(c: &mut Criterion) {
         ready_queue_depth: 100,
     };
 
-    group.bench_function("default_weights", |b| {
+    group.bench_function("default_weights", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::with_defaults();
         b.iter(|| black_box(governor.compute_record(black_box(&snapshot))))
     });
 
-    group.bench_function("uniform_weights", |b| {
+    group.bench_function("uniform_weights", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::new(PotentialWeights::uniform(1.0));
         b.iter(|| black_box(governor.compute_record(black_box(&snapshot))))
     });
 
-    group.bench_function("obligation_focused", |b| {
+    group.bench_function("obligation_focused", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::new(PotentialWeights::obligation_focused());
         b.iter(|| black_box(governor.compute_record(black_box(&snapshot))))
     });
 
-    group.bench_function("deadline_focused", |b| {
+    group.bench_function("deadline_focused", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::new(PotentialWeights::deadline_focused());
         b.iter(|| black_box(governor.compute_record(black_box(&snapshot))))
     });
@@ -420,25 +420,28 @@ fn bench_governor_overhead(c: &mut Criterion) {
     };
 
     // suggest() with default weights (pure decision, no recording)
-    group.bench_function("suggest_default", |b| {
+    group.bench_function("suggest_default", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::with_defaults();
         b.iter(|| black_box(governor.suggest(black_box(&busy_snapshot))))
     });
 
     // suggest() with obligation-focused weights
-    group.bench_function("suggest_obligation_focused", |b| {
-        let governor = LyapunovGovernor::new(PotentialWeights::obligation_focused());
-        b.iter(|| black_box(governor.suggest(black_box(&busy_snapshot))))
-    });
+    group.bench_function(
+        "suggest_obligation_focused",
+        |b: &mut criterion::Bencher| {
+            let governor = LyapunovGovernor::new(PotentialWeights::obligation_focused());
+            b.iter(|| black_box(governor.suggest(black_box(&busy_snapshot))))
+        },
+    );
 
     // compute_record() (full breakdown, no history)
-    group.bench_function("compute_record", |b| {
+    group.bench_function("compute_record", |b: &mut criterion::Bencher| {
         let governor = LyapunovGovernor::with_defaults();
         b.iter(|| black_box(governor.compute_record(black_box(&busy_snapshot))))
     });
 
     // compute_potential() loop (records to history + convergence check)
-    group.bench_function("potential_loop_100_steps", |b| {
+    group.bench_function("potential_loop_100_steps", |b: &mut criterion::Bencher| {
         b.iter_batched(
             LyapunovGovernor::with_defaults,
             |mut governor| {

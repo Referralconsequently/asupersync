@@ -67,7 +67,7 @@ fn bench_task_spawn(c: &mut Criterion) {
     let mut group = c.benchmark_group("methodology/task_spawn");
 
     // Measure inject_ready (the global injection path for spawning)
-    group.bench_function("inject_ready_global_queue", |b| {
+    group.bench_function("inject_ready_global_queue", |b: &mut criterion::Bencher| {
         b.iter_batched(
             GlobalQueue::new,
             |queue| {
@@ -79,7 +79,7 @@ fn bench_task_spawn(c: &mut Criterion) {
     });
 
     // Measure local_queue push (the per-worker spawn path)
-    group.bench_function("local_queue_push", |b| {
+    group.bench_function("local_queue_push", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || local_queue(0),
             |queue| {
@@ -113,7 +113,7 @@ fn bench_task_spawn(c: &mut Criterion) {
     }
 
     // RuntimeState::create_root_region (region creation is part of task setup)
-    group.bench_function("create_root_region", |b| {
+    group.bench_function("create_root_region", |b: &mut criterion::Bencher| {
         let mut state = RuntimeState::new();
         b.iter(|| {
             let id = state.create_root_region(Budget::INFINITE);
@@ -163,11 +163,11 @@ fn bench_task_cancellation(c: &mut Criterion) {
     }
 
     // CancelReason creation and strengthening
-    group.bench_function("cancel_reason_create", |b| {
+    group.bench_function("cancel_reason_create", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(CancelReason::new(CancelKind::User)))
     });
 
-    group.bench_function("cancel_reason_strengthen", |b| {
+    group.bench_function("cancel_reason_strengthen", |b: &mut criterion::Bencher| {
         let r1 = CancelReason::new(CancelKind::User);
         let r2 = CancelReason::new(CancelKind::Timeout);
         b.iter(|| black_box(r1.clone().strengthen(&r2)))
@@ -226,14 +226,14 @@ fn bench_channel_send_recv(c: &mut Criterion) {
     }
 
     // Channel creation cost
-    group.bench_function("mpsc_create_cap16", |b| {
+    group.bench_function("mpsc_create_cap16", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let (tx, rx) = mpsc::channel::<u64>(16);
             black_box((&tx, &rx));
         })
     });
 
-    group.bench_function("mpsc_create_cap256", |b| {
+    group.bench_function("mpsc_create_cap256", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let (tx, rx) = mpsc::channel::<u64>(256);
             black_box((&tx, &rx));
@@ -241,14 +241,14 @@ fn bench_channel_send_recv(c: &mut Criterion) {
     });
 
     // Sender clone cost (multi-producer scenario)
-    group.bench_function("mpsc_sender_clone", |b| {
+    group.bench_function("mpsc_sender_clone", |b: &mut criterion::Bencher| {
         let (tx, _rx) = mpsc::channel::<u64>(16);
         b.iter(|| black_box(tx.clone()))
     });
 
     // Weak sender upgrade/drop models dynamic handle lifecycles in
     // multi-producer topologies (e.g., registries/routers holding weak handles).
-    group.bench_function("mpsc_weak_sender_upgrade", |b| {
+    group.bench_function("mpsc_weak_sender_upgrade", |b: &mut criterion::Bencher| {
         let (tx, _rx) = mpsc::channel::<u64>(16);
         let weak = tx.downgrade();
         b.iter(|| {
@@ -268,9 +268,11 @@ fn bench_cx_capability_check(c: &mut Criterion) {
     let mut group = c.benchmark_group("methodology/cx_capability");
 
     // Cx creation
-    group.bench_function("for_testing", |b| b.iter(|| black_box(Cx::for_testing())));
+    group.bench_function("for_testing", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(Cx::for_testing()))
+    });
 
-    group.bench_function("for_testing_with_budget", |b| {
+    group.bench_function("for_testing_with_budget", |b: &mut criterion::Bencher| {
         let budget = Budget::new()
             .with_deadline(Time::from_secs(30))
             .with_poll_quota(1000);
@@ -279,26 +281,42 @@ fn bench_cx_capability_check(c: &mut Criterion) {
 
     // Capability checks (minimal Cx — all return false)
     let cx = Cx::for_testing();
-    group.bench_function("has_timer", |b| b.iter(|| black_box(cx.has_timer())));
-    group.bench_function("has_io", |b| b.iter(|| black_box(cx.has_io())));
-    group.bench_function("has_registry", |b| b.iter(|| black_box(cx.has_registry())));
-    group.bench_function("has_remote", |b| b.iter(|| black_box(cx.has_remote())));
+    group.bench_function("has_timer", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx.has_timer()))
+    });
+    group.bench_function("has_io", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx.has_io()))
+    });
+    group.bench_function("has_registry", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx.has_registry()))
+    });
+    group.bench_function("has_remote", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx.has_remote()))
+    });
 
     // Cx with I/O capability — check cost when capability IS present
     let cx_io = Cx::for_testing_with_io();
-    group.bench_function("has_io_present", |b| b.iter(|| black_box(cx_io.has_io())));
+    group.bench_function("has_io_present", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx_io.has_io()))
+    });
 
     // Budget access
-    group.bench_function("budget", |b| b.iter(|| black_box(cx.budget())));
+    group.bench_function("budget", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx.budget()))
+    });
 
     // Cancel check
-    group.bench_function("is_cancel_requested", |b| {
+    group.bench_function("is_cancel_requested", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(cx.is_cancel_requested()))
     });
 
     // Identity access
-    group.bench_function("task_id", |b| b.iter(|| black_box(cx.task_id())));
-    group.bench_function("region_id", |b| b.iter(|| black_box(cx.region_id())));
+    group.bench_function("task_id", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx.task_id()))
+    });
+    group.bench_function("region_id", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(cx.region_id()))
+    });
 
     group.finish();
 }
@@ -307,57 +325,68 @@ fn bench_cx_capability_check(c: &mut Criterion) {
 // 5. BUDGET CHECK AND PROPAGATION
 // =============================================================================
 
+#[allow(clippy::too_many_lines)]
 fn bench_budget_check(c: &mut Criterion) {
     let mut group = c.benchmark_group("methodology/budget");
 
     // Budget creation
-    group.bench_function("create_infinite", |b| {
+    group.bench_function("create_infinite", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(Budget::INFINITE))
     });
 
-    group.bench_function("create_with_deadline_and_quota", |b| {
-        b.iter(|| {
-            black_box(
-                Budget::new()
-                    .with_deadline(Time::from_secs(30))
-                    .with_poll_quota(1000)
-                    .with_cost_quota(10_000),
-            )
-        })
-    });
+    group.bench_function(
+        "create_with_deadline_and_quota",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                black_box(
+                    Budget::new()
+                        .with_deadline(Time::from_secs(30))
+                        .with_poll_quota(1000)
+                        .with_cost_quota(10_000),
+                )
+            })
+        },
+    );
 
     // Exhaustion check
     let budget_inf = Budget::INFINITE;
     let budget_zero = Budget::ZERO;
     let budget_with_resources = Budget::new().with_poll_quota(1000).with_cost_quota(10_000);
 
-    group.bench_function("is_exhausted_infinite", |b| {
+    group.bench_function("is_exhausted_infinite", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(budget_inf.is_exhausted()))
     });
 
-    group.bench_function("is_exhausted_zero", |b| {
+    group.bench_function("is_exhausted_zero", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(budget_zero.is_exhausted()))
     });
 
-    group.bench_function("is_exhausted_with_resources", |b| {
-        b.iter(|| black_box(budget_with_resources.is_exhausted()))
-    });
+    group.bench_function(
+        "is_exhausted_with_resources",
+        |b: &mut criterion::Bencher| b.iter(|| black_box(budget_with_resources.is_exhausted())),
+    );
 
     // Deadline check
-    group.bench_function("is_past_deadline_no_deadline", |b| {
-        let budget = Budget::INFINITE;
-        let now = Time::from_secs(100);
-        b.iter(|| black_box(budget.is_past_deadline(now)))
-    });
+    group.bench_function(
+        "is_past_deadline_no_deadline",
+        |b: &mut criterion::Bencher| {
+            let budget = Budget::INFINITE;
+            let now = Time::from_secs(100);
+            b.iter(|| black_box(budget.is_past_deadline(now)))
+        },
+    );
 
-    group.bench_function("is_past_deadline_with_deadline", |b| {
-        let budget = Budget::new().with_deadline(Time::from_secs(30));
-        let now = Time::from_secs(10);
-        b.iter(|| black_box(budget.is_past_deadline(now)))
-    });
+    group.bench_function(
+        "is_past_deadline_with_deadline",
+        |b: &mut criterion::Bencher| {
+            let budget = Budget::new().with_deadline(Time::from_secs(30));
+            let now = Time::from_secs(10);
+            b.iter(|| black_box(budget.is_past_deadline(now)))
+        },
+    );
 
     // Consume poll (mutation path)
-    group.bench_function("consume_poll", |b| {
+    group.bench_function("consume_poll", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || Budget::new().with_poll_quota(u32::MAX),
             |mut budget| black_box(budget.consume_poll()),
@@ -366,7 +395,7 @@ fn bench_budget_check(c: &mut Criterion) {
     });
 
     // Consume cost (mutation path)
-    group.bench_function("consume_cost", |b| {
+    group.bench_function("consume_cost", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || Budget::new().with_cost_quota(u64::MAX),
             |mut budget| black_box(budget.consume_cost(1)),
@@ -375,7 +404,7 @@ fn bench_budget_check(c: &mut Criterion) {
     });
 
     // Combine (meet operation) — critical for budget propagation
-    group.bench_function("combine_two", |b| {
+    group.bench_function("combine_two", |b: &mut criterion::Bencher| {
         let b1 = Budget::new()
             .with_deadline(Time::from_secs(30))
             .with_poll_quota(1000);
@@ -407,17 +436,23 @@ fn bench_budget_check(c: &mut Criterion) {
     }
 
     // Remaining time computation
-    group.bench_function("remaining_time_with_deadline", |b| {
-        let budget = Budget::new().with_deadline(Time::from_secs(30));
-        let now = Time::from_secs(10);
-        b.iter(|| black_box(budget.remaining_time(now)))
-    });
+    group.bench_function(
+        "remaining_time_with_deadline",
+        |b: &mut criterion::Bencher| {
+            let budget = Budget::new().with_deadline(Time::from_secs(30));
+            let now = Time::from_secs(10);
+            b.iter(|| black_box(budget.remaining_time(now)))
+        },
+    );
 
-    group.bench_function("remaining_time_no_deadline", |b| {
-        let budget = Budget::INFINITE;
-        let now = Time::from_secs(10);
-        b.iter(|| black_box(budget.remaining_time(now)))
-    });
+    group.bench_function(
+        "remaining_time_no_deadline",
+        |b: &mut criterion::Bencher| {
+            let budget = Budget::INFINITE;
+            let now = Time::from_secs(10);
+            b.iter(|| black_box(budget.remaining_time(now)))
+        },
+    );
 
     group.finish();
 }

@@ -39,24 +39,24 @@ fn bench_outcome_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("outcome");
 
     // Benchmark severity comparison
-    group.bench_function("severity_ok", |b| {
+    group.bench_function("severity_ok", |b: &mut criterion::Bencher| {
         let outcome: Outcome<i32, &str> = Outcome::Ok(42);
         b.iter(|| black_box(outcome.severity()))
     });
 
-    group.bench_function("severity_cancelled", |b| {
+    group.bench_function("severity_cancelled", |b: &mut criterion::Bencher| {
         let outcome: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::new(CancelKind::User));
         b.iter(|| black_box(outcome.severity()))
     });
 
     // Benchmark outcome aggregation (worst wins)
-    group.bench_function("join_ok_ok", |b| {
+    group.bench_function("join_ok_ok", |b: &mut criterion::Bencher| {
         let o1: Outcome<(), ()> = Outcome::Ok(());
         let o2: Outcome<(), ()> = Outcome::Ok(());
         b.iter(|| black_box(join2_outcomes(o1.clone(), o2.clone())))
     });
 
-    group.bench_function("join_ok_cancelled", |b| {
+    group.bench_function("join_ok_cancelled", |b: &mut criterion::Bencher| {
         let o1: Outcome<(), ()> = Outcome::Ok(());
         let o2: Outcome<(), ()> = Outcome::Cancelled(CancelReason::new(CancelKind::Timeout));
         b.iter(|| black_box(join2_outcomes(o1.clone(), o2.clone())))
@@ -69,11 +69,11 @@ fn bench_budget_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("budget");
 
     // Benchmark budget creation
-    group.bench_function("create_infinite", |b| {
+    group.bench_function("create_infinite", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(Budget::INFINITE))
     });
 
-    group.bench_function("create_with_deadline", |b| {
+    group.bench_function("create_with_deadline", |b: &mut criterion::Bencher| {
         b.iter(|| {
             black_box(
                 Budget::new()
@@ -84,7 +84,7 @@ fn bench_budget_operations(c: &mut Criterion) {
     });
 
     // Benchmark budget combination (product semiring)
-    group.bench_function("combine", |b| {
+    group.bench_function("combine", |b: &mut criterion::Bencher| {
         let b1 = Budget::new()
             .with_deadline(Time::from_nanos(1_000_000_000))
             .with_poll_quota(1000);
@@ -101,22 +101,22 @@ fn bench_cancel_reason_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("cancel_reason");
 
     // Benchmark creation
-    group.bench_function("create_user", |b| {
+    group.bench_function("create_user", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(CancelReason::new(CancelKind::User)))
     });
 
-    group.bench_function("create_timeout", |b| {
+    group.bench_function("create_timeout", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(CancelReason::new(CancelKind::Timeout)))
     });
 
     // Benchmark strengthen (idempotent merge)
-    group.bench_function("strengthen_same", |b| {
+    group.bench_function("strengthen_same", |b: &mut criterion::Bencher| {
         let r1 = CancelReason::new(CancelKind::User);
         let r2 = CancelReason::new(CancelKind::User);
         b.iter(|| black_box(r1.clone().strengthen(&r2)))
     });
 
-    group.bench_function("strengthen_different", |b| {
+    group.bench_function("strengthen_different", |b: &mut criterion::Bencher| {
         let r1 = CancelReason::new(CancelKind::User);
         let r2 = CancelReason::new(CancelKind::Timeout);
         b.iter(|| black_box(r1.clone().strengthen(&r2)))
@@ -133,7 +133,7 @@ fn bench_arena_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("arena");
 
     // Benchmark insert
-    group.bench_function("insert", |b| {
+    group.bench_function("insert", |b: &mut criterion::Bencher| {
         let mut arena: Arena<u64> = Arena::new();
         b.iter(|| {
             let idx = arena.insert(42u64);
@@ -142,14 +142,14 @@ fn bench_arena_operations(c: &mut Criterion) {
     });
 
     // Benchmark get (hit)
-    group.bench_function("get_hit", |b| {
+    group.bench_function("get_hit", |b: &mut criterion::Bencher| {
         let mut arena: Arena<u64> = Arena::new();
         let idx = arena.insert(42u64);
         b.iter(|| black_box(arena.get(idx)))
     });
 
     // Benchmark insert + remove cycle
-    group.bench_function("insert_remove_cycle", |b| {
+    group.bench_function("insert_remove_cycle", |b: &mut criterion::Bencher| {
         let mut arena: Arena<u64> = Arena::new();
         b.iter(|| {
             let idx = arena.insert(42u64);
@@ -159,7 +159,7 @@ fn bench_arena_operations(c: &mut Criterion) {
     });
 
     // Benchmark iteration over populated arena
-    group.bench_function("iterate_1000", |b| {
+    group.bench_function("iterate_1000", |b: &mut criterion::Bencher| {
         let mut arena: Arena<u64> = Arena::new();
         for i in 0..1000 {
             arena.insert(i);
@@ -181,10 +181,12 @@ fn bench_runtime_state_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("runtime_state");
 
     // Benchmark state creation
-    group.bench_function("create", |b| b.iter(|| black_box(RuntimeState::new())));
+    group.bench_function("create", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(RuntimeState::new()))
+    });
 
     // Benchmark root region creation
-    group.bench_function("create_root_region", |b| {
+    group.bench_function("create_root_region", |b: &mut criterion::Bencher| {
         let mut state = RuntimeState::new();
         b.iter(|| {
             // Note: This will keep creating regions, but that's fine for benchmarking
@@ -194,19 +196,19 @@ fn bench_runtime_state_operations(c: &mut Criterion) {
     });
 
     // Benchmark quiescence check (empty state)
-    group.bench_function("is_quiescent_empty", |b| {
+    group.bench_function("is_quiescent_empty", |b: &mut criterion::Bencher| {
         let state = RuntimeState::new();
         b.iter(|| black_box(state.is_quiescent()))
     });
 
     // Benchmark live counts
-    group.bench_function("live_task_count_empty", |b| {
+    group.bench_function("live_task_count_empty", |b: &mut criterion::Bencher| {
         let state = RuntimeState::new();
         b.iter(|| black_box(state.live_task_count()))
     });
 
     // Benchmark cancel_request on a region
-    group.bench_function("cancel_request_region", |b| {
+    group.bench_function("cancel_request_region", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
             for _ in 0..iters {
@@ -234,43 +236,52 @@ fn bench_combinator_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("combinator");
 
     // Benchmark join2_outcomes
-    group.bench_function("join2_outcomes_ok", |b| {
+    group.bench_function("join2_outcomes_ok", |b: &mut criterion::Bencher| {
         let o1: Outcome<i32, ()> = Outcome::Ok(1);
         let o2: Outcome<i32, ()> = Outcome::Ok(2);
         b.iter(|| black_box(join2_outcomes(o1.clone(), o2.clone())))
     });
 
     // Benchmark race2_outcomes (with correct 3-argument signature)
-    group.bench_function("race2_outcomes_first_wins", |b| {
+    group.bench_function("race2_outcomes_first_wins", |b: &mut criterion::Bencher| {
         let o1: Outcome<i32, ()> = Outcome::Ok(1);
         let o2: Outcome<i32, ()> = Outcome::Cancelled(CancelReason::race_loser());
         b.iter(|| black_box(race2_outcomes(RaceWinner::First, o1.clone(), o2.clone())))
     });
 
-    group.bench_function("race2_outcomes_second_wins", |b| {
-        let o1: Outcome<i32, ()> = Outcome::Cancelled(CancelReason::race_loser());
-        let o2: Outcome<i32, ()> = Outcome::Ok(2);
-        b.iter(|| black_box(race2_outcomes(RaceWinner::Second, o1.clone(), o2.clone())))
-    });
+    group.bench_function(
+        "race2_outcomes_second_wins",
+        |b: &mut criterion::Bencher| {
+            let o1: Outcome<i32, ()> = Outcome::Cancelled(CancelReason::race_loser());
+            let o2: Outcome<i32, ()> = Outcome::Ok(2);
+            b.iter(|| black_box(race2_outcomes(RaceWinner::Second, o1.clone(), o2.clone())))
+        },
+    );
 
     // Benchmark effective_deadline computation (correct signature: Time, Option<Time>)
-    group.bench_function("effective_deadline_with_existing", |b| {
-        let requested = Time::from_nanos(1_000_000_000);
-        let existing = Some(Time::from_nanos(500_000_000));
-        b.iter(|| black_box(effective_deadline(requested, existing)))
-    });
+    group.bench_function(
+        "effective_deadline_with_existing",
+        |b: &mut criterion::Bencher| {
+            let requested = Time::from_nanos(1_000_000_000);
+            let existing = Some(Time::from_nanos(500_000_000));
+            b.iter(|| black_box(effective_deadline(requested, existing)))
+        },
+    );
 
-    group.bench_function("effective_deadline_no_existing", |b| {
-        let requested = Time::from_nanos(1_000_000_000);
-        b.iter(|| black_box(effective_deadline(requested, None)))
-    });
+    group.bench_function(
+        "effective_deadline_no_existing",
+        |b: &mut criterion::Bencher| {
+            let requested = Time::from_nanos(1_000_000_000);
+            b.iter(|| black_box(effective_deadline(requested, None)))
+        },
+    );
 
     // Benchmark TimeoutConfig creation and resolution
-    group.bench_function("timeout_config_new", |b| {
+    group.bench_function("timeout_config_new", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(TimeoutConfig::new(Time::from_nanos(1_000_000_000))))
     });
 
-    group.bench_function("timeout_config_resolve", |b| {
+    group.bench_function("timeout_config_resolve", |b: &mut criterion::Bencher| {
         let config = TimeoutConfig::new(Time::from_nanos(1_000_000_000));
         let existing = Some(Time::from_nanos(500_000_000));
         b.iter(|| black_box(config.resolve(existing)))
@@ -287,7 +298,7 @@ fn bench_lab_runtime_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("lab_runtime");
 
     // Benchmark creation
-    group.bench_function("create", |b| {
+    group.bench_function("create", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let config = LabConfig::new(12345);
             black_box(LabRuntime::new(config))
@@ -295,18 +306,18 @@ fn bench_lab_runtime_operations(c: &mut Criterion) {
     });
 
     // Benchmark with_seed convenience constructor
-    group.bench_function("with_seed", |b| {
+    group.bench_function("with_seed", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(LabRuntime::with_seed(12345)))
     });
 
     // Benchmark time query
-    group.bench_function("now", |b| {
+    group.bench_function("now", |b: &mut criterion::Bencher| {
         let runtime = LabRuntime::with_seed(12345);
         b.iter(|| black_box(runtime.now()))
     });
 
     // Benchmark steps query
-    group.bench_function("steps", |b| {
+    group.bench_function("steps", |b: &mut criterion::Bencher| {
         let runtime = LabRuntime::with_seed(12345);
         b.iter(|| black_box(runtime.steps()))
     });
@@ -327,7 +338,7 @@ fn bench_throughput(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("region_creates", size),
             &size,
-            |b, &size| {
+            |b: &mut criterion::Bencher, &size: &usize| {
                 b.iter(|| {
                     let mut state = RuntimeState::new();
                     for _ in 0..size {
@@ -344,7 +355,7 @@ fn bench_throughput(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("arena_inserts", size),
             &size,
-            |b, &size| {
+            |b: &mut criterion::Bencher, &size: &usize| {
                 b.iter(|| {
                     let mut arena: Arena<u64> = Arena::new();
                     for i in 0..size {
@@ -362,7 +373,7 @@ fn bench_throughput(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("budget_combines", size),
             &size,
-            |b, &size| {
+            |b: &mut criterion::Bencher, &size: &usize| {
                 let budget = Budget::new()
                     .with_deadline(Time::from_nanos(1_000_000_000))
                     .with_poll_quota(1000);
@@ -387,27 +398,29 @@ fn bench_throughput(c: &mut Criterion) {
 fn bench_time_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("time");
 
-    group.bench_function("from_nanos", |b| {
+    group.bench_function("from_nanos", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(Time::from_nanos(1_000_000_000)))
     });
 
-    group.bench_function("from_millis", |b| {
+    group.bench_function("from_millis", |b: &mut criterion::Bencher| {
         b.iter(|| black_box(Time::from_millis(1000)))
     });
 
-    group.bench_function("from_secs", |b| b.iter(|| black_box(Time::from_secs(1))));
+    group.bench_function("from_secs", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(Time::from_secs(1)))
+    });
 
-    group.bench_function("as_nanos", |b| {
+    group.bench_function("as_nanos", |b: &mut criterion::Bencher| {
         let t = Time::from_secs(1);
         b.iter(|| black_box(t.as_nanos()))
     });
 
-    group.bench_function("saturating_add_nanos", |b| {
+    group.bench_function("saturating_add_nanos", |b: &mut criterion::Bencher| {
         let t = Time::from_secs(1);
         b.iter(|| black_box(t.saturating_add_nanos(500_000_000)))
     });
 
-    group.bench_function("duration_since", |b| {
+    group.bench_function("duration_since", |b: &mut criterion::Bencher| {
         let t1 = Time::from_secs(2);
         let t2 = Time::from_secs(1);
         b.iter(|| black_box(t1.duration_since(t2)))
@@ -428,50 +441,54 @@ fn bench_raptorq_pipeline(c: &mut Criterion) {
 
     for &size in &sizes {
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::new("send_receive", size), &size, |b, &size| {
-            let data = vec![0_u8; size];
-            let config = raptorq_config_for_size(size);
-            let params = object_params_for(&config, size);
-            let object_id = params.object_id;
-            // Transport capacity must hold all source + repair symbols since the
-            // benchmark sends everything before the receiver starts reading.
-            let symbol_size = config.encoding.symbol_size as usize;
-            let source_symbols = size.div_ceil(symbol_size);
-            #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
-            let total_with_overhead =
-                (source_symbols as f64 * config.encoding.repair_overhead).ceil() as usize;
-            let transport_capacity = total_with_overhead + total_with_overhead / 4; // 25% headroom
+        group.bench_with_input(
+            BenchmarkId::new("send_receive", size),
+            &size,
+            |b: &mut criterion::Bencher, &size: &usize| {
+                let data = vec![0_u8; size];
+                let config = raptorq_config_for_size(size);
+                let params = object_params_for(&config, size);
+                let object_id = params.object_id;
+                // Transport capacity must hold all source + repair symbols since the
+                // benchmark sends everything before the receiver starts reading.
+                let symbol_size = config.encoding.symbol_size as usize;
+                let source_symbols = size.div_ceil(symbol_size);
+                #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+                let total_with_overhead =
+                    (source_symbols as f64 * config.encoding.repair_overhead).ceil() as usize;
+                let transport_capacity = total_with_overhead + total_with_overhead / 4; // 25% headroom
 
-            b.iter_batched(
-                || {
-                    let mut transport_config = SimTransportConfig::reliable();
-                    transport_config.capacity = transport_capacity;
-                    let (sink, stream) = sim_channel(transport_config);
-                    let sender = RaptorQSenderBuilder::new()
-                        .config(config.clone())
-                        .transport(sink)
-                        .build()
-                        .expect("build sender");
-                    let receiver = RaptorQReceiverBuilder::new()
-                        .config(config.clone())
-                        .source(stream)
-                        .build()
-                        .expect("build receiver");
-                    (sender, receiver)
-                },
-                |(mut sender, mut receiver)| {
-                    let send_outcome = sender
-                        .send_object(&cx, object_id, &data)
-                        .expect("send object");
-                    let recv_outcome = receiver
-                        .receive_object(&cx, &params)
-                        .expect("receive object");
-                    black_box(send_outcome);
-                    black_box(recv_outcome);
-                },
-                BatchSize::SmallInput,
-            )
-        });
+                b.iter_batched(
+                    || {
+                        let mut transport_config = SimTransportConfig::reliable();
+                        transport_config.capacity = transport_capacity;
+                        let (sink, stream) = sim_channel(transport_config);
+                        let sender = RaptorQSenderBuilder::new()
+                            .config(config.clone())
+                            .transport(sink)
+                            .build()
+                            .expect("build sender");
+                        let receiver = RaptorQReceiverBuilder::new()
+                            .config(config.clone())
+                            .source(stream)
+                            .build()
+                            .expect("build receiver");
+                        (sender, receiver)
+                    },
+                    |(mut sender, mut receiver)| {
+                        let send_outcome = sender
+                            .send_object(&cx, object_id, &data)
+                            .expect("send object");
+                        let recv_outcome = receiver
+                            .receive_object(&cx, &params)
+                            .expect("receive object");
+                        black_box(send_outcome);
+                        black_box(recv_outcome);
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
     }
 
     group.finish();

@@ -67,7 +67,7 @@ fn bench_http1_parsing(c: &mut Criterion) {
 
     // Simple GET request
     group.throughput(Throughput::Bytes(SIMPLE_GET_REQUEST.len() as u64));
-    group.bench_function("simple_get", |b| {
+    group.bench_function("simple_get", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let codec = Http1Codec::new();
@@ -84,7 +84,7 @@ fn bench_http1_parsing(c: &mut Criterion) {
 
     // POST request with body
     group.throughput(Throughput::Bytes(POST_REQUEST_WITH_BODY.len() as u64));
-    group.bench_function("post_with_body", |b| {
+    group.bench_function("post_with_body", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let codec = Http1Codec::new();
@@ -188,7 +188,7 @@ fn bench_hpack_encoding(c: &mut Criterion) {
     let mut group = c.benchmark_group("hpack/encode");
 
     // Encode typical request headers
-    group.bench_function("request_headers", |b| {
+    group.bench_function("request_headers", |b: &mut criterion::Bencher| {
         let headers = typical_request_headers();
         b.iter_batched(
             || {
@@ -205,7 +205,7 @@ fn bench_hpack_encoding(c: &mut Criterion) {
     });
 
     // Encode typical response headers
-    group.bench_function("response_headers", |b| {
+    group.bench_function("response_headers", |b: &mut criterion::Bencher| {
         let headers = typical_response_headers();
         b.iter_batched(
             || {
@@ -222,7 +222,7 @@ fn bench_hpack_encoding(c: &mut Criterion) {
     });
 
     // Benchmark repeated encoding (dynamic table optimization)
-    group.bench_function("repeated_headers", |b| {
+    group.bench_function("repeated_headers", |b: &mut criterion::Bencher| {
         let headers = typical_request_headers();
         let mut encoder = HpackEncoder::new();
         let mut buf = BytesMut::with_capacity(256);
@@ -261,7 +261,7 @@ fn bench_hpack_decoding(c: &mut Criterion) {
 
     // Decode request headers
     group.throughput(Throughput::Bytes(encoded_request.len() as u64));
-    group.bench_function("request_headers", |b| {
+    group.bench_function("request_headers", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let decoder = HpackDecoder::new();
@@ -277,7 +277,7 @@ fn bench_hpack_decoding(c: &mut Criterion) {
 
     // Decode response headers
     group.throughput(Throughput::Bytes(encoded_response.len() as u64));
-    group.bench_function("response_headers", |b| {
+    group.bench_function("response_headers", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let decoder = HpackDecoder::new();

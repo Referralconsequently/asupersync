@@ -128,7 +128,7 @@ fn bench_timer_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer_wheel/insert");
 
     // Single insert
-    group.bench_function("single", |b| {
+    group.bench_function("single", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_millis(100), noop_waker());
@@ -137,7 +137,7 @@ fn bench_timer_insert(c: &mut Criterion) {
     });
 
     // Insert into different time ranges
-    group.bench_function("level0_1ms", |b| {
+    group.bench_function("level0_1ms", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_millis(1), noop_waker());
@@ -145,7 +145,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("level1_1s", |b| {
+    group.bench_function("level1_1s", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(1), noop_waker());
@@ -153,7 +153,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("level2_1min", |b| {
+    group.bench_function("level2_1min", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(60), noop_waker());
@@ -161,7 +161,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("level3_1h", |b| {
+    group.bench_function("level3_1h", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(3600), noop_waker());
@@ -169,7 +169,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("overflow_48h", |b| {
+    group.bench_function("overflow_48h", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(48 * 3600), noop_waker());
@@ -188,7 +188,7 @@ fn bench_timer_cancel(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer_wheel/cancel");
 
     // Cancel (generation-based, O(1))
-    group.bench_function("single", |b| {
+    group.bench_function("single", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
             let mut wheel = TimerWheel::new();
@@ -208,7 +208,7 @@ fn bench_timer_cancel(c: &mut Criterion) {
     });
 
     // Cancel already cancelled (should be fast - just HashMap lookup)
-    group.bench_function("already_cancelled", |b| {
+    group.bench_function("already_cancelled", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         let handle = wheel.register(Time::from_millis(100), noop_waker());
         wheel.cancel(&handle);
@@ -229,7 +229,7 @@ fn bench_timer_tick(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer_wheel/tick");
 
     // Tick with no timers
-    group.bench_function("empty_wheel", |b| {
+    group.bench_function("empty_wheel", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         let mut time = Time::ZERO;
         b.iter(|| {
@@ -240,7 +240,7 @@ fn bench_timer_tick(c: &mut Criterion) {
     });
 
     // Tick with timers but none expiring
-    group.bench_function("no_expiry_100_timers", |b| {
+    group.bench_function("no_expiry_100_timers", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         // All timers at 1 hour
         for _ in 0..100 {
@@ -256,7 +256,7 @@ fn bench_timer_tick(c: &mut Criterion) {
     });
 
     // Tick with single expiry
-    group.bench_function("single_expiry", |b| {
+    group.bench_function("single_expiry", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
 
@@ -274,7 +274,7 @@ fn bench_timer_tick(c: &mut Criterion) {
     });
 
     // Large time jump
-    group.bench_function("large_jump_1h", |b| {
+    group.bench_function("large_jump_1h", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
 
@@ -376,7 +376,7 @@ fn bench_coalescing(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer_wheel/coalescing");
 
     // Overhead of coalescing vs non-coalescing
-    group.bench_function("disabled_100_timers", |b| {
+    group.bench_function("disabled_100_timers", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
 
@@ -397,7 +397,7 @@ fn bench_coalescing(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("enabled_100_timers", |b| {
+    group.bench_function("enabled_100_timers", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
 
@@ -421,7 +421,7 @@ fn bench_coalescing(c: &mut Criterion) {
     });
 
     // Coalescing group size calculation
-    group.bench_function("group_size_calculation", |b| {
+    group.bench_function("group_size_calculation", |b: &mut criterion::Bencher| {
         let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
         let mut wheel =
             TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
@@ -449,7 +449,7 @@ fn bench_overflow(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer_wheel/overflow");
 
     // Insert into overflow
-    group.bench_function("insert_overflow", |b| {
+    group.bench_function("insert_overflow", |b: &mut criterion::Bencher| {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             // 48 hours, definitely in overflow
@@ -459,7 +459,7 @@ fn bench_overflow(c: &mut Criterion) {
     });
 
     // Promotion from overflow
-    group.bench_function("promote_100_overflow", |b| {
+    group.bench_function("promote_100_overflow", |b: &mut criterion::Bencher| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
 
@@ -494,14 +494,14 @@ fn bench_config(c: &mut Criterion) {
     let mut group = c.benchmark_group("timer_wheel/config");
 
     // Default construction
-    group.bench_function("new_default", |b| {
+    group.bench_function("new_default", |b: &mut criterion::Bencher| {
         b.iter(|| {
             std::hint::black_box(TimerWheel::new());
         });
     });
 
     // Custom config construction
-    group.bench_function("new_with_config", |b| {
+    group.bench_function("new_with_config", |b: &mut criterion::Bencher| {
         let config = TimerWheelConfig::new()
             .max_wheel_duration(Duration::from_secs(86400))
             .max_timer_duration(Duration::from_secs(604_800));
@@ -517,7 +517,7 @@ fn bench_config(c: &mut Criterion) {
     });
 
     // try_register validation overhead
-    group.bench_function("try_register_validation", |b| {
+    group.bench_function("try_register_validation", |b: &mut criterion::Bencher| {
         let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600));
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
 
@@ -705,45 +705,61 @@ fn bench_comparison_insert(c: &mut Criterion) {
         let size_u64 = size as u64;
         group.throughput(Throughput::Elements(size_u64));
 
-        group.bench_with_input(BenchmarkId::new("timer_wheel", size), &size, |b, &_| {
-            b.iter(|| {
-                let mut wheel = TimerWheel::new();
-                for i in 0..size_u64 {
-                    wheel.register(Time::from_millis(i + 1), noop_waker());
-                }
-                std::hint::black_box(wheel.len());
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("timer_wheel", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter(|| {
+                    let mut wheel = TimerWheel::new();
+                    for i in 0..size_u64 {
+                        wheel.register(Time::from_millis(i + 1), noop_waker());
+                    }
+                    std::hint::black_box(wheel.len());
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("btree_map", size), &size, |b, &_| {
-            b.iter(|| {
-                let mut timers = BTreeTimers::new();
-                for i in 0..size_u64 {
-                    timers.insert((i + 1) * 1_000_000, noop_waker()); // millis → nanos
-                }
-                std::hint::black_box(timers.len());
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("btree_map", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter(|| {
+                    let mut timers = BTreeTimers::new();
+                    for i in 0..size_u64 {
+                        timers.insert((i + 1) * 1_000_000, noop_waker()); // millis → nanos
+                    }
+                    std::hint::black_box(timers.len());
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("binary_heap", size), &size, |b, &_| {
-            b.iter(|| {
-                let mut timers = HeapTimers::new();
-                for i in 0..size_u64 {
-                    timers.insert((i + 1) * 1_000_000, noop_waker());
-                }
-                std::hint::black_box(timers.len());
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("binary_heap", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter(|| {
+                    let mut timers = HeapTimers::new();
+                    for i in 0..size_u64 {
+                        timers.insert((i + 1) * 1_000_000, noop_waker());
+                    }
+                    std::hint::black_box(timers.len());
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("vec_linear", size), &size, |b, &_| {
-            b.iter(|| {
-                let mut timers = VecTimers::new();
-                for i in 0..size_u64 {
-                    timers.insert((i + 1) * 1_000_000, noop_waker());
-                }
-                std::hint::black_box(timers.len());
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("vec_linear", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter(|| {
+                    let mut timers = VecTimers::new();
+                    for i in 0..size_u64 {
+                        timers.insert((i + 1) * 1_000_000, noop_waker());
+                    }
+                    std::hint::black_box(timers.len());
+                });
+            },
+        );
     }
 
     group.finish();
@@ -760,81 +776,97 @@ fn bench_comparison_cancel(c: &mut Criterion) {
         let size_u64 = size as u64;
         group.throughput(Throughput::Elements(size_u64));
 
-        group.bench_with_input(BenchmarkId::new("timer_wheel", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut wheel = TimerWheel::new();
-                    let handles: Vec<_> = (0..size_u64)
-                        .map(|i| wheel.register(Time::from_millis(i + 1), noop_waker()))
-                        .collect();
+        group.bench_with_input(
+            BenchmarkId::new("timer_wheel", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut wheel = TimerWheel::new();
+                        let handles: Vec<_> = (0..size_u64)
+                            .map(|i| wheel.register(Time::from_millis(i + 1), noop_waker()))
+                            .collect();
 
-                    let start = std::time::Instant::now();
-                    for handle in handles {
-                        wheel.cancel(&handle);
+                        let start = std::time::Instant::now();
+                        for handle in handles {
+                            wheel.cancel(&handle);
+                        }
+                        total += start.elapsed();
                     }
-                    total += start.elapsed();
-                }
-                total
-            });
-        });
+                    total
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("btree_map", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = BTreeTimers::new();
-                    let ids: Vec<_> = (0..size_u64)
-                        .map(|i| timers.insert((i + 1) * 1_000_000, noop_waker()))
-                        .collect();
+        group.bench_with_input(
+            BenchmarkId::new("btree_map", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = BTreeTimers::new();
+                        let ids: Vec<_> = (0..size_u64)
+                            .map(|i| timers.insert((i + 1) * 1_000_000, noop_waker()))
+                            .collect();
 
-                    let start = std::time::Instant::now();
-                    for id in ids {
-                        timers.cancel(id);
+                        let start = std::time::Instant::now();
+                        for id in ids {
+                            timers.cancel(id);
+                        }
+                        total += start.elapsed();
                     }
-                    total += start.elapsed();
-                }
-                total
-            });
-        });
+                    total
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("binary_heap", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = HeapTimers::new();
-                    let ids: Vec<_> = (0..size_u64)
-                        .map(|i| timers.insert((i + 1) * 1_000_000, noop_waker()))
-                        .collect();
+        group.bench_with_input(
+            BenchmarkId::new("binary_heap", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = HeapTimers::new();
+                        let ids: Vec<_> = (0..size_u64)
+                            .map(|i| timers.insert((i + 1) * 1_000_000, noop_waker()))
+                            .collect();
 
-                    let start = std::time::Instant::now();
-                    for id in ids {
-                        timers.cancel(id);
+                        let start = std::time::Instant::now();
+                        for id in ids {
+                            timers.cancel(id);
+                        }
+                        total += start.elapsed();
                     }
-                    total += start.elapsed();
-                }
-                total
-            });
-        });
+                    total
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("vec_linear", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = VecTimers::new();
-                    let ids: Vec<_> = (0..size_u64)
-                        .map(|i| timers.insert((i + 1) * 1_000_000, noop_waker()))
-                        .collect();
+        group.bench_with_input(
+            BenchmarkId::new("vec_linear", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = VecTimers::new();
+                        let ids: Vec<_> = (0..size_u64)
+                            .map(|i| timers.insert((i + 1) * 1_000_000, noop_waker()))
+                            .collect();
 
-                    let start = std::time::Instant::now();
-                    for id in ids {
-                        timers.cancel(id);
+                        let start = std::time::Instant::now();
+                        for id in ids {
+                            timers.cancel(id);
+                        }
+                        total += start.elapsed();
                     }
-                    total += start.elapsed();
-                }
-                total
-            });
-        });
+                    total
+                });
+            },
+        );
     }
 
     group.finish();
@@ -852,77 +884,93 @@ fn bench_comparison_expire(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size_u64));
 
         // All timers expire at once — measures bulk expiry.
-        group.bench_with_input(BenchmarkId::new("timer_wheel", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut wheel = TimerWheel::new();
-                    for i in 0..size_u64 {
-                        wheel.register(Time::from_millis(i + 1), noop_waker());
+        group.bench_with_input(
+            BenchmarkId::new("timer_wheel", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut wheel = TimerWheel::new();
+                        for i in 0..size_u64 {
+                            wheel.register(Time::from_millis(i + 1), noop_waker());
+                        }
+
+                        let start = std::time::Instant::now();
+                        let wakers = wheel.collect_expired(Time::from_millis(size_u64 + 1));
+                        total += start.elapsed();
+                        assert_eq!(wakers.len(), size);
                     }
+                    total
+                });
+            },
+        );
 
-                    let start = std::time::Instant::now();
-                    let wakers = wheel.collect_expired(Time::from_millis(size_u64 + 1));
-                    total += start.elapsed();
-                    assert_eq!(wakers.len(), size);
-                }
-                total
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("btree_map", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = BTreeTimers::new();
+                        for i in 0..size_u64 {
+                            timers.insert((i + 1) * 1_000_000, noop_waker());
+                        }
 
-        group.bench_with_input(BenchmarkId::new("btree_map", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = BTreeTimers::new();
-                    for i in 0..size_u64 {
-                        timers.insert((i + 1) * 1_000_000, noop_waker());
+                        let start = std::time::Instant::now();
+                        let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
+                        total += start.elapsed();
+                        assert_eq!(wakers.len(), size);
                     }
+                    total
+                });
+            },
+        );
 
-                    let start = std::time::Instant::now();
-                    let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                    total += start.elapsed();
-                    assert_eq!(wakers.len(), size);
-                }
-                total
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("binary_heap", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = HeapTimers::new();
+                        for i in 0..size_u64 {
+                            timers.insert((i + 1) * 1_000_000, noop_waker());
+                        }
 
-        group.bench_with_input(BenchmarkId::new("binary_heap", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = HeapTimers::new();
-                    for i in 0..size_u64 {
-                        timers.insert((i + 1) * 1_000_000, noop_waker());
+                        let start = std::time::Instant::now();
+                        let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
+                        total += start.elapsed();
+                        assert_eq!(wakers.len(), size);
                     }
+                    total
+                });
+            },
+        );
 
-                    let start = std::time::Instant::now();
-                    let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                    total += start.elapsed();
-                    assert_eq!(wakers.len(), size);
-                }
-                total
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("vec_linear", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = VecTimers::new();
+                        for i in 0..size_u64 {
+                            timers.insert((i + 1) * 1_000_000, noop_waker());
+                        }
 
-        group.bench_with_input(BenchmarkId::new("vec_linear", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = VecTimers::new();
-                    for i in 0..size_u64 {
-                        timers.insert((i + 1) * 1_000_000, noop_waker());
+                        let start = std::time::Instant::now();
+                        let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
+                        total += start.elapsed();
+                        assert_eq!(wakers.len(), size);
                     }
-
-                    let start = std::time::Instant::now();
-                    let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                    total += start.elapsed();
-                    assert_eq!(wakers.len(), size);
-                }
-                total
-            });
-        });
+                    total
+                });
+            },
+        );
     }
 
     group.finish();
@@ -943,124 +991,140 @@ fn bench_comparison_mixed(c: &mut Criterion) {
         let size_u64 = size as u64;
         group.throughput(Throughput::Elements(size_u64));
 
-        group.bench_with_input(BenchmarkId::new("timer_wheel", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut wheel = TimerWheel::new();
+        group.bench_with_input(
+            BenchmarkId::new("timer_wheel", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut wheel = TimerWheel::new();
 
-                    let start = std::time::Instant::now();
-                    // Insert all timers at staggered deadlines.
-                    let handles: Vec<_> = (0..size_u64)
-                        .map(|i| wheel.register(Time::from_millis(i * 10 + 10), noop_waker()))
-                        .collect();
+                        let start = std::time::Instant::now();
+                        // Insert all timers at staggered deadlines.
+                        let handles: Vec<_> = (0..size_u64)
+                            .map(|i| wheel.register(Time::from_millis(i * 10 + 10), noop_waker()))
+                            .collect();
 
-                    // Cancel every 3rd timer.
-                    for (idx, handle) in handles.iter().enumerate() {
-                        if idx % 3 == 0 {
-                            wheel.cancel(handle);
+                        // Cancel every 3rd timer.
+                        for (idx, handle) in handles.iter().enumerate() {
+                            if idx % 3 == 0 {
+                                wheel.cancel(handle);
+                            }
                         }
-                    }
 
-                    // Advance time in steps, collecting expired.
-                    let mut collected = 0;
-                    for step in (0..size_u64 * 10 + 20).step_by(100) {
-                        let wakers = wheel.collect_expired(Time::from_millis(step));
-                        collected += wakers.len();
-                    }
-                    total += start.elapsed();
-                    std::hint::black_box(collected);
-                }
-                total
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("btree_map", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = BTreeTimers::new();
-
-                    let start = std::time::Instant::now();
-                    let ids: Vec<_> = (0..size_u64)
-                        .map(|i| timers.insert((i * 10 + 10) * 1_000_000, noop_waker()))
-                        .collect();
-
-                    for (idx, &id) in ids.iter().enumerate() {
-                        if idx % 3 == 0 {
-                            timers.cancel(id);
+                        // Advance time in steps, collecting expired.
+                        let mut collected = 0;
+                        for step in (0..size_u64 * 10 + 20).step_by(100) {
+                            let wakers = wheel.collect_expired(Time::from_millis(step));
+                            collected += wakers.len();
                         }
+                        total += start.elapsed();
+                        std::hint::black_box(collected);
                     }
+                    total
+                });
+            },
+        );
 
-                    let mut collected = 0;
-                    for step in (0..size_u64 * 10 + 20).step_by(100) {
-                        let wakers = timers.collect_expired(step * 1_000_000);
-                        collected += wakers.len();
-                    }
-                    total += start.elapsed();
-                    std::hint::black_box(collected);
-                }
-                total
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("btree_map", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = BTreeTimers::new();
 
-        group.bench_with_input(BenchmarkId::new("binary_heap", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = HeapTimers::new();
+                        let start = std::time::Instant::now();
+                        let ids: Vec<_> = (0..size_u64)
+                            .map(|i| timers.insert((i * 10 + 10) * 1_000_000, noop_waker()))
+                            .collect();
 
-                    let start = std::time::Instant::now();
-                    let ids: Vec<_> = (0..size_u64)
-                        .map(|i| timers.insert((i * 10 + 10) * 1_000_000, noop_waker()))
-                        .collect();
-
-                    for (idx, &id) in ids.iter().enumerate() {
-                        if idx % 3 == 0 {
-                            timers.cancel(id);
+                        for (idx, &id) in ids.iter().enumerate() {
+                            if idx % 3 == 0 {
+                                timers.cancel(id);
+                            }
                         }
-                    }
 
-                    let mut collected = 0;
-                    for step in (0..size_u64 * 10 + 20).step_by(100) {
-                        let wakers = timers.collect_expired(step * 1_000_000);
-                        collected += wakers.len();
-                    }
-                    total += start.elapsed();
-                    std::hint::black_box(collected);
-                }
-                total
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("vec_linear", size), &size, |b, &_| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let mut timers = VecTimers::new();
-
-                    let start = std::time::Instant::now();
-                    let ids: Vec<_> = (0..size_u64)
-                        .map(|i| timers.insert((i * 10 + 10) * 1_000_000, noop_waker()))
-                        .collect();
-
-                    for (idx, &id) in ids.iter().enumerate() {
-                        if idx % 3 == 0 {
-                            timers.cancel(id);
+                        let mut collected = 0;
+                        for step in (0..size_u64 * 10 + 20).step_by(100) {
+                            let wakers = timers.collect_expired(step * 1_000_000);
+                            collected += wakers.len();
                         }
+                        total += start.elapsed();
+                        std::hint::black_box(collected);
                     }
+                    total
+                });
+            },
+        );
 
-                    let mut collected = 0;
-                    for step in (0..size_u64 * 10 + 20).step_by(100) {
-                        let wakers = timers.collect_expired(step * 1_000_000);
-                        collected += wakers.len();
+        group.bench_with_input(
+            BenchmarkId::new("binary_heap", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = HeapTimers::new();
+
+                        let start = std::time::Instant::now();
+                        let ids: Vec<_> = (0..size_u64)
+                            .map(|i| timers.insert((i * 10 + 10) * 1_000_000, noop_waker()))
+                            .collect();
+
+                        for (idx, &id) in ids.iter().enumerate() {
+                            if idx % 3 == 0 {
+                                timers.cancel(id);
+                            }
+                        }
+
+                        let mut collected = 0;
+                        for step in (0..size_u64 * 10 + 20).step_by(100) {
+                            let wakers = timers.collect_expired(step * 1_000_000);
+                            collected += wakers.len();
+                        }
+                        total += start.elapsed();
+                        std::hint::black_box(collected);
                     }
-                    total += start.elapsed();
-                    std::hint::black_box(collected);
-                }
-                total
-            });
-        });
+                    total
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("vec_linear", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut timers = VecTimers::new();
+
+                        let start = std::time::Instant::now();
+                        let ids: Vec<_> = (0..size_u64)
+                            .map(|i| timers.insert((i * 10 + 10) * 1_000_000, noop_waker()))
+                            .collect();
+
+                        for (idx, &id) in ids.iter().enumerate() {
+                            if idx % 3 == 0 {
+                                timers.cancel(id);
+                            }
+                        }
+
+                        let mut collected = 0;
+                        for step in (0..size_u64 * 10 + 20).step_by(100) {
+                            let wakers = timers.collect_expired(step * 1_000_000);
+                            collected += wakers.len();
+                        }
+                        total += start.elapsed();
+                        std::hint::black_box(collected);
+                    }
+                    total
+                });
+            },
+        );
     }
 
     group.finish();
@@ -1083,7 +1147,7 @@ fn bench_comparison_memory(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("timer_wheel_alloc_free", size),
             &size,
-            |b, &_| {
+            |b: &mut criterion::Bencher, &_: &usize| {
                 b.iter(|| {
                     let mut wheel = TimerWheel::new();
                     for i in 0..size_u64 {
@@ -1098,7 +1162,7 @@ fn bench_comparison_memory(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("btree_alloc_free", size),
             &size,
-            |b, &_| {
+            |b: &mut criterion::Bencher, &_: &usize| {
                 b.iter(|| {
                     let mut timers = BTreeTimers::new();
                     for i in 0..size_u64 {
@@ -1110,27 +1174,35 @@ fn bench_comparison_memory(c: &mut Criterion) {
             },
         );
 
-        group.bench_with_input(BenchmarkId::new("heap_alloc_free", size), &size, |b, &_| {
-            b.iter(|| {
-                let mut timers = HeapTimers::new();
-                for i in 0..size_u64 {
-                    timers.insert((i + 1) * 1_000_000, noop_waker());
-                }
-                let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                std::hint::black_box(wakers.len());
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("heap_alloc_free", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter(|| {
+                    let mut timers = HeapTimers::new();
+                    for i in 0..size_u64 {
+                        timers.insert((i + 1) * 1_000_000, noop_waker());
+                    }
+                    let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
+                    std::hint::black_box(wakers.len());
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("vec_alloc_free", size), &size, |b, &_| {
-            b.iter(|| {
-                let mut timers = VecTimers::new();
-                for i in 0..size_u64 {
-                    timers.insert((i + 1) * 1_000_000, noop_waker());
-                }
-                let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                std::hint::black_box(wakers.len());
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("vec_alloc_free", size),
+            &size,
+            |b: &mut criterion::Bencher, &_: &usize| {
+                b.iter(|| {
+                    let mut timers = VecTimers::new();
+                    for i in 0..size_u64 {
+                        timers.insert((i + 1) * 1_000_000, noop_waker());
+                    }
+                    let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
+                    std::hint::black_box(wakers.len());
+                });
+            },
+        );
     }
 
     group.finish();

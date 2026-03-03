@@ -77,7 +77,7 @@ impl GenServer for BenchCounter {
 fn bench_genserver_call(c: &mut Criterion) {
     let mut group = c.benchmark_group("spork/genserver");
 
-    group.bench_function("call_roundtrip", |b| {
+    group.bench_function("call_roundtrip", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let budget = Budget::new().with_poll_quota(100_000);
             let mut runtime = LabRuntime::new(LabConfig::new(42));
@@ -122,7 +122,7 @@ fn bench_genserver_call(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("cast_fire_and_forget", |b| {
+    group.bench_function("cast_fire_and_forget", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let budget = Budget::new().with_poll_quota(100_000);
             let mut runtime = LabRuntime::new(LabConfig::new(42));
@@ -150,7 +150,7 @@ fn bench_genserver_call(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("spawn_server", |b| {
+    group.bench_function("spawn_server", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let budget = Budget::new().with_poll_quota(100_000);
             let mut runtime = LabRuntime::new(LabConfig::new(42));
@@ -178,7 +178,7 @@ fn bench_genserver_call(c: &mut Criterion) {
 fn bench_registry_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("spork/registry");
 
-    group.bench_function("register_single", |b| {
+    group.bench_function("register_single", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let mut registry = NameRegistry::new();
             let task_id = TaskId::new_for_test(1, 0);
@@ -192,7 +192,7 @@ fn bench_registry_operations(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("register_100_unique", |b| {
+    group.bench_function("register_100_unique", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let mut registry = NameRegistry::new();
             let region = RegionId::new_for_test(0, 0);
@@ -210,7 +210,7 @@ fn bench_registry_operations(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("whereis_hit", |b| {
+    group.bench_function("whereis_hit", |b: &mut criterion::Bencher| {
         let mut registry = NameRegistry::new();
         let task_id = TaskId::new_for_test(1, 0);
         let region = RegionId::new_for_test(0, 0);
@@ -223,12 +223,12 @@ fn bench_registry_operations(c: &mut Criterion) {
         let _ = lease.abort();
     });
 
-    group.bench_function("whereis_miss", |b| {
+    group.bench_function("whereis_miss", |b: &mut criterion::Bencher| {
         let registry = NameRegistry::new();
         b.iter(|| std::hint::black_box(registry.whereis("nonexistent")))
     });
 
-    group.bench_function("register_unregister_cycle", |b| {
+    group.bench_function("register_unregister_cycle", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let mut registry = NameRegistry::new();
             let task_id = TaskId::new_for_test(1, 0);
@@ -263,54 +263,66 @@ fn noop_child_start(
 fn bench_supervisor_restart_decision(c: &mut Criterion) {
     let mut group = c.benchmark_group("spork/supervisor");
 
-    group.bench_function("restart_plan_one_for_one_3_children", |b| {
-        let compiled = SupervisorBuilder::new("bench_sup")
-            .child(ChildSpec::new("child_a", noop_child_start))
-            .child(ChildSpec::new("child_b", noop_child_start))
-            .child(ChildSpec::new("child_c", noop_child_start))
-            .compile()
-            .unwrap();
+    group.bench_function(
+        "restart_plan_one_for_one_3_children",
+        |b: &mut criterion::Bencher| {
+            let compiled = SupervisorBuilder::new("bench_sup")
+                .child(ChildSpec::new("child_a", noop_child_start))
+                .child(ChildSpec::new("child_b", noop_child_start))
+                .child(ChildSpec::new("child_c", noop_child_start))
+                .compile()
+                .unwrap();
 
-        b.iter(|| std::hint::black_box(compiled.restart_plan_for("child_b")))
-    });
+            b.iter(|| std::hint::black_box(compiled.restart_plan_for("child_b")))
+        },
+    );
 
-    group.bench_function("restart_plan_one_for_all_5_children", |b| {
-        let compiled = SupervisorBuilder::new("bench_sup_all")
-            .with_restart_policy(RestartPolicy::OneForAll)
-            .child(ChildSpec::new("c1", noop_child_start))
-            .child(ChildSpec::new("c2", noop_child_start))
-            .child(ChildSpec::new("c3", noop_child_start))
-            .child(ChildSpec::new("c4", noop_child_start))
-            .child(ChildSpec::new("c5", noop_child_start))
-            .compile()
-            .unwrap();
+    group.bench_function(
+        "restart_plan_one_for_all_5_children",
+        |b: &mut criterion::Bencher| {
+            let compiled = SupervisorBuilder::new("bench_sup_all")
+                .with_restart_policy(RestartPolicy::OneForAll)
+                .child(ChildSpec::new("c1", noop_child_start))
+                .child(ChildSpec::new("c2", noop_child_start))
+                .child(ChildSpec::new("c3", noop_child_start))
+                .child(ChildSpec::new("c4", noop_child_start))
+                .child(ChildSpec::new("c5", noop_child_start))
+                .compile()
+                .unwrap();
 
-        b.iter(|| std::hint::black_box(compiled.restart_plan_for("c3")))
-    });
+            b.iter(|| std::hint::black_box(compiled.restart_plan_for("c3")))
+        },
+    );
 
-    group.bench_function("restart_plan_rest_for_one_5_children", |b| {
-        let compiled = SupervisorBuilder::new("bench_sup_rest")
-            .with_restart_policy(RestartPolicy::RestForOne)
-            .child(ChildSpec::new("c1", noop_child_start))
-            .child(ChildSpec::new("c2", noop_child_start))
-            .child(ChildSpec::new("c3", noop_child_start))
-            .child(ChildSpec::new("c4", noop_child_start))
-            .child(ChildSpec::new("c5", noop_child_start))
-            .compile()
-            .unwrap();
+    group.bench_function(
+        "restart_plan_rest_for_one_5_children",
+        |b: &mut criterion::Bencher| {
+            let compiled = SupervisorBuilder::new("bench_sup_rest")
+                .with_restart_policy(RestartPolicy::RestForOne)
+                .child(ChildSpec::new("c1", noop_child_start))
+                .child(ChildSpec::new("c2", noop_child_start))
+                .child(ChildSpec::new("c3", noop_child_start))
+                .child(ChildSpec::new("c4", noop_child_start))
+                .child(ChildSpec::new("c5", noop_child_start))
+                .compile()
+                .unwrap();
 
-        b.iter(|| std::hint::black_box(compiled.restart_plan_for("c2")))
-    });
+            b.iter(|| std::hint::black_box(compiled.restart_plan_for("c2")))
+        },
+    );
 
-    group.bench_function("compile_supervisor_10_children", |b| {
-        b.iter(|| {
-            let mut builder = SupervisorBuilder::new("compile_bench");
-            for i in 0..10 {
-                builder = builder.child(ChildSpec::new(format!("child_{i}"), noop_child_start));
-            }
-            std::hint::black_box(builder.compile().unwrap())
-        })
-    });
+    group.bench_function(
+        "compile_supervisor_10_children",
+        |b: &mut criterion::Bencher| {
+            b.iter(|| {
+                let mut builder = SupervisorBuilder::new("compile_bench");
+                for i in 0..10 {
+                    builder = builder.child(ChildSpec::new(format!("child_{i}"), noop_child_start));
+                }
+                std::hint::black_box(builder.compile().unwrap())
+            })
+        },
+    );
 
     group.finish();
 }
@@ -322,7 +334,7 @@ fn bench_supervisor_restart_decision(c: &mut Criterion) {
 fn bench_harness_lifecycle(c: &mut Criterion) {
     let mut group = c.benchmark_group("spork/harness");
 
-    group.bench_function("empty_app_lifecycle", |b| {
+    group.bench_function("empty_app_lifecycle", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let app = asupersync::app::AppSpec::new("bench_app");
             let harness = asupersync::lab::SporkAppHarness::with_seed(42, app).unwrap();
@@ -331,7 +343,7 @@ fn bench_harness_lifecycle(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("lab_runtime_create", |b| {
+    group.bench_function("lab_runtime_create", |b: &mut criterion::Bencher| {
         b.iter(|| {
             let runtime = LabRuntime::new(LabConfig::new(42));
             std::hint::black_box(runtime.now())

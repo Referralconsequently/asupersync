@@ -86,7 +86,7 @@ fn bench_local_queue(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/local_queue");
 
     // Single push/pop cycle
-    group.bench_function("push_pop_single", |b| {
+    group.bench_function("push_pop_single", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || local_queue(1),
             |queue| {
@@ -124,7 +124,7 @@ fn bench_local_queue(c: &mut Criterion) {
     }
 
     // Interleaved push/pop (simulates real workload)
-    group.bench_function("interleaved_push_pop", |b| {
+    group.bench_function("interleaved_push_pop", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || local_queue(199),
             |queue| {
@@ -149,7 +149,7 @@ fn bench_global_queue(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/global_queue");
 
     // Single push/pop
-    group.bench_function("push_pop_single", |b| {
+    group.bench_function("push_pop_single", |b: &mut criterion::Bencher| {
         b.iter_batched(
             GlobalQueue::new,
             |queue| {
@@ -218,7 +218,7 @@ fn bench_priority_scheduler(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/priority");
 
     // Ready lane schedule/pop
-    group.bench_function("schedule_ready_pop", |b| {
+    group.bench_function("schedule_ready_pop", |b: &mut criterion::Bencher| {
         b.iter_batched(
             Scheduler::new,
             |mut scheduler| {
@@ -231,7 +231,7 @@ fn bench_priority_scheduler(c: &mut Criterion) {
     });
 
     // Cancel lane schedule/pop
-    group.bench_function("schedule_cancel_pop", |b| {
+    group.bench_function("schedule_cancel_pop", |b: &mut criterion::Bencher| {
         b.iter_batched(
             Scheduler::new,
             |mut scheduler| {
@@ -244,7 +244,7 @@ fn bench_priority_scheduler(c: &mut Criterion) {
     });
 
     // Timed lane schedule/pop
-    group.bench_function("schedule_timed_pop", |b| {
+    group.bench_function("schedule_timed_pop", |b: &mut criterion::Bencher| {
         b.iter_batched(
             Scheduler::new,
             |mut scheduler| {
@@ -302,7 +302,7 @@ fn bench_priority_scheduler(c: &mut Criterion) {
     }
 
     // Deduplication behavior (scheduling same task twice)
-    group.bench_function("dedup_same_task", |b| {
+    group.bench_function("dedup_same_task", |b: &mut criterion::Bencher| {
         b.iter_batched(
             Scheduler::new,
             |mut scheduler| {
@@ -327,7 +327,7 @@ fn bench_lane_priority(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/lane_priority");
 
     // Mixed lanes: cancel > timed > ready ordering
-    group.bench_function("mixed_lanes_pop_order", |b| {
+    group.bench_function("mixed_lanes_pop_order", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let mut scheduler = Scheduler::new();
@@ -349,7 +349,7 @@ fn bench_lane_priority(c: &mut Criterion) {
     });
 
     // EDF ordering within timed lane
-    group.bench_function("timed_edf_ordering", |b| {
+    group.bench_function("timed_edf_ordering", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let mut scheduler = Scheduler::new();
@@ -371,7 +371,7 @@ fn bench_lane_priority(c: &mut Criterion) {
     });
 
     // Priority ordering within ready lane
-    group.bench_function("ready_priority_ordering", |b| {
+    group.bench_function("ready_priority_ordering", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let mut scheduler = Scheduler::new();
@@ -403,7 +403,7 @@ fn bench_work_stealing(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/work_stealing");
 
     // Single steal operation
-    group.bench_function("steal_single", |b| {
+    group.bench_function("steal_single", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let state = setup_runtime_state(1);
@@ -449,7 +449,7 @@ fn bench_work_stealing(c: &mut Criterion) {
     }
 
     // Steal from empty queue
-    group.bench_function("steal_empty", |b| {
+    group.bench_function("steal_empty", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let victim = LocalQueue::new(setup_runtime_state(0));
@@ -580,7 +580,7 @@ fn bench_parker(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/parker");
 
     // Unpark-before-park (permit model, no blocking)
-    group.bench_function("unpark_then_park", |b| {
+    group.bench_function("unpark_then_park", |b: &mut criterion::Bencher| {
         b.iter_batched(
             Parker::new,
             |parker| {
@@ -592,7 +592,7 @@ fn bench_parker(c: &mut Criterion) {
     });
 
     // Park with timeout (no notification, immediate timeout)
-    group.bench_function("park_timeout_zero", |b| {
+    group.bench_function("park_timeout_zero", |b: &mut criterion::Bencher| {
         b.iter_batched(
             Parker::new,
             |parker| {
@@ -603,7 +603,7 @@ fn bench_parker(c: &mut Criterion) {
     });
 
     // Unpark-before-park cycle repeated (reuse)
-    group.bench_function("park_unpark_cycle_100", |b| {
+    group.bench_function("park_unpark_cycle_100", |b: &mut criterion::Bencher| {
         b.iter_batched(
             Parker::new,
             |parker| {
@@ -617,7 +617,7 @@ fn bench_parker(c: &mut Criterion) {
     });
 
     // Cross-thread unpark latency
-    group.bench_function("cross_thread_unpark", |b| {
+    group.bench_function("cross_thread_unpark", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let parker = Parker::new();
@@ -646,7 +646,7 @@ fn bench_intrusive_ring(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/intrusive_ring");
 
     // Single push_back/pop_front cycle
-    group.bench_function("push_pop_single", |b| {
+    group.bench_function("push_pop_single", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let arena = setup_arena(1);
@@ -691,7 +691,7 @@ fn bench_intrusive_ring(c: &mut Criterion) {
     }
 
     // Interleaved push/pop
-    group.bench_function("interleaved_push_pop", |b| {
+    group.bench_function("interleaved_push_pop", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let arena = setup_arena(200);
@@ -716,7 +716,7 @@ fn bench_intrusive_stack(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/intrusive_stack");
 
     // Single push/pop cycle
-    group.bench_function("push_pop_single", |b| {
+    group.bench_function("push_pop_single", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
                 let arena = setup_arena(1);

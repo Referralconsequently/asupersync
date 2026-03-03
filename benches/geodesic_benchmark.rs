@@ -343,16 +343,19 @@ fn bench_switch_cost_improvement(c: &mut Criterion) {
             result.algorithm,
         );
 
-        group.bench_function(BenchmarkId::new("e2e", label), |b| {
-            b.iter(|| {
-                let poset = TracePoset::from_trace(std::hint::black_box(&trace));
-                let result = asupersync::trace::geodesic_normalize(
-                    std::hint::black_box(&poset),
-                    &default_config,
-                );
-                std::hint::black_box(result)
-            });
-        });
+        group.bench_function(
+            BenchmarkId::new("e2e", label),
+            |b: &mut criterion::Bencher| {
+                b.iter(|| {
+                    let poset = TracePoset::from_trace(std::hint::black_box(&trace));
+                    let result = asupersync::trace::geodesic_normalize(
+                        std::hint::black_box(&poset),
+                        &default_config,
+                    );
+                    std::hint::black_box(result)
+                });
+            },
+        );
     }
 
     group.finish();
