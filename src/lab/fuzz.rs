@@ -560,4 +560,63 @@ mod tests {
         assert_eq!(corpus.cases[1].replay_seed, 13);
         assert_eq!(corpus.cases[1].violation_categories, vec!["futurelock"]);
     }
+
+    #[test]
+    fn regression_corpus_replay_seeds_preserve_violation_categories() {
+        let config = FuzzConfig::new(0x6C6F_7265_6D71_6505, 4)
+            .worker_count(2)
+            .max_steps(256)
+            .minimize(true);
+        let harness = FuzzHarness::new(config.clone());
+
+        let scenario = |runtime: &mut LabRuntime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            for _ in 0..3 {
+                let (task_id, _) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async {})
+                    .expect("create scheduled task");
+                runtime.scheduler.lock().schedule(task_id, 0);
+            }
+            let _unscheduled = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("create unscheduled task");
+            runtime.run_until_quiescent();
+        };
+
+        let report = harness.run(scenario);
+        assert!(report.has_findings(), "expected minimized fuzz findings");
+        let corpus = report.to_regression_corpus(config.base_seed);
+        assert!(
+            !corpus.cases.is_empty(),
+            "regression corpus must include failing replay seeds"
+        );
+
+        for case in &corpus.cases {
+            let first_replay = harness.run_single(case.replay_seed, &scenario);
+            assert!(
+                !first_replay.violations.is_empty(),
+                "replay seed {} should still violate an invariant",
+                case.replay_seed
+            );
+            let replay_categories = sorted_violation_categories(&first_replay.violations);
+            assert_eq!(
+                replay_categories, case.violation_categories,
+                "replay seed {} changed violation categories",
+                case.replay_seed
+            );
+
+            // Deterministic replay seeds must produce stable certificates and traces.
+            let second_replay = harness.run_single(case.replay_seed, &scenario);
+            assert_eq!(
+                first_replay.certificate_hash,
+                second_replay.certificate_hash
+            );
+            assert_eq!(
+                first_replay.trace_fingerprint,
+                second_replay.trace_fingerprint
+            );
+        }
+    }
 }
