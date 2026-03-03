@@ -346,6 +346,7 @@ mod tests {
 
             let std_file = std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .read(true)
                 .open(&path)

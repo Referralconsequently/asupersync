@@ -368,6 +368,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
             .into()));
         }
 
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         // Compute per-read cap: min(buf remaining, chunk limit, budget remaining)
         let remaining = buf.remaining();
         let budget_remaining = (this
@@ -610,6 +614,20 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
             .config
             .max_total_write_bytes
             .saturating_sub(this.total_written) as usize;
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        if !this.config.allow_partial_writes && buf.len() > budget_remaining {
+            this.state = BrowserStreamState::Errored;
+            return Poll::Ready(Err(BrowserStreamError::WriteLimitExceeded {
+                written: this.total_written,
+                limit: this.config.max_total_write_bytes,
+            }
+            .into()));
+        }
+
         let to_write = buf.len().min(budget_remaining);
 
         if to_write == 0 {

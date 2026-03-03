@@ -96,7 +96,7 @@ mod tests {
                 SeekFrom::Start(offset) => offset,
                 SeekFrom::End(offset) => {
                     if offset >= 0 {
-                        self.len.saturating_add(offset as u64)
+                        self.len.saturating_add(offset.unsigned_abs())
                     } else {
                         self.len.checked_sub(offset.unsigned_abs()).ok_or_else(|| {
                             io::Error::new(io::ErrorKind::InvalidInput, "seek before start")
@@ -105,7 +105,7 @@ mod tests {
                 }
                 SeekFrom::Current(offset) => {
                     if offset >= 0 {
-                        self.pos.saturating_add(offset as u64)
+                        self.pos.saturating_add(offset.unsigned_abs())
                     } else {
                         self.pos.checked_sub(offset.unsigned_abs()).ok_or_else(|| {
                             io::Error::new(io::ErrorKind::InvalidInput, "seek before start")
