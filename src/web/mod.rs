@@ -59,6 +59,7 @@ pub mod response;
 pub mod router;
 pub mod security;
 pub mod sse;
+pub mod static_files;
 /// WebSocket support for the web framework.
 pub mod websocket;
 
