@@ -143,9 +143,7 @@ fn generate_race(cx: &Expr, timeout: Option<&Expr>, branches: &[RaceBranch]) -> 
         .map(|branch| {
             let fut = &branch.future;
             let fut_expr = quote! {
-                ::std::boxed::Box::pin(async move {
-                    (#fut).await
-                })
+                ::std::boxed::Box::pin(#fut)
             };
             if let Some(name) = &branch.name {
                 quote! { (#name, #fut_expr) }

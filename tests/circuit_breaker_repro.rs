@@ -20,6 +20,6 @@ fn test_half_open_probes_overflow() {
     // Ideally, this should be clamped to prevent overflow in the packed state.
     // MAX_HALF_OPEN_PROBES = 0x00FF_FFFF = 16777215
 
-    assert_eq!(policy.half_open_max_probes, 0x00FF_FFFF);
+    assert_eq!(policy.half_open_max_probes, 0xFFFF);
     assert_ne!(policy.half_open_max_probes, large_limit);
 }

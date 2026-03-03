@@ -788,16 +788,16 @@ mod tests {
     #[test]
     fn read_u64_big_endian() {
         init_test("read_u64_big_endian");
-        let mut reader: &[u8] = &0x0102030405060708u64.to_be_bytes();
+        let mut reader: &[u8] = &0x0102_0304_0506_0708_u64.to_be_bytes();
         let mut fut = reader.read_u64();
         let mut fut = Pin::new(&mut fut);
         let val = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
         crate::assert_with_log!(
-            val == 0x0102030405060708,
+            val == 0x0102_0304_0506_0708,
             "u64 BE",
-            0x0102030405060708u64,
+            0x0102_0304_0506_0708_u64,
             val
         );
         crate::test_complete!("read_u64_big_endian");

@@ -2390,11 +2390,7 @@ impl PgConnection {
     }
 
     /// Close a prepared statement, freeing server-side resources.
-    pub async fn close_statement(
-        &mut self,
-        cx: &Cx,
-        stmt: &PgStatement,
-    ) -> Outcome<(), PgError> {
+    pub async fn close_statement(&mut self, cx: &Cx, stmt: &PgStatement) -> Outcome<(), PgError> {
         if cx.is_cancel_requested() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -2746,15 +2742,13 @@ impl PgConnection {
 
             match msg_type {
                 b'1' | b'2' => { /* ParseComplete / BindComplete */ }
-                b'T' => {
-                    match self.parse_row_description(&data) {
-                        Ok((cols, indices)) => {
-                            columns = Some(Arc::new(cols));
-                            column_indices = Some(Arc::new(indices));
-                        }
-                        Err(e) => return Outcome::Err(e),
+                b'T' => match self.parse_row_description(&data) {
+                    Ok((cols, indices)) => {
+                        columns = Some(Arc::new(cols));
+                        column_indices = Some(Arc::new(indices));
                     }
-                }
+                    Err(e) => return Outcome::Err(e),
+                },
                 b'n' => { /* NoData */ }
                 b'D' => {
                     if let (Some(cols), Some(indices)) = (&columns, &column_indices) {
@@ -4196,7 +4190,10 @@ mod tests {
             0x1234
         );
         // i16 text
-        assert_eq!(i16::from_sql(b"1234", oid::INT2, Format::Text).unwrap(), 1234);
+        assert_eq!(
+            i16::from_sql(b"1234", oid::INT2, Format::Text).unwrap(),
+            1234
+        );
         // i16 too short
         assert!(i16::from_sql(&[0], oid::INT2, Format::Binary).is_err());
 
@@ -4338,10 +4335,11 @@ mod tests {
         // NULL parameters have length -1 in the message
         // The -1 should appear as 0xFF 0xFF 0xFF 0xFF somewhere in the body
         let body = &msg[5..];
-        let has_null_marker = body
-            .windows(4)
-            .any(|w| w == [0xFF, 0xFF, 0xFF, 0xFF]);
-        assert!(has_null_marker, "bind message should contain NULL marker (-1)");
+        let has_null_marker = body.windows(4).any(|w| w == [0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(
+            has_null_marker,
+            "bind message should contain NULL marker (-1)"
+        );
     }
 
     #[test]
@@ -4587,10 +4585,16 @@ mod tests {
     fn pg_value_to_text_bytes_roundtrip() {
         // Bool
         let bytes = pg_value_to_text_bytes(&PgValue::Bool(true));
-        assert_eq!(bool::from_sql(&bytes, oid::BOOL, Format::Text).unwrap(), true);
+        assert_eq!(
+            bool::from_sql(&bytes, oid::BOOL, Format::Text).unwrap(),
+            true
+        );
 
         let bytes = pg_value_to_text_bytes(&PgValue::Bool(false));
-        assert_eq!(bool::from_sql(&bytes, oid::BOOL, Format::Text).unwrap(), false);
+        assert_eq!(
+            bool::from_sql(&bytes, oid::BOOL, Format::Text).unwrap(),
+            false
+        );
 
         // Int2
         let bytes = pg_value_to_text_bytes(&PgValue::Int2(123));
@@ -4609,11 +4613,17 @@ mod tests {
 
         // Float4
         let bytes = pg_value_to_text_bytes(&PgValue::Float4(1.5));
-        assert_eq!(f32::from_sql(&bytes, oid::FLOAT4, Format::Text).unwrap(), 1.5);
+        assert_eq!(
+            f32::from_sql(&bytes, oid::FLOAT4, Format::Text).unwrap(),
+            1.5
+        );
 
         // Float8
         let bytes = pg_value_to_text_bytes(&PgValue::Float8(2.5));
-        assert_eq!(f64::from_sql(&bytes, oid::FLOAT8, Format::Text).unwrap(), 2.5);
+        assert_eq!(
+            f64::from_sql(&bytes, oid::FLOAT8, Format::Text).unwrap(),
+            2.5
+        );
 
         // Text
         let bytes = pg_value_to_text_bytes(&PgValue::Text("hello".to_string()));

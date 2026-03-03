@@ -629,7 +629,7 @@ mod tests {
     fn write_u32_big_endian() {
         init_test("write_u32_big_endian");
         let mut output = Vec::new();
-        let mut fut = output.write_u32(0x01020304);
+        let mut fut = output.write_u32(0x0102_0304);
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
@@ -707,9 +707,9 @@ mod tests {
 
     #[test]
     fn write_read_roundtrip_u32() {
-        init_test("write_read_roundtrip_u32");
         use crate::io::ext::read_ext::AsyncReadExt;
-        let expected: u32 = 0xDEADBEEF;
+        init_test("write_read_roundtrip_u32");
+        let expected: u32 = 0xDEAD_BEEF;
         let mut output = Vec::new();
 
         // Write

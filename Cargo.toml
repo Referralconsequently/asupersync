@@ -84,8 +84,14 @@ sqlite = ["dep:rusqlite"]
 postgres = []
 # Enable MySQL async client with wire protocol.
 mysql = []
-# QUIC/HTTP3 feature flags are intentionally not exposed here yet.
-# Native Tokio-free transport work is tracked under `net::quic_core`.
+# Native QUIC/HTTP3 rollout surfaces (T4.1).
+# These expose Tokio-free native paths for inventory/build/test contracts.
+quic = []
+http3 = ["quic"]
+# Legacy compatibility wrappers over upstream quinn/h3 stacks.
+# Kept explicitly separate from native rollout; disabled by default.
+quic-compat = []
+http3-compat = ["quic-compat"]
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
 # Enable unsafe AVX2/NEON intrinsics for ~8x GF(256) throughput in RaptorQ.
@@ -258,6 +264,10 @@ name = "cancel_drain_bench"
 harness = false
 
 [[bench]]
+name = "geodesic_benchmark"
+harness = false
+
+[[bench]]
 name = "homology_benchmark"
 harness = false
 
@@ -295,7 +305,7 @@ codegen-units = 1
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]
 # The epoll reactor requires unsafe for the polling crate's FFI operations
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(feature, values("quic", "http3", "wasm-browser-preview", "simd-intrinsics"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(feature, values("quic", "http3", "quic-compat", "http3-compat", "wasm-browser-preview", "simd-intrinsics"))'] }
 unsafe_code = "deny"
 missing_docs = "warn"
 unused = { level = "warn", priority = -1 }

@@ -587,7 +587,8 @@ impl RateLimiter {
                 .fetch_add(wait_ms, Ordering::Relaxed);
 
             let new_max_ms = duration_to_millis_saturating(max_wait_time);
-            self.max_wait_time_ms.fetch_max(new_max_ms, Ordering::Relaxed);
+            self.max_wait_time_ms
+                .fetch_max(new_max_ms, Ordering::Relaxed);
         }
 
         first_granted

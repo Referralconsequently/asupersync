@@ -1694,11 +1694,11 @@ mod tests {
     #[test]
     fn builder_clamps_max_probes() {
         let policy = CircuitBreakerPolicyBuilder::new()
-            .half_open_max_probes(20_000_000) // > 2^24
+            .half_open_max_probes(20_000_000) // > 2^16
             .build();
 
         assert_eq!(policy.half_open_max_probes, MAX_HALF_OPEN_PROBES);
-        assert_eq!(policy.half_open_max_probes, 0x00FF_FFFF);
+        assert_eq!(policy.half_open_max_probes, 0xFFFF);
     }
 
     #[test]

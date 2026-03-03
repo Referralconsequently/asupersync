@@ -121,7 +121,7 @@ STEP_HINTS=(
     "Inspect obligation ledger behavior under tab-suspension style timing gaps."
     "Inspect cancellation drain invariants under host interruption timing."
     "Inspect browser replay artifact/report generation pipeline in tests/replay_e2e_suite.rs."
-    "Inspect golden replay-delta drift triage bundle generation in tests/replay_e2e_suite.rs."
+    "Inspect golden replay-delta drift triage bundle generation (golden_trace_replay_delta_triage_bundle.json) in tests/replay_e2e_suite.rs."
 )
 
 STEP_COMMANDS=(
@@ -369,16 +369,16 @@ jq -n \
     --argjson failed_steps "${failed_steps_json}" \
     --argjson step_count "${steps_recorded}" \
     '{
-       schema_version: $schema_version,
-       suite_id: $suite_id,
-       scenario_id: $scenario_id,
-       seed: $seed,
-       started_ts: $started_ts,
-       ended_ts: $ended_ts,
+       "schema_version": "e2e-suite-summary-v3",
+       "suite_id": $suite_id,
+       "scenario_id": $scenario_id,
+       "seed": $seed,
+       "started_ts": $started_ts,
+       "ended_ts": $ended_ts,
        duration_ms: $duration_ms,
-       status: $status,
-       repro_command: $repro_command,
-       artifact_path: $artifact_path,
+       "status": $status,
+       "repro_command": $repro_command,
+       "artifact_path": $artifact_path,
        suite: $suite_id,
        timestamp: $ended_ts,
        test_log_level: env.TEST_LOG_LEVEL,
