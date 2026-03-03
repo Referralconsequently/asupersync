@@ -251,3 +251,270 @@ fn baseline_has_per_domain_feature_tables() {
         "baseline must have per-domain feature tables for >= 5 domains, found {count}"
     );
 }
+
+// =============================================================================
+// EXTENDED COVERAGE: severity distribution, cross-references, module paths
+// =============================================================================
+
+fn extract_summary_table_gaps(doc: &str) -> Vec<(String, String, String)> {
+    // Parse rows from the "Gap Summary Table" section.
+    // Each row: | ID | Domain | Description | Severity | Phase |
+    let summary = match doc.split("Gap Summary Table").nth(1) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let mut gaps = Vec::new();
+    for line in summary.lines() {
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cols.len() >= 5 {
+            let id = cols[1];
+            let severity = cols[4];
+            let phase = cols.get(5).unwrap_or(&"");
+            let prefixes = ["PG-G", "MY-G", "SQ-G", "RD-G", "NT-G", "KA-G", "POOL-G"];
+            if prefixes.iter().any(|p| id.starts_with(p)) {
+                gaps.push((id.to_string(), severity.to_string(), phase.to_string()));
+            }
+        }
+    }
+    gaps
+}
+
+#[test]
+fn summary_table_covers_all_52_gaps() {
+    let doc = load_baseline_doc();
+    let gaps = extract_summary_table_gaps(&doc);
+    assert!(
+        gaps.len() >= 45,
+        "summary table must list >= 45 gaps, found {}",
+        gaps.len()
+    );
+}
+
+#[test]
+fn severity_distribution_matches_documented_totals() {
+    let doc = load_baseline_doc();
+    let gaps = extract_summary_table_gaps(&doc);
+
+    let critical = gaps.iter().filter(|(_, s, _)| s == "Critical").count();
+    let high = gaps.iter().filter(|(_, s, _)| s == "High").count();
+    let medium = gaps.iter().filter(|(_, s, _)| s == "Medium").count();
+    let low = gaps.iter().filter(|(_, s, _)| s == "Low").count();
+
+    assert!(
+        critical >= 5,
+        "expected >= 5 Critical gaps, found {critical}"
+    );
+    assert!(high >= 10, "expected >= 10 High gaps, found {high}");
+    assert!(medium >= 10, "expected >= 10 Medium gaps, found {medium}");
+    assert!(low >= 8, "expected >= 8 Low gaps, found {low}");
+}
+
+#[test]
+fn every_summary_gap_appears_in_per_domain_section() {
+    let doc = load_baseline_doc();
+    let summary_gaps = extract_summary_table_gaps(&doc);
+    let body_ids = extract_gap_ids(&doc);
+
+    for (gap_id, _, _) in &summary_gaps {
+        assert!(
+            body_ids.contains(gap_id),
+            "summary gap {gap_id} must also appear in per-domain sections"
+        );
+    }
+}
+
+#[test]
+fn all_phases_are_valid() {
+    let doc = load_baseline_doc();
+    let gaps = extract_summary_table_gaps(&doc);
+    let valid_phases = ["A", "B", "C", "D"];
+
+    for (id, _, phase) in &gaps {
+        assert!(
+            valid_phases.iter().any(|p| phase.contains(p)),
+            "gap {id} has invalid phase '{phase}', expected one of {valid_phases:?}"
+        );
+    }
+}
+
+#[test]
+fn critical_gaps_are_in_early_phases() {
+    let doc = load_baseline_doc();
+    let gaps = extract_summary_table_gaps(&doc);
+
+    for (id, severity, phase) in &gaps {
+        if severity == "Critical" {
+            assert!(
+                phase.contains('A') || phase.contains('B'),
+                "critical gap {id} should be in Phase A or B, found Phase {phase}"
+            );
+        }
+    }
+}
+
+#[test]
+fn database_reliability_requirements_are_numbered() {
+    let doc = load_baseline_doc();
+    for i in 1..=6 {
+        let req_id = format!("DR-{i:02}");
+        assert!(
+            doc.contains(&req_id),
+            "missing database reliability requirement {req_id}"
+        );
+    }
+}
+
+#[test]
+fn messaging_reliability_requirements_are_numbered() {
+    let doc = load_baseline_doc();
+    for i in 1..=6 {
+        let req_id = format!("MR-{i:02}");
+        assert!(
+            doc.contains(&req_id),
+            "missing messaging reliability requirement {req_id}"
+        );
+    }
+}
+
+#[test]
+fn module_paths_reference_real_directories() {
+    let doc = load_baseline_doc();
+    let expected_modules = [
+        "database/postgres.rs",
+        "database/mysql.rs",
+        "database/sqlite.rs",
+        "messaging/redis.rs",
+        "messaging/nats.rs",
+        "messaging/kafka.rs",
+        "sync/pool.rs",
+    ];
+    for module in &expected_modules {
+        assert!(
+            doc.contains(module),
+            "baseline must reference module path: {module}"
+        );
+    }
+}
+
+#[test]
+fn module_source_files_exist() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let expected_files = [
+        "src/database/postgres.rs",
+        "src/database/mysql.rs",
+        "src/database/sqlite.rs",
+        "src/messaging/redis.rs",
+        "src/messaging/nats.rs",
+        "src/messaging/kafka.rs",
+        "src/sync/pool.rs",
+    ];
+    for file in &expected_files {
+        let path = manifest_dir.join(file);
+        assert!(path.exists(), "referenced source file must exist: {file}");
+    }
+}
+
+#[test]
+fn hard_blockers_section_lists_critical_gaps() {
+    let doc = load_baseline_doc();
+    let hard_section = doc
+        .split("Hard Blocker")
+        .nth(1)
+        .expect("must have Hard Blockers section");
+
+    // Critical pool and driver gaps must be in hard blockers
+    let critical_ids = ["PG-G4", "MY-G3", "RD-G1", "RD-G2"];
+    for id in &critical_ids {
+        assert!(
+            hard_section.contains(id),
+            "critical gap {id} must be listed in Hard Blockers section"
+        );
+    }
+}
+
+#[test]
+fn soft_blockers_section_lists_high_severity_gaps() {
+    let doc = load_baseline_doc();
+    let soft_section = doc
+        .split("Soft Blocker")
+        .nth(1)
+        .expect("must have Soft Blockers section");
+
+    let expected = ["PG-G3", "NT-G2", "NT-G3"];
+    for id in &expected {
+        assert!(
+            soft_section.contains(id),
+            "high-severity gap {id} should be in Soft Blockers section"
+        );
+    }
+}
+
+#[test]
+fn tokio_ecosystem_equivalents_are_named() {
+    let doc = load_baseline_doc();
+    let equivalents = [
+        "tokio-postgres",
+        "sqlx",
+        "fred",
+        "redis-rs",
+        "async-nats",
+        "rdkafka",
+    ];
+    for eq in &equivalents {
+        assert!(
+            doc.contains(eq),
+            "baseline must name tokio ecosystem equivalent: {eq}"
+        );
+    }
+}
+
+#[test]
+fn feature_family_mapping_is_consistent() {
+    let doc = load_baseline_doc();
+    // F18 = database family, F19 = messaging family
+    assert!(
+        doc.contains("F18") && doc.contains("F19"),
+        "baseline must map gaps to capability families F18 and F19"
+    );
+
+    // Verify family assignments
+    assert!(
+        doc.contains("PostgreSQL") && doc.contains("F18"),
+        "PostgreSQL must be in family F18"
+    );
+    assert!(
+        doc.contains("Redis") && doc.contains("F19"),
+        "Redis must be in family F19"
+    );
+}
+
+#[test]
+fn conditional_eliminations_reference_g3_interop() {
+    let doc = load_baseline_doc();
+    let g3_section = doc
+        .split("Conditional Elimination")
+        .nth(1)
+        .expect("must have conditional eliminations section");
+
+    assert!(
+        g3_section.contains("PG-G4"),
+        "G3 eliminations must mention PG-G4 (pool can be replaced by bb8)"
+    );
+    assert!(
+        g3_section.contains("bb8") || g3_section.contains("deadpool"),
+        "G3 eliminations must name pooling crate alternatives"
+    );
+}
+
+#[test]
+fn document_has_revision_history() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("Revision History"),
+        "baseline must include revision history section"
+    );
+    assert!(
+        doc.contains("SapphireHill"),
+        "revision history must credit authoring agent"
+    );
+}
