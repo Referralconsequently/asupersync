@@ -329,11 +329,14 @@ impl Bulkhead {
         // the metrics lock once, instead of acquiring it per timed-out entry.
         let mut timeout_count = 0u64;
         let mut timeout_wait_ms = 0u64;
+        let mut max_individual_wait_ms = 0u64;
         for entry in queue.iter_mut() {
             if entry.result.is_none() && now_millis >= entry.deadline_millis {
                 entry.result = Some(Err(RejectionReason::Timeout));
                 timeout_count += 1;
-                timeout_wait_ms += now_millis.saturating_sub(entry.enqueued_at_millis);
+                let wait = now_millis.saturating_sub(entry.enqueued_at_millis);
+                timeout_wait_ms += wait;
+                max_individual_wait_ms = max_individual_wait_ms.max(wait);
             }
         }
         if timeout_count > 0 {
@@ -345,7 +348,7 @@ impl Bulkhead {
             self.total_wait_time_ms
                 .fetch_add(timeout_wait_ms, Ordering::Relaxed);
             self.max_queue_wait_ms_atomic
-                .fetch_max(timeout_wait_ms, Ordering::Relaxed);
+                .fetch_max(max_individual_wait_ms, Ordering::Relaxed);
         }
 
         // Find all waiting entries that can be granted
