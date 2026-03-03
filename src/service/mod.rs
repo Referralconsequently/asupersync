@@ -13,7 +13,9 @@
 //! - [`concurrency_limit`]: Limit concurrent in-flight requests
 //! - [`rate_limit`]: Rate-limit requests using a token bucket
 //! - [`retry`]: Retry failed requests according to a policy
+//! - [`buffer`]: Buffer requests via a bounded channel
 
+pub mod buffer;
 mod builder;
 pub mod concurrency_limit;
 mod layer;
@@ -23,6 +25,7 @@ pub mod retry;
 mod service;
 pub mod timeout;
 
+pub use buffer::{Buffer, BufferError, BufferLayer};
 pub use builder::ServiceBuilder;
 pub use concurrency_limit::{ConcurrencyLimit, ConcurrencyLimitError, ConcurrencyLimitLayer};
 pub use layer::{Identity, Layer, Stack};
