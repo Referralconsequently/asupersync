@@ -62,7 +62,7 @@ pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
 pub use path_ops::{
     canonicalize, copy, hard_link, metadata, read, read_link, read_to_string, remove_file, rename,
-    set_permissions, symlink_metadata, write,
+    set_permissions, symlink_metadata, write, write_atomic,
 };
 pub use read_dir::{DirEntry, ReadDir, read_dir};
 

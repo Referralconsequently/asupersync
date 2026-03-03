@@ -7,7 +7,9 @@
 use super::metadata::{Metadata, Permissions};
 use crate::runtime::spawn_blocking_io;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Get metadata for a path (follows symlinks).
 pub async fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
@@ -136,6 +138,100 @@ pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Re
     let path = path.as_ref().to_owned();
     let contents = contents.as_ref().to_owned();
     spawn_blocking_io(move || std::fs::write(&path, &contents)).await
+}
+
+/// Atomically replace file contents via temp-file + rename.
+///
+/// The temporary file is created in the target directory, fully written and
+/// `sync_all()`'d, then renamed into place. On Unix, the parent directory is
+/// also `sync_all()`'d after the rename so directory-entry durability is
+/// explicit.
+///
+/// If the operation fails before rename, the temporary file is cleaned up.
+pub async fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let path = path.as_ref().to_owned();
+    let contents = contents.as_ref().to_owned();
+    spawn_blocking_io(move || write_atomic_blocking(&path, &contents)).await
+}
+
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn write_atomic_blocking(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = normalized_parent(path);
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic write target must include a file name",
+        )
+    })?;
+
+    let tmp_path = unique_tmp_path(parent, file_name);
+    let mut tmp_guard = TempPathGuard::new(tmp_path.clone());
+
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp_path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+
+    std::fs::rename(&tmp_path, path)?;
+    tmp_guard.disarm();
+    sync_parent_dir(parent)?;
+    Ok(())
+}
+
+fn normalized_parent(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+fn unique_tmp_path(parent: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    let counter = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(file_name);
+    tmp_name.push(format!(
+        ".asupersync-tmp-{}-{counter}",
+        std::process::id()
+    ));
+    parent.join(tmp_name)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    let dir = std::fs::File::open(parent)?;
+    dir.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+struct TempPathGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempPathGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempPathGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 // ---- io_uring helpers ----
@@ -350,6 +446,67 @@ mod tests {
             crate::assert_with_log!(!exists, "renamed removed", false, exists);
         });
         crate::test_complete!("copy_rename_remove");
+    }
+
+    #[test]
+    fn write_atomic_creates_and_replaces_without_temp_leaks() {
+        init_test("write_atomic_creates_and_replaces_without_temp_leaks");
+        let dir = TempDir::new("write_atomic").unwrap();
+        let path = dir.path().join("target.txt");
+
+        future::block_on(async {
+            write_atomic(&path, b"v1").await.unwrap();
+            let first = read(&path).await.unwrap();
+            crate::assert_with_log!(first == b"v1", "initial write", b"v1", first);
+
+            write_atomic(&path, b"v2").await.unwrap();
+            let second = read(&path).await.unwrap();
+            crate::assert_with_log!(second == b"v2", "replacement write", b"v2", second);
+
+            let mut leaked_tmp = Vec::new();
+            for entry in std::fs::read_dir(dir.path()).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name();
+                if name.to_string_lossy().contains(".asupersync-tmp-") {
+                    leaked_tmp.push(name.to_string_lossy().to_string());
+                }
+            }
+            crate::assert_with_log!(
+                leaked_tmp.is_empty(),
+                "no leaked temporary files",
+                "[]",
+                format!("{leaked_tmp:?}")
+            );
+        });
+        crate::test_complete!("write_atomic_creates_and_replaces_without_temp_leaks");
+    }
+
+    #[test]
+    fn write_atomic_missing_parent_fails_cleanly() {
+        init_test("write_atomic_missing_parent_fails_cleanly");
+        let dir = TempDir::new("write_atomic_missing_parent").unwrap();
+        let missing_parent = dir.path().join("missing");
+        let target = missing_parent.join("target.txt");
+
+        future::block_on(async {
+            let err = write_atomic(&target, b"data")
+                .await
+                .expect_err("missing parent should fail");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::NotFound,
+                "missing parent returns NotFound",
+                io::ErrorKind::NotFound,
+                err.kind()
+            );
+            let target_exists = target.exists();
+            crate::assert_with_log!(
+                !target_exists,
+                "target should not be created on failure",
+                false,
+                target_exists
+            );
+        });
+        crate::test_complete!("write_atomic_missing_parent_fails_cleanly");
     }
 
     #[cfg(unix)]
