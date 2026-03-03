@@ -37,6 +37,7 @@ impl From<io::Error> for LinesCodecError {
 pub struct LinesCodec {
     max_length: usize,
     next_index: usize,
+    is_discarding: bool,
 }
 
 impl LinesCodec {
@@ -52,6 +53,7 @@ impl LinesCodec {
         Self {
             max_length,
             next_index: 0,
+            is_discarding: false,
         }
     }
 
@@ -73,33 +75,87 @@ impl Decoder for LinesCodec {
     type Error = LinesCodecError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<String>, Self::Error> {
-        let read_to = std::cmp::min(self.max_length.saturating_add(1), src.len());
+        loop {
+            let read_to = if self.is_discarding {
+                src.len()
+            } else {
+                std::cmp::min(self.max_length.saturating_add(1), src.len())
+            };
 
-        let newline_offset = src[self.next_index..read_to]
-            .iter()
-            .position(|b| *b == b'\n');
+            let newline_offset = src[self.next_index..read_to]
+                .iter()
+                .position(|b| *b == b'\n');
 
-        if let Some(offset) = newline_offset {
-            let newline_index = self.next_index + offset;
-            self.next_index = 0;
+            match (self.is_discarding, newline_offset) {
+                (true, Some(offset)) => {
+                    // Drop the oversized line, including trailing '\n', and
+                    // continue decoding subsequent data.
+                    let newline_index = self.next_index + offset;
+                    let _ = src.split_to(newline_index + 1);
+                    self.next_index = 0;
+                    self.is_discarding = false;
+                    continue;
+                }
+                (true, None) => {
+                    // Keep memory bounded while discarding an oversized line.
+                    src.clear();
+                    self.next_index = 0;
+                    return Ok(None);
+                }
+                (false, Some(offset)) => {
+                    let newline_index = self.next_index + offset;
+                    self.next_index = 0;
 
-            let mut line = src.split_to(newline_index + 1);
-            // Drop trailing '\n'
-            line.truncate(line.len().saturating_sub(1));
+                    let mut line = src.split_to(newline_index + 1);
+                    // Drop trailing '\n'
+                    line.truncate(line.len().saturating_sub(1));
 
-            // Handle CRLF
-            if line.last() == Some(&b'\r') {
-                line.truncate(line.len().saturating_sub(1));
+                    // Handle CRLF
+                    if line.last() == Some(&b'\r') {
+                        line.truncate(line.len().saturating_sub(1));
+                    }
+
+                    let s =
+                        String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
+                    return Ok(Some(s));
+                }
+                (false, None) => {
+                    if src.len() > self.max_length {
+                        self.is_discarding = true;
+                        return Err(LinesCodecError::MaxLineLengthExceeded);
+                    }
+                    self.next_index = read_to;
+                    return Ok(None);
+                }
             }
+        }
+    }
 
-            let s = String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
-            Ok(Some(s))
-        } else {
-            if src.len() > self.max_length {
-                return Err(LinesCodecError::MaxLineLengthExceeded);
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode(src)? {
+            Some(frame) => Ok(Some(frame)),
+            None if src.is_empty() => Ok(None),
+            None if self.is_discarding => {
+                src.clear();
+                self.next_index = 0;
+                self.is_discarding = false;
+                Ok(None)
             }
-            self.next_index = read_to;
-            Ok(None)
+            None => {
+                self.next_index = 0;
+                if src.len() > self.max_length {
+                    src.clear();
+                    return Err(LinesCodecError::MaxLineLengthExceeded);
+                }
+
+                let mut line = src.split_to(src.len());
+                if line.last() == Some(&b'\r') {
+                    line.truncate(line.len().saturating_sub(1));
+                }
+
+                let s = String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
+                Ok(Some(s))
+            }
         }
     }
 }
@@ -146,6 +202,35 @@ mod tests {
             codec.decode(&mut buf),
             Err(LinesCodecError::MaxLineLengthExceeded)
         ));
+    }
+
+    #[test]
+    fn test_lines_codec_discards_oversized_and_recovers() {
+        let mut codec = LinesCodec::new_with_max_length(5);
+        let mut buf = BytesMut::from("toolong");
+
+        assert!(matches!(
+            codec.decode(&mut buf),
+            Err(LinesCodecError::MaxLineLengthExceeded)
+        ));
+
+        // Finish the oversized line, then provide a valid line.
+        buf.put_slice(b"\nok\n");
+
+        assert_eq!(codec.decode(&mut buf).unwrap(), Some("ok".to_string()));
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn test_lines_codec_decode_eof_returns_trailing_line() {
+        let mut codec = LinesCodec::new();
+        let mut buf = BytesMut::from("tail-without-newline");
+
+        assert_eq!(
+            codec.decode_eof(&mut buf).unwrap(),
+            Some("tail-without-newline".to_string())
+        );
+        assert_eq!(codec.decode_eof(&mut buf).unwrap(), None);
     }
 
     #[test]

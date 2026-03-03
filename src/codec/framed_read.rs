@@ -217,16 +217,17 @@ mod tests {
 
     #[test]
     fn framed_read_handles_partial_data() {
-        // Data without trailing newline triggers decode_eof.
+        // Data without trailing newline is emitted by decode_eof.
         let reader = SliceReader::new(b"partial");
         let mut framed = FramedRead::new(reader, LinesCodec::new());
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // First poll: reads data, decode returns None, then reads EOF.
-        // decode_eof should return an error because there's data but no newline.
         let poll = Pin::new(&mut framed).poll_next(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Some(Err(_)))));
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref s))) if s == "partial"));
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(None)));
     }
 
     #[test]

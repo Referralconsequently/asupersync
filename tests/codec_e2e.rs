@@ -196,21 +196,50 @@ fn e2e_codec_006_lines_decode_eof() {
         result.is_none()
     );
 
-    test_section!("incomplete line at eof errors");
+    test_section!("incomplete line at eof yields trailing line");
     let mut codec = LinesCodec::new();
     let mut buf = BytesMut::from("no newline");
-    let err = codec
+    let line = codec
         .decode_eof(&mut buf)
-        .expect_err("incomplete should error");
-    // LinesCodecError::InvalidUtf8 is used for io::Error conversion
+        .expect("decode eof")
+        .expect("line");
     assert_with_log!(
-        matches!(err, LinesCodecError::InvalidUtf8),
-        "incomplete eof error",
-        "InvalidUtf8",
-        err
+        line == "no newline",
+        "incomplete eof line",
+        "no newline",
+        line
     );
 
     test_complete!("e2e_codec_006_lines_decode_eof");
+}
+
+/// E2E-CODEC-007: LinesCodec discards oversized lines and recovers
+///
+/// Verifies that max-length violations do not cause unbounded retention and
+/// that decoding resumes after the oversized line terminator.
+#[test]
+fn e2e_codec_007_lines_discard_and_recover() {
+    init_test("e2e_codec_007_lines_discard_and_recover");
+    test_section!("setup");
+
+    let mut codec = LinesCodec::new_with_max_length(5);
+    let mut buf = BytesMut::from("way_too_long");
+
+    test_section!("oversized line rejected");
+    let err = codec.decode(&mut buf).expect_err("should reject");
+    assert_with_log!(
+        err == LinesCodecError::MaxLineLengthExceeded,
+        "max length error",
+        LinesCodecError::MaxLineLengthExceeded,
+        err
+    );
+
+    test_section!("recover after oversized newline");
+    buf.put_slice(b"\nok\n");
+    let line = codec.decode(&mut buf).expect("decode").expect("line");
+    assert_with_log!(line == "ok", "recovered line", "ok", line);
+
+    test_complete!("e2e_codec_007_lines_discard_and_recover");
 }
 
 // ============================================================================
