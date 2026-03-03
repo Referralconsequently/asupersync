@@ -527,6 +527,19 @@ impl Command {
         child.wait_with_output()
     }
 
+    /// Async variant of [`output`](Self::output).
+    ///
+    /// Uses cooperative polling to avoid blocking the runtime thread while
+    /// waiting for process exit and draining pipes.
+    pub async fn output_async(&mut self) -> Result<Output, ProcessError> {
+        self.stdin(Stdio::Null);
+        self.stdout(Stdio::Pipe);
+        self.stderr(Stdio::Pipe);
+
+        let child = self.spawn()?;
+        child.wait_with_output_async().await
+    }
+
     /// Spawns the command and waits for it to complete, returning status.
     ///
     /// Stdin, stdout, and stderr are inherited.
@@ -548,6 +561,15 @@ impl Command {
     pub fn status(&mut self) -> Result<ExitStatus, ProcessError> {
         let mut child = self.spawn()?;
         child.wait()
+    }
+
+    /// Async variant of [`status`](Self::status).
+    ///
+    /// Uses cooperative polling to avoid blocking the runtime thread while
+    /// waiting for process exit.
+    pub async fn status_async(&mut self) -> Result<ExitStatus, ProcessError> {
+        let mut child = self.spawn()?;
+        child.wait_async().await
     }
 }
 
@@ -634,6 +656,19 @@ impl Child {
         Ok(ExitStatus::from_std(status))
     }
 
+    /// Async variant of [`wait`](Self::wait).
+    ///
+    /// Uses `try_wait()` + cooperative yielding to avoid blocking the runtime
+    /// worker thread while waiting for process completion.
+    pub async fn wait_async(&mut self) -> Result<ExitStatus, ProcessError> {
+        loop {
+            if let Some(status) = self.try_wait()? {
+                return Ok(status);
+            }
+            crate::runtime::yield_now().await;
+        }
+    }
+
     /// Waits for the child and collects all output.
     ///
     /// This consumes the `Child` and returns the collected stdout/stderr.
@@ -702,6 +737,77 @@ impl Child {
         let status = match status {
             Some(s) => s,
             None => self.wait()?,
+        };
+
+        Ok(Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        })
+    }
+
+    /// Async variant of [`wait_with_output`](Self::wait_with_output).
+    ///
+    /// Uses cooperative yielding instead of thread sleeps while waiting for
+    /// process exit and pipe drain progress.
+    pub async fn wait_with_output_async(mut self) -> Result<Output, ProcessError> {
+        // Take the handles before waiting
+        let mut stdout_handle = self.stdout.take();
+        let mut stderr_handle = self.stderr.take();
+        drop(self.stdin.take()); // Close stdin
+
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+
+        let mut status = None;
+        let mut stdout_done = stdout_handle.is_none();
+        let mut stderr_done = stderr_handle.is_none();
+
+        while status.is_none() || !stdout_done || !stderr_done {
+            let mut progressed = false;
+
+            if status.is_none() {
+                match self.try_wait() {
+                    Ok(Some(s)) => {
+                        status = Some(s);
+                        progressed = true;
+                    }
+                    Ok(None) => {}
+                    Err(ProcessError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(e),
+                }
+            }
+
+            if let Some(handle) = stdout_handle.as_mut() {
+                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stdout_buf)?;
+                if done {
+                    stdout_handle = None;
+                    stdout_done = true;
+                }
+                progressed |= any || done;
+            }
+
+            if let Some(handle) = stderr_handle.as_mut() {
+                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stderr_buf)?;
+                if done {
+                    stderr_handle = None;
+                    stderr_done = true;
+                }
+                progressed |= any || done;
+            }
+
+            if status.is_some() && stdout_done && stderr_done {
+                break;
+            }
+
+            if !progressed {
+                crate::runtime::yield_now().await;
+            }
+        }
+
+        let status = match status {
+            Some(s) => s,
+            None => self.wait_async().await?,
         };
 
         Ok(Output {
@@ -1113,6 +1219,34 @@ mod tests {
     }
 
     #[test]
+    fn test_command_echo_async_output() {
+        init_test("test_command_echo_async_output");
+
+        let result = futures_lite::future::block_on(async {
+            let child = Command::new("echo")
+                .arg("hello")
+                .stdout(Stdio::Pipe)
+                .spawn()?;
+            child.wait_with_output_async().await
+        })
+        .expect("async output failed");
+
+        crate::assert_with_log!(
+            result.status.success(),
+            "success",
+            true,
+            result.status.success()
+        );
+        crate::assert_with_log!(
+            result.stdout == b"hello\n",
+            "stdout",
+            "hello\\n",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        crate::test_complete!("test_command_echo_async_output");
+    }
+
+    #[test]
     fn test_command_exit_code() {
         init_test("test_command_exit_code");
 
@@ -1132,6 +1266,26 @@ mod tests {
             result.code()
         );
         crate::test_complete!("test_command_exit_code");
+    }
+
+    #[test]
+    fn test_command_exit_code_async_status() {
+        init_test("test_command_exit_code_async_status");
+
+        let result = futures_lite::future::block_on(async {
+            let mut child = Command::new("sh").arg("-c").arg("exit 42").spawn()?;
+            child.wait_async().await
+        })
+        .expect("async wait failed");
+
+        crate::assert_with_log!(!result.success(), "not success", false, result.success());
+        crate::assert_with_log!(
+            result.code() == Some(42),
+            "exit code",
+            Some(42),
+            result.code()
+        );
+        crate::test_complete!("test_command_exit_code_async_status");
     }
 
     #[test]
