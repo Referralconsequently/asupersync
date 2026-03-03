@@ -35,9 +35,8 @@
 //! handshake completes, read/write operations follow the cancel-safety
 //! properties of the underlying I/O traits.
 
-use crate::time::{TimeSource, WallClock};
+use crate::cx::Cx;
 use crate::types::Time;
-use std::sync::OnceLock;
 
 mod acceptor;
 mod connector;
@@ -45,9 +44,10 @@ mod error;
 mod stream;
 mod types;
 
-fn wall_clock_now() -> Time {
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
-    CLOCK.get_or_init(WallClock::new).now()
+fn timeout_now() -> Time {
+    Cx::current()
+        .and_then(|current| current.timer_driver())
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
 pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder};
@@ -57,3 +57,41 @@ pub use stream::TlsStream;
 pub use types::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, PrivateKey, RootCertStore,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::timeout_now;
+    use crate::cx::Cx;
+    use crate::time::{TimerDriverHandle, VirtualClock, wall_now};
+    use crate::types::{Budget, RegionId, TaskId, Time};
+    use std::sync::Arc;
+
+    #[test]
+    fn timeout_now_uses_current_timer_driver_clock_when_available() {
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(42)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(virtual_clock);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(7, 0),
+            TaskId::new_for_test(9, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver.clone()),
+            None,
+        );
+        let _current = Cx::set_current(Some(cx));
+
+        assert_eq!(timeout_now(), timer_driver.now());
+    }
+
+    #[test]
+    fn timeout_now_falls_back_to_wall_now_when_no_context_is_active() {
+        let before = wall_now();
+        let now = timeout_now();
+        let after = wall_now();
+
+        assert!(now >= before);
+        assert!(now <= after);
+    }
+}

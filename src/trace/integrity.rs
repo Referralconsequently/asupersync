@@ -617,6 +617,7 @@ fn verify_metadata(
     let metadata: TraceMetadata = match rmp_serde::from_slice(&meta_bytes) {
         Ok(m) => m,
         Err(e) => {
+            let e: rmp_serde::decode::Error = e;
             result.add_issue(IntegrityIssue::InvalidMetadata {
                 message: e.to_string(),
             });
@@ -707,6 +708,7 @@ fn verify_events(
         let event: ReplayEvent = match rmp_serde::from_slice(&event_bytes) {
             Ok(e) => e,
             Err(e) => {
+                let e: rmp_serde::decode::Error = e;
                 result.add_issue(IntegrityIssue::InvalidEvent {
                     index: event_index,
                     message: e.to_string(),

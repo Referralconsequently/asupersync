@@ -246,8 +246,10 @@ impl<T: Serialize> Serializer<T> for SerdeCodec {
     ) -> Result<Vec<u8>, SerializationError> {
         match format {
             SerializationFormat::MessagePack => {
-                rmp_serde::to_vec(value).map_err(|err| SerializationError::SerializationFailed {
-                    reason: err.to_string(),
+                rmp_serde::to_vec(value).map_err(|err: rmp_serde::encode::Error| {
+                    SerializationError::SerializationFailed {
+                        reason: err.to_string(),
+                    }
                 })
             }
             SerializationFormat::Bincode => {
@@ -276,11 +278,13 @@ impl<T: DeserializeOwned> Deserializer<T> for SerdeCodec {
         format: SerializationFormat,
     ) -> Result<T, DeserializationError> {
         match format {
-            SerializationFormat::MessagePack => rmp_serde::from_slice(bytes).map_err(|err| {
-                DeserializationError::DeserializationFailed {
-                    reason: err.to_string(),
-                }
-            }),
+            SerializationFormat::MessagePack => {
+                rmp_serde::from_slice(bytes).map_err(|err: rmp_serde::decode::Error| {
+                    DeserializationError::DeserializationFailed {
+                        reason: err.to_string(),
+                    }
+                })
+            }
             SerializationFormat::Bincode => {
                 bincode::serde::decode_from_slice(bytes, bincode::config::legacy())
                     .map(|(decoded, _)| decoded)

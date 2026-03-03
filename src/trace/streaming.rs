@@ -252,7 +252,8 @@ impl ReplayCheckpoint {
     ///
     /// Returns an error if serialization fails.
     pub fn to_bytes(&self) -> StreamingReplayResult<Vec<u8>> {
-        rmp_serde::to_vec(self).map_err(|e| StreamingReplayError::Serialize(e.to_string()))
+        rmp_serde::to_vec(self)
+            .map_err(|e: rmp_serde::encode::Error| StreamingReplayError::Serialize(e.to_string()))
     }
 
     /// Deserializes a checkpoint from bytes.
@@ -261,8 +262,9 @@ impl ReplayCheckpoint {
     ///
     /// Returns an error if deserialization fails.
     pub fn from_bytes(bytes: &[u8]) -> StreamingReplayResult<Self> {
-        rmp_serde::from_slice(bytes)
-            .map_err(|e| StreamingReplayError::InvalidCheckpoint(e.to_string()))
+        rmp_serde::from_slice(bytes).map_err(|e: rmp_serde::decode::Error| {
+            StreamingReplayError::InvalidCheckpoint(e.to_string())
+        })
     }
 }
 
