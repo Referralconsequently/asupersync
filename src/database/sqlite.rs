@@ -40,6 +40,7 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -339,6 +340,8 @@ pub struct SqliteConnection {
     inner: Arc<Mutex<SqliteConnectionInner>>,
     /// Handle to the blocking pool.
     pool: BlockingPoolHandle,
+    /// Flag indicating an uncommitted transaction was dropped and needs rollback.
+    needs_rollback: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for SqliteConnection {
@@ -346,6 +349,7 @@ impl fmt::Debug for SqliteConnection {
         f.debug_struct("SqliteConnection")
             .field("open", &self.inner.lock().conn.is_some())
             .field("pool", &self.pool)
+            .field("needs_rollback", &self.needs_rollback.load(Ordering::Relaxed))
             .finish()
     }
 }

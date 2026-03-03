@@ -143,6 +143,10 @@ where
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         let this = self.get_mut();
         let filled_before = buf.filled().len();
 
