@@ -258,7 +258,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
                 // Was dequeued by unlock() but we're still waiting — re-register
                 // at the FRONT to preserve FIFO fairness.
                 let new_id = state.next_waiter_id;
-                state.next_waiter_id += 1;
+                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                 state.waiters.push_front(Waiter {
                     waker: context.waker().clone(),
                     id: new_id,
@@ -269,7 +269,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             }
         } else {
             let id = state.next_waiter_id;
-            state.next_waiter_id += 1;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
             state.waiters.push_back(Waiter {
                 waker: context.waker().clone(),
                 id,
@@ -438,7 +438,7 @@ impl<T> OwnedMutexGuard<T> {
                         }
                     } else {
                         let new_id = state.next_waiter_id;
-                        state.next_waiter_id += 1;
+                        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                         state.waiters.push_front(Waiter {
                             waker: context.waker().clone(),
                             id: new_id,
@@ -449,7 +449,7 @@ impl<T> OwnedMutexGuard<T> {
                     }
                 } else {
                     let id = state.next_waiter_id;
-                    state.next_waiter_id += 1;
+                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
                     state.waiters.push_back(Waiter {
                         waker: context.waker().clone(),
                         id,

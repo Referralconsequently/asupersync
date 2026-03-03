@@ -829,7 +829,7 @@ where
             }
         } else {
             let id = state.next_waiter_id;
-            state.next_waiter_id += 1;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
             let idx = state.waiters.len();
             state.waiters.push_back(PoolWaiter {
                 id,
@@ -1482,7 +1482,7 @@ where
                             state.waiters.remove(p);
                         }
 
-                        let waker = if state.closed {
+                        let waker: Option<std::task::Waker> = if state.closed {
                             None
                         } else {
                             let total_including_creating =

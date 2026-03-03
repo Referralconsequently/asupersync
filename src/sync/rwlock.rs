@@ -330,7 +330,17 @@ impl<T> RwLock<T> {
         let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
             state.writer_active = false;
-            if state.writer_waiters > 0 {
+
+            let wake_writer = if state.writer_waiters > 0 && !state.reader_waiters.is_empty() {
+                // Both are waiting. Wake the oldest to ensure fairness.
+                let writer_id = state.writer_queue.front().unwrap().id;
+                let reader_id = state.reader_waiters.front().unwrap().id;
+                writer_id < reader_id
+            } else {
+                state.writer_waiters > 0
+            };
+
+            if wake_writer {
                 let waker = Self::pop_writer_waiter(&mut state);
                 if waker.is_some() {
                     state.writer_active = true;
@@ -403,7 +413,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
         }
 
         let id = state.next_waiter_id;
-        state.next_waiter_id += 1;
+        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
         state.reader_waiters.push_back(Waiter {
             waker: context.waker().clone(),
             id,
@@ -497,7 +507,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
         }
 
         let id = state.next_waiter_id;
-        state.next_waiter_id += 1;
+        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
         state.writer_queue.push_back(Waiter {
             waker: context.waker().clone(),
             id,
@@ -532,7 +542,15 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 state.writer_active = false;
 
-                if state.writer_waiters > 0 {
+                let wake_writer = if state.writer_waiters > 0 && !state.reader_waiters.is_empty() {
+                    let writer_id = state.writer_queue.front().unwrap().id;
+                    let reader_id = state.reader_waiters.front().unwrap().id;
+                    writer_id < reader_id
+                } else {
+                    state.writer_waiters > 0
+                };
+
+                if wake_writer {
                     writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
                     if writer_waker.is_some() {
                         state.writer_active = true;
@@ -755,7 +773,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
         }
 
         let id = state.next_waiter_id;
-        state.next_waiter_id += 1;
+        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
         state.reader_waiters.push_back(Waiter {
             waker: context.waker().clone(),
             id,
@@ -851,7 +869,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
         }
 
         let id = state.next_waiter_id;
-        state.next_waiter_id += 1;
+        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
         state.writer_queue.push_back(Waiter {
             waker: context.waker().clone(),
             id,
@@ -886,7 +904,15 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 state.writer_active = false;
 
-                if state.writer_waiters > 0 {
+                let wake_writer = if state.writer_waiters > 0 && !state.reader_waiters.is_empty() {
+                    let writer_id = state.writer_queue.front().unwrap().id;
+                    let reader_id = state.reader_waiters.front().unwrap().id;
+                    writer_id < reader_id
+                } else {
+                    state.writer_waiters > 0
+                };
+
+                if wake_writer {
                     writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
                     if writer_waker.is_some() {
                         state.writer_active = true;
