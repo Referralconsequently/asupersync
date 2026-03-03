@@ -56,6 +56,7 @@ pub mod request_region;
 pub mod response;
 pub mod router;
 pub mod security;
+pub mod sse;
 pub mod websocket;
 
 pub use extract::{
