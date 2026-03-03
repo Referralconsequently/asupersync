@@ -1119,8 +1119,10 @@ impl NatsClient {
         Ok(())
     }
 
-    /// Close the connection.
-    pub fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
+    /// Close the connection gracefully.
+    ///
+    /// Flushes pending writes before shutting down the TCP stream.
+    pub async fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         self.state.closed.store(true, Ordering::Release);
@@ -1132,6 +1134,8 @@ impl NatsClient {
         }
 
         if self.connected {
+            // Best-effort flush before shutdown
+            let _ = self.stream.flush().await;
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
         }
         self.connected = false;
@@ -1394,7 +1398,7 @@ mod tests {
         let mut buf = NatsReadBuffer::new();
         assert!(buf.available().is_empty());
 
-        buf.extend(b"hello\r\n");
+        buf.extend(b"hello\r\n").unwrap();
         assert_eq!(buf.available(), b"hello\r\n");
         assert_eq!(buf.find_crlf(), Some(5));
 
@@ -1405,10 +1409,10 @@ mod tests {
     #[test]
     fn test_read_buffer_partial_crlf() {
         let mut buf = NatsReadBuffer::new();
-        buf.extend(b"hello\r");
+        buf.extend(b"hello\r").unwrap();
         assert_eq!(buf.find_crlf(), None); // Incomplete CRLF
 
-        buf.extend(b"\n");
+        buf.extend(b"\n").unwrap();
         assert_eq!(buf.find_crlf(), Some(5));
     }
 
