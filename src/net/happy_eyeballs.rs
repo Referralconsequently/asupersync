@@ -104,6 +104,42 @@ pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
     result
 }
 
+/// Sorts socket addresses per RFC 8305 §4 while preserving per-address ports.
+///
+/// This follows the same family interleaving policy as [`sort_addresses`], but
+/// operates on full `SocketAddr` values so each address keeps its original port.
+#[must_use]
+fn sort_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let v6: Vec<SocketAddr> = addrs.iter().copied().filter(|addr| addr.is_ipv6()).collect();
+    let v4: Vec<SocketAddr> = addrs.iter().copied().filter(|addr| addr.is_ipv4()).collect();
+
+    let mut result = Vec::with_capacity(v6.len() + v4.len());
+    let mut v6_iter = v6.into_iter();
+    let mut v4_iter = v4.into_iter();
+
+    loop {
+        match (v6_iter.next(), v4_iter.next()) {
+            (Some(v6_addr), Some(v4_addr)) => {
+                result.push(v6_addr);
+                result.push(v4_addr);
+            }
+            (Some(v6_addr), None) => {
+                result.push(v6_addr);
+                result.extend(v6_iter);
+                break;
+            }
+            (None, Some(v4_addr)) => {
+                result.push(v4_addr);
+                result.extend(v4_iter);
+                break;
+            }
+            (None, None) => break,
+        }
+    }
+
+    result
+}
+
 /// Races connection attempts to a set of addresses using Happy Eyeballs v2.
 ///
 /// The algorithm:
@@ -132,15 +168,9 @@ pub async fn connect(addrs: &[SocketAddr], config: &HappyEyeballsConfig) -> io::
         return connect_one(addrs[0], config.connect_timeout).await;
     }
 
-    // Sort addresses: interleave IPv6 and IPv4
-    let sorted_ips: Vec<IpAddr> = addrs.iter().map(SocketAddr::ip).collect();
-    let sorted = sort_addresses(&sorted_ips);
-
-    // Build SocketAddr list preserving port from original addresses
-    // (all addrs should share the same port in typical usage)
-    let port = addrs[0].port();
-    let sorted_addrs: Vec<SocketAddr> =
-        sorted.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
+    // Sort addresses: interleave IPv6 and IPv4 while preserving each
+    // address's original port.
+    let sorted_addrs = sort_socket_addrs(addrs);
 
     // Race connections with staggered starts
     connect_racing(&sorted_addrs, config).await
@@ -504,6 +534,54 @@ mod tests {
         assert_eq!(sorted.len(), 1);
         assert!(sorted[0].is_ipv4());
         crate::test_complete!("sort_addresses_single_v4");
+    }
+
+    #[test]
+    fn sort_socket_addrs_preserves_ports() {
+        init_test("sort_socket_addrs_preserves_ports");
+
+        let addrs: Vec<SocketAddr> = vec![
+            "[2001:db8::1]:443".parse().unwrap(),
+            "192.0.2.10:8443".parse().unwrap(),
+            "[2001:db8::2]:444".parse().unwrap(),
+            "192.0.2.11:8080".parse().unwrap(),
+        ];
+
+        let sorted = sort_socket_addrs(&addrs);
+
+        assert_eq!(sorted.len(), 4);
+        assert_eq!(sorted[0], "[2001:db8::1]:443".parse::<SocketAddr>().unwrap());
+        assert_eq!(sorted[1], "192.0.2.10:8443".parse::<SocketAddr>().unwrap());
+        assert_eq!(sorted[2], "[2001:db8::2]:444".parse::<SocketAddr>().unwrap());
+        assert_eq!(sorted[3], "192.0.2.11:8080".parse::<SocketAddr>().unwrap());
+
+        crate::test_complete!("sort_socket_addrs_preserves_ports");
+    }
+
+    #[test]
+    fn sort_socket_addrs_uneven_families() {
+        init_test("sort_socket_addrs_uneven_families");
+
+        let addrs: Vec<SocketAddr> = vec![
+            "[2001:db8::1]:443".parse().unwrap(),
+            "192.0.2.10:8080".parse().unwrap(),
+            "192.0.2.11:8081".parse().unwrap(),
+            "192.0.2.12:8082".parse().unwrap(),
+        ];
+
+        let sorted = sort_socket_addrs(&addrs);
+
+        assert_eq!(sorted.len(), 4);
+        assert!(sorted[0].is_ipv6());
+        assert!(sorted[1].is_ipv4());
+        assert!(sorted[2].is_ipv4());
+        assert!(sorted[3].is_ipv4());
+        assert_eq!(sorted[0].port(), 443);
+        assert_eq!(sorted[1].port(), 8080);
+        assert_eq!(sorted[2].port(), 8081);
+        assert_eq!(sorted[3].port(), 8082);
+
+        crate::test_complete!("sort_socket_addrs_uneven_families");
     }
 
     // =======================================================================
