@@ -45,6 +45,7 @@ mod read;
 mod read_buf;
 mod seek;
 mod split;
+mod stream_adapters;
 mod write;
 mod write_permit;
 
@@ -65,6 +66,7 @@ pub use read::{AsyncRead, AsyncReadVectored, Chain, Take};
 pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;
 pub use split::{ReadHalf, SplitStream, WriteHalf, split};
+pub use stream_adapters::{ReaderStream, StreamReader};
 pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 
