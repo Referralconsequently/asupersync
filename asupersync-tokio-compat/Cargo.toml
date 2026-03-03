@@ -8,11 +8,18 @@ repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["async", "tokio", "compatibility", "bridge", "interop"]
 categories = ["asynchronous", "network-programming"]
 
+[package.metadata.asupersync_compat_policy]
+policy_version = "1.0.0"
+compatibility_line = "0.1.x"
+release_train = "tokio-compat"
+owner_track = "asupersync-2oh2u.7"
+exception_review = "threaded-agent-mail"
+
 [dependencies]
 # Core Asupersync runtime (no Tokio in core paths).
 asupersync = { version = "0.2.6", path = ".." }
 
-# Tokio sync primitives only — does NOT require a running Tokio runtime.
+# Tokio sync primitives and I/O traits — does NOT require a running Tokio runtime.
 # Used for trait implementations and type bridging.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 

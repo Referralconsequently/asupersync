@@ -46,6 +46,13 @@
 #![warn(clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions, clippy::must_use_candidate)]
 
+/// Stable policy identifier for compatibility scaffolding and release controls.
+pub const COMPAT_POLICY_VERSION: &str = "1.0.0";
+/// Current semver compatibility line for this pre-1.0 adapter crate.
+pub const COMPATIBILITY_LINE: &str = "0.1.x";
+/// Track-level owner for escalation and exception handling.
+pub const OWNER_TRACK_ID: &str = "asupersync-2oh2u.7";
+
 pub mod cancel;
 pub mod io;
 
@@ -174,3 +181,15 @@ impl<E: std::fmt::Display> std::fmt::Display for AdapterError<E> {
 }
 
 impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for AdapterError<E> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatibility_policy_constants_are_present() {
+        assert_eq!(COMPAT_POLICY_VERSION, "1.0.0");
+        assert_eq!(COMPATIBILITY_LINE, "0.1.x");
+        assert_eq!(OWNER_TRACK_ID, "asupersync-2oh2u.7");
+    }
+}
