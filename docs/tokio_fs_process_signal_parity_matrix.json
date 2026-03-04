@@ -524,8 +524,47 @@
       "id": "T3-DRIFT-10",
       "rule": "unit_test_matrix test files must exist, inline test modules must exist, and bead coverage must include T3.3..T3.7",
       "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-11",
+      "rule": "e2e_scenarios must include T310-E2E-01..10 and T310-FD-01..05 with owner modules, log schema fields, and migration linkage",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
     }
   ],
+  "e2e_scenarios": {
+    "bead_id": "asupersync-2oh2u.3.10",
+    "version": 1,
+    "scenario_count": 10,
+    "failure_drill_count": 5,
+    "scenarios": [
+      {"id": "T310-E2E-01", "domain": "filesystem", "focus": "file lifecycle under concurrent access", "owner_modules": ["src/fs/file.rs", "src/fs/path_ops.rs"]},
+      {"id": "T310-E2E-02", "domain": "filesystem", "focus": "atomic write under cancellation", "owner_modules": ["src/fs/path_ops.rs"]},
+      {"id": "T310-E2E-03", "domain": "filesystem", "focus": "directory tree operations with symlinks", "owner_modules": ["src/fs/dir.rs", "src/fs/read_dir.rs", "src/fs/path_ops.rs"]},
+      {"id": "T310-E2E-04", "domain": "process", "focus": "piped IO and exit code verification", "owner_modules": ["src/process.rs"]},
+      {"id": "T310-E2E-05", "domain": "process", "focus": "kill_on_drop cancellation no-zombie", "owner_modules": ["src/process.rs"]},
+      {"id": "T310-E2E-06", "domain": "process", "focus": "spawn error classification", "owner_modules": ["src/process.rs"]},
+      {"id": "T310-E2E-07", "domain": "signal", "focus": "signal storm monotonic delivery", "owner_modules": ["src/signal/signal.rs"]},
+      {"id": "T310-E2E-08", "domain": "signal", "focus": "graceful shutdown multi-subscriber", "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"]},
+      {"id": "T310-E2E-09", "domain": "cross-domain", "focus": "file+process+signal composed workflow", "owner_modules": ["src/fs/file.rs", "src/process.rs", "src/signal/shutdown.rs"]},
+      {"id": "T310-E2E-10", "domain": "cross-domain", "focus": "replay after induced failure", "owner_modules": ["src/fs/file.rs", "src/process.rs", "src/signal/shutdown.rs"]}
+    ],
+    "failure_drills": [
+      {"id": "T310-FD-01", "failure_class": "FS write failure (ENOSPC)", "quiescence_check": "no leaked file handles"},
+      {"id": "T310-FD-02", "failure_class": "process spawn failure", "quiescence_check": "no zombie processes"},
+      {"id": "T310-FD-03", "failure_class": "signal delivery timeout", "quiescence_check": "controller reusable"},
+      {"id": "T310-FD-04", "failure_class": "cascading cancellation", "quiescence_check": "no obligation leaks"},
+      {"id": "T310-FD-05", "failure_class": "replay after fault", "quiescence_check": "clean state"}
+    ],
+    "log_schema_fields": ["correlation_id", "scenario_id", "timestamp_ms", "phase", "op_type", "outcome", "timeline_ms", "replay_command", "owner_module", "error_detail"],
+    "required_log_fields": ["correlation_id", "scenario_id", "timestamp_ms", "phase", "op_type", "outcome", "timeline_ms"],
+    "migration_linkage": {
+      "playbook_beads": ["asupersync-2oh2u.3.8", "asupersync-2oh2u.11.2"],
+      "tokio_fs_scenarios": ["T310-E2E-01", "T310-E2E-02", "T310-E2E-03"],
+      "tokio_process_scenarios": ["T310-E2E-04", "T310-E2E-05", "T310-E2E-06"],
+      "tokio_signal_scenarios": ["T310-E2E-07", "T310-E2E-08"],
+      "cross_domain_scenarios": ["T310-E2E-09", "T310-E2E-10"]
+    }
+  },
   "unit_test_matrix": {
     "bead_id": "asupersync-2oh2u.3.9",
     "version": 1,
@@ -580,6 +619,7 @@
     "rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture",
     "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture",
     "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c -- --nocapture",
-    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t39 -- --nocapture"
+    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t39 -- --nocapture",
+    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t310 -- --nocapture"
   ]
 }

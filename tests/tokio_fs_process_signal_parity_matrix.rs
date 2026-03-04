@@ -1212,7 +1212,14 @@ fn json_unit_test_matrix_is_complete() {
     );
 
     for entry in test_files {
-        for field in ["file", "bead", "domain", "category", "test_count", "scenario_prefix"] {
+        for field in [
+            "file",
+            "bead",
+            "domain",
+            "category",
+            "test_count",
+            "scenario_prefix",
+        ] {
             assert!(
                 entry.get(field).is_some(),
                 "test file entry missing field: {field}"
@@ -1382,5 +1389,313 @@ fn t39_replay_commands_are_rch_routed() {
     assert!(
         doc.contains("rch exec -- cargo test --lib fs:: signal:: process"),
         "T3.9 must include inline unit test replay command"
+    );
+}
+
+// =============================================================================
+// T3.10 End-to-End Scripts with Forensic-Grade Logging Contract Tests
+// =============================================================================
+
+#[test]
+fn matrix_includes_t310_e2e_section() {
+    let doc = load_matrix_doc();
+    for token in [
+        "T3.10 End-to-End Scripts with Forensic-Grade Logging",
+        "asupersync-2oh2u.3.10",
+        "E2E Scenario Matrix",
+        "Structured Log Schema Contract",
+        "Failure and Recovery Drills",
+        "Reproducible Artifact Bundle",
+        "Migration Playbook Linkage",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T3.10 E2E section missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn t310_scenario_matrix_covers_all_domains() {
+    let doc = load_matrix_doc();
+    // All 10 scenario IDs present
+    for id in [
+        "T310-E2E-01",
+        "T310-E2E-02",
+        "T310-E2E-03",
+        "T310-E2E-04",
+        "T310-E2E-05",
+        "T310-E2E-06",
+        "T310-E2E-07",
+        "T310-E2E-08",
+        "T310-E2E-09",
+        "T310-E2E-10",
+    ] {
+        assert!(
+            doc.contains(id),
+            "T3.10 scenario matrix missing scenario: {id}"
+        );
+    }
+    // Domain coverage
+    for domain in ["filesystem", "process", "signal", "cross-domain"] {
+        assert!(
+            doc.contains(domain),
+            "T3.10 scenario matrix missing domain: {domain}"
+        );
+    }
+}
+
+#[test]
+fn t310_log_schema_has_required_fields() {
+    let doc = load_matrix_doc();
+    for field in [
+        "correlation_id",
+        "scenario_id",
+        "timestamp_ms",
+        "phase",
+        "op_type",
+        "outcome",
+        "timeline_ms",
+        "replay_command",
+        "owner_module",
+        "error_detail",
+    ] {
+        assert!(
+            doc.contains(field),
+            "T3.10 log schema missing required field: {field}"
+        );
+    }
+}
+
+#[test]
+fn t310_failure_drills_are_complete() {
+    let doc = load_matrix_doc();
+    for drill in [
+        "T310-FD-01",
+        "T310-FD-02",
+        "T310-FD-03",
+        "T310-FD-04",
+        "T310-FD-05",
+    ] {
+        assert!(
+            doc.contains(drill),
+            "T3.10 failure drills missing: {drill}"
+        );
+    }
+    // Quiescence checks
+    for check in [
+        "No leaked file handles",
+        "No zombie processes",
+        "No obligation leaks",
+    ] {
+        assert!(
+            doc.contains(check),
+            "T3.10 failure drills missing quiescence check: {check}"
+        );
+    }
+}
+
+#[test]
+fn t310_migration_linkage_references_downstream_beads() {
+    let doc = load_matrix_doc();
+    for bead in ["asupersync-2oh2u.3.8", "asupersync-2oh2u.11.2"] {
+        assert!(
+            doc.contains(bead),
+            "T3.10 migration linkage missing downstream bead: {bead}"
+        );
+    }
+}
+
+#[test]
+fn json_e2e_scenarios_are_complete() {
+    let json = load_matrix_json();
+    let e2e = &json["e2e_scenarios"];
+    assert!(e2e.is_object(), "json must contain e2e_scenarios object");
+
+    let bead_id = e2e["bead_id"]
+        .as_str()
+        .expect("e2e_scenarios must have bead_id");
+    assert_eq!(bead_id, "asupersync-2oh2u.3.10");
+
+    let scenarios = e2e["scenarios"]
+        .as_array()
+        .expect("e2e_scenarios must have scenarios array");
+    assert!(
+        scenarios.len() >= 10,
+        "expected at least 10 E2E scenarios, found {}",
+        scenarios.len()
+    );
+
+    let mut ids = BTreeSet::new();
+    for scenario in scenarios {
+        let id = scenario["id"]
+            .as_str()
+            .expect("scenario must have string id");
+        ids.insert(id.to_string());
+        for field in ["domain", "focus", "owner_modules"] {
+            assert!(
+                scenario.get(field).is_some(),
+                "scenario {id} missing field: {field}"
+            );
+        }
+        let modules = scenario["owner_modules"]
+            .as_array()
+            .expect("owner_modules must be array");
+        for module in modules {
+            let path = module.as_str().expect("module path must be string");
+            assert!(
+                repo_path(path).exists(),
+                "scenario {id} owner module must exist: {path}"
+            );
+        }
+    }
+
+    for required in [
+        "T310-E2E-01",
+        "T310-E2E-02",
+        "T310-E2E-03",
+        "T310-E2E-04",
+        "T310-E2E-05",
+        "T310-E2E-06",
+        "T310-E2E-07",
+        "T310-E2E-08",
+        "T310-E2E-09",
+        "T310-E2E-10",
+    ] {
+        assert!(
+            ids.contains(required),
+            "E2E scenarios missing required id: {required}"
+        );
+    }
+}
+
+#[test]
+fn json_failure_drills_are_complete() {
+    let json = load_matrix_json();
+    let drills = json["e2e_scenarios"]["failure_drills"]
+        .as_array()
+        .expect("e2e_scenarios must have failure_drills array");
+    assert!(
+        drills.len() >= 5,
+        "expected at least 5 failure drills, found {}",
+        drills.len()
+    );
+
+    let mut ids = BTreeSet::new();
+    for drill in drills {
+        let id = drill["id"]
+            .as_str()
+            .expect("drill must have string id");
+        ids.insert(id.to_string());
+        for field in ["failure_class", "quiescence_check"] {
+            assert!(
+                drill.get(field).is_some(),
+                "drill {id} missing field: {field}"
+            );
+        }
+    }
+
+    for required in [
+        "T310-FD-01",
+        "T310-FD-02",
+        "T310-FD-03",
+        "T310-FD-04",
+        "T310-FD-05",
+    ] {
+        assert!(
+            ids.contains(required),
+            "failure drills missing required id: {required}"
+        );
+    }
+}
+
+#[test]
+fn json_e2e_log_schema_has_required_fields() {
+    let json = load_matrix_json();
+    let required_fields = json["e2e_scenarios"]["required_log_fields"]
+        .as_array()
+        .expect("e2e_scenarios must have required_log_fields array");
+    let field_set: BTreeSet<_> = required_fields
+        .iter()
+        .map(|f| f.as_str().expect("field must be string"))
+        .collect();
+    for required in [
+        "correlation_id",
+        "scenario_id",
+        "timestamp_ms",
+        "phase",
+        "op_type",
+        "outcome",
+        "timeline_ms",
+    ] {
+        assert!(
+            field_set.contains(required),
+            "required log fields missing: {required}"
+        );
+    }
+}
+
+#[test]
+fn json_e2e_migration_linkage_valid() {
+    let json = load_matrix_json();
+    let linkage = &json["e2e_scenarios"]["migration_linkage"];
+    assert!(
+        linkage.is_object(),
+        "e2e_scenarios must have migration_linkage object"
+    );
+
+    let beads = linkage["playbook_beads"]
+        .as_array()
+        .expect("migration_linkage must have playbook_beads array");
+    let bead_set: BTreeSet<_> = beads
+        .iter()
+        .map(|b| b.as_str().expect("bead must be string"))
+        .collect();
+    for required in ["asupersync-2oh2u.3.8", "asupersync-2oh2u.11.2"] {
+        assert!(
+            bead_set.contains(required),
+            "migration linkage missing playbook bead: {required}"
+        );
+    }
+
+    // Verify all domain scenario arrays exist and are non-empty
+    for key in [
+        "tokio_fs_scenarios",
+        "tokio_process_scenarios",
+        "tokio_signal_scenarios",
+        "cross_domain_scenarios",
+    ] {
+        let arr = linkage[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("migration_linkage missing: {key}"));
+        assert!(
+            !arr.is_empty(),
+            "migration_linkage {key} must be non-empty"
+        );
+    }
+}
+
+#[test]
+fn json_includes_t310_drift_rule() {
+    let json = load_matrix_json();
+    let rules = json["drift_detection_rules"]
+        .as_array()
+        .expect("drift_detection_rules must be array");
+    let ids: BTreeSet<_> = rules
+        .iter()
+        .map(|r| r["id"].as_str().expect("rule id must be string"))
+        .collect();
+    assert!(
+        ids.contains("T3-DRIFT-11"),
+        "missing required T3.10 drift rule: T3-DRIFT-11"
+    );
+}
+
+#[test]
+fn t310_replay_command_is_rch_routed() {
+    let doc = load_matrix_doc();
+    assert!(
+        doc.contains("rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t310"),
+        "T3.10 must include rch-routed replay command"
     );
 }

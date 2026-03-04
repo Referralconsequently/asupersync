@@ -329,6 +329,78 @@ rch exec -- cargo test --lib fs:: signal:: process -- --nocapture
 
 ---
 
+## 13. T3.10 End-to-End Scripts with Forensic-Grade Logging
+
+This section closes `asupersync-2oh2u.3.10` by defining end-to-end scenario scripts that exercise full T3 workflows (filesystem churn, process lifecycle, signal storms, cancellation/teardown) with forensic-grade structured logging, failure/recovery drills, and deterministic replay artifacts.
+
+### 13.1 E2E Scenario Matrix
+
+| Scenario ID | Domain | Scenario Description | Expected Outcome | Log Assertions | Owner Modules |
+|---|---|---|---|---|---|
+| `T310-E2E-01` | filesystem | File create → write → sync → read-back → delete lifecycle under concurrent access | All operations complete without partial state; read-back matches written content; delete succeeds | `correlation_id`, `op_type`, `path`, `bytes_written`, `timeline_ms` | `src/fs/file.rs`, `src/fs/path_ops.rs` |
+| `T310-E2E-02` | filesystem | Atomic write under simulated cancellation (write_atomic interrupted mid-operation) | Either complete write or no file change; no partial/corrupt output | `correlation_id`, `op_type=write_atomic`, `outcome={complete,rolled_back}`, `timeline_ms` | `src/fs/path_ops.rs` |
+| `T310-E2E-03` | filesystem | Directory tree create_all → populate → read_dir → remove_all with nested symlinks | Complete recursive operations; read_dir enumerates all entries; remove_all leaves no remnants | `correlation_id`, `op_type`, `depth`, `entry_count`, `timeline_ms` | `src/fs/dir.rs`, `src/fs/read_dir.rs`, `src/fs/path_ops.rs` |
+| `T310-E2E-04` | process | Spawn → piped stdin/stdout/stderr → wait_async → exit code verification | Child completes with expected exit code; stdout/stderr captured without truncation or deadlock | `correlation_id`, `child_pid`, `exit_code`, `stdout_bytes`, `stderr_bytes`, `timeline_ms` | `src/process.rs` |
+| `T310-E2E-05` | process | Spawn long-running child → kill_on_drop cancellation → verify no zombie | Child killed on parent drop; no zombie process; no leaked file descriptors | `correlation_id`, `child_pid`, `kill_on_drop=true`, `cleanup_outcome`, `timeline_ms` | `src/process.rs` |
+| `T310-E2E-06` | process | Spawn invalid program → verify NotFound; spawn non-executable → verify PermissionDenied | Correct ProcessError variants with program name in diagnostics | `correlation_id`, `spawn_error_variant`, `program_name`, `timeline_ms` | `src/process.rs` |
+| `T310-E2E-07` | signal | Signal storm: rapid SIGUSR1 burst → verify monotonic delivery counter, no loss | All signals observed by receiver; delivery counter matches send count | `correlation_id`, `signal_kind`, `send_count`, `recv_count`, `delivery_delta`, `timeline_ms` | `src/signal/signal.rs` |
+| `T310-E2E-08` | signal | Graceful shutdown: controller → multiple subscribers → verify all notified, late subscriber sees shutdown | All receivers observe shutdown; late subscriber sees already-initiated; double shutdown is no-op | `correlation_id`, `subscriber_count`, `shutdown_ts`, `late_subscriber_immediate`, `timeline_ms` | `src/signal/shutdown.rs`, `src/signal/graceful.rs` |
+| `T310-E2E-09` | cross-domain | File write → spawn child reading file → signal shutdown → graceful teardown → verify quiescence | File written, child reads, shutdown propagated, all resources cleaned up, no leaked handles | `correlation_id`, `phase={write,spawn,signal,teardown}`, `quiescence_check`, `timeline_ms` | `src/fs/file.rs`, `src/process.rs`, `src/signal/shutdown.rs` |
+| `T310-E2E-10` | cross-domain | Recovery rerun: replay T310-E2E-09 after induced failure with same correlation seed | Repeatable pass/fail class with matching diagnostics; deterministic replay | `correlation_id`, `replay_seed`, `scenario_id=T310-E2E-09`, `outcome_class`, `timeline_ms` | `src/fs/file.rs`, `src/process.rs`, `src/signal/shutdown.rs` |
+
+### 13.2 Structured Log Schema Contract
+
+Every T3.10 scenario run MUST emit structured events containing at least:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `correlation_id` | `String` | yes | Unique per-scenario-run identifier for log correlation |
+| `scenario_id` | `String` | yes | `T310-E2E-*` identifier linking to matrix row |
+| `timestamp_ms` | `u64` | yes | Monotonic millisecond timestamp |
+| `phase` | `String` | yes | Lifecycle phase (`setup`, `execute`, `verify`, `teardown`) |
+| `op_type` | `String` | yes | Operation type (`file_write`, `process_spawn`, `signal_send`, etc.) |
+| `outcome` | `String` | yes | `pass`, `fail`, or `skip` |
+| `timeline_ms` | `u64` | yes | Elapsed time from scenario start |
+| `replay_command` | `String` | conditional | `rch exec --` command to reproduce this scenario deterministically |
+| `owner_module` | `String` | conditional | Module path for failure diagnostics |
+| `error_detail` | `String` | conditional | Error context when `outcome=fail` |
+
+### 13.3 Failure and Recovery Drills
+
+| Drill ID | Failure Class | Injection Method | Recovery Assertion | Quiescence Check |
+|---|---|---|---|---|
+| `T310-FD-01` | FS write failure (ENOSPC) | VFS mock or temp filesystem limit | Error propagated; no partial file; caller can retry | No leaked file handles |
+| `T310-FD-02` | Process spawn failure | Invalid program path | ProcessError::NotFound; parent unaffected | No zombie processes |
+| `T310-FD-03` | Signal delivery timeout | No signal sent within deadline | Graceful timeout path taken; shutdown controller still functional | Controller reusable |
+| `T310-FD-04` | Cascading cancellation | Cancel parent task during cross-domain workflow | All child operations cancelled; resources released | No obligation leaks |
+| `T310-FD-05` | Replay after fault | Re-run scenario with same seed after FD-01..FD-04 | Deterministic outcome class; matching log structure | Clean state |
+
+### 13.4 Reproducible Artifact Bundle
+
+Every T3.10 run MUST produce (or validate existence of):
+
+- `docs/tokio_fs_process_signal_parity_matrix.md` (this document, section 13)
+- `docs/tokio_fs_process_signal_parity_matrix.json` (machine-readable `e2e_scenarios` array)
+- `tests/tokio_fs_process_signal_parity_matrix.rs` (contract tests enforcing schema)
+
+Deterministic replay commands:
+```
+rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t310 -- --nocapture
+```
+
+### 13.5 Migration Playbook Linkage
+
+T3.10 outputs are an explicit upstream input for migration documentation:
+
+| Migration Target | T3.10 Evidence | Playbook Bead |
+|---|---|---|
+| `tokio::fs` users | T310-E2E-01..03 lifecycle + FD-01 recovery | `asupersync-2oh2u.3.8`, `asupersync-2oh2u.11.2` |
+| `tokio::process` users | T310-E2E-04..06 lifecycle + FD-02 recovery | `asupersync-2oh2u.3.8`, `asupersync-2oh2u.11.2` |
+| `tokio::signal` users | T310-E2E-07..08 delivery/shutdown + FD-03 recovery | `asupersync-2oh2u.3.8`, `asupersync-2oh2u.11.2` |
+| Cross-domain workflows | T310-E2E-09..10 composed flow + FD-04..05 | `asupersync-2oh2u.11.2` |
+
+---
+
 ## 9. Drift-Detection Rules (Anti-Staleness)
 
 The following rules define stale/misleading parity drift and MUST be enforced by tests/CI:
