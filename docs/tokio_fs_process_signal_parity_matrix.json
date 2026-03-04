@@ -529,8 +529,44 @@
       "id": "T3-DRIFT-11",
       "rule": "e2e_scenarios must include T310-E2E-01..10 and T310-FD-01..05 with owner modules, log schema fields, and migration linkage",
       "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-12",
+      "rule": "migration_playbook must include breaking_changes, api_compatible_surfaces, asupersync_extensions, and evidence_linkage",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
     }
   ],
+  "migration_playbook": {
+    "bead_id": "asupersync-2oh2u.3.8",
+    "version": "1.0",
+    "domains": ["filesystem", "process", "signal"],
+    "breaking_changes": [
+      {"domain": "process", "change": "wait() is synchronous; use wait_async() for async", "severity": "high", "migration": "Replace child.wait().await with child.wait_async().await"},
+      {"domain": "process", "change": "wait_with_output() is synchronous; use wait_with_output_async()", "severity": "high", "migration": "Replace child.wait_with_output().await with child.wait_with_output_async().await"},
+      {"domain": "process", "change": "kill() is synchronous; no .await needed", "severity": "medium", "migration": "Remove .await from child.kill()"},
+      {"domain": "process", "change": "ProcessError enum instead of io::Error", "severity": "medium", "migration": "Match on ProcessError variants or use .into()"},
+      {"domain": "signal", "change": "Unix-only signal streams; non-Unix returns SignalError", "severity": "medium", "migration": "Add #[cfg(unix)] guards or is_available() checks"}
+    ],
+    "api_compatible_surfaces": [
+      "fs::File::open", "fs::File::create", "fs::read", "fs::read_to_string", "fs::write",
+      "fs::copy", "fs::rename", "fs::remove_file", "fs::create_dir", "fs::create_dir_all",
+      "fs::remove_dir_all", "fs::metadata", "fs::read_dir", "fs::OpenOptions",
+      "process::Command::new", "process::Command::arg/args/env/stdin/stdout/stderr/kill_on_drop/spawn",
+      "process::Child::id/try_wait", "process::Stdio::inherit/piped/null",
+      "signal::ctrl_c", "signal::signal(kind)", "signal::Signal::recv"
+    ],
+    "asupersync_extensions": [
+      "fs::write_atomic", "fs::try_exists", "fs::Vfs trait", "fs::IoUringFile",
+      "signal::ShutdownController", "signal::ShutdownReceiver", "signal::GracefulOutcome",
+      "signal::with_graceful_shutdown"
+    ],
+    "evidence_linkage": {
+      "conformance_tests": "tests/tokio_fs_process_signal_conformance.rs",
+      "fault_injection_tests": "tests/tokio_fs_process_signal_conformance_faults.rs",
+      "cancellation_tests": "tests/tokio_cancel_safe_fs_process_signal.rs",
+      "e2e_scenarios": "section 13 of this document"
+    }
+  },
   "e2e_scenarios": {
     "bead_id": "asupersync-2oh2u.3.10",
     "version": 1,

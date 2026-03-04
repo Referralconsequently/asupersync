@@ -401,6 +401,95 @@ T3.10 outputs are an explicit upstream input for migration documentation:
 
 ---
 
+## 14. T3.8 Migration Playbook for fs/process/signal Users
+
+This section closes `asupersync-2oh2u.3.8` by providing migration guidance for users moving from `tokio::fs`, `tokio::process`, and `tokio::signal` to asupersync equivalents, with before/after patterns, edge-case caveats, rollback paths, and troubleshooting decision points.
+
+### 14.1 Filesystem Migration Patterns
+
+| Tokio Pattern | Asupersync Equivalent | Migration Notes |
+|---|---|---|
+| `tokio::fs::File::open(path).await` | `asupersync::fs::File::open(path).await` | API-compatible; returns `io::Result<File>` |
+| `tokio::fs::File::create(path).await` | `asupersync::fs::File::create(path).await` | API-compatible |
+| `tokio::fs::read(path).await` | `asupersync::fs::read(path).await` | API-compatible; uses `spawn_blocking_io` |
+| `tokio::fs::read_to_string(path).await` | `asupersync::fs::read_to_string(path).await` | API-compatible |
+| `tokio::fs::write(path, contents).await` | `asupersync::fs::write(path, contents).await` | API-compatible |
+| `tokio::fs::copy(src, dst).await` | `asupersync::fs::copy(src, dst).await` | API-compatible |
+| `tokio::fs::rename(from, to).await` | `asupersync::fs::rename(from, to).await` | API-compatible |
+| `tokio::fs::remove_file(path).await` | `asupersync::fs::remove_file(path).await` | API-compatible |
+| `tokio::fs::create_dir(path).await` | `asupersync::fs::create_dir(path).await` | API-compatible |
+| `tokio::fs::create_dir_all(path).await` | `asupersync::fs::create_dir_all(path).await` | API-compatible |
+| `tokio::fs::remove_dir_all(path).await` | `asupersync::fs::remove_dir_all(path).await` | API-compatible |
+| `tokio::fs::metadata(path).await` | `asupersync::fs::metadata(path).await` | API-compatible |
+| `tokio::fs::read_dir(path).await` | `asupersync::fs::read_dir(path).await` | Returns `ReadDir`; use `.next_entry().await` |
+| N/A | `asupersync::fs::write_atomic(path, contents).await` | Asupersync extension: atomic write via temp+rename |
+| N/A | `asupersync::fs::try_exists(path).await` | Asupersync extension: returns `io::Result<bool>` |
+
+**Caveats:**
+- Asupersync provides `write_atomic` for crash-safe writes; Tokio has no equivalent.
+- `OpenOptions` builder is API-compatible. Add `.mode(u32)` on Unix for permissions.
+- VFS trait (`asupersync::fs::Vfs`) enables deterministic testing; no Tokio equivalent.
+- `io-uring` feature path provides Linux acceleration; behavior must match blocking-offload path.
+
+### 14.2 Process Migration Patterns
+
+| Tokio Pattern | Asupersync Equivalent | Migration Notes |
+|---|---|---|
+| `tokio::process::Command::new(prog)` | `asupersync::process::Command::new(prog)` | API-compatible builder |
+| `.arg(a).args(v).env(k,v)` | `.arg(a).args(v).env(k,v)` | API-compatible chaining |
+| `.stdin(Stdio::piped())` | `.stdin(Stdio::piped())` | API-compatible; `Stdio::{inherit,piped,null}` |
+| `.kill_on_drop(true)` | `.kill_on_drop(true)` | API-compatible; Drop sends SIGKILL |
+| `.spawn()` → `Child` | `.spawn()` → `Result<Child, ProcessError>` | Returns `ProcessError` not `io::Error`; use `.map_err()` if needed |
+| `child.wait().await` | `child.wait_async().await` | **Breaking change**: method name differs. `wait()` is synchronous in asupersync. |
+| `child.wait_with_output().await` | `child.wait_with_output_async().await` | **Breaking change**: method name differs. Blocking variant is `wait_with_output()`. |
+| `child.id()` | `child.id()` | API-compatible; returns `Option<u32>` |
+| `child.kill().await` | `child.kill()` | **Sync in asupersync**: no `.await` needed |
+| `child.try_wait()` | `child.try_wait()` | API-compatible |
+
+**Caveats:**
+- **`wait()` vs `wait_async()`**: Tokio's `wait()` is async. Asupersync's `wait()` is blocking; use `wait_async()` for the async version. This is the primary migration friction point.
+- **Error type**: Asupersync uses `ProcessError` enum (with `NotFound`, `PermissionDenied`, `Signaled` variants) instead of generic `io::Error`. Use `ProcessError::Io(e)` for the raw IO error.
+- **`kill()` is synchronous**: No `.await` needed in asupersync. Sends SIGKILL immediately.
+- PTY support (`G13`) is not yet available; interactive process workloads need alternative approaches.
+
+### 14.3 Signal Migration Patterns
+
+| Tokio Pattern | Asupersync Equivalent | Migration Notes |
+|---|---|---|
+| `tokio::signal::ctrl_c().await` | `asupersync::signal::ctrl_c().await` | API-compatible on Unix; check `is_available()` for cross-platform |
+| `tokio::signal::unix::signal(kind)` | `asupersync::signal::signal(kind)` | API-compatible on Unix; convenience helpers available (`sigterm()`, `sigint()`, etc.) |
+| `signal.recv().await` | `signal.recv().await` | API-compatible; returns `Option<()>` |
+| N/A | `ShutdownController::new()` | Asupersync extension: structured shutdown orchestration |
+| N/A | `controller.subscribe()` → `ShutdownReceiver` | Asupersync extension: multi-subscriber pattern |
+| N/A | `with_graceful_shutdown(fut, receiver).await` | Asupersync extension: races future vs shutdown |
+
+**Caveats:**
+- **Unix-only**: Signal stream creation fails on non-Unix with explicit `SignalError`. Use `#[cfg(unix)]` guards or check `is_available()`.
+- **`ctrl_c()` availability**: On non-Unix, `ctrl_c()` returns `Err(CtrlCError)`. Wrap in a fallback.
+- **No `tokio::signal::windows`**: Windows signal support gap (`SG-G1`, `SG-G2`) remains open.
+- `ShutdownController` and `GracefulOutcome` are asupersync extensions; no direct Tokio equivalent. Use for structured shutdown patterns.
+
+### 14.4 Rollback and Troubleshooting Decision Tree
+
+| Symptom | Likely Cause | Resolution | Rollback Path |
+|---|---|---|---|
+| `wait()` blocks the async runtime | Used sync `wait()` instead of `wait_async()` | Replace `child.wait()` with `child.wait_async().await` | Revert to tokio::process |
+| `ProcessError` type mismatch | Tokio code expects `io::Error` | Match on `ProcessError::Io(e)` or use `.into()` | Wrap in adapter |
+| Signal stream creation fails at runtime | Running on non-Unix platform | Add `#[cfg(unix)]` guard or `is_available()` check | Use platform-conditional code |
+| No `kill().await` | `kill()` is synchronous in asupersync | Remove `.await` from `child.kill()` | N/A (compile-time) |
+| Partial write on crash | Used `write()` instead of `write_atomic()` | Switch to `asupersync::fs::write_atomic()` | Keep `write()` with explicit fsync |
+| Missing PTY support | `G13` not yet implemented | Use external PTY crate or raw fd manipulation | Stay on tokio::process for PTY workloads |
+
+### 14.5 Version and Evidence Linkage
+
+- Playbook version: 1.0
+- Conformance evidence: `tests/tokio_fs_process_signal_conformance.rs` (34 tests), `tests/tokio_fs_process_signal_conformance_faults.rs` (48 tests)
+- E2E evidence: T310-E2E-01..10 scenario matrix (section 13)
+- Cancellation evidence: `tests/tokio_cancel_safe_fs_process_signal.rs` (24 tests)
+- Archive reference: `docs/tokio_evidence_checklist.md`, `docs/tokio_replacement_roadmap.md`
+
+---
+
 ## 9. Drift-Detection Rules (Anti-Staleness)
 
 The following rules define stale/misleading parity drift and MUST be enforced by tests/CI:

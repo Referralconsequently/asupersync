@@ -1699,3 +1699,182 @@ fn t310_replay_command_is_rch_routed() {
         "T3.10 must include rch-routed replay command"
     );
 }
+
+// =============================================================================
+// T3.8 Migration Playbook Contract Tests
+// =============================================================================
+
+#[test]
+fn matrix_includes_t38_migration_playbook_section() {
+    let doc = load_matrix_doc();
+    for token in [
+        "T3.8 Migration Playbook for fs/process/signal Users",
+        "asupersync-2oh2u.3.8",
+        "Filesystem Migration Patterns",
+        "Process Migration Patterns",
+        "Signal Migration Patterns",
+        "Rollback and Troubleshooting Decision Tree",
+        "Version and Evidence Linkage",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T3.8 migration playbook missing section token: {token}"
+        );
+    }
+}
+
+#[test]
+fn t38_documents_breaking_changes() {
+    let doc = load_matrix_doc();
+    // Key breaking changes must be documented
+    for token in [
+        "wait_async()",
+        "wait_with_output_async()",
+        "ProcessError",
+        "Breaking change",
+        "Sync in asupersync",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T3.8 migration playbook missing breaking change documentation: {token}"
+        );
+    }
+}
+
+#[test]
+fn t38_covers_api_compatible_surfaces() {
+    let doc = load_matrix_doc();
+    // Must document API-compatible surfaces
+    for api in [
+        "asupersync::fs::File::open",
+        "asupersync::fs::File::create",
+        "asupersync::fs::read",
+        "asupersync::fs::write",
+        "asupersync::process::Command::new",
+        "asupersync::signal::ctrl_c",
+    ] {
+        assert!(
+            doc.contains(api),
+            "T3.8 playbook missing API-compatible surface: {api}"
+        );
+    }
+}
+
+#[test]
+fn t38_documents_asupersync_extensions() {
+    let doc = load_matrix_doc();
+    for ext in [
+        "write_atomic",
+        "try_exists",
+        "Vfs trait",
+        "ShutdownController",
+        "GracefulOutcome",
+        "with_graceful_shutdown",
+    ] {
+        assert!(
+            doc.contains(ext),
+            "T3.8 playbook missing asupersync extension: {ext}"
+        );
+    }
+}
+
+#[test]
+fn t38_includes_rollback_paths() {
+    let doc = load_matrix_doc();
+    for token in [
+        "Rollback Path",
+        "Revert to tokio::process",
+        "Wrap in adapter",
+        "platform-conditional",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T3.8 playbook missing rollback guidance: {token}"
+        );
+    }
+}
+
+#[test]
+fn json_migration_playbook_is_complete() {
+    let json = load_matrix_json();
+    let playbook = &json["migration_playbook"];
+    assert!(
+        playbook.is_object(),
+        "json must contain migration_playbook object"
+    );
+
+    let bead_id = playbook["bead_id"]
+        .as_str()
+        .expect("migration_playbook must have bead_id");
+    assert_eq!(bead_id, "asupersync-2oh2u.3.8");
+
+    let breaking = playbook["breaking_changes"]
+        .as_array()
+        .expect("migration_playbook must have breaking_changes array");
+    assert!(
+        breaking.len() >= 5,
+        "expected at least 5 breaking changes, found {}",
+        breaking.len()
+    );
+    for change in breaking {
+        for field in ["domain", "change", "severity", "migration"] {
+            assert!(
+                change.get(field).is_some(),
+                "breaking change missing field: {field}"
+            );
+        }
+    }
+
+    let compatible = playbook["api_compatible_surfaces"]
+        .as_array()
+        .expect("migration_playbook must have api_compatible_surfaces array");
+    assert!(
+        compatible.len() >= 15,
+        "expected at least 15 API-compatible surfaces, found {}",
+        compatible.len()
+    );
+
+    let extensions = playbook["asupersync_extensions"]
+        .as_array()
+        .expect("migration_playbook must have asupersync_extensions array");
+    assert!(
+        extensions.len() >= 7,
+        "expected at least 7 asupersync extensions, found {}",
+        extensions.len()
+    );
+
+    let evidence = &playbook["evidence_linkage"];
+    assert!(
+        evidence.is_object(),
+        "migration_playbook must have evidence_linkage object"
+    );
+    for key in [
+        "conformance_tests",
+        "fault_injection_tests",
+        "cancellation_tests",
+    ] {
+        let path = evidence[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("evidence_linkage missing: {key}"));
+        assert!(
+            repo_path(path).exists(),
+            "evidence_linkage path must exist: {path}"
+        );
+    }
+}
+
+#[test]
+fn json_includes_t38_drift_rule() {
+    let json = load_matrix_json();
+    let rules = json["drift_detection_rules"]
+        .as_array()
+        .expect("drift_detection_rules must be array");
+    let ids: BTreeSet<_> = rules
+        .iter()
+        .map(|r| r["id"].as_str().expect("rule id must be string"))
+        .collect();
+    assert!(
+        ids.contains("T3-DRIFT-12"),
+        "missing required T3.8 drift rule: T3-DRIFT-12"
+    );
+}
