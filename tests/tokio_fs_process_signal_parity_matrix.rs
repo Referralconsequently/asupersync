@@ -1065,3 +1065,322 @@ fn matrix_t37_has_evidence_commands() {
         "T3.7 section must include full suite replay command"
     );
 }
+
+// =============================================================================
+// T3.9 Exhaustive Unit-Test Coverage Matrix Contract Tests
+// =============================================================================
+
+#[test]
+fn matrix_includes_t39_unit_test_matrix_section() {
+    let doc = load_matrix_doc();
+    for token in [
+        "T3.9 Exhaustive Unit-Test Coverage Matrix",
+        "asupersync-2oh2u.3.9",
+        "Test File Inventory",
+        "Inline Unit-Test Inventory",
+        "Coverage Matrix by Domain",
+        "Bead-to-Test Traceability Matrix",
+        "CI Enforcement Thresholds",
+        "Deterministic Replay Commands",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T3.9 unit-test matrix section missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn t39_test_file_inventory_covers_all_files() {
+    let doc = load_matrix_doc();
+    let required_files = [
+        "tests/fs_verification.rs",
+        "tests/e2e_fs.rs",
+        "tests/compile_test_process.rs",
+        "tests/e2e_signal.rs",
+        "tests/process_lifecycle_hardening.rs",
+        "tests/tokio_process_lifecycle_parity.rs",
+        "tests/tokio_cancel_safe_fs_process_signal.rs",
+        "tests/tokio_fs_process_signal_conformance.rs",
+        "tests/tokio_fs_process_signal_conformance_faults.rs",
+        "tests/tokio_fs_process_signal_parity_matrix.rs",
+    ];
+    for file in &required_files {
+        assert!(
+            doc.contains(file),
+            "T3.9 inventory missing test file: {file}"
+        );
+    }
+    // All listed files must exist in the repo
+    for file in &required_files {
+        assert!(
+            repo_path(file).exists(),
+            "T3.9 test file must exist in repository: {file}"
+        );
+    }
+}
+
+#[test]
+fn t39_inline_test_modules_exist() {
+    let required_modules = [
+        "src/fs/file.rs",
+        "src/fs/vfs.rs",
+        "src/fs/path_ops.rs",
+        "src/fs/dir.rs",
+        "src/fs/read_dir.rs",
+        "src/fs/open_options.rs",
+        "src/fs/metadata.rs",
+        "src/process.rs",
+        "src/signal/signal.rs",
+        "src/signal/ctrl_c.rs",
+        "src/signal/kind.rs",
+        "src/signal/shutdown.rs",
+        "src/signal/graceful.rs",
+    ];
+    for module in &required_modules {
+        assert!(
+            repo_path(module).exists(),
+            "T3.9 inline test module must exist: {module}"
+        );
+    }
+}
+
+#[test]
+fn t39_inline_modules_contain_tests() {
+    let modules_with_min_tests = [
+        ("src/fs/file.rs", 5),
+        ("src/fs/vfs.rs", 8),
+        ("src/fs/path_ops.rs", 8),
+        ("src/process.rs", 15),
+        ("src/signal/shutdown.rs", 7),
+        ("src/signal/graceful.rs", 14),
+    ];
+    for (module, min) in &modules_with_min_tests {
+        let src = load_source(module);
+        let count = src.matches("#[test]").count();
+        assert!(
+            count >= *min,
+            "T3.9: {module} must have >= {min} inline tests, found {count}"
+        );
+    }
+}
+
+#[test]
+fn t39_bead_traceability_covers_t33_through_t37() {
+    let doc = load_matrix_doc();
+    for bead in ["T3.3", "T3.4", "T3.5", "T3.6", "T3.7"] {
+        assert!(
+            doc.contains(bead),
+            "T3.9 bead traceability missing coverage for {bead}"
+        );
+    }
+    for bead_id in [
+        "2oh2u.3.3",
+        "2oh2u.3.4",
+        "2oh2u.3.5",
+        "2oh2u.3.6",
+        "2oh2u.3.7",
+    ] {
+        assert!(
+            doc.contains(bead_id),
+            "T3.9 bead traceability missing bead ID: {bead_id}"
+        );
+    }
+}
+
+#[test]
+fn json_unit_test_matrix_is_complete() {
+    let json = load_matrix_json();
+    let matrix = &json["unit_test_matrix"];
+    assert!(
+        matrix.is_object(),
+        "json must contain unit_test_matrix object"
+    );
+
+    let bead_id = matrix["bead_id"]
+        .as_str()
+        .expect("unit_test_matrix must have bead_id");
+    assert_eq!(bead_id, "asupersync-2oh2u.3.9");
+
+    let test_files = matrix["test_files"]
+        .as_array()
+        .expect("unit_test_matrix must have test_files array");
+    assert!(
+        test_files.len() >= 10,
+        "expected at least 10 test files, found {}",
+        test_files.len()
+    );
+
+    for entry in test_files {
+        for field in ["file", "bead", "domain", "category", "test_count", "scenario_prefix"] {
+            assert!(
+                entry.get(field).is_some(),
+                "test file entry missing field: {field}"
+            );
+        }
+        let file = entry["file"].as_str().expect("file must be string");
+        assert!(
+            repo_path(file).exists(),
+            "unit_test_matrix test file must exist: {file}"
+        );
+    }
+}
+
+#[test]
+fn json_unit_test_matrix_inline_tests_valid() {
+    let json = load_matrix_json();
+    let inline = json["unit_test_matrix"]["inline_tests"]
+        .as_array()
+        .expect("unit_test_matrix must have inline_tests array");
+    assert!(
+        inline.len() >= 13,
+        "expected at least 13 inline test modules, found {}",
+        inline.len()
+    );
+
+    for entry in inline {
+        let module = entry["module"]
+            .as_str()
+            .expect("inline test module must be string");
+        assert!(
+            repo_path(module).exists(),
+            "inline test module must exist: {module}"
+        );
+        let count = entry["test_count"]
+            .as_u64()
+            .expect("test_count must be integer");
+        assert!(
+            count >= 2,
+            "inline test module {module} must have >= 2 tests, declared {count}"
+        );
+    }
+}
+
+#[test]
+fn json_unit_test_matrix_bead_coverage_complete() {
+    let json = load_matrix_json();
+    let coverage = json["unit_test_matrix"]["bead_coverage"]
+        .as_array()
+        .expect("unit_test_matrix must have bead_coverage array");
+    assert!(
+        coverage.len() >= 5,
+        "expected at least 5 bead coverage entries, found {}",
+        coverage.len()
+    );
+
+    let mut covered_beads = BTreeSet::new();
+    for entry in coverage {
+        let bead = entry["bead"]
+            .as_str()
+            .expect("bead_coverage entry must have bead string");
+        covered_beads.insert(bead.to_string());
+
+        let test_files = entry["test_files"]
+            .as_array()
+            .expect("bead_coverage entry must have test_files array");
+        assert!(
+            !test_files.is_empty(),
+            "bead {bead} must have at least one test file"
+        );
+        for tf in test_files {
+            let path = tf.as_str().expect("test file path must be string");
+            assert!(
+                repo_path(path).exists(),
+                "bead {bead} test file must exist: {path}"
+            );
+        }
+    }
+
+    for required in [
+        "asupersync-2oh2u.3.3",
+        "asupersync-2oh2u.3.4",
+        "asupersync-2oh2u.3.5",
+        "asupersync-2oh2u.3.6",
+        "asupersync-2oh2u.3.7",
+    ] {
+        assert!(
+            covered_beads.contains(required),
+            "bead coverage missing required bead: {required}"
+        );
+    }
+}
+
+#[test]
+fn json_unit_test_matrix_ci_thresholds_defined() {
+    let json = load_matrix_json();
+    let thresholds = &json["unit_test_matrix"]["ci_thresholds"];
+    assert!(
+        thresholds.is_object(),
+        "unit_test_matrix must have ci_thresholds object"
+    );
+
+    let min_integration = thresholds["min_integration_tests"]
+        .as_u64()
+        .expect("min_integration_tests must be integer");
+    assert!(
+        min_integration >= 280,
+        "min_integration_tests must be >= 280, got {min_integration}"
+    );
+
+    let min_inline = thresholds["min_inline_tests"]
+        .as_u64()
+        .expect("min_inline_tests must be integer");
+    assert!(
+        min_inline >= 100,
+        "min_inline_tests must be >= 100, got {min_inline}"
+    );
+
+    let domains = thresholds["required_domains"]
+        .as_array()
+        .expect("required_domains must be array");
+    let domain_set: BTreeSet<_> = domains
+        .iter()
+        .map(|d| d.as_str().expect("domain must be string"))
+        .collect();
+    for required in ["filesystem", "process", "signal"] {
+        assert!(
+            domain_set.contains(required),
+            "CI thresholds missing required domain: {required}"
+        );
+    }
+}
+
+#[test]
+fn json_includes_t39_drift_rule() {
+    let json = load_matrix_json();
+    let rules = json["drift_detection_rules"]
+        .as_array()
+        .expect("drift_detection_rules must be array");
+    let ids: BTreeSet<_> = rules
+        .iter()
+        .map(|r| r["id"].as_str().expect("rule id must be string"))
+        .collect();
+    assert!(
+        ids.contains("T3-DRIFT-10"),
+        "missing required T3.9 drift rule: T3-DRIFT-10"
+    );
+}
+
+#[test]
+fn t39_replay_commands_are_rch_routed() {
+    let doc = load_matrix_doc();
+    // Full suite replay command
+    assert!(
+        doc.contains("rch exec -- cargo test --test fs_verification --test e2e_fs"),
+        "T3.9 must include full-suite rch replay command"
+    );
+    // Per-bead replay commands
+    assert!(
+        doc.contains("rch exec -- cargo test --test process_lifecycle_hardening"),
+        "T3.9 must include T3.4 per-bead replay command"
+    );
+    assert!(
+        doc.contains("rch exec -- cargo test --test tokio_cancel_safe_fs_process_signal"),
+        "T3.9 must include T3.6 per-bead replay command"
+    );
+    // Inline test replay
+    assert!(
+        doc.contains("rch exec -- cargo test --lib fs:: signal:: process"),
+        "T3.9 must include inline unit test replay command"
+    );
+}

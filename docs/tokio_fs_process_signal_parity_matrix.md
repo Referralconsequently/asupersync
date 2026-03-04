@@ -241,6 +241,94 @@ This section closes `asupersync-2oh2u.3.7` by defining executable conformance co
 
 ---
 
+## 12. T3.9 Exhaustive Unit-Test Coverage Matrix
+
+This section closes `asupersync-2oh2u.3.9` by providing a complete unit-test coverage map across all T3 implementation surfaces (filesystem, process, signal), with explicit bead-to-test mappings, scenario categorization, structured diagnostic IDs, and CI enforcement thresholds.
+
+### 12.1 Test File Inventory
+
+| Test File | Primary Bead | Domain | Category | Test Count | Scenario ID Prefix |
+|---|---|---|---|---|---|
+| `tests/fs_verification.rs` | baseline | filesystem | happy-path, boundary | 36 | `FS-V-*` |
+| `tests/e2e_fs.rs` | baseline | filesystem | e2e, integration | 22 | `FS-E2E-*` |
+| `tests/compile_test_process.rs` | baseline | process | compile-time | 3 | `PR-CT-*` |
+| `tests/e2e_signal.rs` | baseline | signal | e2e, integration | 7 | `SIG-E2E-*` |
+| `tests/process_lifecycle_hardening.rs` | T3.4 | process | lifecycle, boundary, error | 38 | `PR-LH-*` |
+| `tests/tokio_process_lifecycle_parity.rs` | T3.4 | process | parity, protocol | 36 | `PR-LP-*` |
+| `tests/tokio_cancel_safe_fs_process_signal.rs` | T3.6 | fs+process+signal | cancellation | 24 | `T36-CS-*` |
+| `tests/tokio_fs_process_signal_conformance.rs` | T3.7 | fs+process+signal | conformance | 34 | `T37-CF-*` |
+| `tests/tokio_fs_process_signal_conformance_faults.rs` | T3.7 | fs+process+signal | fault-injection | 48 | `T37-FI-*` |
+| `tests/tokio_fs_process_signal_parity_matrix.rs` | T3.1/T3.5/T3.7/T3.9 | fs+process+signal | contract, drift | 36+ | `T3-PM-*` |
+
+### 12.2 Inline Unit-Test Inventory
+
+| Source Module | Domain | Inline Test Count | Coverage Focus |
+|---|---|---|---|
+| `src/fs/file.rs` | filesystem | 7 | File open/create, read/write, sync, seek |
+| `src/fs/vfs.rs` | filesystem | 10 | VFS trait, UnixVfs, deterministic behavior |
+| `src/fs/path_ops.rs` | filesystem | 10 | Path operations, write_atomic, try_exists |
+| `src/fs/dir.rs` | filesystem | 6 | Directory create/remove, recursive ops |
+| `src/fs/read_dir.rs` | filesystem | 3 | Directory listing, DirEntry iteration |
+| `src/fs/open_options.rs` | filesystem | 6 | OpenOptions builder variants |
+| `src/fs/metadata.rs` | filesystem | 9 | Metadata, FileType, Permissions |
+| `src/process.rs` | process | 18 | Command builder, Child lifecycle, error classification |
+| `src/signal/signal.rs` | signal | 5 | Signal creation, delivery, platform fallback |
+| `src/signal/ctrl_c.rs` | signal | 2 | Ctrl+C availability, platform behavior |
+| `src/signal/kind.rs` | signal | 5 | SignalKind variants, raw value mapping |
+| `src/signal/shutdown.rs` | signal | 9 | ShutdownController, multi-subscriber |
+| `src/signal/graceful.rs` | signal | 16 | GracefulOutcome, with_graceful_shutdown, grace period |
+
+### 12.3 Coverage Matrix by Domain and Scenario Category
+
+| Domain | Happy-Path | Boundary/Edge | Error/Failure | Cancellation | Fault-Injection | Contract/Drift | Total |
+|---|---|---|---|---|---|---|---|
+| Filesystem | 36 (fs_verification) + 51 inline | 22 (e2e_fs) | conformance_faults (subset) | 24 (cancel_safe, subset) | 48 (conformance_faults, subset) | 36+ (parity_matrix, subset) | 130+ |
+| Process | 38 (lifecycle_hardening) + 18 inline | 36 (lifecycle_parity) + 3 (compile_test) | conformance_faults (subset) | 24 (cancel_safe, subset) | 48 (conformance_faults, subset) | 36+ (parity_matrix, subset) | 143+ |
+| Signal | 7 (e2e_signal) + 37 inline | conformance (subset) | conformance (subset) | 24 (cancel_safe, subset) | 48 (conformance_faults, subset) | 36+ (parity_matrix, subset) | 116+ |
+
+**Total T3 test count**: 284+ integration/contract tests + 106 inline source tests = **390+** tests.
+
+### 12.4 Bead-to-Test Traceability Matrix
+
+| T3 Bead | Bead Focus | Test File(s) | Minimum Test Count | Repro Command |
+|---|---|---|---|---|
+| T3.3 (`2oh2u.3.3`) | Platform semantics and io_uring parity | `tests/fs_verification.rs`, `tests/e2e_fs.rs` | 58 | `rch exec -- cargo test --test fs_verification --test e2e_fs -- --nocapture` |
+| T3.4 (`2oh2u.3.4`) | Process lifecycle parity | `tests/process_lifecycle_hardening.rs`, `tests/tokio_process_lifecycle_parity.rs`, `tests/compile_test_process.rs` | 77 | `rch exec -- cargo test --test process_lifecycle_hardening --test tokio_process_lifecycle_parity --test compile_test_process -- --nocapture` |
+| T3.5 (`2oh2u.3.5`) | Cross-platform signal contracts | `tests/e2e_signal.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` (SGC-*) | 7+ parity tests | `rch exec -- cargo test --test e2e_signal --test tokio_fs_process_signal_parity_matrix signal -- --nocapture` |
+| T3.6 (`2oh2u.3.6`) | Cancellation-safe integration | `tests/tokio_cancel_safe_fs_process_signal.rs` | 24 | `rch exec -- cargo test --test tokio_cancel_safe_fs_process_signal -- --nocapture` |
+| T3.7 (`2oh2u.3.7`) | Conformance and fault-injection | `tests/tokio_fs_process_signal_conformance.rs`, `tests/tokio_fs_process_signal_conformance_faults.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` (T37C-*) | 82+ parity tests | `rch exec -- cargo test --test tokio_fs_process_signal_conformance --test tokio_fs_process_signal_conformance_faults -- --nocapture` |
+
+### 12.5 CI Enforcement Thresholds
+
+| Gate | Threshold | Enforcement | Violation Action |
+|---|---|---|---|
+| Test file existence | All 10 files in inventory MUST exist | `tests/tokio_fs_process_signal_parity_matrix.rs` | Fail CI with missing-file diagnostic |
+| Minimum integration test count | >= 280 across all T3 test files | `tests/tokio_fs_process_signal_parity_matrix.rs` | Fail if test count drops below threshold |
+| Minimum inline test count | >= 100 across T3 source modules | `tests/tokio_fs_process_signal_parity_matrix.rs` | Fail if inline coverage drops |
+| Bead coverage completeness | T3.3, T3.4, T3.5, T3.6, T3.7 all mapped | `tests/tokio_fs_process_signal_parity_matrix.rs` | Fail if any bead lacks test mapping |
+| Domain coverage completeness | filesystem, process, signal each have >= 100 tests | `tests/tokio_fs_process_signal_parity_matrix.rs` | Fail if domain is under-covered |
+
+### 12.6 Deterministic Replay Commands
+
+Full T3 suite (all integration test files):
+```
+rch exec -- cargo test --test fs_verification --test e2e_fs --test compile_test_process --test e2e_signal --test process_lifecycle_hardening --test tokio_process_lifecycle_parity --test tokio_cancel_safe_fs_process_signal --test tokio_fs_process_signal_conformance --test tokio_fs_process_signal_conformance_faults --test tokio_fs_process_signal_parity_matrix -- --nocapture
+```
+
+Per-bead replay:
+- T3.3: `rch exec -- cargo test --test fs_verification --test e2e_fs -- --nocapture`
+- T3.4: `rch exec -- cargo test --test process_lifecycle_hardening --test tokio_process_lifecycle_parity -- --nocapture`
+- T3.5: `rch exec -- cargo test --test e2e_signal -- --nocapture`
+- T3.6: `rch exec -- cargo test --test tokio_cancel_safe_fs_process_signal -- --nocapture`
+- T3.7: `rch exec -- cargo test --test tokio_fs_process_signal_conformance --test tokio_fs_process_signal_conformance_faults -- --nocapture`
+
+Inline unit tests:
+```
+rch exec -- cargo test --lib fs:: signal:: process -- --nocapture
+```
+
+---
+
 ## 9. Drift-Detection Rules (Anti-Staleness)
 
 The following rules define stale/misleading parity drift and MUST be enforced by tests/CI:

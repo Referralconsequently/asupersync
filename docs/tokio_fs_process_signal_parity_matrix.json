@@ -519,13 +519,67 @@
       "id": "T3-DRIFT-09",
       "rule": "all conformance contract owner/artifact paths must exist and each reproduction command must be rch-routed",
       "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-10",
+      "rule": "unit_test_matrix test files must exist, inline test modules must exist, and bead coverage must include T3.3..T3.7",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
     }
   ],
+  "unit_test_matrix": {
+    "bead_id": "asupersync-2oh2u.3.9",
+    "version": 1,
+    "total_integration_tests": 284,
+    "total_inline_tests": 106,
+    "total_tests": 390,
+    "test_files": [
+      {"file": "tests/fs_verification.rs", "bead": "baseline", "domain": "filesystem", "category": "happy-path, boundary", "test_count": 36, "scenario_prefix": "FS-V"},
+      {"file": "tests/e2e_fs.rs", "bead": "baseline", "domain": "filesystem", "category": "e2e, integration", "test_count": 22, "scenario_prefix": "FS-E2E"},
+      {"file": "tests/compile_test_process.rs", "bead": "baseline", "domain": "process", "category": "compile-time", "test_count": 3, "scenario_prefix": "PR-CT"},
+      {"file": "tests/e2e_signal.rs", "bead": "baseline", "domain": "signal", "category": "e2e, integration", "test_count": 7, "scenario_prefix": "SIG-E2E"},
+      {"file": "tests/process_lifecycle_hardening.rs", "bead": "asupersync-2oh2u.3.4", "domain": "process", "category": "lifecycle, boundary, error", "test_count": 38, "scenario_prefix": "PR-LH"},
+      {"file": "tests/tokio_process_lifecycle_parity.rs", "bead": "asupersync-2oh2u.3.4", "domain": "process", "category": "parity, protocol", "test_count": 36, "scenario_prefix": "PR-LP"},
+      {"file": "tests/tokio_cancel_safe_fs_process_signal.rs", "bead": "asupersync-2oh2u.3.6", "domain": "fs+process+signal", "category": "cancellation", "test_count": 24, "scenario_prefix": "T36-CS"},
+      {"file": "tests/tokio_fs_process_signal_conformance.rs", "bead": "asupersync-2oh2u.3.7", "domain": "fs+process+signal", "category": "conformance", "test_count": 34, "scenario_prefix": "T37-CF"},
+      {"file": "tests/tokio_fs_process_signal_conformance_faults.rs", "bead": "asupersync-2oh2u.3.7", "domain": "fs+process+signal", "category": "fault-injection", "test_count": 48, "scenario_prefix": "T37-FI"},
+      {"file": "tests/tokio_fs_process_signal_parity_matrix.rs", "bead": "asupersync-2oh2u.3.1", "domain": "fs+process+signal", "category": "contract, drift", "test_count": 36, "scenario_prefix": "T3-PM"}
+    ],
+    "inline_tests": [
+      {"module": "src/fs/file.rs", "domain": "filesystem", "test_count": 7},
+      {"module": "src/fs/vfs.rs", "domain": "filesystem", "test_count": 10},
+      {"module": "src/fs/path_ops.rs", "domain": "filesystem", "test_count": 10},
+      {"module": "src/fs/dir.rs", "domain": "filesystem", "test_count": 6},
+      {"module": "src/fs/read_dir.rs", "domain": "filesystem", "test_count": 3},
+      {"module": "src/fs/open_options.rs", "domain": "filesystem", "test_count": 6},
+      {"module": "src/fs/metadata.rs", "domain": "filesystem", "test_count": 9},
+      {"module": "src/process.rs", "domain": "process", "test_count": 18},
+      {"module": "src/signal/signal.rs", "domain": "signal", "test_count": 5},
+      {"module": "src/signal/ctrl_c.rs", "domain": "signal", "test_count": 2},
+      {"module": "src/signal/kind.rs", "domain": "signal", "test_count": 5},
+      {"module": "src/signal/shutdown.rs", "domain": "signal", "test_count": 9},
+      {"module": "src/signal/graceful.rs", "domain": "signal", "test_count": 16}
+    ],
+    "bead_coverage": [
+      {"bead": "asupersync-2oh2u.3.3", "focus": "platform semantics and io_uring parity", "test_files": ["tests/fs_verification.rs", "tests/e2e_fs.rs"], "min_tests": 58},
+      {"bead": "asupersync-2oh2u.3.4", "focus": "process lifecycle parity", "test_files": ["tests/process_lifecycle_hardening.rs", "tests/tokio_process_lifecycle_parity.rs", "tests/compile_test_process.rs"], "min_tests": 77},
+      {"bead": "asupersync-2oh2u.3.5", "focus": "cross-platform signal contracts", "test_files": ["tests/e2e_signal.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"], "min_tests": 7},
+      {"bead": "asupersync-2oh2u.3.6", "focus": "cancellation-safe integration", "test_files": ["tests/tokio_cancel_safe_fs_process_signal.rs"], "min_tests": 24},
+      {"bead": "asupersync-2oh2u.3.7", "focus": "conformance and fault-injection", "test_files": ["tests/tokio_fs_process_signal_conformance.rs", "tests/tokio_fs_process_signal_conformance_faults.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"], "min_tests": 82}
+    ],
+    "ci_thresholds": {
+      "min_integration_tests": 280,
+      "min_inline_tests": 100,
+      "min_test_files": 10,
+      "required_beads": ["asupersync-2oh2u.3.3", "asupersync-2oh2u.3.4", "asupersync-2oh2u.3.5", "asupersync-2oh2u.3.6", "asupersync-2oh2u.3.7"],
+      "required_domains": ["filesystem", "process", "signal"]
+    }
+  },
   "ci_commands": [
     "rch exec -- cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture",
     "rch exec -- cargo test -p asupersync --test e2e_signal -- --nocapture",
     "rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture",
     "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture",
-    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c -- --nocapture"
+    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c -- --nocapture",
+    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t39 -- --nocapture"
   ]
 }
