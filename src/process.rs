@@ -38,12 +38,17 @@ use crate::runtime::reactor::Interest;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
-use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process as std_process;
 use std::task::{Context, Poll};
 
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, RawHandle};
+
+#[cfg(unix)]
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
@@ -53,6 +58,11 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_nonblocking() -> io::Result<()> {
     Ok(())
 }
 
@@ -935,6 +945,7 @@ pub struct ChildStdin {
 }
 
 impl ChildStdin {
+    #[cfg(unix)]
     fn from_std(stdin: std_process::ChildStdin) -> io::Result<Self> {
         set_nonblocking(stdin.as_raw_fd())?;
         Ok(Self {
@@ -943,10 +954,27 @@ impl ChildStdin {
         })
     }
 
+    #[cfg(not(unix))]
+    fn from_std(stdin: std_process::ChildStdin) -> io::Result<Self> {
+        set_nonblocking()?;
+        Ok(Self {
+            inner: stdin,
+            registration: None,
+        })
+    }
+
     /// Returns the raw file descriptor.
+    #[cfg(unix)]
     #[must_use]
     pub fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
+    }
+
+    /// Returns the raw handle on Windows.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn as_raw_handle(&self) -> RawHandle {
+        self.inner.as_raw_handle()
     }
 }
 
@@ -957,33 +985,61 @@ impl AsyncWrite for ChildStdin {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        match this.inner.write(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) =
-                    register_interest(&mut this.registration, &this.inner, cx, Interest::WRITABLE)
-                {
-                    return Poll::Ready(Err(err));
+        #[cfg(unix)]
+        {
+            match this.inner.write(buf) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = register_interest(
+                        &mut this.registration,
+                        &this.inner,
+                        cx,
+                        Interest::WRITABLE,
+                    ) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
                 }
-                Poll::Pending
+                Err(e) => Poll::Ready(Err(e)),
             }
-            Err(e) => Poll::Ready(Err(e)),
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (this, cx, buf);
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "async child stdin is only supported on Unix in this build",
+            )))
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        match this.inner.flush() {
-            Ok(()) => Poll::Ready(Ok(())),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) =
-                    register_interest(&mut this.registration, &this.inner, cx, Interest::WRITABLE)
-                {
-                    return Poll::Ready(Err(err));
+        #[cfg(unix)]
+        {
+            match this.inner.flush() {
+                Ok(()) => Poll::Ready(Ok(())),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = register_interest(
+                        &mut this.registration,
+                        &this.inner,
+                        cx,
+                        Interest::WRITABLE,
+                    ) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
                 }
-                Poll::Pending
+                Err(e) => Poll::Ready(Err(e)),
             }
-            Err(e) => Poll::Ready(Err(e)),
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (this, cx);
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "async child stdin is only supported on Unix in this build",
+            )))
         }
     }
 

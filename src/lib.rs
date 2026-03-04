@@ -221,7 +221,7 @@ pub mod fs;
 pub mod grpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod messaging;
-#[cfg(unix)]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod process;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;

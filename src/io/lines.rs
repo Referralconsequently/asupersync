@@ -33,9 +33,10 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
         let this = self.get_mut();
 
         loop {
-            // 1. Check if we already have a newline in `this.buf`
-            if let Some(_pos) = this.buf[this.bytes_read..].iter().position(|&b| b == b'\n') {
-                // Remove \n (we know it's always exactly at the end because of step 4)
+            // 1. Check if we already have a newline at the end of `this.buf`
+            // We know it can only be at the end because of step 4.
+            if this.buf.last() == Some(&b'\n') {
+                // Remove \n
                 this.buf.pop();
 
                 // Handle \r\n
