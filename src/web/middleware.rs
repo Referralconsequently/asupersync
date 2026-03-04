@@ -158,8 +158,9 @@ impl<H: Handler> CorsMiddleware<H> {
             allow_origin.to_string(),
         );
         // Cache key must vary by Origin when policy is origin-sensitive.
-        resp.headers
-            .insert("vary".to_string(), "origin".to_string());
+        // Use append (not insert) to preserve existing Vary tokens set by
+        // the inner handler or other middleware (e.g., accept-encoding).
+        append_vary_header(&mut resp, "origin");
         if self.policy.allow_credentials {
             resp.headers.insert(
                 "access-control-allow-credentials".to_string(),

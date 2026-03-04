@@ -358,6 +358,7 @@ impl<M: ConnectionManager> DbPool<M> {
             return Ok(PooledConnection {
                 conn: Some(idle.conn),
                 pool: self,
+                created_at: idle.created_at,
             });
         }
 
@@ -375,6 +376,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     Ok(PooledConnection {
                         conn: Some(conn),
                         pool: self,
+                        created_at: Instant::now(),
                     })
                 }
                 Err(e) => {
@@ -452,8 +454,8 @@ impl<M: ConnectionManager> DbPool<M> {
         self.get().ok()
     }
 
-    /// Return a connection to the pool.
-    fn return_connection(&self, conn: M::Connection) {
+    /// Return a connection to the pool, preserving its original creation time.
+    fn return_connection(&self, conn: M::Connection, created_at: Instant) {
         let mut inner = self.inner.lock().unwrap();
         if inner.closed {
             inner.total = inner.total.saturating_sub(1);
@@ -462,7 +464,7 @@ impl<M: ConnectionManager> DbPool<M> {
         }
         inner.idle.push_back(IdleConnection {
             conn,
-            created_at: Instant::now(),
+            created_at,
             last_used: Instant::now(),
         });
     }
@@ -543,7 +545,7 @@ impl<M: ConnectionManager> DbPool<M> {
             match self.manager.connect() {
                 Ok(conn) => {
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.return_connection(conn);
+                    self.return_connection(conn, Instant::now());
                     created += 1;
                 }
                 Err(_) => {
@@ -578,6 +580,7 @@ impl<M: ConnectionManager> fmt::Debug for DbPool<M> {
 pub struct PooledConnection<'a, M: ConnectionManager> {
     conn: Option<M::Connection>,
     pool: &'a DbPool<M>,
+    created_at: Instant,
 }
 
 impl<'a, M: ConnectionManager> PooledConnection<'a, M> {
@@ -595,7 +598,7 @@ impl<'a, M: ConnectionManager> PooledConnection<'a, M> {
     /// Explicitly return the connection to the pool.
     pub fn return_to_pool(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn);
+            self.pool.return_connection(conn, self.created_at);
         }
     }
 
@@ -626,7 +629,7 @@ impl<M: ConnectionManager> std::ops::DerefMut for PooledConnection<'_, M> {
 impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn);
+            self.pool.return_connection(conn, self.created_at);
         }
     }
 }

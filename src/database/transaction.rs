@@ -104,6 +104,12 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Validate that a savepoint name is safe for SQL identifier interpolation.
+/// Rejects anything that is not `[a-zA-Z0-9_]` to prevent SQL injection.
+fn validate_savepoint_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 // ─── PostgreSQL helpers ──────────────────────────────────────────────────────
 
 #[cfg(feature = "postgres")]
@@ -223,11 +229,18 @@ mod pg {
 
     impl<'a, 'tx> PgSavepoint<'a, 'tx> {
         /// Create a new savepoint with the given name.
+        ///
+        /// Name must be `[a-zA-Z0-9_]+` to prevent SQL injection.
         pub async fn new(
             tx: &'a mut PgTransaction<'tx>,
             cx: &Cx,
             name: &str,
         ) -> Outcome<PgSavepoint<'a, 'tx>, PgError> {
+            if !validate_savepoint_name(name) {
+                return Outcome::Err(PgError::Protocol(format!(
+                    "invalid savepoint name: {name:?}"
+                )));
+            }
             let sql = format!("SAVEPOINT {name}");
             match tx.execute(cx, &sql).await {
                 Outcome::Ok(_) => Outcome::Ok(PgSavepoint {
@@ -432,11 +445,18 @@ mod sqlite {
 
     impl<'a, 'tx> SqliteSavepoint<'a, 'tx> {
         /// Create a new savepoint with the given name.
+        ///
+        /// Name must be `[a-zA-Z0-9_]+` to prevent SQL injection.
         pub async fn new(
             tx: &'a SqliteTransaction<'tx>,
             cx: &Cx,
             name: &str,
         ) -> Outcome<SqliteSavepoint<'a, 'tx>, SqliteError> {
+            if !validate_savepoint_name(name) {
+                return Outcome::Err(SqliteError::Sqlite(format!(
+                    "invalid savepoint name: {name:?}"
+                )));
+            }
             let sql = format!("SAVEPOINT {name}");
             match tx.execute(cx, &sql, &[]).await {
                 Outcome::Ok(_) => Outcome::Ok(SqliteSavepoint {
@@ -596,11 +616,18 @@ mod mysql {
 
     impl<'a, 'tx> MySqlSavepoint<'a, 'tx> {
         /// Create a new savepoint with the given name.
+        ///
+        /// Name must be `[a-zA-Z0-9_]+` to prevent SQL injection.
         pub async fn new(
             tx: &'a mut MySqlTransaction<'tx>,
             cx: &Cx,
             name: &str,
         ) -> Outcome<MySqlSavepoint<'a, 'tx>, MySqlError> {
+            if !validate_savepoint_name(name) {
+                return Outcome::Err(MySqlError::Protocol(format!(
+                    "invalid savepoint name: {name:?}"
+                )));
+            }
             let sql = format!("SAVEPOINT {name}");
             match tx.execute(cx, &sql).await {
                 Outcome::Ok(_) => Outcome::Ok(MySqlSavepoint {

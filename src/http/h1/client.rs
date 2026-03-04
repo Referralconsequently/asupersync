@@ -126,6 +126,10 @@ fn parse_status_line(line: &str) -> Result<(Version, u16, String), HttpError> {
 
     let version = Version::from_bytes(ver.as_bytes()).ok_or(HttpError::UnsupportedVersion)?;
     let status: u16 = code.parse().map_err(|_| HttpError::BadRequestLine)?;
+    // RFC 9110 §15: status codes are three-digit integers (100–999).
+    if !(100..=999).contains(&status) {
+        return Err(HttpError::BadRequestLine);
+    }
 
     Ok((version, status, reason))
 }

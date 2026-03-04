@@ -1081,13 +1081,24 @@ impl MessageBuffer {
     }
 
     fn write_cstring(&mut self, s: &str) {
-        self.buf.extend_from_slice(s.as_bytes());
+        // Prevent protocol injection: if the string contains an embedded NUL,
+        // only write up to the first NUL byte (matching PostgreSQL server
+        // C-string semantics). This avoids a mismatch where the client thinks
+        // it sent one string but the server sees a truncated version followed
+        // by attacker-controlled bytes.
+        let bytes = s.as_bytes();
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        debug_assert!(end == bytes.len(), "embedded NUL in C-string: {s:?}");
+        self.buf.extend_from_slice(&bytes[..end]);
         self.buf.push(0);
     }
 
     /// Build a typed message with length prefix.
     fn build_message(&mut self, msg_type: u8) -> Vec<u8> {
-        let len = (self.buf.len() + 4) as i32; // +4 for length field itself
+        // PostgreSQL protocol uses i32 for message length. Guard against
+        // overflow for pathologically large messages (> 2 GiB payload).
+        let payload_len = self.buf.len().saturating_add(4); // +4 for length field
+        let len: i32 = i32::try_from(payload_len).unwrap_or(i32::MAX);
         let mut result = Vec::with_capacity(1 + 4 + self.buf.len());
         result.push(msg_type);
         result.extend_from_slice(&len.to_be_bytes());
@@ -1097,7 +1108,8 @@ impl MessageBuffer {
 
     /// Build a startup message (no type byte, includes protocol version).
     fn build_startup_message(&mut self) -> Vec<u8> {
-        let len = (self.buf.len() + 4) as i32;
+        let payload_len = self.buf.len().saturating_add(4);
+        let len: i32 = i32::try_from(payload_len).unwrap_or(i32::MAX);
         let mut result = Vec::with_capacity(4 + self.buf.len());
         result.extend_from_slice(&len.to_be_bytes());
         result.extend_from_slice(&self.buf);
@@ -2373,7 +2385,7 @@ impl PgConnection {
         }
 
         let stmt_name = format!("__asupersync_s{}", self.inner.next_stmt_id);
-        self.inner.next_stmt_id += 1;
+        self.inner.next_stmt_id = self.inner.next_stmt_id.wrapping_add(1);
 
         // Parse with no type hints (let server infer from $N positions).
         let parse = match build_parse_msg(&stmt_name, sql, &[]) {
