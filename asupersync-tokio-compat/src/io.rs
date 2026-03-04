@@ -16,8 +16,11 @@
 //! - `read_exact` and `write_all` are NOT cancel-safe through either adapter
 
 use pin_project_lite::pin_project;
+#[cfg(feature = "tokio-io")]
 use std::io;
+#[cfg(feature = "tokio-io")]
 use std::pin::Pin;
+#[cfg(feature = "tokio-io")]
 use std::task::{Context, Poll};
 
 pin_project! {
