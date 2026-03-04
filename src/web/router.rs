@@ -489,6 +489,64 @@ mod tests {
     }
 
     #[test]
+    fn route_with_multiple_typed_states() {
+        use crate::web::extract::State;
+        use crate::web::handler::FnHandler2;
+
+        #[derive(Clone)]
+        struct AppState {
+            name: &'static str,
+        }
+
+        #[derive(Clone)]
+        struct FeatureFlags {
+            beta: bool,
+        }
+
+        fn handler(State(app): State<AppState>, State(flags): State<FeatureFlags>) -> String {
+            format!("{}:{}", app.name, flags.beta)
+        }
+
+        let router = Router::new()
+            .route(
+                "/",
+                get(FnHandler2::<_, State<AppState>, State<FeatureFlags>>::new(
+                    handler,
+                )),
+            )
+            .with_state(AppState { name: "router" })
+            .with_state(FeatureFlags { beta: true });
+
+        let resp = router.handle(Request::new("GET", "/"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"router:true");
+    }
+
+    #[test]
+    fn route_with_state_same_type_last_insert_wins() {
+        use crate::web::extract::State;
+        use crate::web::handler::FnHandler1;
+
+        #[derive(Clone)]
+        struct AppState {
+            value: &'static str,
+        }
+
+        fn handler(State(app): State<AppState>) -> String {
+            app.value.to_string()
+        }
+
+        let router = Router::new()
+            .route("/", get(FnHandler1::<_, State<AppState>>::new(handler)))
+            .with_state(AppState { value: "first" })
+            .with_state(AppState { value: "second" });
+
+        let resp = router.handle(Request::new("GET", "/"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"second");
+    }
+
+    #[test]
     fn route_multiple_methods() {
         fn post_handler() -> StatusCode {
             StatusCode::CREATED
@@ -619,6 +677,37 @@ mod tests {
 
         let resp = app.handle(Request::new("POST", "/api/v1/users"));
         assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn nested_router_typed_state_override_prefers_nested_router() {
+        use crate::web::extract::State;
+        use crate::web::handler::FnHandler1;
+
+        #[derive(Clone)]
+        struct AppState {
+            greeting: &'static str,
+        }
+
+        fn handler(State(state): State<AppState>) -> String {
+            state.greeting.to_string()
+        }
+
+        let api = Router::new()
+            .route("/", get(FnHandler1::<_, State<AppState>>::new(handler)))
+            .with_state(AppState {
+                greeting: "nested",
+            });
+
+        let app = Router::new()
+            .with_state(AppState {
+                greeting: "parent",
+            })
+            .nest("/api", api);
+
+        let resp = app.handle(Request::new("GET", "/api/"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"nested");
     }
 
     #[test]

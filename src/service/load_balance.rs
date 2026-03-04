@@ -14,7 +14,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
@@ -204,7 +204,7 @@ impl Strategy for Weighted {
             return None;
         }
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
 
         // Ensure state vector matches backend count.
         if state.current_weights.len() != len {
@@ -276,7 +276,7 @@ struct Backend<S> {
 
 impl<S: fmt::Debug, T: Strategy> fmt::Debug for LoadBalancer<S, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let backends = self.backends.lock().unwrap();
+        let backends = self.backends.lock();
         f.debug_struct("LoadBalancer")
             .field("backends", &backends.len())
             .field("strategy", &self.strategy)
@@ -313,7 +313,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
 
     /// Add a backend service.
     pub fn push(&self, service: S) {
-        self.backends.lock().unwrap().push(Backend {
+        self.backends.lock().push(Backend {
             service,
             load: LoadMetric::new(),
         });
@@ -322,13 +322,13 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     /// Get the number of backends.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.backends.lock().unwrap().len()
+        self.backends.lock().len()
     }
 
     /// Returns true if there are no backends.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.backends.lock().unwrap().is_empty()
+        self.backends.lock().is_empty()
     }
 
     /// Get per-backend in-flight counts.
@@ -355,7 +355,7 @@ where
 {
     /// Remove a backend by index, returning the service.
     pub fn remove(&self, index: usize) -> Option<S> {
-        let mut backends = self.backends.lock().unwrap();
+        let mut backends = self.backends.lock();
         if index < backends.len() {
             Some(backends.remove(index).service)
         } else {
@@ -376,7 +376,7 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
     where
         S: Service<Request>,
     {
-        let backends = self.backends.lock().unwrap();
+        let backends = self.backends.lock();
 
         if backends.is_empty() {
             return Err(LoadBalanceError::NoBackends);
