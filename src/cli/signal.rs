@@ -82,9 +82,10 @@ impl SignalHandler {
     /// Set the threshold for force quit.
     ///
     /// After this many signals, the process should exit immediately.
+    /// A threshold of 0 is treated as 1 (at least one signal required).
     #[must_use]
     pub const fn with_force_quit_threshold(mut self, threshold: u32) -> Self {
-        self.force_quit_threshold = threshold;
+        self.force_quit_threshold = if threshold == 0 { 1 } else { threshold };
         self
     }
 

@@ -316,7 +316,7 @@ impl Color {
     pub fn from_hex(value: &str) -> Option<Self> {
         let trimmed = value.trim();
         let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
-        if hex.len() != 6 {
+        if hex.len() != 6 || !hex.is_ascii() {
             return None;
         }
         let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -754,7 +754,7 @@ fn basic_index_to_rgb(idx: u8) -> (u8, u8, u8) {
 }
 
 fn rgb_to_basic(r: u8, g: u8, b: u8) -> (bool, u8) {
-    let luminance = (u16::from(r) * 212 + u16::from(g) * 715 + u16::from(b) * 72) / 1000;
+    let luminance = (u32::from(r) * 212 + u32::from(g) * 715 + u32::from(b) * 72) / 1000;
     let bright = luminance > 170;
     let (max, idx) = if r >= g && r >= b {
         (r, 1)

@@ -15,6 +15,7 @@ use parking_lot::Mutex;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
@@ -44,7 +45,10 @@ impl LoadMetric {
     }
 
     fn decrement(&self) {
-        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+        // Use fetch_update to prevent underflow wrapping.
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
     }
 }
 
@@ -271,7 +275,7 @@ pub struct LoadBalancer<S, T: Strategy> {
 
 struct Backend<S> {
     service: S,
-    load: LoadMetric,
+    load: Arc<LoadMetric>,
 }
 
 impl<S: fmt::Debug, T: Strategy> fmt::Debug for LoadBalancer<S, T> {
@@ -294,7 +298,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
                     .into_iter()
                     .map(|s| Backend {
                         service: s,
-                        load: LoadMetric::new(),
+                        load: Arc::new(LoadMetric::new()),
                     })
                     .collect(),
             ),
@@ -315,7 +319,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     pub fn push(&self, service: S) {
         self.backends.lock().push(Backend {
             service,
-            load: LoadMetric::new(),
+            load: Arc::new(LoadMetric::new()),
         });
     }
 
@@ -384,6 +388,7 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
             .ok_or(LoadBalanceError::NoBackends)?;
 
         backends[idx].load.increment();
+        let load_metric = Arc::clone(&backends[idx].load);
         let mut svc = backends[idx].service.clone();
         drop(backends);
 
@@ -392,6 +397,7 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
         Ok(LoadBalancedFuture {
             inner: fut,
             _service: svc,
+            load_metric: Some(load_metric),
         })
     }
 }
@@ -400,6 +406,8 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
 pub struct LoadBalancedFuture<F, S> {
     inner: F,
     _service: S,
+    /// Load metric to decrement when the future completes or is dropped.
+    load_metric: Option<Arc<LoadMetric>>,
 }
 
 impl<F, S> fmt::Debug for LoadBalancedFuture<F, S> {
@@ -416,7 +424,23 @@ where
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner).poll(cx)
+        let result = Pin::new(&mut self.inner).poll(cx);
+        if result.is_ready() {
+            // Decrement in-flight counter when the future completes.
+            if let Some(load) = self.load_metric.take() {
+                load.decrement();
+            }
+        }
+        result
+    }
+}
+
+impl<F, S> Drop for LoadBalancedFuture<F, S> {
+    fn drop(&mut self) {
+        // Decrement in-flight counter if the future is dropped before completion.
+        if let Some(load) = self.load_metric.take() {
+            load.decrement();
+        }
     }
 }
 
@@ -504,8 +528,8 @@ mod tests {
     // ================================================================
 
     #[test]
-    fn p2c_prefers_lower_load() {
-        init_test("p2c_prefers_lower_load");
+    fn p2c_prefers_lowerload_metric() {
+        init_test("p2c_prefers_lowerload_metric");
         let p2c = PowerOfTwoChoices::new();
         // With one heavily loaded and others at 0, P2C should mostly avoid it.
         let loads = [100, 0, 0, 0];
@@ -518,7 +542,7 @@ mod tests {
         }
         // Should pick a zero-load backend most of the time.
         assert!(picked_zero > 50, "picked_zero={picked_zero}");
-        crate::test_complete!("p2c_prefers_lower_load");
+        crate::test_complete!("p2c_prefers_lowerload_metric");
     }
 
     #[test]
@@ -544,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn p2c_equal_loads() {
+    fn p2c_equalload_metrics() {
         let p2c = PowerOfTwoChoices::new();
         let loads = [5, 5, 5];
         // All loads equal — should still return a valid index.
@@ -722,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn lb_loads() {
+    fn lbload_metrics() {
         let lb = LoadBalancer::new(
             RoundRobin::new(),
             vec![MockService::new(1), MockService::new(2)],
@@ -792,6 +816,7 @@ mod tests {
         let fut = LoadBalancedFuture {
             inner: std::future::ready(42),
             _service: (),
+            load_metric: None,
         };
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("LoadBalancedFuture"));

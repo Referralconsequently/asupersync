@@ -33,6 +33,10 @@ use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONNECT_MAX_HEADERS_SIZE: usize = 64 * 1024;
+/// Maximum number of cookies stored per host (RFC 6265 recommends at least 50).
+const MAX_COOKIES_PER_HOST: usize = 64;
+/// Maximum number of hosts tracked in the cookie store.
+const MAX_COOKIE_HOSTS: usize = 256;
 const SOCKS5_VERSION: u8 = 0x05;
 const SOCKS5_AUTH_NONE: u8 = 0x00;
 const SOCKS5_AUTH_USER_PASS: u8 = 0x02;
@@ -1110,6 +1114,10 @@ impl HttpClient {
 
         let host = canonical_cookie_host(host);
         let mut cookies = self.cookies.lock();
+        // Cap the number of tracked hosts to prevent unbounded growth.
+        if !cookies.contains_key(&host) && cookies.len() >= MAX_COOKIE_HOSTS {
+            return;
+        }
         let mut touched = false;
         {
             let entry = cookies.entry(host.clone()).or_default();
@@ -1128,7 +1136,7 @@ impl HttpClient {
                         .find(|cookie| cookie.name.eq_ignore_ascii_case(&name))
                     {
                         existing.value = value;
-                    } else {
+                    } else if entry.len() < MAX_COOKIES_PER_HOST {
                         entry.push(StoredCookie { name, value });
                     }
                 }

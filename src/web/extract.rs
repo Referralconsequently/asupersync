@@ -556,9 +556,10 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
             ));
         }
 
-        let content_type = req.headers.get("content-type").map(String::as_str);
+        let content_type = header_value_ci(&req, "content-type");
         if let Some(ct) = content_type {
-            if !ct.contains("application/json") {
+            let ct_lower = ct.to_ascii_lowercase();
+            if !ct_lower.contains("application/json") {
                 return Err(ExtractionError::new(
                     super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     format!("expected application/json, got {ct}"),
@@ -602,9 +603,10 @@ impl FromRequest for Form<HashMap<String, String>> {
             ));
         }
 
-        let content_type = req.headers.get("content-type").map(String::as_str);
+        let content_type = header_value_ci(&req, "content-type");
         if let Some(ct) = content_type {
-            if !ct.contains("application/x-www-form-urlencoded") {
+            let ct_lower = ct.to_ascii_lowercase();
+            if !ct_lower.contains("application/x-www-form-urlencoded") {
                 return Err(ExtractionError::new(
                     super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     format!("expected application/x-www-form-urlencoded, got {ct}"),
@@ -918,6 +920,15 @@ mod tests {
     }
 
     #[test]
+    fn json_content_type_header_name_case_insensitive() {
+        let req = Request::new("POST", "/data")
+            .with_header("Content-Type", "application/json")
+            .with_body(Bytes::from_static(br#"{"ok":true}"#));
+        let Json(value) = Json::<serde_json::Value>::from_request(req).unwrap();
+        assert_eq!(value.get("ok"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
     fn form_wrong_content_type() {
         let req = Request::new("POST", "/form")
             .with_header("content-type", "text/plain")
@@ -929,6 +940,16 @@ mod tests {
             err.status,
             crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
+    }
+
+    #[test]
+    fn form_content_type_header_name_case_insensitive() {
+        let req = Request::new("POST", "/form")
+            .with_header("Content-Type", "application/x-www-form-urlencoded")
+            .with_body(Bytes::from_static(b"user=alice&role=admin"));
+        let Form(values) = Form::<HashMap<String, String>>::from_request(req).unwrap();
+        assert_eq!(values.get("user").map(String::as_str), Some("alice"));
+        assert_eq!(values.get("role").map(String::as_str), Some("admin"));
     }
 
     #[test]
