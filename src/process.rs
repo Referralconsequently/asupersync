@@ -1405,7 +1405,7 @@ impl std::fmt::Display for ExitStatus {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
