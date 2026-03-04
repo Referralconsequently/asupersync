@@ -74,9 +74,6 @@ fn html_page() -> Html<&'static str> {
     Html("<h1>Hello</h1>")
 }
 
-fn redirect_home() -> Redirect {
-    Redirect::to("/home")
-}
 
 fn echo_raw(RawBody(body): RawBody) -> Vec<u8> {
     body.to_vec()
@@ -84,7 +81,7 @@ fn echo_raw(RawBody(body): RawBody) -> Vec<u8> {
 
 fn echo_headers(headers: HashMap<String, String>) -> String {
     let mut pairs: Vec<_> = headers.iter().collect();
-    pairs.sort_by_key(|(k, _)| k.clone());
+    pairs.sort_by_key(|(k, _)| (*k).clone());
     pairs
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
