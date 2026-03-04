@@ -153,8 +153,8 @@ This matrix covers the full T4 implementation surface with deterministic, networ
 | `tests/quic_h3_e2e_violations.rs` | T4.5 | ~8 |
 | `tests/tokio_quic_h3_interop_matrix.rs` | T4.6 | ~20 |
 | `tests/tokio_quic_h3_soak_adversarial.rs` | T4.7 | ~24 |
-| `tests/tokio_quic_h3_unit_protocol_matrix.rs` | T4.10 | 64 |
-| **Total** | | **~159** |
+| `tests/tokio_quic_h3_unit_protocol_matrix.rs` | T4.10 | 68 |
+| **Total** | | **~163** |
 
 ---
 

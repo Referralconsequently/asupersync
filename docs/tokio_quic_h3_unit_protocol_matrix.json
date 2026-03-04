@@ -20,7 +20,8 @@
     {"prefix": "QS", "name": "Stream and flow control", "count": 15, "bead": "T4.3/T4.4"},
     {"prefix": "TL", "name": "TLS/key phase machine", "count": 10, "bead": "T4.4"},
     {"prefix": "NC", "name": "Connection lifecycle", "count": 6, "bead": "T4.2"},
-    {"prefix": "HF", "name": "HTTP/3 frame codec and protocol", "count": 15, "bead": "T4.5"}
+    {"prefix": "HF", "name": "HTTP/3 frame codec and protocol", "count": 15, "bead": "T4.5"},
+    {"prefix": "MV", "name": "Matrix validation", "count": 4, "bead": "T4.10"}
   ],
   "drift_detection": [
     {"id": "DRIFT-QH1", "trigger": "New public type in quic_core/quic_native", "action": "Add unit test"},
@@ -30,7 +31,7 @@
     {"id": "DRIFT-QH5", "trigger": "T4.8 observability hooks complete", "action": "Add observability tests"}
   ],
   "summary": {
-    "total_tests": 64,
+    "total_tests": 68,
     "beads_covered": ["T4.2", "T4.3", "T4.4", "T4.5"],
     "modules_tested": 6,
     "overall_verdict": "COMPLETE"
