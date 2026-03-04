@@ -95,6 +95,7 @@ impl SignalDispatcher {
 
         let raw_signals: Vec<i32> = all_signal_kinds()
             .iter()
+            .copied()
             .map(raw_signal_for_kind)
             .collect();
         let mut signals = signal_hook::iterator::Signals::new(raw_signals)?;
@@ -150,16 +151,20 @@ fn all_signal_kinds() -> [SignalKind; 10] {
 
 #[cfg(windows)]
 fn all_signal_kinds() -> [SignalKind; 3] {
-    [SignalKind::Interrupt, SignalKind::Terminate, SignalKind::Quit]
+    [
+        SignalKind::Interrupt,
+        SignalKind::Terminate,
+        SignalKind::Quit,
+    ]
 }
 
 #[cfg(unix)]
-fn raw_signal_for_kind(kind: &SignalKind) -> i32 {
+fn raw_signal_for_kind(kind: SignalKind) -> i32 {
     kind.as_raw_value()
 }
 
 #[cfg(windows)]
-fn raw_signal_for_kind(kind: &SignalKind) -> i32 {
+fn raw_signal_for_kind(kind: SignalKind) -> i32 {
     kind.as_raw_value().expect("windows supported signal kind")
 }
 

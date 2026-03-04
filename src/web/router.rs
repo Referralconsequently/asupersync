@@ -695,14 +695,10 @@ mod tests {
 
         let api = Router::new()
             .route("/", get(FnHandler1::<_, State<AppState>>::new(handler)))
-            .with_state(AppState {
-                greeting: "nested",
-            });
+            .with_state(AppState { greeting: "nested" });
 
         let app = Router::new()
-            .with_state(AppState {
-                greeting: "parent",
-            })
+            .with_state(AppState { greeting: "parent" })
             .nest("/api", api);
 
         let resp = app.handle(Request::new("GET", "/api/"));

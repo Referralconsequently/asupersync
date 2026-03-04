@@ -642,6 +642,11 @@ impl BulkheadPermit<'_> {
 impl Drop for BulkheadPermit<'_> {
     fn drop(&mut self) {
         self.bulkhead.release_permit(self.weight);
+        // Process the queue to grant the newly available permits to waiting tasks.
+        // We use Time::ZERO because we don't have access to the current time here.
+        // This is safe because saturating_sub ensures time differences don't underflow,
+        // so we just won't trigger any timeouts during this specific queue processing pass.
+        let _ = self.bulkhead.process_queue(crate::types::Time::ZERO);
     }
 }
 

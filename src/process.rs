@@ -152,7 +152,7 @@ impl From<ProcessError> for io::Error {
     fn from(err: ProcessError) -> Self {
         match err {
             ProcessError::Io(inner) => inner,
-            other => io::Error::other(other.to_string()),
+            other => Self::other(other.to_string()),
         }
     }
 }
@@ -1191,9 +1191,12 @@ impl AsyncRead for ChildStdout {
                     Poll::Ready(Ok(()))
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) =
-                        register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
-                    {
+                    if let Err(err) = register_interest(
+                        &mut this.registration,
+                        &this.inner,
+                        cx,
+                        Interest::READABLE,
+                    ) {
                         return Poll::Ready(Err(err));
                     }
                     Poll::Pending
@@ -1287,9 +1290,12 @@ impl AsyncRead for ChildStderr {
                     Poll::Ready(Ok(()))
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) =
-                        register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
-                    {
+                    if let Err(err) = register_interest(
+                        &mut this.registration,
+                        &this.inner,
+                        cx,
+                        Interest::READABLE,
+                    ) {
                         return Poll::Ready(Err(err));
                     }
                     Poll::Pending

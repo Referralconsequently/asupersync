@@ -206,6 +206,13 @@ impl Future for RegionCloseFuture {
     }
 }
 
+impl Drop for RegionCloseFuture {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        state.waker = None;
+    }
+}
+
 impl<P: Policy> Scope<'_, P> {
     /// Creates a new scope (internal use).
     #[must_use]
