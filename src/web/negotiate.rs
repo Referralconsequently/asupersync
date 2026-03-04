@@ -265,7 +265,12 @@ impl<H: Handler> ErrorHandlerMiddleware<H> {
 
 impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let accept = req.headers.get("accept").cloned().unwrap_or_default();
+        let accept = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
 
         let result = if self.config.catch_panics {
             panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(req)))

@@ -198,7 +198,11 @@ fn is_valid_session_id(id: &str) -> bool {
 
 /// Extract a cookie value from the Cookie header.
 fn get_cookie(req: &Request, name: &str) -> Option<String> {
-    let header = req.headers.get("cookie")?;
+    let header = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        .map(|(_, v)| v)?;
     for pair in header.split(';') {
         let pair = pair.trim();
         if let Some((k, v)) = pair.split_once('=') {
@@ -415,10 +419,12 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         // 7. Set cookie on new sessions or modified sessions.
         if session_cleared {
             // Expire the cookie so the browser deletes it.
-            let cookie_val = format!(
-                "{}=; Path={}; Max-Age=0; HttpOnly",
-                self.config.cookie_name, self.config.cookie_path
-            );
+            // Reuse set_cookie_header to ensure all configured attributes
+            // (Secure, SameSite, HttpOnly) are included — omitting them
+            // could leave a stale session cookie in the browser.
+            let mut expire_config = self.config.clone();
+            expire_config.max_age = Some(0);
+            let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
             resp.headers.insert("set-cookie".to_string(), cookie_val);
         } else if is_new || session_data.is_modified() {
             let cookie_val = set_cookie_header(&self.config.cookie_name, &session_id, &self.config);

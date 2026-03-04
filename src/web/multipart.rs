@@ -151,10 +151,12 @@ impl FromRequest for Multipart {
             ));
         }
 
-        // Content-Type validation and boundary extraction.
+        // Content-Type validation and boundary extraction (case-insensitive lookup).
         let content_type = req
             .headers
-            .get("content-type")
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v)
             .ok_or_else(|| {
                 ExtractionError::new(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
