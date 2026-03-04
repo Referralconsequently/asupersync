@@ -111,15 +111,9 @@ impl TcpListener {
                         let deadline = timer.now() + delay;
                         let _ = timer.register(deadline, cx.waker().clone());
                     } else {
-                        // Schedule a delayed wakeup on a background thread to avoid
-                        // blocking the runtime worker.
-                        let waker = cx.waker().clone();
-                        let _ = std::thread::Builder::new()
-                            .name("accept-fallback".into())
-                            .spawn(move || {
-                                std::thread::sleep(delay);
-                                waker.wake();
-                            });
+                        // Sleep inline if no timer driver is present to avoid unbounded thread explosion.
+                        std::thread::sleep(delay);
+                        cx.waker().wake_by_ref();
                     }
                 }
                 // ReactorArmed: the reactor is re-armed and will wake us on

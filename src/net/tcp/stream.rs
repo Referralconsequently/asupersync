@@ -324,13 +324,8 @@ fn fallback_rewake(cx: &Context<'_>) {
         let deadline = timer.now() + FALLBACK_IO_BACKOFF;
         let _ = timer.register(deadline, cx.waker().clone());
     } else {
-        let waker = cx.waker().clone();
-        let _ = std::thread::Builder::new()
-            .name("stream-fallback".into())
-            .spawn(move || {
-                std::thread::sleep(FALLBACK_IO_BACKOFF);
-                waker.wake();
-            });
+        std::thread::sleep(FALLBACK_IO_BACKOFF);
+        cx.waker().wake_by_ref();
     }
 }
 
