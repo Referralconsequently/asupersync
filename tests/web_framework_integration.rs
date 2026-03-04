@@ -50,7 +50,9 @@ fn get_user_posts(Path(params): Path<HashMap<String, String>>) -> String {
     format!("user:{uid}/post:{pid}")
 }
 
-fn create_item(JsonExtract(body): JsonExtract<serde_json::Value>) -> (StatusCode, Json<serde_json::Value>) {
+fn create_item(
+    JsonExtract(body): JsonExtract<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
@@ -74,7 +76,6 @@ fn delete_item(Path(id): Path<String>) -> StatusCode {
 fn html_page() -> Html<&'static str> {
     Html("<h1>Hello</h1>")
 }
-
 
 fn echo_raw(RawBody(body): RawBody) -> Bytes {
     body
@@ -256,10 +257,7 @@ fn integration_router_wildcard_route() {
 
     let resp = router.handle(Request::new("GET", "/files/docs/readme.md"));
     assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(
-        std::str::from_utf8(&resp.body).unwrap(),
-        "docs/readme.md"
-    );
+    assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "docs/readme.md");
 
     test_complete!("router_wildcard_route");
 }
@@ -278,10 +276,7 @@ fn integration_router_multiple_path_params() {
 
     let resp = router.handle(Request::new("GET", "/users/42/posts/7"));
     assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(
-        std::str::from_utf8(&resp.body).unwrap(),
-        "user:42/post:7"
-    );
+    assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "user:42/post:7");
 
     test_complete!("router_multiple_path_params");
 }
@@ -331,10 +326,7 @@ fn integration_extractor_path_numeric() {
     common::init_test_logging();
     test_phase!("Extractor Path Numeric");
 
-    let router = Router::new().route(
-        "/items/:id",
-        get(FnHandler1::<_, Path<u64>>::new(handler)),
-    );
+    let router = Router::new().route("/items/:id", get(FnHandler1::<_, Path<u64>>::new(handler)));
 
     let resp = router.handle(Request::new("GET", "/items/999"));
     assert_eq!(resp.status, StatusCode::OK);
@@ -483,13 +475,11 @@ fn integration_extractor_form() {
         )),
     );
 
-    let req = Request::new("POST", "/login").with_body(Bytes::from_static(b"user=alice&pass=secret"));
+    let req =
+        Request::new("POST", "/login").with_body(Bytes::from_static(b"user=alice&pass=secret"));
     let resp = router.handle(req);
     assert_eq!(resp.status, StatusCode::OK);
-    assert_eq!(
-        std::str::from_utf8(&resp.body).unwrap(),
-        "logged_in:alice"
-    );
+    assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "logged_in:alice");
 
     test_complete!("extractor_form");
 }
@@ -499,10 +489,7 @@ fn integration_extractor_raw_body() {
     common::init_test_logging();
     test_phase!("Extractor RawBody");
 
-    let router = Router::new().route(
-        "/echo",
-        post(FnHandler1::<_, RawBody>::new(echo_raw)),
-    );
+    let router = Router::new().route("/echo", post(FnHandler1::<_, RawBody>::new(echo_raw)));
 
     let payload = b"binary\x00data\xff";
     let req = Request::new("POST", "/echo").with_body(Bytes::copy_from_slice(payload));
@@ -540,10 +527,7 @@ fn integration_extractor_cookie_raw() {
     common::init_test_logging();
     test_phase!("Extractor Cookie Raw");
 
-    let router = Router::new().route(
-        "/cookie",
-        get(FnHandler1::<_, Cookie>::new(echo_cookie)),
-    );
+    let router = Router::new().route("/cookie", get(FnHandler1::<_, Cookie>::new(echo_cookie)));
 
     let req = Request::new("GET", "/cookie").with_header("Cookie", "session=abc123");
     let resp = router.handle(req);
@@ -754,9 +738,9 @@ fn integration_response_tuple_status_body() {
 
     let router = Router::new().route(
         "/create",
-        post(FnHandler::new(
-            || -> (StatusCode, &'static str) { (StatusCode::CREATED, "created") },
-        )),
+        post(FnHandler::new(|| -> (StatusCode, &'static str) {
+            (StatusCode::CREATED, "created")
+        })),
     );
 
     let resp = router.handle(Request::new("POST", "/create"));
@@ -854,11 +838,12 @@ fn integration_middleware_cors_preflight() {
         resp.headers.get("access-control-allow-origin").unwrap(),
         "*"
     );
-    assert!(resp
-        .headers
-        .get("access-control-allow-methods")
-        .unwrap()
-        .contains("POST"));
+    assert!(
+        resp.headers
+            .get("access-control-allow-methods")
+            .unwrap()
+            .contains("POST")
+    );
 
     test_complete!("middleware_cors_preflight");
 }
@@ -959,8 +944,7 @@ fn integration_middleware_auth_bearer() {
     assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 
     // Invalid token
-    let req =
-        Request::new("GET", "/secure").with_header("authorization", "Bearer wrong-token");
+    let req = Request::new("GET", "/secure").with_header("authorization", "Bearer wrong-token");
     let resp = auth.call(req);
     assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 
@@ -1244,10 +1228,7 @@ fn integration_error_extraction_failure_propagates() {
     test_phase!("Extraction Failure Propagates");
 
     // Path extractor with no params → 400
-    let router = Router::new().route(
-        "/",
-        get(FnHandler1::<_, Path<String>>::new(get_user)),
-    );
+    let router = Router::new().route("/", get(FnHandler1::<_, Path<String>>::new(get_user)));
 
     let resp = router.handle(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
@@ -1325,12 +1306,10 @@ fn integration_state_propagates_to_nested_router() {
         get(FnHandler1::<_, State<AppConfig>>::new(with_state)),
     );
 
-    let app = Router::new()
-        .nest("/api", api)
-        .with_state(AppConfig {
-            name: "nested",
-            version: 2,
-        });
+    let app = Router::new().nest("/api", api).with_state(AppConfig {
+        name: "nested",
+        version: 2,
+    });
 
     let resp = app.handle(Request::new("GET", "/api/info"));
     assert_eq!(resp.status, StatusCode::OK);
@@ -1354,12 +1333,10 @@ fn integration_nested_state_overrides_parent() {
             version: 9,
         });
 
-    let app = Router::new()
-        .nest("/api", api)
-        .with_state(AppConfig {
-            name: "parent",
-            version: 1,
-        });
+    let app = Router::new().nest("/api", api).with_state(AppConfig {
+        name: "parent",
+        version: 1,
+    });
 
     let resp = app.handle(Request::new("GET", "/api/info"));
     assert_eq!(resp.status, StatusCode::OK);
@@ -1384,10 +1361,12 @@ fn integration_full_app_composition() {
     let users_api = Router::new()
         .route(
             "/",
-            get(FnHandler::new(|| -> &'static str { "user-list" }))
-                .post(FnHandler1::<_, JsonExtract<serde_json::Value>>::new(
-                    create_item,
-                )),
+            get(FnHandler::new(|| -> &'static str { "user-list" })).post(FnHandler1::<
+                _,
+                JsonExtract<serde_json::Value>,
+            >::new(
+                create_item
+            )),
         )
         .route(
             "/:id",
@@ -1410,9 +1389,9 @@ fn integration_full_app_composition() {
             name: "fullapp",
             version: 1,
         })
-        .fallback(FnHandler::new(
-            || -> (StatusCode, &'static str) { (StatusCode::NOT_FOUND, "not found") },
-        ));
+        .fallback(FnHandler::new(|| -> (StatusCode, &'static str) {
+            (StatusCode::NOT_FOUND, "not found")
+        }));
 
     test_section!("Root");
     let resp = app.handle(Request::new("GET", "/"));
