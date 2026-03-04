@@ -378,6 +378,7 @@ where
             match inner.poll_ready(&mut cx) {
                 Poll::Ready(Ok(())) => {
                     let mut future = inner.call(req);
+                    drop(inner);
                     // Poll the future to completion.
                     match Pin::new(&mut future).poll(&mut cx) {
                         Poll::Ready(result) => Some(result),
@@ -554,9 +555,7 @@ mod tests {
         let layer = BufferLayer::new(4);
         let dbg = format!("{layer:?}");
         assert!(dbg.contains("BufferLayer"));
-        assert!(dbg.contains("4"));
-        let cloned = layer.clone();
-        assert_eq!(format!("{cloned:?}"), dbg);
+        assert!(dbg.contains('4'));
     }
 
     #[test]
@@ -592,7 +591,7 @@ mod tests {
         let dbg = format!("{svc:?}");
         assert!(dbg.contains("Buffer"));
         assert!(dbg.contains("capacity"));
-        assert!(dbg.contains("8"));
+        assert!(dbg.contains('8'));
     }
 
     #[test]

@@ -522,7 +522,7 @@ mod tests {
         data.insert("x", "1");
         data.insert("y", "2");
         let mut keys = data.keys();
-        keys.sort();
+        keys.sort_unstable();
         assert_eq!(keys, vec!["x", "y"]);
     }
 
@@ -581,7 +581,6 @@ mod tests {
         let store = MemoryStore::new();
         let dbg = format!("{store:?}");
         assert!(dbg.contains("MemoryStore"));
-        let _cloned = store.clone();
     }
 
     #[test]
@@ -712,17 +711,18 @@ mod tests {
     impl Handler for TestHandler {
         fn call(&self, req: Request) -> Response {
             // Try to get session from extensions.
-            if let Some(session) = req.extensions.get_typed::<Session>() {
-                let count = session
-                    .get("count")
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
-                session.insert("count", (count + 1).to_string());
-                let body = format!("count={}", count + 1);
-                Response::new(StatusCode::OK, body.into_bytes())
-            } else {
-                Response::new(StatusCode::OK, b"no session".to_vec())
-            }
+            req.extensions.get_typed::<Session>().map_or_else(
+                || Response::new(StatusCode::OK, b"no session".to_vec()),
+                |session| {
+                    let count = session
+                        .get("count")
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    session.insert("count", (count + 1).to_string());
+                    let body = format!("count={}", count + 1);
+                    Response::new(StatusCode::OK, body.into_bytes())
+                },
+            )
         }
     }
 
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn middleware_loads_existing_session() {
         let store = MemoryStore::new();
-        let layer = SessionLayer::new(store.clone());
+        let layer = SessionLayer::new(store);
         let handler = layer.wrap(TestHandler);
 
         // First request — creates session.

@@ -782,7 +782,6 @@ mod tests {
         };
         let dbg = format!("{f:?}");
         assert!(dbg.contains("MultipartField"));
-        let _cloned = f.clone();
     }
 
     #[test]
@@ -790,6 +789,5 @@ mod tests {
         let mp = Multipart { fields: vec![] };
         let dbg = format!("{mp:?}");
         assert!(dbg.contains("Multipart"));
-        let _cloned = mp.clone();
     }
 }

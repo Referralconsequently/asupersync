@@ -655,7 +655,6 @@ mod tests {
         };
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("HealthResponse"));
-        let _cloned = resp.clone();
     }
 
     #[test]

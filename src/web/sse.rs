@@ -27,7 +27,7 @@
 //! }
 //! ```
 
-use std::fmt::Write;
+use std::fmt::{self, Write};
 use std::time::Duration;
 
 use super::response::{IntoResponse, Response, StatusCode};
@@ -116,16 +116,6 @@ impl SseEvent {
         self
     }
 
-    /// Serialize this event to the SSE wire format.
-    ///
-    /// Returns the formatted event including the trailing blank line.
-    #[must_use]
-    pub fn to_string(&self) -> String {
-        let mut buf = String::new();
-        self.write_to(&mut buf);
-        buf
-    }
-
     /// Write this event to the given buffer in SSE wire format.
     fn write_to(&self, buf: &mut String) {
         // Comment lines first.
@@ -159,6 +149,14 @@ impl SseEvent {
 
         // Terminate with blank line.
         buf.push('\n');
+    }
+}
+
+impl fmt::Display for SseEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut buf = String::new();
+        self.write_to(&mut buf);
+        f.write_str(&buf)
     }
 }
 
@@ -251,7 +249,7 @@ impl Sse {
             if i == self.events.len() - 1 && self.last_event_id.is_some() {
                 let mut event_with_id = event.clone();
                 if event_with_id.id.is_none() {
-                    event_with_id.id = self.last_event_id.clone();
+                    event_with_id.id.clone_from(&self.last_event_id);
                 }
                 event_with_id.write_to(&mut body);
             } else {
@@ -512,7 +510,6 @@ mod tests {
         let sse = Sse::event(SseEvent::default().data("test"));
         let dbg = format!("{sse:?}");
         assert!(dbg.contains("Sse"));
-        let _cloned = sse.clone();
     }
 
     // ================================================================

@@ -49,6 +49,7 @@ impl fmt::Debug for StaticFiles {
             .field("root", &self.root)
             .field("max_age", &self.max_age)
             .field("index_file", &self.index_file)
+            .field("custom_headers", &self.custom_headers)
             .finish()
     }
 }
@@ -125,9 +126,8 @@ impl StaticFiles {
     /// Serve a file, handling ETag and conditional requests.
     fn serve_file(&self, path: &Path, if_none_match: Option<&str>) -> Response {
         // Read file metadata.
-        let metadata = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => return Response::empty(StatusCode::NOT_FOUND),
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return Response::empty(StatusCode::NOT_FOUND);
         };
 
         if metadata.len() > MAX_FILE_SIZE {
@@ -147,9 +147,8 @@ impl StaticFiles {
         }
 
         // Read file contents.
-        let body = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(_) => return Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
+        let Ok(body) = std::fs::read(path) else {
+            return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
         };
 
         let mime = guess_mime(path);
@@ -191,10 +190,10 @@ impl Handler for StaticFilesHandler {
         let if_none_match = req.headers.get("if-none-match").cloned();
         let request_path = &req.path;
 
-        match self.config.resolve_path(request_path) {
-            Some(file_path) => self.config.serve_file(&file_path, if_none_match.as_deref()),
-            None => Response::empty(StatusCode::NOT_FOUND),
-        }
+        self.config.resolve_path(request_path).map_or_else(
+            || Response::empty(StatusCode::NOT_FOUND),
+            |file_path| self.config.serve_file(&file_path, if_none_match.as_deref()),
+        )
     }
 }
 
@@ -242,7 +241,7 @@ fn guess_mime(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
+        .map(str::to_ascii_lowercase)
         .as_deref()
     {
         // Text
@@ -357,7 +356,7 @@ mod tests {
         fs::write(dir.path().join("style.css"), "body { color: red; }").unwrap();
         fs::write(dir.path().join("app.js"), "console.log('hi');").unwrap();
         fs::write(dir.path().join("data.json"), r#"{"key":"val"}"#).unwrap();
-        fs::write(dir.path().join("image.png"), &[0x89, 0x50, 0x4E, 0x47]).unwrap();
+        fs::write(dir.path().join("image.png"), [0x89, 0x50, 0x4E, 0x47]).unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/page.html"), "<h1>Sub</h1>").unwrap();
         fs::write(dir.path().join("sub/index.html"), "<h1>Index</h1>").unwrap();
@@ -702,6 +701,6 @@ mod tests {
     fn builder_clone() {
         let sf = StaticFiles::new("/tmp/static").max_age(300);
         let sf2 = sf.clone();
-        assert_eq!(sf2.max_age, 300);
+        assert_eq!(sf2.max_age, sf.max_age);
     }
 }

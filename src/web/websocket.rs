@@ -648,11 +648,11 @@ mod tests {
 
     #[test]
     fn message_ping_pong() {
-        let ping = Message::Ping(Bytes::from_static(b"ping"));
-        assert!(matches!(ping, Message::Ping(_)));
+        let heartbeat_ping = Message::Ping(Bytes::from_static(b"ping"));
+        assert!(matches!(heartbeat_ping, Message::Ping(_)));
 
-        let pong = Message::Pong(Bytes::from_static(b"pong"));
-        assert!(matches!(pong, Message::Pong(_)));
+        let control_reply = Message::Pong(Bytes::from_static(b"pong"));
+        assert!(matches!(control_reply, Message::Pong(_)));
     }
 
     // ─── Data type trait coverage ─────────────────────────────────────
@@ -664,9 +664,7 @@ mod tests {
         let dbg = format!("{upgrade:?}");
         assert!(dbg.contains("WebSocketUpgrade"));
         assert!(dbg.contains("accept_key"));
-
-        let cloned = upgrade.clone();
-        assert_eq!(cloned.accept_key(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(upgrade.accept_key(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
     #[test]
@@ -674,9 +672,7 @@ mod tests {
         let err = ExtractionError::bad_request("test rejection");
         let dbg = format!("{err:?}");
         assert!(dbg.contains("ExtractionError"));
-
-        let cloned = err.clone();
-        assert_eq!(cloned.message, "test rejection");
+        assert_eq!(err.message, "test rejection");
     }
 
     // ─── Accept key correctness ───────────────────────────────────────
