@@ -32,7 +32,7 @@ fn architecture_doc_references_correct_bead_and_metadata() {
         "Maintained by",
         "WhiteDesert",
         "Version",
-        "1.2.0",
+        "1.4.0",
     ] {
         assert!(doc.contains(token), "missing metadata token: {token}");
     }
@@ -364,5 +364,198 @@ fn t74_cancellation_bridge_supports_three_modes() {
     assert!(
         cancel.contains("request_cancel"),
         "must expose request_cancel for protocol propagation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T7.5 Contract Tests — Tower Bridge Implementation Evidence
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t75_tower_bridge_module_exists() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/tower_bridge.rs");
+    assert!(path.exists(), "tower_bridge.rs must exist");
+    let src = std::fs::read_to_string(path).expect("must read tower_bridge.rs");
+    assert!(
+        src.len() > 2_000,
+        "tower_bridge.rs should be substantial, got {} bytes",
+        src.len()
+    );
+}
+
+#[test]
+fn t75_tower_bridge_has_from_tower_adapter() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/tower_bridge.rs");
+    let src = std::fs::read_to_string(path).unwrap();
+
+    assert!(
+        src.contains("pub struct FromTower"),
+        "must define FromTower adapter"
+    );
+    assert!(
+        src.contains("tower::Service<Request>"),
+        "FromTower must constrain on tower::Service"
+    );
+    // INV-1: Must accept Cx explicitly.
+    assert!(
+        src.contains("cx: &asupersync::Cx"),
+        "FromTower::call must accept &Cx"
+    );
+}
+
+#[test]
+fn t75_tower_bridge_has_into_tower_adapter() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/tower_bridge.rs");
+    let src = std::fs::read_to_string(path).unwrap();
+
+    assert!(
+        src.contains("pub struct IntoTower"),
+        "must define IntoTower adapter"
+    );
+    assert!(
+        src.contains("tower::Service<Request> for IntoTower"),
+        "IntoTower must implement tower::Service"
+    );
+    assert!(
+        src.contains("Cx::current()"),
+        "IntoTower must retrieve Cx from thread-local"
+    );
+}
+
+#[test]
+fn t75_tower_bridge_has_bridge_error() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/tower_bridge.rs");
+    let src = std::fs::read_to_string(path).unwrap();
+
+    assert!(
+        src.contains("pub enum BridgeError"),
+        "must define BridgeError enum"
+    );
+    // INV-5: Outcome severity lattice — must distinguish error classes.
+    for variant in ["Readiness", "Service", "Cancelled", "NoCxAvailable"] {
+        assert!(
+            src.contains(variant),
+            "BridgeError must include {variant} variant"
+        );
+    }
+    assert!(
+        src.contains("impl<E: std::fmt::Display> std::fmt::Display for BridgeError<E>"),
+        "BridgeError must implement Display"
+    );
+    assert!(
+        src.contains("std::error::Error for BridgeError<E>"),
+        "BridgeError must implement Error"
+    );
+}
+
+#[test]
+fn t75_tower_bridge_preserves_cancellation_invariant() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/tower_bridge.rs");
+    let src = std::fs::read_to_string(path).unwrap();
+
+    // INV-3: Cancellation is a protocol.
+    assert!(
+        src.contains("is_cancel_requested"),
+        "FromTower must check cancellation before awaiting response"
+    );
+    assert!(
+        src.contains("BridgeError::Cancelled"),
+        "must return Cancelled variant when cancelled"
+    );
+}
+
+#[test]
+fn t75_tower_bridge_preserves_cx_invariant() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/tower_bridge.rs");
+    let src = std::fs::read_to_string(path).unwrap();
+
+    // INV-1: No ambient authority — FromTower takes &Cx.
+    assert!(
+        src.contains("pub async fn call"),
+        "FromTower must have async call method"
+    );
+    assert!(
+        src.contains("Cx::set_current"),
+        "must install Cx for tower future execution"
+    );
+    // IntoTower must fail explicitly when Cx is missing.
+    assert!(
+        src.contains("NoCxAvailable"),
+        "IntoTower must fail with NoCxAvailable when Cx not installed"
+    );
+}
+
+#[test]
+fn t75_tower_bridge_has_tests() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/tower_bridge.rs");
+    let src = std::fs::read_to_string(path).unwrap();
+
+    assert!(
+        src.contains("#[cfg(test)]"),
+        "tower_bridge must include unit tests"
+    );
+    // Verify key test coverage.
+    for test_name in [
+        "from_tower_echo_service",
+        "from_tower_cancelled_before_call",
+        "into_tower_counter_service",
+        "into_tower_no_cx_returns_error",
+        "bridge_error_display",
+    ] {
+        assert!(
+            src.contains(test_name),
+            "tower_bridge must include test: {test_name}"
+        );
+    }
+}
+
+#[test]
+fn t75_cargo_toml_has_tower_dependency() {
+    let toml_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/Cargo.toml");
+    let toml = std::fs::read_to_string(toml_path).unwrap();
+
+    assert!(
+        toml.contains("tower"),
+        "Cargo.toml must list tower dependency"
+    );
+    assert!(
+        toml.contains("tower-bridge"),
+        "Cargo.toml must define tower-bridge feature"
+    );
+}
+
+#[test]
+fn t75_lib_rs_exports_tower_bridge() {
+    let lib_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("asupersync-tokio-compat/src/lib.rs");
+    let lib = std::fs::read_to_string(lib_path).unwrap();
+
+    assert!(
+        lib.contains("pub mod tower_bridge"),
+        "lib.rs must export tower_bridge module"
+    );
+    assert!(
+        lib.contains("tower-bridge"),
+        "lib.rs must gate tower_bridge on tower-bridge feature"
+    );
+}
+
+#[test]
+fn t75_architecture_doc_references_tower_bridge() {
+    let doc = load_doc();
+    assert!(
+        doc.contains("tower_bridge.rs"),
+        "architecture doc must reference tower_bridge.rs"
+    );
+    assert!(
+        doc.contains("T7.5"),
+        "architecture doc revision history must reference T7.5"
     );
 }
