@@ -1674,12 +1674,10 @@ mod messaging_cross_system_equivalence {
 
 mod pool_connection_retry {
     use asupersync::combinator::RetryPolicy;
-    use asupersync::database::pool::{
-        ConnectionManager, DbPool, DbPoolConfig, DbPoolError,
-    };
+    use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
     use std::fmt;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     // ── Test fixtures ───────────────────────────────────────────────────
@@ -1776,7 +1774,10 @@ mod pool_connection_retry {
     }
 
     fn make_pool(counters: &Counters) -> DbPool<FlakeyManager> {
-        DbPool::new(FlakeyManager::new(counters.clone()), DbPoolConfig::default())
+        DbPool::new(
+            FlakeyManager::new(counters.clone()),
+            DbPoolConfig::default(),
+        )
     }
 
     fn make_pool_with_config(counters: &Counters, config: DbPoolConfig) -> DbPool<FlakeyManager> {
@@ -1831,8 +1832,7 @@ mod pool_connection_retry {
         // Contract: total time bounded by connection_timeout.
         let ctr = Counters::new();
         ctr.set_permanent_fail(true);
-        let config = DbPoolConfig::default()
-            .connection_timeout(Duration::from_millis(50));
+        let config = DbPoolConfig::default().connection_timeout(Duration::from_millis(50));
         let pool = make_pool_with_config(&ctr, config);
         // Many attempts allowed, but timeout should kick in.
         let policy = RetryPolicy::new()
@@ -1961,8 +1961,7 @@ mod pool_connection_retry {
         // Timeout counter should increment on connection_timeout breach.
         let ctr = Counters::new();
         ctr.set_permanent_fail(true);
-        let config = DbPoolConfig::default()
-            .connection_timeout(Duration::from_millis(10));
+        let config = DbPoolConfig::default().connection_timeout(Duration::from_millis(10));
         let pool = make_pool_with_config(&ctr, config);
         let policy = RetryPolicy::new()
             .with_max_attempts(100)
