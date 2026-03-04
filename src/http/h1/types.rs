@@ -198,6 +198,7 @@ pub fn default_reason(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Payload Too Large",
         414 => "URI Too Long",
+        417 => "Expectation Failed",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
@@ -249,6 +250,7 @@ mod tests {
     fn default_reasons() {
         assert_eq!(default_reason(200), "OK");
         assert_eq!(default_reason(404), "Not Found");
+        assert_eq!(default_reason(417), "Expectation Failed");
         assert_eq!(default_reason(500), "Internal Server Error");
         assert_eq!(default_reason(999), "Unknown");
     }

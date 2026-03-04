@@ -15,14 +15,19 @@
 use crate::http::h1::client::{ClientStreamingResponse, Http1Client};
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::http::pool::{Pool, PoolConfig, PoolKey};
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::tcp::stream::TcpStream;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnectorBuilder, TlsStream};
+use memchr::memmem;
 use parking_lot::Mutex;
+use std::fmt::Write;
+use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+const CONNECT_MAX_HEADERS_SIZE: usize = 64 * 1024;
 
 /// Errors that can occur during HTTP client operations.
 #[derive(Debug)]
@@ -46,6 +51,15 @@ pub enum ClientError {
     },
     /// I/O error.
     Io(io::Error),
+    /// HTTP CONNECT tunnel was rejected by the proxy endpoint.
+    ConnectTunnelRefused {
+        /// HTTP status code returned by the proxy.
+        status: u16,
+        /// Reason phrase returned by the proxy.
+        reason: String,
+    },
+    /// Invalid CONNECT target authority or header input.
+    InvalidConnectInput(String),
 }
 
 impl std::fmt::Display for ClientError {
@@ -60,6 +74,13 @@ impl std::fmt::Display for ClientError {
                 write!(f, "too many redirects ({count} of max {max})")
             }
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::ConnectTunnelRefused { status, reason } => {
+                write!(
+                    f,
+                    "HTTP CONNECT tunnel rejected with status {status} ({reason})"
+                )
+            }
+            Self::InvalidConnectInput(msg) => write!(f, "invalid CONNECT input: {msg}"),
         }
     }
 }
@@ -69,7 +90,11 @@ impl std::error::Error for ClientError {
         match self {
             Self::DnsError(e) | Self::ConnectError(e) | Self::Io(e) => Some(e),
             Self::HttpError(e) => Some(e),
-            _ => None,
+            Self::ConnectTunnelRefused { .. }
+            | Self::InvalidConnectInput(_)
+            | Self::TlsError(_)
+            | Self::InvalidUrl(_)
+            | Self::TooManyRedirects { .. } => None,
         }
     }
 }
@@ -160,6 +185,81 @@ impl AsyncWrite for ClientIo {
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_shutdown(cx),
         }
+    }
+}
+
+/// Established HTTP CONNECT tunnel.
+///
+/// The tunnel preserves any bytes that were already read after the `\r\n\r\n`
+/// response delimiter and serves them first on reads before delegating to the
+/// underlying transport.
+#[derive(Debug)]
+pub struct HttpConnectTunnel<T> {
+    io: T,
+    prefetched: Vec<u8>,
+    prefetched_pos: usize,
+}
+
+impl<T> HttpConnectTunnel<T> {
+    fn new(io: T, prefetched: Vec<u8>) -> Self {
+        Self {
+            io,
+            prefetched,
+            prefetched_pos: 0,
+        }
+    }
+
+    /// Number of prefetched bytes that still need to be drained.
+    #[must_use]
+    pub fn prefetched_len(&self) -> usize {
+        self.prefetched.len().saturating_sub(self.prefetched_pos)
+    }
+
+    /// Consume the wrapper and return the underlying transport.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.io
+    }
+}
+
+impl<T> AsyncRead for HttpConnectTunnel<T>
+where
+    T: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.prefetched_pos < self.prefetched.len() && buf.remaining() > 0 {
+            let remaining_prefetched = self.prefetched.len() - self.prefetched_pos;
+            let to_copy = remaining_prefetched.min(buf.remaining());
+            buf.put_slice(&self.prefetched[self.prefetched_pos..self.prefetched_pos + to_copy]);
+            self.prefetched_pos += to_copy;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+
+impl<T> AsyncWrite for HttpConnectTunnel<T>
+where
+    T: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, data)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
     }
 }
 
@@ -377,6 +477,28 @@ impl HttpClient {
         let parsed = ParsedUrl::parse(url)?;
         self.execute_with_redirects_streaming(method, parsed, extra_headers, body, 0)
             .await
+    }
+
+    /// Establish an HTTP/1.1 CONNECT tunnel through a proxy endpoint.
+    ///
+    /// `proxy_url` is the proxy server URL (e.g. `http://proxy.local:3128`).
+    /// `target_authority` is the requested CONNECT authority-form target
+    /// (e.g. `example.com:443`).
+    pub async fn connect_tunnel(
+        &self,
+        proxy_url: &str,
+        target_authority: &str,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<HttpConnectTunnel<ClientIo>, ClientError> {
+        let proxy = ParsedUrl::parse(proxy_url)?;
+        let io = self.connect_io(&proxy).await?;
+        establish_http_connect_tunnel(
+            io,
+            target_authority,
+            self.config.user_agent.as_deref(),
+            &extra_headers,
+        )
+        .await
     }
 
     /// Execute a request, following redirects as configured.
@@ -695,9 +817,167 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
     )
 }
 
+fn find_headers_end(buf: &[u8]) -> Option<usize> {
+    memmem::find(buf, b"\r\n\r\n").map(|idx| idx + 4)
+}
+
+fn contains_ctl_line_break(s: &str) -> bool {
+    s.chars().any(|c| matches!(c, '\r' | '\n'))
+}
+
+fn validate_connect_inputs(
+    target_authority: &str,
+    extra_headers: &[(String, String)],
+    user_agent: Option<&str>,
+) -> Result<(), ClientError> {
+    if target_authority.trim().is_empty() {
+        return Err(ClientError::InvalidConnectInput(
+            "target authority cannot be empty".into(),
+        ));
+    }
+    if target_authority.chars().any(char::is_whitespace)
+        || contains_ctl_line_break(target_authority)
+    {
+        return Err(ClientError::InvalidConnectInput(
+            "target authority must be RFC authority-form without whitespace".into(),
+        ));
+    }
+    if let Some(ua) = user_agent
+        && contains_ctl_line_break(ua)
+    {
+        return Err(ClientError::InvalidConnectInput(
+            "User-Agent header contains invalid control characters".into(),
+        ));
+    }
+    for (name, value) in extra_headers {
+        if name.trim().is_empty() {
+            return Err(ClientError::InvalidConnectInput(
+                "header name cannot be empty".into(),
+            ));
+        }
+        if contains_ctl_line_break(name) || contains_ctl_line_break(value) {
+            return Err(ClientError::InvalidConnectInput(
+                "header name/value cannot contain CR or LF".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_connect_status_line(line: &str) -> Result<(u16, String), ClientError> {
+    let mut parts = line.splitn(3, ' ');
+    let version = parts.next().ok_or(ClientError::HttpError(
+        crate::http::h1::codec::HttpError::BadRequestLine,
+    ))?;
+    let status = parts.next().ok_or(ClientError::HttpError(
+        crate::http::h1::codec::HttpError::BadRequestLine,
+    ))?;
+    let reason = parts.next().unwrap_or("").to_owned();
+
+    if Version::from_bytes(version.as_bytes()).is_none() {
+        return Err(ClientError::HttpError(
+            crate::http::h1::codec::HttpError::UnsupportedVersion,
+        ));
+    }
+    let code = status
+        .parse::<u16>()
+        .map_err(|_| ClientError::HttpError(crate::http::h1::codec::HttpError::BadRequestLine))?;
+    Ok((code, reason))
+}
+
+async fn establish_http_connect_tunnel<T>(
+    mut io: T,
+    target_authority: &str,
+    user_agent: Option<&str>,
+    extra_headers: &[(String, String)],
+) -> Result<HttpConnectTunnel<T>, ClientError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_connect_inputs(target_authority, extra_headers, user_agent)?;
+
+    let mut request = String::with_capacity(256);
+    write!(&mut request, "CONNECT {target_authority} HTTP/1.1\r\n")
+        .expect("in-memory string write cannot fail");
+    write!(&mut request, "Host: {target_authority}\r\n")
+        .expect("in-memory string write cannot fail");
+    if let Some(ua) = user_agent {
+        write!(&mut request, "User-Agent: {ua}\r\n").expect("in-memory string write cannot fail");
+    }
+    for (name, value) in extra_headers {
+        write!(&mut request, "{name}: {value}\r\n").expect("in-memory string write cannot fail");
+    }
+    request.push_str("\r\n");
+
+    io.write_all(request.as_bytes()).await?;
+    io.flush().await?;
+
+    let mut read_buf = Vec::with_capacity(8192);
+    let mut scratch = [0u8; 8192];
+
+    loop {
+        if let Some(end) = find_headers_end(&read_buf) {
+            if end > CONNECT_MAX_HEADERS_SIZE {
+                return Err(ClientError::HttpError(
+                    crate::http::h1::codec::HttpError::HeadersTooLarge,
+                ));
+            }
+
+            let head = std::str::from_utf8(&read_buf[..end]).map_err(|_| {
+                ClientError::HttpError(crate::http::h1::codec::HttpError::BadRequestLine)
+            })?;
+            let mut lines = head.split("\r\n");
+            let status_line = lines.next().ok_or(ClientError::HttpError(
+                crate::http::h1::codec::HttpError::BadRequestLine,
+            ))?;
+            let (status, reason) = parse_connect_status_line(status_line)?;
+
+            // Permit informational responses and continue until final status.
+            if (100..=199).contains(&status) {
+                read_buf.drain(..end);
+                continue;
+            }
+
+            if !(200..=299).contains(&status) {
+                return Err(ClientError::ConnectTunnelRefused { status, reason });
+            }
+
+            let prefetched = read_buf[end..].to_vec();
+            return Ok(HttpConnectTunnel::new(io, prefetched));
+        }
+
+        if read_buf.len() > CONNECT_MAX_HEADERS_SIZE {
+            return Err(ClientError::HttpError(
+                crate::http::h1::codec::HttpError::HeadersTooLarge,
+            ));
+        }
+
+        let n = poll_fn(|cx| {
+            let mut rb = ReadBuf::new(&mut scratch);
+            match Pin::new(&mut io).poll_read(cx, &mut rb) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(rb.filled().len())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            }
+        })
+        .await?;
+
+        if n == 0 {
+            return Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "proxy closed before CONNECT response headers were complete",
+            )));
+        }
+        read_buf.extend_from_slice(&scratch[..n]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::AsyncWriteExt;
+    use futures_lite::future::block_on;
+    use std::future::poll_fn;
 
     // =========================================================================
     // URL parsing
@@ -950,6 +1230,149 @@ mod tests {
         let client = HttpClient::new();
         let stats = client.pool_stats();
         assert_eq!(stats.total_connections, 0);
+    }
+
+    #[derive(Debug)]
+    struct ConnectTestIo {
+        read_data: Vec<u8>,
+        read_pos: usize,
+        written: Vec<u8>,
+    }
+
+    impl ConnectTestIo {
+        fn new(read_data: impl AsRef<[u8]>) -> Self {
+            Self {
+                read_data: read_data.as_ref().to_vec(),
+                read_pos: 0,
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for ConnectTestIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.read_pos >= self.read_data.len() {
+                return Poll::Ready(Ok(()));
+            }
+            let remaining = self.read_data.len() - self.read_pos;
+            let to_copy = remaining.min(buf.remaining());
+            buf.put_slice(&self.read_data[self.read_pos..self.read_pos + to_copy]);
+            self.read_pos += to_copy;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for ConnectTestIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            data: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.extend_from_slice(data);
+            Poll::Ready(Ok(data.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn connect_tunnel_writes_expected_request() {
+        let io = ConnectTestIo::new("HTTP/1.1 200 Connection Established\r\n\r\n");
+        let tunnel = block_on(establish_http_connect_tunnel(
+            io,
+            "example.com:443",
+            Some("asupersync-test/1.0"),
+            &[("Proxy-Authorization".into(), "Basic abc".into())],
+        ))
+        .expect("tunnel should establish");
+        let io = tunnel.into_inner();
+        let written = String::from_utf8(io.written).expect("request should be utf8");
+        assert!(written.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"));
+        assert!(written.contains("\r\nHost: example.com:443\r\n"));
+        assert!(written.contains("\r\nUser-Agent: asupersync-test/1.0\r\n"));
+        assert!(written.contains("\r\nProxy-Authorization: Basic abc\r\n"));
+        assert!(written.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn connect_tunnel_preserves_prefetched_bytes_and_supports_write() {
+        let io = ConnectTestIo::new("HTTP/1.1 200 OK\r\n\r\nHELLO");
+        let mut tunnel = block_on(establish_http_connect_tunnel(
+            io,
+            "example.com:443",
+            None,
+            &[],
+        ))
+        .expect("tunnel should establish");
+
+        assert_eq!(tunnel.prefetched_len(), 5);
+        let mut first = [0u8; 3];
+        block_on(async {
+            poll_fn(|cx| {
+                let mut rb = ReadBuf::new(&mut first);
+                Pin::new(&mut tunnel).poll_read(cx, &mut rb)
+            })
+            .await
+            .expect("read prefetched bytes");
+        });
+        assert_eq!(&first, b"HEL");
+        assert_eq!(tunnel.prefetched_len(), 2);
+
+        block_on(async {
+            tunnel.write_all(b"PING").await.expect("write to tunnel");
+            tunnel.flush().await.expect("flush to tunnel");
+        });
+
+        let io = tunnel.into_inner();
+        let written = String::from_utf8(io.written).expect("request should be utf8");
+        assert!(written.ends_with("\r\n\r\nPING"));
+    }
+
+    #[test]
+    fn connect_tunnel_rejects_non_success_status() {
+        let io = ConnectTestIo::new("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
+        let err = block_on(establish_http_connect_tunnel(
+            io,
+            "example.com:443",
+            None,
+            &[],
+        ))
+        .expect_err("non-2xx should fail");
+        match err {
+            ClientError::ConnectTunnelRefused { status, reason } => {
+                assert_eq!(status, 407);
+                assert!(reason.contains("Proxy Authentication Required"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_tunnel_rejects_header_injection() {
+        let io = ConnectTestIo::new("HTTP/1.1 200 OK\r\n\r\n");
+        let err = block_on(establish_http_connect_tunnel(
+            io,
+            "example.com:443",
+            None,
+            &[("X-Test".into(), "ok\r\nbad".into())],
+        ))
+        .expect_err("CRLF in header value must be rejected");
+        match err {
+            ClientError::InvalidConnectInput(msg) => {
+                assert!(msg.contains("header name/value"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     // =========================================================================

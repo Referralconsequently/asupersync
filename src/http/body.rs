@@ -739,10 +739,7 @@ mod tests {
     #[test]
     fn empty_body_returns_none() {
         let mut body = Empty::new();
-        match poll_body(&mut body) {
-            Poll::Ready(None) => {}
-            _ => panic!("expected Poll::Ready(None)"),
-        }
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
     }
 
     #[test]
@@ -754,20 +751,15 @@ mod tests {
         assert!(!body.is_end_stream());
         assert_eq!(body.size_hint().exact(), Some(5));
 
-        match poll_body(&mut body) {
-            Poll::Ready(Some(Ok(frame))) => {
-                let data = frame.into_data().expect("expected data frame");
-                assert_eq!(data.chunk(), b"hello");
-            }
-            _ => panic!("expected data frame"),
-        }
+        let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
+            panic!("expected data frame")
+        };
+        let data = frame.into_data().expect("expected data frame");
+        assert_eq!(data.chunk(), b"hello");
 
         assert!(body.is_end_stream());
 
-        match poll_body(&mut body) {
-            Poll::Ready(None) => {}
-            _ => panic!("expected Poll::Ready(None)"),
-        }
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
     }
 
     #[test]

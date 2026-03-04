@@ -8,7 +8,7 @@
 use crate::codec::Framed;
 use crate::cx::Cx;
 use crate::http::h1::codec::{Http1Codec, HttpError};
-use crate::http::h1::types::{Request, Response, Version};
+use crate::http::h1::types::{Request, Response, Version, default_reason};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::ShutdownSignal;
 use crate::stream::Stream;
@@ -117,6 +117,13 @@ pub enum ConnectionPhase {
 enum ReadOutcome {
     Read(Option<Result<Request, HttpError>>),
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectationAction {
+    None,
+    Continue,
+    Reject,
 }
 
 impl ConnectionState {
@@ -337,6 +344,31 @@ where
             };
             req.peer_addr = peer_addr;
 
+            let expectation_action = classify_expectation(&req);
+            if expectation_action == ExpectationAction::Reject {
+                state.phase = ConnectionPhase::Writing;
+                let mut reject = Response::new(417, default_reason(417), Vec::new());
+                add_connection_close(&mut reject);
+                framed.send(reject)?;
+                poll_fn(|cx| framed.poll_flush(cx))
+                    .await
+                    .map_err(HttpError::Io)?;
+                state.requests_served += 1;
+                state.last_request_at = Cx::current()
+                    .and_then(|cx| cx.timer_driver())
+                    .map_or_else(wall_now, |timer| timer.now());
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
+
+            if expectation_action == ExpectationAction::Continue && request_expects_body(&req) {
+                let continue_response = Response::new(100, default_reason(100), Vec::new());
+                framed.send(continue_response)?;
+                poll_fn(|cx| framed.poll_flush(cx))
+                    .await
+                    .map_err(HttpError::Io)?;
+            }
+
             // Determine if we should close after this request
             let close_after = should_close_connection(&req, &self.config, &state);
 
@@ -376,6 +408,65 @@ where
 
         Ok(state)
     }
+}
+
+fn classify_expectation(req: &Request) -> ExpectationAction {
+    let mut saw_expect = false;
+    let mut saw_continue = false;
+    let mut saw_unsupported = false;
+
+    for (name, value) in &req.headers {
+        if !name.eq_ignore_ascii_case("expect") {
+            continue;
+        }
+        saw_expect = true;
+        for token in value
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            if token.eq_ignore_ascii_case("100-continue") {
+                saw_continue = true;
+            } else {
+                saw_unsupported = true;
+            }
+        }
+    }
+
+    if !saw_expect {
+        return ExpectationAction::None;
+    }
+
+    if saw_unsupported || req.version != Version::Http11 {
+        return ExpectationAction::Reject;
+    }
+
+    if saw_continue {
+        return ExpectationAction::Continue;
+    }
+
+    // Expect header present but no token content: treat as unsupported.
+    ExpectationAction::Reject
+}
+
+fn request_expects_body(req: &Request) -> bool {
+    for (name, value) in &req.headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            if let Ok(len) = value.trim().parse::<usize>() {
+                if len > 0 {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return value
+                .split(',')
+                .map(str::trim)
+                .any(|token| token.eq_ignore_ascii_case("chunked"));
+        }
+    }
+    !req.body.is_empty()
 }
 
 /// Determine whether the connection should close after this request.
@@ -599,6 +690,66 @@ mod tests {
         assert!(!config.keep_alive);
         assert_eq!(config.max_requests_per_connection, Some(50));
         assert_eq!(config.idle_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn classify_expectation_none_when_absent() {
+        let req = make_request(Version::Http11, vec![]);
+        assert_eq!(classify_expectation(&req), ExpectationAction::None);
+    }
+
+    #[test]
+    fn classify_expectation_continue_for_http11() {
+        let req = make_request(
+            Version::Http11,
+            vec![("Expect".into(), "100-continue".into())],
+        );
+        assert_eq!(classify_expectation(&req), ExpectationAction::Continue);
+    }
+
+    #[test]
+    fn classify_expectation_rejects_http10_continue() {
+        let req = make_request(
+            Version::Http10,
+            vec![("Expect".into(), "100-continue".into())],
+        );
+        assert_eq!(classify_expectation(&req), ExpectationAction::Reject);
+    }
+
+    #[test]
+    fn classify_expectation_rejects_unsupported_expectation() {
+        let req = make_request(Version::Http11, vec![("Expect".into(), "foo".into())]);
+        assert_eq!(classify_expectation(&req), ExpectationAction::Reject);
+    }
+
+    #[test]
+    fn classify_expectation_rejects_mixed_tokens() {
+        let req = make_request(
+            Version::Http11,
+            vec![("Expect".into(), "100-continue, foo".into())],
+        );
+        assert_eq!(classify_expectation(&req), ExpectationAction::Reject);
+    }
+
+    #[test]
+    fn request_expects_body_content_length_positive() {
+        let req = make_request(Version::Http11, vec![("Content-Length".into(), "5".into())]);
+        assert!(request_expects_body(&req));
+    }
+
+    #[test]
+    fn request_expects_body_content_length_zero() {
+        let req = make_request(Version::Http11, vec![("Content-Length".into(), "0".into())]);
+        assert!(!request_expects_body(&req));
+    }
+
+    #[test]
+    fn request_expects_body_chunked_encoding() {
+        let req = make_request(
+            Version::Http11,
+            vec![("Transfer-Encoding".into(), "chunked".into())],
+        );
+        assert!(request_expects_body(&req));
     }
 
     #[test]
