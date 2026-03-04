@@ -275,6 +275,12 @@ Browser Edition doc map (current canonical locations):
    - `docs/integration.md` (entrypoint index + integration orientation)
 6. Canonical framework examples:
    - `docs/wasm_canonical_examples.md`
+7. Troubleshooting and diagnostics cookbook:
+   - `docs/wasm_troubleshooting_compendium.md`
+8. Rationale index and decision ledger:
+   - `docs/wasm_rationale_index.md`
+9. Pilot triage and roadmap assimilation:
+   - `docs/wasm_pilot_feedback_triage_loop.md`
 
 Doc-drift verification hooks (required for Browser Edition doc changes):
 

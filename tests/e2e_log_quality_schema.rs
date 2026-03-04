@@ -281,11 +281,14 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
 }
 
 #[test]
-fn wasm_cross_framework_runner_keeps_replay_delta_drift_bundle_step() {
+fn wasm_cross_framework_runner_keeps_replay_corpus_and_delta_steps() {
     let content = fs::read_to_string("scripts/test_wasm_cross_framework_e2e.sh")
         .expect("read wasm cross-framework e2e runner script");
 
     for token in [
+        "vanilla.browser_replay_schedule_fuzz_corpus",
+        "schedule_permutation_fuzz_regression_corpus_artifact",
+        "schedule_permutation_fuzz_corpus.json",
         "vanilla.browser_replay_delta_drift_bundle",
         "golden_trace_replay_delta_report_flags_fixture_drift",
         "golden_trace_replay_delta_triage_bundle.json",

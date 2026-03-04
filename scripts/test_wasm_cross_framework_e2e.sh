@@ -76,6 +76,7 @@ STEP_IDS=(
     "wasm.host_interruption_tab_suspension"
     "wasm.host_interruption_cancel_drain"
     "vanilla.browser_replay_report_artifact"
+    "vanilla.browser_replay_schedule_fuzz_corpus"
     "vanilla.browser_replay_delta_drift_bundle"
 )
 
@@ -88,6 +89,7 @@ STEP_FRAMEWORK=(
     "next"
     "next"
     "next"
+    "vanilla"
     "vanilla"
     "vanilla"
     "vanilla"
@@ -107,6 +109,7 @@ STEP_CATEGORY=(
     "hostile_timing"
     "replay_artifact"
     "replay_artifact"
+    "replay_artifact"
 )
 
 STEP_HINTS=(
@@ -121,6 +124,7 @@ STEP_HINTS=(
     "Inspect obligation ledger behavior under tab-suspension style timing gaps."
     "Inspect cancellation drain invariants under host interruption timing."
     "Inspect browser replay artifact/report generation pipeline in tests/replay_e2e_suite.rs."
+    "Inspect schedule-permutation fuzz corpus artifact generation (schedule_permutation_fuzz_corpus.json) in tests/replay_e2e_suite.rs."
     "Inspect golden replay-delta drift triage bundle generation (golden_trace_replay_delta_triage_bundle.json) in tests/replay_e2e_suite.rs."
 )
 
@@ -136,10 +140,12 @@ STEP_COMMANDS=(
     "cargo test --test obligation_wasm_parity wasm_host_interruption_tab_suspension_multi_obligation -- --nocapture"
     "cargo test --test obligation_wasm_parity wasm_host_interruption_during_cancel_drain -- --nocapture"
     "cargo test --test replay_e2e_suite browser_replay_report_artifact_e2e -- --nocapture"
+    "cargo test --test replay_e2e_suite schedule_permutation_fuzz_regression_corpus_artifact -- --nocapture"
     "cargo test --test replay_e2e_suite golden_trace_replay_delta_report_flags_fixture_drift -- --nocapture"
 )
 
 STEP_FAULT_PROFILE=(
+    "none"
     "none"
     "none"
     "none"
