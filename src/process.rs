@@ -837,6 +837,33 @@ impl Child {
         Ok(())
     }
 
+    /// Sends an arbitrary signal to the child process (Unix only).
+    ///
+    /// Common signals: `libc::SIGTERM` (15), `libc::SIGHUP` (1),
+    /// `libc::SIGINT` (2), `libc::SIGUSR1` (10), `libc::SIGUSR2` (12).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process has already been waited on, or if
+    /// the `kill(2)` syscall fails (e.g., process already exited).
+    #[cfg(unix)]
+    pub fn signal(&mut self, sig: i32) -> Result<(), ProcessError> {
+        let child = self.inner.as_ref().ok_or_else(|| {
+            ProcessError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "child already waited",
+            ))
+        })?;
+
+        #[allow(clippy::cast_possible_wrap)]
+        let pid = child.id() as i32; // POSIX pid_t is i32; u32->i32 wrapping is safe for valid PIDs
+        let ret = unsafe { libc::kill(pid, sig) };
+        if ret != 0 {
+            return Err(ProcessError::Io(io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
     /// Attempts to check exit status without blocking.
     ///
     /// Returns `Ok(None)` if the process is still running.
@@ -1124,6 +1151,22 @@ pub struct ExitStatus {
 }
 
 impl ExitStatus {
+    /// Constructs an `ExitStatus` from explicit parts.
+    ///
+    /// Primarily useful for testing. On non-Unix platforms, `signal` is ignored.
+    #[must_use]
+    pub fn from_parts(code: Option<i32>, signal: Option<i32>) -> Self {
+        #[cfg(unix)]
+        {
+            Self { code, signal }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = signal;
+            Self { code }
+        }
+    }
+
     fn from_std(status: std_process::ExitStatus) -> Self {
         #[cfg(unix)]
         {
