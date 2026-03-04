@@ -283,9 +283,9 @@ Timeouts MUST act as backpressure release valves:
 
 | Backend | `is_transient` | `is_connection_error` | `is_serialization_failure` | `is_deadlock` | `is_retryable` |
 |---------|---------------|----------------------|---------------------------|---------------|----------------|
-| PostgreSQL | Missing | Missing | Implemented | Implemented | Missing |
-| MySQL | Missing | Missing | Missing | Missing | Missing |
-| SQLite | Missing | Missing | N/A | N/A | Missing |
+| PostgreSQL | Implemented | Implemented | Implemented | Implemented | Implemented |
+| MySQL | Implemented | Implemented | Implemented | Implemented | Implemented |
+| SQLite | Implemented | Implemented | N/A | N/A | Implemented |
 
 ### Idempotency Status
 
