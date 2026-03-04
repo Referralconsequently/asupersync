@@ -344,6 +344,8 @@ fn run_all_orchestrator_enforces_redaction_mode_and_quality_threshold_contract()
     for token in [
         "ARTIFACT_REDACTION_MODE must be one of: metadata_only, none, strict",
         "ARTIFACT_REDACTION_MODE=none is forbidden in CI",
+        "ARTIFACT_RETENTION_DAYS_LOCAL must be greater than 0",
+        "ARTIFACT_RETENTION_DAYS_CI must be greater than 0",
         "LOG_QUALITY_MIN_SCORE must be numeric (0-100)",
         "LOG_QUALITY_MIN_SCORE must be within 0..100",
         "--arg redaction_mode",
@@ -437,5 +439,27 @@ fn verify_matrix_rejects_none_redaction_mode_in_ci() {
     assert!(
         stderr.contains("ARTIFACT_REDACTION_MODE=none is forbidden in CI"),
         "expected CI redaction policy error, got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn verify_matrix_rejects_non_positive_retention_days() {
+    let _guard = verify_matrix_lock();
+    let output = Command::new("bash")
+        .arg("scripts/run_all_e2e.sh")
+        .arg("--verify-matrix")
+        .env("ARTIFACT_RETENTION_DAYS_LOCAL", "0")
+        .current_dir(repo_root())
+        .output()
+        .expect("run verify-matrix with invalid retention policy");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "verify-matrix should fail when ARTIFACT_RETENTION_DAYS_LOCAL=0"
+    );
+    assert!(
+        stderr.contains("ARTIFACT_RETENTION_DAYS_LOCAL must be greater than 0"),
+        "expected retention policy error, got stderr:\n{stderr}"
     );
 }

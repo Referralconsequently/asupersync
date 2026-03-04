@@ -100,13 +100,14 @@ Required policy invariants:
 
 1. `ARTIFACT_REDACTION_MODE` must be one of `metadata_only|none|strict`.
 2. In CI, `ARTIFACT_REDACTION_MODE=none` is forbidden (fail closed).
-3. `LOG_QUALITY_MIN_SCORE` must be numeric and constrained to `0..100`.
-4. Per-suite manifest entries must include:
+3. `ARTIFACT_RETENTION_DAYS_LOCAL` and `ARTIFACT_RETENTION_DAYS_CI` must be numeric and strictly greater than `0`.
+4. `LOG_QUALITY_MIN_SCORE` must be numeric and constrained to `0..100`.
+5. Per-suite manifest entries must include:
    - `log_quality_score`
    - `log_quality_threshold`
    - `log_quality_gate_ok`
    - `summary_schema_reason`
-5. Lifecycle artifacts must include `redaction_mode` so downstream policy
+6. Lifecycle artifacts must include `redaction_mode` so downstream policy
    auditors can verify redaction posture without replaying the suite.
 
 Extension policy:
