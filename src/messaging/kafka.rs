@@ -645,7 +645,7 @@ impl KafkaProducer {
     /// # Errors
     /// Returns an error if the message cannot be sent.
     #[allow(unused_variables, clippy::unused_async)]
-    pub fn send(
+    pub async fn send(
         &self,
         cx: &Cx,
         topic: &str,
@@ -676,8 +676,7 @@ impl KafkaProducer {
                 payload,
                 partition,
                 None,
-            )
-            .await
+            ).await
         }
 
         #[cfg(not(feature = "kafka"))]
@@ -703,7 +702,7 @@ impl KafkaProducer {
     /// * `payload` - Message payload
     /// * `headers` - Key-value header pairs
     #[allow(unused_variables, clippy::unused_async)]
-    pub fn send_with_headers(
+    pub async fn send_with_headers(
         &self,
         cx: &Cx,
         topic: &str,
@@ -733,8 +732,7 @@ impl KafkaProducer {
                 payload,
                 None,
                 Some(headers),
-            )
-            .await
+            ).await
         }
 
         #[cfg(not(feature = "kafka"))]
@@ -883,7 +881,7 @@ pub struct Transaction<'a> {
 impl Transaction<'_> {
     /// Send a message within the transaction.
     #[allow(unused_variables, clippy::unused_async)]
-    pub fn send(
+    pub async fn send(
         &self,
         cx: &Cx,
         topic: &str,
