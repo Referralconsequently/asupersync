@@ -11,7 +11,7 @@
 use asupersync::fs;
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::process::{Command, Stdio};
-use asupersync::signal::{with_graceful_shutdown, GracefulOutcome, ShutdownController, SignalKind};
+use asupersync::signal::{GracefulOutcome, ShutdownController, SignalKind, with_graceful_shutdown};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -125,10 +125,12 @@ fn doc_has_rollback_strategy() {
 fn doc_references_evidence() {
     let doc = load_doc();
     let evidence_files = [
-        "fs_verification.rs",
-        "process_lifecycle_hardening.rs",
-        "e2e_signal.rs",
+        "tokio_fs_process_signal_parity_matrix.rs",
+        "tokio_process_lifecycle_parity.rs",
         "tokio_cancel_safe_fs_process_signal.rs",
+        "tokio_fs_process_signal_conformance.rs",
+        "tokio_fs_process_signal_unit_matrix.rs",
+        "tokio_fs_process_signal_e2e.rs",
     ];
     for f in &evidence_files {
         assert!(doc.contains(f), "Doc must reference evidence file: {f}");
@@ -192,8 +194,7 @@ fn json_breaking_changes_documented() {
     for c in changes {
         assert!(
             c["severity"].as_str().is_some(),
-            "Breaking change must have severity: {:?}",
-            c
+            "Breaking change must have severity: {c:?}"
         );
     }
 }
@@ -370,17 +371,6 @@ fn mr_pr_05_process_error_type() {
 #[test]
 fn mr_sg_01_signal_kind_enum_variants() {
     // Validates MR-SG-01: SignalKind uses enum variants, not constructor functions
-    let _interrupt = SignalKind::Interrupt;
-    let _terminate = SignalKind::Terminate;
-    let _hangup = SignalKind::Hangup;
-    let _quit = SignalKind::Quit;
-    let _user1 = SignalKind::User1;
-    let _user2 = SignalKind::User2;
-    let _child = SignalKind::Child;
-    let _winch = SignalKind::WindowChange;
-    let _pipe = SignalKind::Pipe;
-    let _alarm = SignalKind::Alarm;
-
     // All 10 variants must exist and be distinct
     let kinds = [
         SignalKind::Interrupt,
