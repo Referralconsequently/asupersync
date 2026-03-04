@@ -1766,7 +1766,7 @@ fn t38_documents_asupersync_extensions() {
     for ext in [
         "write_atomic",
         "try_exists",
-        "Vfs trait",
+        "VFS trait",
         "ShutdownController",
         "GracefulOutcome",
         "with_graceful_shutdown",
