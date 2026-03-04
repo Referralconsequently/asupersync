@@ -170,8 +170,12 @@ fn json_has_downstream_dependents() {
     let deps = json["downstream_dependents"]
         .as_array()
         .expect("must be array");
-    let ids: Vec<&str> = deps.iter().filter_map(|d| d["bead_id"].as_str()).collect();
-    assert!(ids.contains(&"asupersync-2oh2u.6.12"), "must ref T6.12");
+    assert!(
+        deps.iter()
+            .filter_map(|d| d["bead_id"].as_str())
+            .any(|x| x == "asupersync-2oh2u.6.12"),
+        "must ref T6.12"
+    );
 }
 
 #[test]
@@ -865,10 +869,7 @@ mod messaging_contracts {
 
         // All variants must be constructible
         let variants: Vec<Box<dyn std::fmt::Display>> = vec![
-            Box::new(KafkaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "test",
-            ))),
+            Box::new(KafkaError::Io(std::io::Error::other("test"))),
             Box::new(KafkaError::Protocol("test".into())),
             Box::new(KafkaError::Broker("test".into())),
             Box::new(KafkaError::QueueFull),
@@ -897,10 +898,7 @@ mod messaging_contracts {
         use asupersync::messaging::NatsError;
 
         let variants: Vec<Box<dyn std::fmt::Display>> = vec![
-            Box::new(NatsError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "test",
-            ))),
+            Box::new(NatsError::Io(std::io::Error::other("test"))),
             Box::new(NatsError::Protocol("test".into())),
             Box::new(NatsError::Server("test".into())),
             Box::new(NatsError::InvalidUrl("test".into())),
@@ -951,10 +949,7 @@ mod messaging_contracts {
         use asupersync::messaging::RedisError;
 
         let variants: Vec<Box<dyn std::fmt::Display>> = vec![
-            Box::new(RedisError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "test",
-            ))),
+            Box::new(RedisError::Io(std::io::Error::other("test"))),
             Box::new(RedisError::Protocol("test".into())),
             Box::new(RedisError::Redis("test".into())),
             Box::new(RedisError::PoolExhausted),
