@@ -448,6 +448,63 @@ mod tests {
     }
 
     #[test]
+    fn route_with_typed_path_and_query_extractors() {
+        use crate::web::extract::{Path, Query};
+        use crate::web::handler::FnHandler2;
+
+        #[derive(serde::Deserialize)]
+        struct UserPath {
+            id: u64,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Pagination {
+            page: u32,
+            active: bool,
+        }
+
+        fn handler(Path(path): Path<UserPath>, Query(query): Query<Pagination>) -> String {
+            format!("id:{} page:{} active:{}", path.id, query.page, query.active)
+        }
+
+        let router = Router::new().route(
+            "/users/:id",
+            get(FnHandler2::<_, Path<UserPath>, Query<Pagination>>::new(
+                handler,
+            )),
+        );
+
+        let req = Request::new("GET", "/users/42").with_query("page=3&active=true");
+        let resp = router.handle(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"id:42 page:3 active:true");
+    }
+
+    #[test]
+    fn route_with_typed_query_error_returns_400() {
+        use crate::web::extract::Query;
+        use crate::web::handler::FnHandler1;
+
+        #[derive(serde::Deserialize)]
+        struct Pagination {
+            page: u32,
+        }
+
+        fn handler(Query(_query): Query<Pagination>) -> &'static str {
+            "ok"
+        }
+
+        let router = Router::new().route(
+            "/items",
+            get(FnHandler1::<_, Query<Pagination>>::new(handler)),
+        );
+
+        let req = Request::new("GET", "/items").with_query("page=not-a-number");
+        let resp = router.handle(req);
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn route_with_typed_state() {
         use crate::web::extract::State;
         use crate::web::handler::FnHandler1;

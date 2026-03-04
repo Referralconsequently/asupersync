@@ -21,7 +21,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::bytes::Bytes;
-use serde::de::{DeserializeOwned, IntoDeserializer, value::MapDeserializer};
+use serde::de::DeserializeOwned;
 
 // ─── Request Type ────────────────────────────────────────────────────────────
 
@@ -265,25 +265,13 @@ where
             return Err(ExtractionError::bad_request("no path parameters found"));
         }
 
-        if let Some(first) = req.path_params.values().next() {
-            let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-                first.as_str().into_deserializer();
-            if let Ok(value) = T::deserialize(de) {
-                return Ok(Self(value));
-            }
+        if let Some(first) = req.path_params.values().next()
+            && let Some(value) = deserialize_single_value::<T>(first)
+        {
+            return Ok(Self(value));
         }
 
-        let map = req.path_params.iter().map(|(key, value)| {
-            let k: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-                key.as_str().into_deserializer();
-            let v: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-                value.as_str().into_deserializer();
-            (k, v)
-        });
-
-        T::deserialize(MapDeserializer::<_, serde::de::value::Error>::new(map))
-            .map(Self)
-            .map_err(|e| ExtractionError::bad_request(format!("invalid path parameters: {e}")))
+        deserialize_from_string_map(&req.path_params, "path parameters").map(Self)
     }
 }
 
@@ -291,7 +279,7 @@ where
 
 /// Extract query string parameters.
 ///
-/// Deserializes the query string using `serde_urlencoded`.
+/// Deserializes query pairs into typed values.
 ///
 /// ```ignore
 /// #[derive(Deserialize)]
@@ -312,28 +300,71 @@ where
         let qs = req.query.as_deref().unwrap_or("");
         let parsed = parse_urlencoded(qs);
 
-        if parsed.len() == 1 {
-            if let Some(first) = parsed.values().next() {
-                let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-                    first.as_str().into_deserializer();
-                if let Ok(value) = T::deserialize(de) {
-                    return Ok(Self(value));
-                }
-            }
+        if let Some(first) = parsed.values().next()
+            && let Some(value) = deserialize_single_value::<T>(first)
+        {
+            return Ok(Self(value));
         }
 
-        let map = parsed.iter().map(|(key, value)| {
-            let k: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-                key.as_str().into_deserializer();
-            let v: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-                value.as_str().into_deserializer();
-            (k, v)
-        });
-
-        T::deserialize(MapDeserializer::<_, serde::de::value::Error>::new(map))
-            .map(Self)
-            .map_err(|e| ExtractionError::bad_request(format!("invalid query parameters: {e}")))
+        deserialize_from_string_map(&parsed, "query parameters").map(Self)
     }
+}
+
+fn deserialize_single_value<T>(raw: &str) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    if let Ok(parsed) = serde_json::from_value::<T>(serde_json::Value::String(raw.to_string())) {
+        return Some(parsed);
+    }
+
+    serde_json::from_value::<T>(coerce_json_scalar(raw)).ok()
+}
+
+#[allow(clippy::implicit_hasher)]
+fn deserialize_from_string_map<T>(
+    values: &HashMap<String, String>,
+    context: &str,
+) -> Result<T, ExtractionError>
+where
+    T: DeserializeOwned,
+{
+    let as_strings = serde_json::Value::Object(
+        values
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect(),
+    );
+    if let Ok(parsed) = serde_json::from_value::<T>(as_strings) {
+        return Ok(parsed);
+    }
+
+    let as_coerced = serde_json::Value::Object(
+        values
+            .iter()
+            .map(|(key, value)| (key.clone(), coerce_json_scalar(value)))
+            .collect(),
+    );
+    serde_json::from_value::<T>(as_coerced)
+        .map_err(|e| ExtractionError::bad_request(format!("invalid {context}: {e}")))
+}
+
+fn coerce_json_scalar(raw: &str) -> serde_json::Value {
+    if let Ok(boolean) = raw.parse::<bool>() {
+        return serde_json::Value::Bool(boolean);
+    }
+    if let Ok(integer) = raw.parse::<i64>() {
+        return serde_json::Value::Number(integer.into());
+    }
+    if let Ok(unsigned) = raw.parse::<u64>() {
+        return serde_json::Value::Number(unsigned.into());
+    }
+    if let Ok(float) = raw.parse::<f64>()
+        && let Some(number) = serde_json::Number::from_f64(float)
+    {
+        return serde_json::Value::Number(number);
+    }
+    serde_json::Value::String(raw.to_string())
 }
 
 /// Parse a URL-encoded string into key-value pairs.
