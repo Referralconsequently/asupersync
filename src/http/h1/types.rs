@@ -130,6 +130,133 @@ pub struct Request {
     pub peer_addr: Option<SocketAddr>,
 }
 
+impl Request {
+    /// Create a request builder for the provided method and URI.
+    #[must_use]
+    pub fn builder(method: Method, uri: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(method, uri)
+    }
+
+    /// Create a `GET` request builder.
+    #[must_use]
+    pub fn get(uri: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(Method::Get, uri)
+    }
+
+    /// Create a `POST` request builder.
+    #[must_use]
+    pub fn post(uri: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(Method::Post, uri)
+    }
+
+    /// Create a `PUT` request builder.
+    #[must_use]
+    pub fn put(uri: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(Method::Put, uri)
+    }
+
+    /// Create a `DELETE` request builder.
+    #[must_use]
+    pub fn delete(uri: impl Into<String>) -> RequestBuilder {
+        RequestBuilder::new(Method::Delete, uri)
+    }
+}
+
+/// Fluent builder for [`Request`].
+#[derive(Debug, Clone)]
+pub struct RequestBuilder {
+    request: Request,
+}
+
+impl RequestBuilder {
+    /// Create a builder with HTTP/1.1 defaults.
+    #[must_use]
+    pub fn new(method: Method, uri: impl Into<String>) -> Self {
+        Self {
+            request: Request {
+                method,
+                uri: uri.into(),
+                version: Version::Http11,
+                headers: Vec::new(),
+                body: Vec::new(),
+                trailers: Vec::new(),
+                peer_addr: None,
+            },
+        }
+    }
+
+    /// Set the request method.
+    #[must_use]
+    pub fn method(mut self, method: Method) -> Self {
+        self.request.method = method;
+        self
+    }
+
+    /// Set the request URI.
+    #[must_use]
+    pub fn uri(mut self, uri: impl Into<String>) -> Self {
+        self.request.uri = uri.into();
+        self
+    }
+
+    /// Set the HTTP version.
+    #[must_use]
+    pub fn version(mut self, version: Version) -> Self {
+        self.request.version = version;
+        self
+    }
+
+    /// Add a header.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.request.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Add multiple headers.
+    #[must_use]
+    pub fn headers<I, N, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: Into<String>,
+        V: Into<String>,
+    {
+        self.request.headers.extend(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        self
+    }
+
+    /// Set request body bytes.
+    #[must_use]
+    pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.request.body = body.into();
+        self
+    }
+
+    /// Add a trailer header.
+    #[must_use]
+    pub fn trailer(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.request.trailers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Set remote peer address metadata.
+    #[must_use]
+    pub fn peer_addr(mut self, peer_addr: SocketAddr) -> Self {
+        self.request.peer_addr = Some(peer_addr);
+        self
+    }
+
+    /// Build the request.
+    #[must_use]
+    pub fn build(self) -> Request {
+        self.request
+    }
+}
+
 /// Parsed HTTP/1.1 response (status line + headers + body).
 #[derive(Debug, Clone)]
 pub struct Response {
@@ -168,6 +295,12 @@ impl Response {
         self
     }
 
+    /// Create a response builder using the standard reason phrase for `status`.
+    #[must_use]
+    pub fn builder(status: u16) -> ResponseBuilder {
+        ResponseBuilder::new(status)
+    }
+
     /// Add a trailer header.
     ///
     /// Trailers are only valid with `Transfer-Encoding: chunked`.
@@ -175,6 +308,94 @@ impl Response {
     pub fn with_trailer(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.trailers.push((name.into(), value.into()));
         self
+    }
+}
+
+/// Fluent builder for [`Response`].
+#[derive(Debug, Clone)]
+pub struct ResponseBuilder {
+    response: Response,
+}
+
+impl ResponseBuilder {
+    /// Create a builder with HTTP/1.1 defaults and the standard reason phrase.
+    #[must_use]
+    pub fn new(status: u16) -> Self {
+        Self {
+            response: Response {
+                version: Version::Http11,
+                status,
+                reason: default_reason(status).to_owned(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                trailers: Vec::new(),
+            },
+        }
+    }
+
+    /// Set response status and reset reason phrase to the default for that code.
+    #[must_use]
+    pub fn status(mut self, status: u16) -> Self {
+        self.response.status = status;
+        self.response.reason = default_reason(status).to_owned();
+        self
+    }
+
+    /// Set response reason phrase.
+    #[must_use]
+    pub fn reason(mut self, reason: impl Into<String>) -> Self {
+        self.response.reason = reason.into();
+        self
+    }
+
+    /// Set HTTP version.
+    #[must_use]
+    pub fn version(mut self, version: Version) -> Self {
+        self.response.version = version;
+        self
+    }
+
+    /// Add a header.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.response.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Add multiple headers.
+    #[must_use]
+    pub fn headers<I, N, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: Into<String>,
+        V: Into<String>,
+    {
+        self.response.headers.extend(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        self
+    }
+
+    /// Set response body bytes.
+    #[must_use]
+    pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.response.body = body.into();
+        self
+    }
+
+    /// Add a trailer header.
+    #[must_use]
+    pub fn trailer(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.response.trailers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Build the response.
+    #[must_use]
+    pub fn build(self) -> Response {
+        self.response
     }
 }
 
@@ -383,6 +604,55 @@ mod tests {
     }
 
     #[test]
+    fn request_builder_sets_fields() {
+        let peer_addr: SocketAddr = "10.0.0.9:9000".parse().unwrap();
+        let req = Request::builder(Method::Patch, "/v1/items/7")
+            .version(Version::Http10)
+            .header("Host", "example.com")
+            .header("X-Trace-Id", "abc123")
+            .body(b"payload".to_vec())
+            .trailer("Checksum", "sha256:deadbeef")
+            .peer_addr(peer_addr)
+            .build();
+
+        assert_eq!(req.method, Method::Patch);
+        assert_eq!(req.uri, "/v1/items/7");
+        assert_eq!(req.version, Version::Http10);
+        assert_eq!(
+            req.headers,
+            vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("X-Trace-Id".to_string(), "abc123".to_string()),
+            ]
+        );
+        assert_eq!(req.body, b"payload");
+        assert_eq!(
+            req.trailers,
+            vec![("Checksum".to_string(), "sha256:deadbeef".to_string())]
+        );
+        assert_eq!(req.peer_addr, Some(peer_addr));
+    }
+
+    #[test]
+    fn request_convenience_builders_use_expected_method() {
+        let get_req = Request::get("/health").build();
+        assert_eq!(get_req.method, Method::Get);
+        assert_eq!(get_req.uri, "/health");
+        assert_eq!(get_req.version, Version::Http11);
+
+        let post_req = Request::post("/submit").build();
+        assert_eq!(post_req.method, Method::Post);
+        assert_eq!(post_req.uri, "/submit");
+        assert_eq!(post_req.version, Version::Http11);
+
+        let put_req = Request::put("/resource/1").build();
+        assert_eq!(put_req.method, Method::Put);
+
+        let delete_req = Request::delete("/resource/1").build();
+        assert_eq!(delete_req.method, Method::Delete);
+    }
+
+    #[test]
     fn response_with_trailer() {
         let resp = Response::new(200, "OK", Vec::<u8>::new())
             .with_header("Transfer-Encoding", "chunked")
@@ -406,6 +676,45 @@ mod tests {
     fn response_defaults_version_http11() {
         let resp = Response::new(200, "OK", Vec::<u8>::new());
         assert_eq!(resp.version, Version::Http11);
+    }
+
+    #[test]
+    fn response_builder_uses_default_reason_and_chainable_fields() {
+        let resp = Response::builder(201)
+            .header("Content-Type", "application/json")
+            .body(br#"{"ok":true}"#.to_vec())
+            .trailer("Checksum", "abc123")
+            .build();
+
+        assert_eq!(resp.version, Version::Http11);
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.reason, "Created");
+        assert_eq!(
+            resp.headers,
+            vec![("Content-Type".to_string(), "application/json".to_string())]
+        );
+        assert_eq!(resp.body, br#"{"ok":true}"#);
+        assert_eq!(
+            resp.trailers,
+            vec![("Checksum".to_string(), "abc123".to_string())]
+        );
+    }
+
+    #[test]
+    fn response_builder_status_resets_reason_unless_overridden_afterward() {
+        let resp = Response::builder(200)
+            .reason("Everything Fine")
+            .status(404)
+            .build();
+        assert_eq!(resp.status, 404);
+        assert_eq!(resp.reason, "Not Found");
+
+        let resp_with_custom_reason = Response::builder(200)
+            .status(503)
+            .reason("Service Busy")
+            .build();
+        assert_eq!(resp_with_custom_reason.status, 503);
+        assert_eq!(resp_with_custom_reason.reason, "Service Busy");
     }
 
     #[test]
