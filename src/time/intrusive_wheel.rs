@@ -1244,6 +1244,12 @@ mod tests {
 
         let next = wheel.next_expiration();
         crate::assert_with_log!(next.is_some(), "has expiration", true, next.is_some());
+
+        // Cancel the node before it drops — TimerNode::drop asserts !is_linked().
+        unsafe {
+            wheel.cancel(node.as_mut());
+        }
+
         crate::test_complete!("intrusive_wheel_next_expiration");
     }
 
