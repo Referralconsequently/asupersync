@@ -283,7 +283,7 @@ Timeouts MUST act as backpressure release valves:
 | PostgreSQL transaction retry | Implemented | `src/database/transaction.rs` |
 | MySQL transaction retry | Implemented | `src/database/transaction.rs` |
 | SQLite transaction retry | Implemented | `src/database/transaction.rs` |
-| Connection pool retry | NOT IMPLEMENTED | — |
+| Connection pool retry | Implemented | `src/database/pool.rs` (`get_with_retry`) |
 
 ### Error Classification Status
 
