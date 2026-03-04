@@ -686,7 +686,10 @@ fn parity_includes_t54_middleware_closure_scope() {
     }
     // Version must be at least 1.4.0 (may be bumped by subsequent beads)
     assert!(
-        doc.contains("1.4.0") || doc.contains("1.5.0") || doc.contains("1.6.0"),
+        doc.contains("1.4.0")
+            || doc.contains("1.5.0")
+            || doc.contains("1.6.0")
+            || doc.contains("1.7.0"),
         "version must be >= 1.4.0"
     );
 }
@@ -1029,5 +1032,185 @@ fn parity_t55_new_gaps_in_summary() {
     assert!(
         summary.contains("HT-G5") && summary.contains("Multi-listener"),
         "HT-G5 must appear in gap summary"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5.7 Contract Tests — gRPC Production Features
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parity_includes_t57_grpc_production_features_scope() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.7 gRPC Production Features Closure Contract"),
+        "must include T5.7 closure contract section"
+    );
+    assert!(
+        doc.contains("1.6.0") || doc.contains("1.7.0"),
+        "version must be >= 1.6.0 for T5.7 updates"
+    );
+}
+
+#[test]
+fn parity_t57_covers_reflection_service() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("ReflectionService") && doc.contains("grpc/reflection.rs"),
+        "T5.7 must cover reflection service with module path"
+    );
+    // GRPC-G1 should be closed
+    assert!(
+        doc.contains("~~GRPC-G1~~") || doc.contains("Closed — `ReflectionService`"),
+        "GRPC-G1 must be marked closed"
+    );
+}
+
+#[test]
+fn parity_t57_covers_compression() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("gzip_frame_compress") && doc.contains("gzip_frame_decompress"),
+        "T5.7 must cover gzip compression functions"
+    );
+    assert!(
+        doc.contains("send_compression") && doc.contains("accept_compression"),
+        "T5.7 must cover server compression config"
+    );
+    // GRPC-G2 should be closed
+    assert!(
+        doc.contains("~~GRPC-G2~~") || doc.contains("Closed — `gzip_frame_compress`"),
+        "GRPC-G2 must be marked closed"
+    );
+}
+
+#[test]
+fn parity_t57_covers_interceptors() {
+    let doc = load_parity_doc();
+    let t57_section = doc
+        .split("T5.7 gRPC Production Features Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for interceptor in [
+        "InterceptorLayer",
+        "BearerAuthInterceptor",
+        "LoggingInterceptor",
+        "RateLimitInterceptor",
+        "TimeoutInterceptor",
+        "TracingInterceptor",
+        "MetadataPropagator",
+    ] {
+        assert!(
+            t57_section.contains(interceptor),
+            "T5.7 must cover interceptor: {interceptor}"
+        );
+    }
+}
+
+#[test]
+fn parity_t57_covers_health_service() {
+    let doc = load_parity_doc();
+    let t57_section = doc
+        .split("T5.7 gRPC Production Features Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for token in [
+        "HealthService",
+        "HealthServiceBuilder",
+        "HealthReporter",
+        "ServingStatus",
+    ] {
+        assert!(
+            t57_section.contains(token),
+            "T5.7 must cover health service type: {token}"
+        );
+    }
+}
+
+#[test]
+fn parity_t57_covers_grpc_web() {
+    let doc = load_parity_doc();
+    let t57_section = doc
+        .split("T5.7 gRPC Production Features Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for token in [
+        "WebFrameCodec",
+        "TrailerFrame",
+        "ContentType",
+        "base64 text modes",
+        "grpc/web.rs",
+    ] {
+        assert!(
+            t57_section.contains(token),
+            "T5.7 must cover gRPC-Web token: {token}"
+        );
+    }
+}
+
+#[test]
+fn parity_t57_has_evidence_commands() {
+    let doc = load_parity_doc();
+    let t57_section = doc
+        .split("T5.7 gRPC Production Features Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    for cmd in [
+        "cargo test --test grpc_enhancement_integration",
+        "cargo test --lib grpc::codec::tests",
+        "cargo test --lib grpc::web::tests",
+        "cargo test --lib grpc::health::tests",
+    ] {
+        assert!(
+            t57_section.contains(cmd),
+            "T5.7 must include evidence command: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn parity_t57_identifies_remaining_gap() {
+    let doc = load_parity_doc();
+    let t57_section = doc
+        .split("T5.7 gRPC Production Features Closure Contract")
+        .nth(1)
+        .unwrap_or("");
+    assert!(
+        t57_section.contains("GRPC-G9") && t57_section.contains("deadline"),
+        "T5.7 must identify GRPC-G9 (deadline propagation) as remaining gap"
+    );
+}
+
+#[test]
+fn parity_grpc_g1_g2_g11_ht_g1_closed_in_gap_summary() {
+    let doc = load_parity_doc();
+    let summary = doc
+        .split("Gap Summary")
+        .nth(1)
+        .expect("must have gap summary");
+    for (gap, feature) in [
+        ("GRPC-G1", "Reflection"),
+        ("GRPC-G2", "compression"),
+        ("GRPC-G11", "metadata"),
+        ("HT-G1", "100-continue"),
+    ] {
+        assert!(
+            summary.contains(&format!("~~{gap}~~")) || summary.contains(&format!("{gap}") ),
+            "gap summary must reference {gap} ({feature})"
+        );
+    }
+}
+
+#[test]
+fn parity_gap_count_updated_for_closures() {
+    let doc = load_parity_doc();
+    // Total should reflect 4 additional closures (GRPC-G1, GRPC-G2, GRPC-G11, HT-G1)
+    assert!(
+        doc.contains("34 open gaps") || doc.contains("33 open gaps") || doc.contains("32 open gaps"),
+        "total gap count must be updated to reflect closures (34 or fewer)"
+    );
+    assert!(
+        doc.contains("11 closed") || doc.contains("12 closed") || doc.contains("13 closed"),
+        "closed gap count must be >= 11"
     );
 }
