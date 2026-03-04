@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::bytes::Bytes;
 use crate::cx::{Cx, cap};
@@ -33,6 +34,9 @@ pub struct ServerConfig {
     pub keepalive_interval_ms: Option<u64>,
     /// Keep-alive timeout.
     pub keepalive_timeout_ms: Option<u64>,
+    /// Default timeout applied to all calls when the client does not send
+    /// a `grpc-timeout` header.
+    pub default_timeout: Option<Duration>,
     /// Compression used for outbound response messages.
     pub send_compression: Option<CompressionEncoding>,
     /// Compression encodings accepted by this server.
@@ -49,6 +53,7 @@ impl Default for ServerConfig {
             max_concurrent_streams: 100,
             keepalive_interval_ms: None,
             keepalive_timeout_ms: None,
+            default_timeout: None,
             send_compression: None,
             accept_compression: vec![CompressionEncoding::Identity],
         }
@@ -132,6 +137,14 @@ impl ServerBuilder {
     #[must_use]
     pub fn keepalive_timeout(mut self, ms: u64) -> Self {
         self.config.keepalive_timeout_ms = Some(ms);
+        self
+    }
+
+    /// Set the default timeout for all calls when the client does not send
+    /// a `grpc-timeout` header.
+    #[must_use]
+    pub fn default_timeout(mut self, timeout: Duration) -> Self {
+        self.config.default_timeout = Some(timeout);
         self
     }
 
@@ -287,6 +300,44 @@ impl Server {
     }
 }
 
+/// Parse a gRPC timeout header value into a [`Duration`].
+///
+/// The gRPC timeout format is `<value><unit>` where unit is one of:
+/// - `H` = hours
+/// - `M` = minutes
+/// - `S` = seconds
+/// - `m` = milliseconds
+/// - `u` = microseconds
+/// - `n` = nanoseconds
+///
+/// Returns `None` for malformed values.
+#[must_use]
+pub fn parse_grpc_timeout(header: &str) -> Option<Duration> {
+    if header.is_empty() {
+        return None;
+    }
+    let (digits, unit) = header.split_at(header.len() - 1);
+    let value: u64 = digits.parse().ok()?;
+    match unit {
+        "H" => Some(Duration::from_secs(value.checked_mul(3600)?)),
+        "M" => Some(Duration::from_secs(value.checked_mul(60)?)),
+        "S" => Some(Duration::from_secs(value)),
+        "m" => Some(Duration::from_millis(value)),
+        "u" => Some(Duration::from_micros(value)),
+        "n" => Some(Duration::from_nanos(value)),
+        _ => None,
+    }
+}
+
+/// Format a [`Duration`] as a gRPC timeout header value.
+///
+/// Uses milliseconds as the unit for practical precision.
+#[must_use]
+pub fn format_grpc_timeout(duration: Duration) -> String {
+    let ms = duration.as_millis();
+    format!("{ms}m")
+}
+
 /// A gRPC call context.
 ///
 /// Use [`CallContext::with_cx`] to attach a capability context for
@@ -296,7 +347,7 @@ pub struct CallContext {
     /// Request metadata.
     metadata: Metadata,
     /// Deadline for the call.
-    deadline: Option<std::time::Instant>,
+    deadline: Option<Instant>,
     /// Peer address.
     peer_addr: Option<String>,
 }
@@ -312,6 +363,51 @@ impl CallContext {
         }
     }
 
+    /// Create a call context from incoming request metadata.
+    ///
+    /// Parses the `grpc-timeout` header to derive the deadline. If no
+    /// timeout header is present and `default_timeout` is provided, the
+    /// default is used instead.
+    #[must_use]
+    pub fn from_metadata(
+        metadata: Metadata,
+        default_timeout: Option<Duration>,
+        peer_addr: Option<String>,
+    ) -> Self {
+        Self::from_metadata_at(metadata, default_timeout, peer_addr, Instant::now())
+    }
+
+    fn from_metadata_at(
+        metadata: Metadata,
+        default_timeout: Option<Duration>,
+        peer_addr: Option<String>,
+        now: Instant,
+    ) -> Self {
+        let timeout = metadata
+            .get("grpc-timeout")
+            .and_then(|v| match v {
+                super::streaming::MetadataValue::Ascii(s) => parse_grpc_timeout(s),
+                super::streaming::MetadataValue::Binary(_) => None,
+            })
+            .or(default_timeout);
+        let deadline = timeout.map(|t| now + t);
+        Self {
+            metadata,
+            deadline,
+            peer_addr,
+        }
+    }
+
+    /// Create a call context with an explicit deadline.
+    #[must_use]
+    pub fn with_deadline(deadline: Instant) -> Self {
+        Self {
+            metadata: Metadata::new(),
+            deadline: Some(deadline),
+            peer_addr: None,
+        }
+    }
+
     /// Get the request metadata.
     #[must_use]
     pub fn metadata(&self) -> &Metadata {
@@ -320,7 +416,7 @@ impl CallContext {
 
     /// Get the deadline.
     #[must_use]
-    pub fn deadline(&self) -> Option<std::time::Instant> {
+    pub fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
 
@@ -330,13 +426,24 @@ impl CallContext {
         self.peer_addr.as_deref()
     }
 
+    /// Returns the remaining time until the deadline, or `None` if no
+    /// deadline is set or it has already expired.
+    #[must_use]
+    pub fn remaining(&self) -> Option<Duration> {
+        self.remaining_at(Instant::now())
+    }
+
+    fn remaining_at(&self, now: Instant) -> Option<Duration> {
+        self.deadline.and_then(|d| d.checked_duration_since(now))
+    }
+
     /// Check if the deadline has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.is_expired_at(std::time::Instant::now())
+        self.is_expired_at(Instant::now())
     }
 
-    fn is_expired_at(&self, now: std::time::Instant) -> bool {
+    fn is_expired_at(&self, now: Instant) -> bool {
         self.deadline.is_some_and(|deadline| now >= deadline)
     }
 
@@ -406,6 +513,13 @@ impl CallContextWithCx<'_> {
     #[must_use]
     pub fn is_expired(&self) -> bool {
         self.call.is_expired()
+    }
+
+    /// Returns the remaining time until the deadline, or `None` if no
+    /// deadline is set or it has already expired.
+    #[must_use]
+    pub fn remaining(&self) -> Option<Duration> {
+        self.call.remaining()
     }
 
     /// Returns the full capability context.

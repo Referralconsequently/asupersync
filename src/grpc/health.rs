@@ -24,6 +24,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::service::{NamedService, ServiceDescriptor, ServiceHandler};
@@ -136,6 +137,8 @@ impl Default for HealthCheckResponse {
 pub struct HealthService {
     /// Service statuses.
     statuses: Arc<RwLock<HashMap<String, ServingStatus>>>,
+    /// Monotonic version counter, bumped on every status change.
+    version: Arc<AtomicU64>,
 }
 
 impl HealthService {
@@ -144,7 +147,14 @@ impl HealthService {
     pub fn new() -> Self {
         Self {
             statuses: Arc::new(RwLock::new(HashMap::new())),
+            version: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Returns the current version counter. Bumped on every status change.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
     }
 
     /// Set the status of a service.
@@ -153,6 +163,8 @@ impl HealthService {
     pub fn set_status(&self, service: impl Into<String>, status: ServingStatus) {
         let mut statuses = self.statuses.write();
         statuses.insert(service.into(), status);
+        drop(statuses);
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     /// Set the status of the overall server.
@@ -179,12 +191,16 @@ impl HealthService {
     pub fn clear(&self) {
         let mut statuses = self.statuses.write();
         statuses.clear();
+        drop(statuses);
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     /// Remove a service from health tracking.
     pub fn clear_status(&self, service: &str) {
         let mut statuses = self.statuses.write();
         statuses.remove(service);
+        drop(statuses);
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     /// Get all registered services.
@@ -234,11 +250,65 @@ impl HealthService {
         let result = self.check(request.get_ref());
         Box::pin(async move { result.map(Response::new) })
     }
+
+    /// Create a watcher that can poll for status changes on a specific service.
+    ///
+    /// The watcher captures the current version; subsequent calls to
+    /// [`HealthWatcher::changed`] will return `true` when the health
+    /// service version has been bumped since the last check.
+    #[must_use]
+    pub fn watch(&self, service: impl Into<String>) -> HealthWatcher {
+        HealthWatcher {
+            service: self.clone(),
+            service_name: service.into(),
+            last_version: self.version.load(Ordering::Acquire),
+        }
+    }
 }
 
 impl Default for HealthService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A watcher that can detect status changes for a particular service.
+///
+/// Implements the polling-based Watch semantic from the gRPC Health
+/// Checking Protocol. Call [`changed`](HealthWatcher::changed) to check
+/// whether the service status has changed since the last poll, and
+/// [`status`](HealthWatcher::status) to retrieve the current value.
+#[derive(Debug)]
+pub struct HealthWatcher {
+    service: HealthService,
+    service_name: String,
+    last_version: u64,
+}
+
+impl HealthWatcher {
+    /// Returns `true` if the health service has been modified since the
+    /// last call to `changed` (or since construction).
+    pub fn changed(&mut self) -> bool {
+        let current = self.service.version.load(Ordering::Acquire);
+        if current != self.last_version {
+            self.last_version = current;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the current status for the watched service.
+    #[must_use]
+    pub fn status(&self) -> Option<ServingStatus> {
+        self.service.get_status(&self.service_name)
+    }
+
+    /// Returns a snapshot: `(changed, current_status)`.
+    pub fn poll_status(&mut self) -> (bool, Option<ServingStatus>) {
+        let changed = self.changed();
+        let status = self.status();
+        (changed, status)
     }
 }
 

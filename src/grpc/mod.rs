@@ -62,7 +62,7 @@ pub use codec::{
 pub use codec::{gzip_frame_compress, gzip_frame_decompress};
 pub use health::{
     HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
-    ServingStatus,
+    HealthWatcher, ServingStatus,
 };
 pub use interceptor::{
     BearerAuthInterceptor, BearerAuthValidator, FnInterceptor, InterceptorLayer,
@@ -77,6 +77,7 @@ pub use reflection::{
 };
 pub use server::{
     CallContext, CallContextWithCx, Interceptor, Server, ServerBuilder, ServerConfig,
+    format_grpc_timeout, parse_grpc_timeout,
 };
 pub use service::{
     BidiStreamingMethod, ClientStreamingMethod, MethodDescriptor, NamedService,
