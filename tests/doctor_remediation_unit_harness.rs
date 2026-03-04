@@ -1473,6 +1473,152 @@ fn guided_session_smoke_is_deterministic_and_covers_success_and_failure() {
     }
 }
 
+#[test]
+fn guided_session_failure_injection_requests_rollback_with_diagnostics() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let recipe = remediation_recipe_fixtures()
+        .first()
+        .expect("fixture")
+        .recipe
+        .clone();
+    let approvals = all_checkpoint_ids(&recipe);
+
+    let outcome = run_guided_remediation_session(
+        &recipe_contract,
+        &logging_contract,
+        &recipe,
+        &GuidedRemediationSessionRequest {
+            run_id: "run-guided-remediation-tests".to_string(),
+            scenario_id: "guided-remediation-failure-injection".to_string(),
+            approved_checkpoints: approvals,
+            simulate_apply_failure: true,
+            previous_idempotency_key: None,
+        },
+    )
+    .expect("guided session");
+
+    assert_eq!(outcome.apply_status, "partial_apply_failed");
+    assert_eq!(outcome.verify_status, "rollback_recommended");
+
+    let apply_event = outcome
+        .events
+        .iter()
+        .find(|event| {
+            event.event_kind == "remediation_apply"
+                && event.fields.get("mode").is_some_and(|mode| mode == "apply")
+        })
+        .expect("apply event");
+    assert_eq!(
+        apply_event.fields.get("mutation_permitted"),
+        Some(&"true".to_string())
+    );
+    assert_eq!(
+        apply_event.fields.get("rollback_point_created"),
+        Some(&"true".to_string())
+    );
+    let apply_rationale = apply_event
+        .fields
+        .get("decision_rationale")
+        .expect("apply event must include decision_rationale");
+    assert!(
+        apply_rationale.contains("rollback required"),
+        "apply rationale must mention rollback requirement: {apply_rationale}"
+    );
+    let rollback_instructions = apply_event
+        .fields
+        .get("rollback_instructions")
+        .expect("apply event must include rollback instructions");
+    assert!(
+        rollback_instructions.contains("rollback_command="),
+        "rollback instructions must include rollback_command"
+    );
+    assert!(
+        rollback_instructions.contains("verify_command="),
+        "rollback instructions must include verify_command"
+    );
+
+    let verify_event = outcome
+        .events
+        .iter()
+        .find(|event| event.event_kind == "remediation_verify")
+        .expect("verify event");
+    assert_eq!(
+        verify_event.fields.get("verify_status"),
+        Some(&"rollback_recommended".to_string())
+    );
+    let unresolved_flags = verify_event
+        .fields
+        .get("unresolved_risk_flags")
+        .expect("verify event must include unresolved_risk_flags");
+    assert_ne!(
+        unresolved_flags, "none",
+        "failure path must preserve unresolved risk flags"
+    );
+}
+
+#[test]
+fn guided_session_failure_summary_event_reports_recovery_path() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let recipe = remediation_recipe_fixtures()
+        .first()
+        .expect("fixture")
+        .recipe
+        .clone();
+    let approvals = all_checkpoint_ids(&recipe);
+
+    let outcome = run_guided_remediation_session(
+        &recipe_contract,
+        &logging_contract,
+        &recipe,
+        &GuidedRemediationSessionRequest {
+            run_id: "run-guided-remediation-tests".to_string(),
+            scenario_id: "guided-remediation-failure-summary".to_string(),
+            approved_checkpoints: approvals,
+            simulate_apply_failure: true,
+            previous_idempotency_key: None,
+        },
+    )
+    .expect("guided session");
+
+    let summary_event = outcome
+        .events
+        .iter()
+        .find(|event| event.event_kind == "verification_summary")
+        .expect("summary event");
+    assert_eq!(
+        summary_event.fields.get("outcome_class"),
+        Some(&"failed".to_string())
+    );
+
+    let decision_rationale = summary_event
+        .fields
+        .get("decision_rationale")
+        .expect("summary event must include decision_rationale");
+    assert!(
+        decision_rationale.contains("apply_status=partial_apply_failed"),
+        "summary rationale must carry apply status: {decision_rationale}"
+    );
+    assert!(
+        decision_rationale.contains("verify_status=rollback_recommended"),
+        "summary rationale must carry verify status: {decision_rationale}"
+    );
+
+    let recovery = summary_event
+        .fields
+        .get("recovery_instructions")
+        .expect("summary event must include recovery_instructions");
+    assert!(
+        recovery.contains("rollback_command"),
+        "recovery instructions must include rollback guidance: {recovery}"
+    );
+    assert!(
+        recovery.contains("verify_command"),
+        "recovery instructions must include verification guidance: {recovery}"
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════
 // 11. Post-Remediation Verification Loop + Trust Scorecard
 // ════════════════════════════════════════════════════════════════════
