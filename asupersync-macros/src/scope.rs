@@ -241,15 +241,19 @@ fn return_span(stmts: &[Stmt]) -> Option<proc_macro2::Span> {
             syn::visit::visit_expr_return(self, node);
         }
 
-        // We shouldn't look inside nested closures or async blocks,
+        // We shouldn't look inside nested closures, async blocks, or nested functions
         // because a return inside them is perfectly valid and returns
-        // from the closure, not the scope body!
+        // from the closure/function, not the scope body!
         fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {
             // Do not traverse into closures
         }
 
         fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {
             // Do not traverse into nested async blocks
+        }
+
+        fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {
+            // Do not traverse into nested functions
         }
     }
 
