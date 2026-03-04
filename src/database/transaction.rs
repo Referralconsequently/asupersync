@@ -83,7 +83,7 @@ impl RetryPolicy {
 
     /// Compute delay for the given attempt (0-indexed), capped at `max_delay`.
     #[must_use]
-    fn delay_for(&self, attempt: u32) -> Duration {
+    pub fn delay_for(&self, attempt: u32) -> Duration {
         let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
         let delay_ms = self
             .base_delay
