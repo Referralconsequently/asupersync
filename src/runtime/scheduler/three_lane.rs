@@ -93,6 +93,36 @@ const YIELD_LIMIT: u32 = 2;
 
 type LocalReadyQueue = Mutex<Vec<TaskId>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoPhaseOutcome {
+    /// This worker made useful I/O progress (work may now be runnable).
+    Progress,
+    /// Another worker is currently the reactor leader.
+    Follower,
+    /// No I/O progress from this worker (leader quick miss or no I/O driver).
+    NoProgress,
+}
+
+#[inline]
+fn select_backoff_deadline(
+    io_phase: IoPhaseOutcome,
+    timer_deadline: Option<Time>,
+    local_deadline: Option<Time>,
+    global_deadline: Option<Time>,
+) -> Option<Time> {
+    if matches!(io_phase, IoPhaseOutcome::Follower) {
+        // Followers should not wake on shared global/timer deadlines. The
+        // leader handles those deadlines and will wake workers when work is
+        // actually runnable. Followers still honor local deadlines.
+        local_deadline
+    } else {
+        [timer_deadline, local_deadline, global_deadline]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+}
+
 #[inline]
 #[allow(clippy::cast_precision_loss)]
 fn usize_to_f64(value: usize) -> f64 {
@@ -1673,9 +1703,9 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn drive_io_phase(&self) -> bool {
+    fn drive_io_phase(&self) -> IoPhaseOutcome {
         let Some(io) = &self.io_driver else {
-            return false;
+            return IoPhaseOutcome::NoProgress;
         };
 
         let now = self
@@ -1716,12 +1746,16 @@ impl ThreeLaneWorker {
                 // If n == 0 but we had a non-zero timeout, we spent time blocking,
                 // so we should continue the loop to check queues again.
                 // If n == 0 and timeout was ZERO, we did a quick poll and found nothing.
-                n > 0 || io_timeout != Some(Duration::ZERO)
+                if n > 0 || io_timeout != Some(Duration::ZERO) {
+                    IoPhaseOutcome::Progress
+                } else {
+                    IoPhaseOutcome::NoProgress
+                }
             }
             Ok(None) | Err(_) => {
                 // Another thread is already polling (we are a follower).
                 // Do not busy loop. Proceed to backoff/park logic.
-                false
+                IoPhaseOutcome::Follower
             }
         }
     }
@@ -1756,7 +1790,8 @@ impl ThreeLaneWorker {
             }
 
             // PHASE 5: Drive I/O (Leader/Follower pattern).
-            if self.drive_io_phase() {
+            let io_phase = self.drive_io_phase();
+            if matches!(io_phase, IoPhaseOutcome::Progress) {
                 // We polled I/O, so we might have woken tasks. Continue loop.
                 continue;
             }
@@ -1815,10 +1850,12 @@ impl ThreeLaneWorker {
                         .and_then(TimerDriverHandle::next_deadline);
                     let global_deadline = self.global.peek_earliest_deadline();
 
-                    let next_deadline = [timer_deadline, local_deadline, global_deadline]
-                        .into_iter()
-                        .flatten()
-                        .min();
+                    let next_deadline = select_backoff_deadline(
+                        io_phase,
+                        timer_deadline,
+                        local_deadline,
+                        global_deadline,
+                    );
 
                     if let Some(next_deadline) = next_deadline {
                         // Re-fetch now to ensure we don't sleep if deadline passed during logic
@@ -3324,6 +3361,59 @@ mod tests {
         assert_eq!(
             ThreeLaneScheduler::initial_local_scheduler_capacity(64),
             128
+        );
+    }
+
+    #[test]
+    fn select_backoff_deadline_follower_uses_local_only() {
+        let timer_deadline = Some(Time::from_nanos(100));
+        let local_deadline = Some(Time::from_nanos(400));
+        let global_deadline = Some(Time::from_nanos(200));
+
+        let selected = select_backoff_deadline(
+            IoPhaseOutcome::Follower,
+            timer_deadline,
+            local_deadline,
+            global_deadline,
+        );
+
+        assert_eq!(
+            selected, local_deadline,
+            "follower must ignore shared deadlines and honor only local deadline"
+        );
+    }
+
+    #[test]
+    fn select_backoff_deadline_follower_without_local_deadline_stays_none() {
+        let selected = select_backoff_deadline(
+            IoPhaseOutcome::Follower,
+            Some(Time::from_nanos(100)),
+            None,
+            Some(Time::from_nanos(200)),
+        );
+
+        assert_eq!(
+            selected, None,
+            "follower should not arm timeout wakeups for non-local deadlines"
+        );
+    }
+
+    #[test]
+    fn select_backoff_deadline_non_follower_uses_earliest_deadline() {
+        let timer_deadline = Some(Time::from_nanos(500));
+        let local_deadline = Some(Time::from_nanos(300));
+        let global_deadline = Some(Time::from_nanos(100));
+
+        let selected = select_backoff_deadline(
+            IoPhaseOutcome::NoProgress,
+            timer_deadline,
+            local_deadline,
+            global_deadline,
+        );
+
+        assert_eq!(
+            selected, global_deadline,
+            "leader/no-io path should continue using earliest deadline across all sources"
         );
     }
 
