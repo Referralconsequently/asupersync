@@ -31,8 +31,7 @@ fn init_test(name: &str) {
 }
 
 fn doc_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/tokio_ga_readiness_checklist_launch_review.md")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_ga_readiness_checklist_launch_review.md")
 }
 
 fn load_doc() -> String {
@@ -134,10 +133,7 @@ fn t99_06_hard_gates_verified() {
     let doc = load_doc();
 
     assert!(doc.contains("HARD_FAIL"), "must reference HARD_FAIL status");
-    assert!(
-        doc.contains("Zero HARD_FAIL"),
-        "must verify zero HARD_FAIL"
-    );
+    assert!(doc.contains("Zero HARD_FAIL"), "must verify zero HARD_FAIL");
 
     test_complete!("t99_06_hard_gates_verified");
 }
@@ -333,7 +329,10 @@ fn t99_17_monitoring_plan_defined() {
 
     assert!(doc.contains("p99 latency"), "must monitor p99 latency");
     assert!(doc.contains("Error rate"), "must monitor error rate");
-    assert!(doc.contains("Continuous"), "must have continuous monitoring");
+    assert!(
+        doc.contains("Continuous"),
+        "must have continuous monitoring"
+    );
 
     test_complete!("t99_17_monitoring_plan_defined");
 }
@@ -402,8 +401,7 @@ fn t99_21_quality_gates_defined() {
     let doc = load_doc();
 
     for gate in [
-        "GA-01", "GA-02", "GA-03", "GA-04", "GA-05", "GA-06", "GA-07", "GA-08", "GA-09",
-        "GA-10",
+        "GA-01", "GA-02", "GA-03", "GA-04", "GA-05", "GA-06", "GA-07", "GA-08", "GA-09", "GA-10",
     ] {
         test_section!(gate);
         assert!(doc.contains(gate), "missing quality gate: {gate}");
