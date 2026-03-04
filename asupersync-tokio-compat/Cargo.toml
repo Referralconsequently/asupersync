@@ -30,6 +30,9 @@ http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
 
+# Byte buffers (explicit for body_bridge; also transitive via http-body).
+bytes = { version = "1", optional = true }
+
 # Tokio I/O traits for bidirectional adapter.
 tokio-util = { version = "0.7", optional = true, features = ["io"] }
 
@@ -42,7 +45,7 @@ pin-project-lite = "0.2"
 [features]
 default = []
 # hyper v1 bridge: executor, timer, and I/O adapters.
-hyper-bridge = ["dep:hyper", "dep:hyper-util", "dep:http", "dep:http-body", "dep:http-body-util"]
+hyper-bridge = ["dep:hyper", "dep:hyper-util", "dep:http", "dep:http-body", "dep:http-body-util", "dep:bytes"]
 # Tokio I/O trait adapters (AsyncRead/AsyncWrite bidirectional).
 tokio-io = ["dep:tokio-util", "tokio/io-util"]
 # tower Service bridge: bidirectional Service trait adapters.
@@ -62,3 +65,4 @@ missing_panics_doc = "allow"
 
 [dev-dependencies]
 asupersync = { version = "0.2.7", path = "..", features = ["test-internals"] }
+futures-lite = "2"
