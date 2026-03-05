@@ -511,11 +511,25 @@ pub struct TimeoutStream<S> {
 
 impl<S> TimeoutStream<S> {
     /// Creates a timeout stream using wall-clock time.
+    ///
+    /// The timeout registers with the timer driver (or spawns a fallback
+    /// thread) so it fires independently of the inner stream's wakeups.
     pub fn new(inner: S, duration: Duration) -> Self {
-        Self::with_time_getter(inner, duration, wall_clock_now)
+        let now = wall_clock_now();
+        let deadline = now.saturating_add_nanos(duration_to_nanos(duration));
+        Self {
+            inner,
+            duration,
+            sleep: Sleep::new(deadline),
+            time_getter: wall_clock_now,
+        }
     }
 
     /// Creates a timeout stream using a custom time source.
+    ///
+    /// **Note:** With a custom time getter, the timeout only fires when the
+    /// stream is polled (no independent waker is registered). This is
+    /// appropriate for virtual-time testing where the caller controls polling.
     pub fn with_time_getter(inner: S, duration: Duration, time_getter: fn() -> Time) -> Self {
         let now = time_getter();
         let deadline = now.saturating_add_nanos(duration_to_nanos(duration));
@@ -548,13 +562,17 @@ impl<S: SymbolStream + Unpin> SymbolStream for TimeoutStream<S> {
             Poll::Pending => {}
         }
 
-        let now = (self.time_getter)();
-        if self.sleep.poll_with_time(now).is_ready() {
-            self.reset_timer();
-            return Poll::Ready(Some(Err(StreamError::Timeout)));
+        // Poll Sleep as a Future so it can register with the timer driver
+        // (or spawn a fallback thread) for an independent wakeup. Without
+        // this, the timeout only fires when the inner stream is polled,
+        // which defeats the purpose of a receive timeout on silent channels.
+        match Pin::new(&mut self.sleep).poll(cx) {
+            Poll::Ready(()) => {
+                self.reset_timer();
+                Poll::Ready(Some(Err(StreamError::Timeout)))
+            }
+            Poll::Pending => Poll::Pending,
         }
-
-        Poll::Pending
     }
 }
 
