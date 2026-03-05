@@ -529,6 +529,11 @@ impl Http1Client {
     ///
     /// This is useful for higher-level clients that want to support HTTP/1.1
     /// keep-alive connection reuse after fully draining the response body.
+    ///
+    /// Returns [`HttpError::PrefetchedDataRemaining`] if unread bytes remain
+    /// in the parser buffer after body drain (for example protocol upgrade
+    /// bytes). Callers should use [`request_streaming`](Self::request_streaming)
+    /// in that case.
     pub async fn request_with_io<T>(io: T, req: Request) -> Result<(Response, T), HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin,
@@ -567,7 +572,10 @@ impl Http1Client {
             }
         }
 
-        let io = streaming.body.into_inner();
+        let (io, prefetched) = streaming.body.into_inner_with_buffer();
+        if !prefetched.is_empty() {
+            return Err(HttpError::PrefetchedDataRemaining(prefetched.len()));
+        }
         Ok((response, io))
     }
 
@@ -1345,6 +1353,33 @@ mod tests {
         let request_bytes = String::from_utf8(io.written).expect("request write should be utf8");
         assert!(request_bytes.starts_with("GET /reuse HTTP/1.1\r\n"));
         assert!(request_bytes.contains("Host: example.com\r\n"));
+    }
+
+    #[test]
+    fn request_with_io_rejects_unread_prefetched_bytes() {
+        let response_bytes =
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n\x81\x00";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/ws".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Connection".to_string(), "Upgrade".to_string()),
+                ("Upgrade".to_string(), "websocket".to_string()),
+            ],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let err = block_on(Http1Client::request_with_io(io, req)).expect_err("must reject");
+        match err {
+            HttpError::PrefetchedDataRemaining(count) => assert_eq!(count, 2),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

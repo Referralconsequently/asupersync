@@ -67,6 +67,9 @@ pub enum HttpError {
     AmbiguousBodyLength,
     /// Trailers were provided/encountered but are not permitted in this context.
     TrailersNotAllowed,
+    /// Response parsing left unread prefetched bytes when a fully-buffered
+    /// response API was used.
+    PrefetchedDataRemaining(usize),
 }
 
 impl fmt::Display for HttpError {
@@ -94,6 +97,12 @@ impl fmt::Display for HttpError {
                 write!(f, "both Content-Length and Transfer-Encoding present")
             }
             Self::TrailersNotAllowed => write!(f, "trailers not allowed"),
+            Self::PrefetchedDataRemaining(count) => {
+                write!(
+                    f,
+                    "response completed with {count} unread prefetched bytes; use streaming API"
+                )
+            }
         }
     }
 }
