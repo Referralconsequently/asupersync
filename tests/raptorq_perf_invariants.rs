@@ -38,6 +38,27 @@ fn beads_issues_jsonl() -> String {
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
+
+fn beads_latest_status_by_id() -> BTreeMap<String, String> {
+    let mut latest = BTreeMap::new();
+    for line in beads_issues_jsonl()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("each .beads/issues.jsonl line must be valid JSON");
+        let id = parsed["id"]
+            .as_str()
+            .expect("issue row must include id")
+            .to_string();
+        let status = parsed["status"]
+            .as_str()
+            .expect("issue row must include status")
+            .to_string();
+        latest.insert(id, status);
+    }
+    latest
+}
 const RAPTORQ_BASELINE_PROFILE_MD: &str = include_str!("../docs/raptorq_baseline_bench_profile.md");
 const RAPTORQ_UNIT_MATRIX_MD: &str = include_str!("../docs/raptorq_unit_test_matrix.md");
 const RAPTORQ_OPT_DECISIONS_MD: &str =
@@ -2076,6 +2097,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
     let ready_to_close = closure_readiness["ready_to_close"]
         .as_bool()
         .expect("closure_readiness.ready_to_close must be a bool");
+    let canonical_issue_statuses = beads_latest_status_by_id();
     let closure_dependencies = closure_readiness["dependencies"]
         .as_array()
         .expect("closure_readiness.dependencies must be an array");
@@ -2086,12 +2108,20 @@ fn g7_expected_loss_contract_schema_and_coverage() {
     let dependency_beads = closure_dependencies
         .iter()
         .map(|entry| {
-            let _required_status = entry["required_status"]
+            let required_status = entry["required_status"]
                 .as_str()
                 .expect("closure dependency must include required_status");
-            let _current_status = entry["current_status"]
+            let current_status = entry["current_status"]
                 .as_str()
                 .expect("closure dependency must include current_status");
+            assert!(
+                matches!(required_status, "open" | "in_progress" | "closed"),
+                "closure dependency required_status must be open|in_progress|closed"
+            );
+            assert!(
+                matches!(current_status, "open" | "in_progress" | "closed"),
+                "closure dependency current_status must be open|in_progress|closed"
+            );
             let evidence_refs = entry["evidence_refs"]
                 .as_array()
                 .expect("closure dependency must include evidence_refs");
@@ -2099,10 +2129,18 @@ fn g7_expected_loss_contract_schema_and_coverage() {
                 !evidence_refs.is_empty(),
                 "closure dependency must include at least one evidence ref"
             );
-            entry["bead_id"]
+            let bead_id = entry["bead_id"]
                 .as_str()
                 .expect("closure dependency must include bead_id")
-                .to_string()
+                .to_string();
+            let canonical_status = canonical_issue_statuses
+                .get(&bead_id)
+                .unwrap_or_else(|| panic!("closure dependency bead {bead_id} must exist in .beads/issues.jsonl"));
+            assert_eq!(
+                current_status, canonical_status,
+                "closure dependency {bead_id} current_status must match canonical Beads issue status"
+            );
+            bead_id
         })
         .collect::<BTreeSet<_>>();
     for required in [
