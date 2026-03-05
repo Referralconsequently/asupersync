@@ -926,12 +926,9 @@ impl CleanupCoordinator {
     /// Registers symbols as pending for an object.
     #[allow(clippy::significant_drop_tightening)]
     pub fn register_pending(&self, object_id: ObjectId, symbol: Symbol, now: Time) {
-        if self.completed.read().contains(&object_id) {
-            return;
-        }
-
         let mut pending = self.pending.write();
-        // Double check after acquiring the lock to avoid races
+        // Check completion while holding the pending map lock so retry-state
+        // restoration can reopen an object without a lost-symbol race.
         if self.completed.read().contains(&object_id) {
             return;
         }
@@ -947,6 +944,18 @@ impl CleanupCoordinator {
 
         set.total_bytes = set.total_bytes.saturating_add(symbol.len());
         set.symbols.push(symbol);
+    }
+
+    fn restore_retry_state(
+        &self,
+        object_id: ObjectId,
+        handler: Box<dyn CleanupHandler>,
+        pending_set: PendingSymbolSet,
+    ) {
+        self.handlers.write().insert(object_id, handler);
+        let mut pending = self.pending.write();
+        pending.insert(object_id, pending_set);
+        self.completed.write().remove(&object_id);
     }
 
     /// Registers a cleanup handler for an object.
@@ -994,9 +1003,7 @@ impl CleanupCoordinator {
                 if budget.poll_quota == 0 {
                     // No budget to even attempt the handler; keep the pending state
                     // and handler for an explicit retry.
-                    self.completed.write().remove(&object_id);
-                    self.handlers.write().insert(object_id, handler);
-                    self.pending.write().insert(object_id, set);
+                    self.restore_retry_state(object_id, handler, set);
                     result.within_budget = false;
                     result.completed = false;
                 } else {
@@ -1012,9 +1019,7 @@ impl CleanupCoordinator {
                         Err(err) => {
                             // The cleanup attempt failed; retain the pending set and
                             // handler so the caller can retry deterministically.
-                            self.completed.write().remove(&object_id);
-                            self.handlers.write().insert(object_id, handler);
-                            self.pending.write().insert(object_id, retry_set);
+                            self.restore_retry_state(object_id, handler, retry_set);
                             result.completed = false;
                             result.handler_errors.push(format!("{handler_name}: {err}"));
                         }
