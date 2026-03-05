@@ -2511,7 +2511,7 @@ impl PgConnection {
                         Err(e) => e,
                         Ok(e) => e,
                     };
-                    self.drain_to_ready().await;
+                    let _ = self.drain_to_ready().await;
                     return Outcome::Err(err);
                 }
                 b'N' => { /* NoticeResponse */ }
@@ -2647,7 +2647,7 @@ impl PgConnection {
                         Err(e) => e,
                         Ok(e) => e,
                     };
-                    self.drain_to_ready().await;
+                    let _ = self.drain_to_ready().await;
                     return Outcome::Err(err);
                 }
                 b'N' => {}
@@ -2671,13 +2671,14 @@ impl PgConnection {
         if !self.inner.needs_rollback {
             return Ok(());
         }
-        self.inner.needs_rollback = false;
 
         let mut buf = MessageBuffer::new();
         buf.write_cstring("ROLLBACK");
         let msg = buf.build_message(b'Q');
         self.write_all(&msg).await?;
-        self.drain_to_ready().await;
+        self.drain_to_ready().await?;
+        // Only clear after the full ROLLBACK round-trip succeeds.
+        self.inner.needs_rollback = false;
         Ok(())
     }
 
@@ -3016,7 +3017,7 @@ impl PgConnection {
                         Err(e) => e,
                         Ok(e) => e,
                     };
-                    self.drain_to_ready().await;
+                    let _ = self.drain_to_ready().await;
                     return Outcome::Err(err);
                 }
                 b'N' => { /* NoticeResponse */ }
@@ -3065,7 +3066,7 @@ impl PgConnection {
                         Err(e) => e,
                         Ok(e) => e,
                     };
-                    self.drain_to_ready().await;
+                    let _ = self.drain_to_ready().await;
                     return Outcome::Err(err);
                 }
                 b'N' => {}
@@ -3077,16 +3078,17 @@ impl PgConnection {
     }
 
     /// Drain messages until ReadyForQuery to re-synchronize after an error.
-    async fn drain_to_ready(&mut self) {
+    ///
+    /// Returns `Ok(())` when `ReadyForQuery` is received, or `Err` if the
+    /// connection hit an I/O error before reaching synchronization.
+    async fn drain_to_ready(&mut self) -> Result<(), PgError> {
         loop {
-            let Ok((msg_type, data)) = self.read_message().await else {
-                break;
-            };
+            let (msg_type, data) = self.read_message().await?;
             if msg_type == b'Z' {
                 if !data.is_empty() {
                     self.inner.transaction_status = data[0];
                 }
-                break;
+                return Ok(());
             }
         }
     }
