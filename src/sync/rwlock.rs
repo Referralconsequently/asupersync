@@ -825,25 +825,25 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
     type Output = Result<OwnedRwLockWriteGuard<T>, RwLockError>;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.cx.checkpoint().is_err() {
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        if this.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        // Clone the Arc to avoid borrow conflict with self.counted
-        let lock = Arc::clone(&self.lock);
-        let mut state = lock.state.lock();
+        let mut state = this.lock.state.lock();
 
-        if lock.is_poisoned() {
+        if this.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if !self.counted {
+        if !this.counted {
             state.writer_waiters += 1;
-            self.counted = true;
+            this.counted = true;
         }
 
-        if let Some(waiter_id) = self.waiter_id {
+        if let Some(waiter_id) = this.waiter_id {
             if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
                 if !existing.waker.will_wake(context.waker()) {
                     existing.waker.clone_from(context.waker());
@@ -852,13 +852,15 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                 return Poll::Pending;
             }
             // Dequeued - we were pre-granted the lock!
-            if self.counted {
+            if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
             }
             drop(state);
-            self.waiter_id = None;
-            self.counted = false;
-            return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
+            this.waiter_id = None;
+            this.counted = false;
+            return Poll::Ready(Ok(OwnedRwLockWriteGuard {
+                lock: Arc::clone(&this.lock),
+            }));
         }
 
         let can_acquire =
@@ -866,12 +868,14 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
 
         if can_acquire {
             state.writer_active = true;
-            if self.counted {
+            if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
             }
             drop(state);
-            self.counted = false;
-            return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
+            this.counted = false;
+            return Poll::Ready(Ok(OwnedRwLockWriteGuard {
+                lock: Arc::clone(&this.lock),
+            }));
         }
 
         let id = state.next_waiter_id;
@@ -881,7 +885,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             id,
         });
         drop(state);
-        self.waiter_id = Some(id);
+        this.waiter_id = Some(id);
         Poll::Pending
     }
 }

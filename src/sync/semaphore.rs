@@ -215,6 +215,9 @@ impl Semaphore {
     ///
     /// Saturates at `usize::MAX` if adding would overflow.
     pub fn add_permits(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
         let mut state = self.state.lock();
         state.permits = state.permits.saturating_add(count);
         self.permits_shadow.store(state.permits, Ordering::Relaxed);
@@ -503,16 +506,17 @@ impl Drop for OwnedAcquireFuture {
 impl Future for OwnedAcquireFuture {
     type Output = Result<OwnedSemaphorePermit, AcquireError>;
 
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.cx.checkpoint().is_err() {
-            if let Some(waiter_id) = self.waiter_id {
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.cx.checkpoint().is_err() {
+            if let Some(waiter_id) = this.waiter_id {
                 let next_waker = {
-                    let mut state = self.semaphore.state.lock();
+                    let mut state = this.semaphore.state.lock();
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
                     remove_waiter_and_take_next_waker(&mut state, waiter_id)
                 };
-                self.waiter_id = None;
+                this.waiter_id = None;
                 if let Some(next) = next_waker {
                     next.wake();
                 }
@@ -520,38 +524,32 @@ impl Future for OwnedAcquireFuture {
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
-        // Extract waiter_id first to avoid borrow conflicts with self.semaphore.
-        // Arc<Semaphore> (unlike &Semaphore in AcquireFuture) creates a borrow
-        // chain through Pin<&mut Self>, so we must defer self.waiter_id assignment
-        // until after the MutexGuard (state) is dropped.
-        let existing_waiter_id = self.waiter_id;
-        // Single lock acquisition (same optimization as AcquireFuture).
-        let mut state = self.semaphore.state.lock();
+        let mut state = this.semaphore.state.lock();
 
-        let (waiter_id, is_new_waiter) = existing_waiter_id.map_or_else(
-            || {
-                let id = state.next_waiter_id;
-                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                (id, true)
-            },
-            |id| (id, false),
-        );
+        let waiter_id = if let Some(id) = this.waiter_id {
+            id
+        } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            this.waiter_id = Some(id);
+            id
+        };
 
         if state.closed {
             if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
                 state.waiters.remove(pos);
             }
             drop(state);
-            self.waiter_id = None;
+            this.waiter_id = None;
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
         // FIFO fairness: only acquire if queue is empty or we are at the front.
         let is_next_in_line = state.waiters.front().is_none_or(|w| w.id == waiter_id);
 
-        if is_next_in_line && state.permits >= self.count {
-            state.permits -= self.count;
-            self.semaphore
+        if is_next_in_line && state.permits >= this.count {
+            state.permits -= this.count;
+            this.semaphore
                 .permits_shadow
                 .store(state.permits, Ordering::Relaxed);
 
@@ -570,13 +568,13 @@ impl Future for OwnedAcquireFuture {
             };
             drop(state);
             // Prevent redundant Drop cleanup after releasing state guard.
-            self.waiter_id = None;
+            this.waiter_id = None;
             if let Some(next) = next_waker {
                 next.wake();
             }
             return Poll::Ready(Ok(OwnedSemaphorePermit {
-                semaphore: self.semaphore.clone(),
-                count: self.count,
+                semaphore: this.semaphore.clone(),
+                count: this.count,
             }));
         }
 
@@ -593,12 +591,6 @@ impl Future for OwnedAcquireFuture {
                 id: waiter_id,
                 waker: context.waker().clone(),
             });
-        }
-        // Deferred assignment: set waiter_id after state (MutexGuard) is dropped
-        // to avoid borrow conflict with self.semaphore through Pin<&mut Self>.
-        drop(state);
-        if is_new_waiter {
-            self.waiter_id = Some(waiter_id);
         }
         Poll::Pending
     }
