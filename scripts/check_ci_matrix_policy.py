@@ -34,6 +34,7 @@ class LanePolicy:
     required_step_names: tuple[str, ...]
     required_artifact_names: tuple[str, ...]
     replay_command: str
+    require_rch: bool
     failure_taxonomy: tuple[str, ...]
     max_failures: int
     required_artifacts_min: int
@@ -85,6 +86,12 @@ def require_str_list(raw: Any, label: str) -> tuple[str, ...]:
     if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
         raise PolicyError(f"{label} must be list[str] with non-empty entries")
     return tuple(raw)
+
+
+def require_bool(raw: Any, label: str) -> bool:
+    if not isinstance(raw, bool):
+        raise PolicyError(f"{label} must be a boolean")
+    return raw
 
 
 def load_policy(policy_path: Path) -> tuple[dict[str, Any], list[LanePolicy], Path, Path]:
@@ -139,6 +146,7 @@ def load_policy(policy_path: Path) -> tuple[dict[str, Any], list[LanePolicy], Pa
                     lane_raw.get("required_artifact_names", []), f"lanes[{idx}].required_artifact_names"
                 ),
                 replay_command=require_str(lane_raw.get("replay_command"), f"lanes[{idx}].replay_command"),
+                require_rch=require_bool(lane_raw.get("require_rch", False), f"lanes[{idx}].require_rch"),
                 failure_taxonomy=require_str_list(
                     lane_raw.get("failure_taxonomy", []), f"lanes[{idx}].failure_taxonomy"
                 ),
@@ -182,6 +190,9 @@ def evaluate_lane(
         *[f"step:{item}" for item in missing_steps],
         *[f"artifact:{item}" for item in missing_artifacts],
     ]
+    rch_compliant = "rch exec --" in lane.replay_command
+    if lane.require_rch and not rch_compliant:
+        missing_contracts.append("replay:rch_prefix")
     status = "pass" if not missing_contracts else "fail"
     return {
         "lane_id": lane.lane_id,
@@ -191,6 +202,8 @@ def evaluate_lane(
         "required_job_ids": list(lane.required_job_ids),
         "required_step_names": list(lane.required_step_names),
         "required_artifact_names": list(lane.required_artifact_names),
+        "require_rch": lane.require_rch,
+        "rch_compliant": rch_compliant,
         "missing_job_ids": missing_job_ids,
         "missing_steps": missing_steps,
         "missing_artifacts": missing_artifacts,
@@ -230,7 +243,8 @@ def run_self_tests() -> int:
                 "required_job_ids": ["test"],
                 "required_step_names": ["Run unit tests"],
                 "required_artifact_names": ["ci-summary-report"],
-                "replay_command": "cargo test --lib --all-features",
+                "replay_command": "rch exec -- cargo test --lib --all-features",
+                "require_rch": True,
                 "failure_taxonomy": ["unit_assertion_failure"],
                 "thresholds": {"max_failures": 0, "required_artifacts_min": 1},
             }
@@ -273,6 +287,25 @@ jobs:
     if "artifact:ci-summary-report" not in lane_fail["missing_contracts"]:
         raise AssertionError("expected missing artifact contract")
 
+    non_rch_lane = LanePolicy(
+        lane_id="unit-no-rch",
+        title="Unit lane without rch",
+        owner="runtime-core",
+        required_job_ids=("test",),
+        required_step_names=("Run unit tests",),
+        required_artifact_names=("ci-summary-report",),
+        replay_command="cargo test --lib --all-features",
+        require_rch=True,
+        failure_taxonomy=("unit_assertion_failure",),
+        max_failures=0,
+        required_artifacts_min=1,
+    )
+    lane_non_rch = evaluate_lane(non_rch_lane, workflow_pass, jobs_pass, steps_pass)
+    if lane_non_rch["status"] != "fail":
+        raise AssertionError("expected fail lane status when require_rch is true but replay command is non-rch")
+    if "replay:rch_prefix" not in lane_non_rch["missing_contracts"]:
+        raise AssertionError("expected replay:rch_prefix contract failure")
+
     print("CI matrix policy self-test passed")
     return 0
 
@@ -293,6 +326,12 @@ def main() -> int:
     lane_reports = [evaluate_lane(lane, workflow_text, job_ids, step_names) for lane in lanes]
     failing_lane_ids = [lane["lane_id"] for lane in lane_reports if lane["status"] != "pass"]
     overall_status = "pass" if not failing_lane_ids else "fail"
+    rch_required_lane_count = sum(1 for lane in lane_reports if lane.get("require_rch") is True)
+    rch_noncompliant_lane_ids = [
+        lane["lane_id"]
+        for lane in lane_reports
+        if lane.get("require_rch") is True and lane.get("rch_compliant") is not True
+    ]
 
     summary_path = args.summary_output if str(args.summary_output) else default_summary_path
     events_path = args.events_output if str(args.events_output) else default_events_path
@@ -308,6 +347,9 @@ def main() -> int:
         "lane_count": len(lane_reports),
         "failing_lane_count": len(failing_lane_ids),
         "failing_lane_ids": failing_lane_ids,
+        "rch_required_lane_count": rch_required_lane_count,
+        "rch_noncompliant_lane_count": len(rch_noncompliant_lane_ids),
+        "rch_noncompliant_lane_ids": rch_noncompliant_lane_ids,
         "lanes": lane_reports,
     }
 
@@ -322,6 +364,8 @@ def main() -> int:
                 "status": lane["status"],
                 "missing_contracts": lane["missing_contracts"],
                 "replay_command": lane["replay_command"],
+                "require_rch": lane["require_rch"],
+                "rch_compliant": lane["rch_compliant"],
                 "failure_taxonomy": lane["failure_taxonomy"],
             }
         )

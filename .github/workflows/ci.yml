@@ -1061,10 +1061,26 @@ jobs:
             ${{ runner.os }}-cargo-${{ env.RUST_TOOLCHAIN }}-
 
       - name: Run unit tests
-        run: cargo test --lib --all-features
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo test --lib --all-features
+          else
+            echo "rch unavailable; falling back to local cargo test --lib --all-features"
+            cargo test --lib --all-features
+          fi
 
       - name: Run integration tests
-        run: cargo test --test '*' --all-features
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo test --test '*' --all-features
+          else
+            echo "rch unavailable; falling back to local cargo test --test '*' --all-features"
+            cargo test --test '*' --all-features
+          fi
 
       - name: Run doc tests
         run: cargo test --doc --all-features
@@ -1386,7 +1402,14 @@ jobs:
 
       - name: RAPTORQ – Forensic logging contract gate (D3)
         run: |
-          NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- env NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+          else
+            echo "rch unavailable; falling back to local forensic profile execution"
+            NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+          fi
           latest_dir="$(ls -1dt target/e2e-results/raptorq/forensics_* | head -n1)"
           mkdir -p phase6-artifacts/raptorq-forensics
           cp "$latest_dir/summary.json" phase6-artifacts/raptorq-forensics/summary.json
@@ -1397,14 +1420,27 @@ jobs:
           set -euo pipefail
           mkdir -p phase6-artifacts/raptorq-perf
           set +e
-          ./scripts/run_perf_e2e.sh \
-            --bench raptorq_benchmark \
-            --bench phase0_baseline \
-            --seed 424242 \
-            --compare baselines/baseline_latest.json \
-            --metric median_ns \
-            --max-regression-pct 10 \
-            --timeout 1200 2>&1 | tee phase6-artifacts/raptorq-perf/run.log
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- ./scripts/run_perf_e2e.sh \
+              --bench raptorq_benchmark \
+              --bench phase0_baseline \
+              --seed 424242 \
+              --compare baselines/baseline_latest.json \
+              --metric median_ns \
+              --max-regression-pct 10 \
+              --timeout 1200 2>&1 | tee phase6-artifacts/raptorq-perf/run.log
+          else
+            echo "rch unavailable; falling back to local perf e2e execution" | tee phase6-artifacts/raptorq-perf/run.log
+            ./scripts/run_perf_e2e.sh \
+              --bench raptorq_benchmark \
+              --bench phase0_baseline \
+              --seed 424242 \
+              --compare baselines/baseline_latest.json \
+              --metric median_ns \
+              --max-regression-pct 10 \
+              --timeout 1200 2>&1 | tee -a phase6-artifacts/raptorq-perf/run.log
+          fi
           perf_rc=${PIPESTATUS[0]}
           set -e
 
@@ -1450,7 +1486,14 @@ jobs:
 
       - name: E2E scenario-matrix completeness gate (D4)
         run: |
-          bash ./scripts/run_all_e2e.sh --verify-matrix
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- bash ./scripts/run_all_e2e.sh --verify-matrix
+          else
+            echo "rch unavailable; falling back to local run_all_e2e matrix verification"
+            bash ./scripts/run_all_e2e.sh --verify-matrix
+          fi
           latest_dir="$(ls -1dt target/e2e-results/orchestrator_* | head -n1)"
           mkdir -p phase6-artifacts/e2e-scenario-matrix
           cp "$latest_dir/scenario_matrix_validation.json" phase6-artifacts/e2e-scenario-matrix/scenario_matrix_validation.json

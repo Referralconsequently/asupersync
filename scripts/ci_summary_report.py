@@ -408,6 +408,9 @@ def compose_summary(
         "lane_count": ci_matrix.get("lane_count", 0),
         "failing_lane_count": ci_matrix.get("failing_lane_count", 0),
         "failing_lane_ids": ci_matrix.get("failing_lane_ids", []),
+        "rch_required_lane_count": ci_matrix.get("rch_required_lane_count", 0),
+        "rch_noncompliant_lane_count": ci_matrix.get("rch_noncompliant_lane_count", 0),
+        "rch_noncompliant_lane_ids": ci_matrix.get("rch_noncompliant_lane_ids", []),
     }
     e2e_matrix_section = {
         "status": e2e_matrix.get("status", "fail"),
@@ -518,7 +521,9 @@ def compose_summary(
         (
             "| CI matrix policy | "
             f"`{ci_matrix_section['status']}` | "
-            f"lanes={ci_matrix_section['lane_count']} failing={ci_matrix_section['failing_lane_count']} | "
+            f"lanes={ci_matrix_section['lane_count']} failing={ci_matrix_section['failing_lane_count']} "
+            f"rch_required={ci_matrix_section['rch_required_lane_count']} "
+            f"rch_noncompliant={ci_matrix_section['rch_noncompliant_lane_count']} | "
             f"delta_failing_lanes={report['trends']['ci_matrix_failing_lanes_delta']} |"
         ),
         (
@@ -539,6 +544,7 @@ def compose_summary(
         "## Notes",
         f"- Coverage failing subsystems: `{coverage_section['failing_subsystems']}`",
         f"- CI matrix failing lanes: `{ci_matrix_section['failing_lane_ids']}`",
+        f"- CI matrix rch-noncompliant lanes: `{ci_matrix_section['rch_noncompliant_lane_ids']}`",
         "- Trend deltas are `None` when no previous D5 summary artifact was provided.",
         "",
         "## Reproduction Instructions",

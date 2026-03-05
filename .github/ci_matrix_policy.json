@@ -19,7 +19,8 @@
       "required_job_ids": ["test"],
       "required_step_names": ["Run unit tests"],
       "required_artifact_names": [],
-      "replay_command": "cargo test --lib --all-features",
+      "replay_command": "rch exec -- cargo test --lib --all-features",
+      "require_rch": true,
       "failure_taxonomy": ["compile_failure", "unit_assertion_failure", "nondeterministic_seed_behavior"],
       "thresholds": {
         "max_failures": 0,
@@ -33,7 +34,8 @@
       "required_job_ids": ["test"],
       "required_step_names": ["Run integration tests"],
       "required_artifact_names": [],
-      "replay_command": "cargo test --test '*' --all-features",
+      "replay_command": "rch exec -- cargo test --test '*' --all-features",
+      "require_rch": true,
       "failure_taxonomy": ["integration_contract_failure", "cross_component_regression"],
       "thresholds": {
         "max_failures": 0,
@@ -47,7 +49,8 @@
       "required_job_ids": ["phase6-e2e", "ci-summary-d5"],
       "required_step_names": ["E2E scenario-matrix completeness gate (D4)", "Compose CI summary reports (D5)"],
       "required_artifact_names": ["phase6-e2e-artifacts", "ci-summary-report"],
-      "replay_command": "bash ./scripts/run_all_e2e.sh --verify-matrix",
+      "replay_command": "rch exec -- bash ./scripts/run_all_e2e.sh --verify-matrix",
+      "require_rch": true,
       "failure_taxonomy": ["missing_scenario_row", "artifact_route_not_configured", "replay_command_missing"],
       "thresholds": {
         "max_failures": 0,
@@ -61,7 +64,8 @@
       "required_job_ids": ["phase6-e2e"],
       "required_step_names": ["RAPTORQ – Forensic logging contract gate (D3)"],
       "required_artifact_names": ["phase6-e2e-artifacts"],
-      "replay_command": "NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics",
+      "replay_command": "rch exec -- env NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics",
+      "require_rch": true,
       "failure_taxonomy": ["missing_forensics_artifact", "scenario_log_schema_violation", "replay_bundle_incomplete"],
       "thresholds": {
         "max_failures": 0,
@@ -89,7 +93,8 @@
       "required_job_ids": ["check", "phase6-e2e"],
       "required_step_names": ["Perf regression gate", "RAPTORQ – Perf smoke regression gate (G2)"],
       "required_artifact_names": ["wasm-perf-regression-report", "phase6-e2e-artifacts"],
-      "replay_command": "./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --compare baselines/baseline_latest.json --metric median_ns --max-regression-pct 10 --timeout 1200",
+      "replay_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --compare baselines/baseline_latest.json --metric median_ns --max-regression-pct 10 --timeout 1200",
+      "require_rch": true,
       "failure_taxonomy": ["budget_regression", "benchmark_instability", "baseline_missing"],
       "thresholds": {
         "max_failures": 0,
