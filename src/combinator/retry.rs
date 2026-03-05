@@ -33,6 +33,7 @@ use crate::types::outcome::PanicPayload;
 use crate::types::{Outcome, Time};
 use crate::util::det_rng::DetRng;
 use core::fmt;
+use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -551,23 +552,26 @@ impl<E, F: Fn(&E, u32) -> bool> RetryPredicate<E> for RetryIf<F> {
 }
 
 /// Internal state machine for the retry future.
+#[pin_project(project = RetryInnerProj)]
 enum RetryInner<F> {
     /// No operation in progress, ready to start next attempt.
     Idle,
     /// Polling the inner future.
-    Polling(F),
+    Polling(#[pin] F),
     /// Sleeping before the next attempt.
-    Sleeping(Sleep),
+    Sleeping(#[pin] Sleep),
 }
 
 /// A future that executes a retry loop.
 ///
 /// This struct is created by the [`retry`] function.
+#[pin_project]
 pub struct Retry<F, Fut, P, Pred> {
     factory: F,
     policy: P,
     predicate: Pred,
     state: RetryState,
+    #[pin]
     inner: RetryInner<Fut>,
 }
 
@@ -589,11 +593,10 @@ where
 
 impl<F, Fut, P, Pred, T, E> Future for Retry<F, Fut, P, Pred>
 where
-    F: FnMut() -> Fut + Unpin,
-    Fut: Future<Output = Outcome<T, E>> + Unpin,
-    P: Clone + Into<RetryPolicy> + Unpin,
-    Pred: RetryPredicate<E> + Unpin,
-    E: Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Outcome<T, E>>,
+    P: Clone + Into<RetryPolicy>,
+    Pred: RetryPredicate<E>,
 {
     type Output = RetryResult<T, E>;
 
@@ -610,8 +613,10 @@ where
                 }
             });
 
-            match &mut self.inner {
-                RetryInner::Idle => {
+            let mut this = self.as_mut().project();
+
+            match this.inner.as_mut().project() {
+                RetryInnerProj::Idle => {
                     if let Some(r) = cancel_reason {
                         return Poll::Ready(RetryResult::Cancelled(r));
                     }
@@ -620,11 +625,11 @@ where
                     // Use Cx entropy if available
                     let mut rng = Cx::current().map(|c| DetRng::new(c.random_u64()));
 
-                    if let Some(delay) = self.state.next_attempt(rng.as_mut()) {
+                    if let Some(delay) = this.state.next_attempt(rng.as_mut()) {
                         if delay == Duration::ZERO {
                             // Start immediately
-                            let fut = (self.factory)();
-                            self.inner = RetryInner::Polling(fut);
+                            let fut = (this.factory)();
+                            this.inner.set(RetryInner::Polling(fut));
                         } else {
                             // Sleep before starting
                             // Cx::current() will be used by Sleep internally
@@ -637,7 +642,7 @@ where
                             });
 
                             let sleep = Sleep::after(now, delay);
-                            self.inner = RetryInner::Sleeping(sleep);
+                            this.inner.set(RetryInner::Sleeping(sleep));
                         }
                     } else {
                         // This case is unreachable because we only transition to Idle
@@ -648,38 +653,37 @@ where
                         );
                     }
                 }
-                RetryInner::Sleeping(sleep) => {
+                RetryInnerProj::Sleeping(sleep) => {
                     if let Some(r) = cancel_reason {
                         return Poll::Ready(RetryResult::Cancelled(r));
                     }
-                    match Pin::new(sleep).poll(cx) {
+                    match sleep.poll(cx) {
                         Poll::Ready(()) => {
                             // Sleep done, start factory
-                            let fut = (self.factory)();
-                            self.inner = RetryInner::Polling(fut);
+                            let fut = (this.factory)();
+                            this.inner.set(RetryInner::Polling(fut));
                         }
                         Poll::Pending => return Poll::Pending,
                     }
                 }
-                RetryInner::Polling(fut) => {
-                    match Pin::new(fut).poll(cx) {
+                RetryInnerProj::Polling(fut) => {
+                    match fut.poll(cx) {
                         Poll::Ready(outcome) => {
                             match outcome {
                                 Outcome::Ok(val) => return Poll::Ready(RetryResult::Ok(val)),
                                 Outcome::Err(e) => {
-                                    let attempt = self.state.attempt;
+                                    let attempt = this.state.attempt;
                                     // Check predicate
-                                    // `attempt` is a plain `u32` counter and must be passed by
-                                    // value. Never dereference it.
-                                    let should_retry = self.predicate.should_retry(&e, attempt);
-                                    if should_retry && self.state.has_attempts_remaining() {
+                                    if this.predicate.should_retry(&e, *attempt)
+                                        && this.state.has_attempts_remaining()
+                                    {
                                         // Retry
-                                        self.inner = RetryInner::Idle;
+                                        this.inner.set(RetryInner::Idle);
                                         // Loop will handle Idle -> Sleeping/Polling
                                     } else {
                                         // Final failure
                                         return Poll::Ready(RetryResult::Failed(
-                                            self.state.clone().into_error(e),
+                                            this.state.clone().into_error(e),
                                         ));
                                     }
                                 }
