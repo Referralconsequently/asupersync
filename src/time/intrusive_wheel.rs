@@ -563,6 +563,14 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
     }
 }
 
+impl<const SLOTS: usize> Drop for TimerWheel<SLOTS> {
+    fn drop(&mut self) {
+        unsafe {
+            self.clear();
+        }
+    }
+}
+
 /// Hierarchical timer wheel built from intrusive slots.
 ///
 /// Level layout (default 1ms resolution):
@@ -938,6 +946,14 @@ impl HierarchicalTimerWheel {
 impl Default for HierarchicalTimerWheel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for HierarchicalTimerWheel {
+    fn drop(&mut self) {
+        unsafe {
+            self.clear();
+        }
     }
 }
 
