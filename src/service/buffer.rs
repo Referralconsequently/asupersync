@@ -281,6 +281,7 @@ where
                             // Loop around to poll Active
                         }
                         Poll::Ready(Err(e)) => {
+                            drop(inner);
                             this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
                             // Loop around to poll Error
                         }
