@@ -17,6 +17,8 @@
 //! - [`bulkhead`]: Resource isolation and concurrency limiting
 //! - [`rate_limit`]: Throughput control with token bucket algorithm
 
+/// Adaptive latency-hedging controllers.
+pub mod adaptive_hedge;
 pub mod bracket;
 pub mod bulkhead;
 pub mod circuit_breaker;
@@ -33,6 +35,7 @@ pub mod retry;
 pub mod select;
 pub mod timeout;
 
+pub use adaptive_hedge::PeakEwmaHedgeController;
 pub use bracket::{bracket, bracket_move, commit_section, try_commit_section};
 pub use bulkhead::{
     Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy,

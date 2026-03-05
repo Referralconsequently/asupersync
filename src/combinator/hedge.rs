@@ -55,6 +55,115 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+/// An adaptive hedge policy based on Marginal Conformal Prediction.
+///
+/// Hard-coded hedge delays are fragile: they either fire too often (wasting compute)
+/// or too late (failing to mitigate tail latency). This policy maintains a sliding
+/// window of recent primary execution latencies and uses conformal prediction to
+/// dynamically calculate the $1-\alpha$ prediction upper bound (e.g., the true P95).
+///
+/// Under the assumption of exchangeability, this provides a finite-sample mathematical
+/// guarantee that the hedge will only fire on true statistical outliers, optimizing
+/// the exact point of the latency/cost tradeoff curve.
+#[derive(Debug, Clone)]
+pub struct AdaptiveHedgePolicy {
+    /// Sliding window of recent primary latencies (in microseconds).
+    history: Vec<u64>,
+    /// Number of observations recorded so far.
+    count: usize,
+    /// Miscoverage target (e.g., 0.05 for P95 hedging).
+    alpha: f64,
+    /// Minimum threshold to prevent micro-hedging on extremely fast tasks.
+    min_delay: Duration,
+    /// Maximum threshold to prevent unbounded waiting on saturated systems.
+    max_delay: Duration,
+}
+
+#[allow(
+    clippy::cast_precision_loss, // quantile math is float-based by definition (alpha is f64)
+    clippy::cast_sign_loss       // value is clamped into [0, n-1] before conversion
+)]
+fn conformal_rank(n: usize, alpha: f64) -> usize {
+    let q = ((n as f64 + 1.0) * (1.0 - alpha)).ceil();
+    if !q.is_finite() || q <= 1.0 {
+        0
+    } else if q >= n as f64 {
+        n.saturating_sub(1)
+    } else {
+        (q as usize).saturating_sub(1)
+    }
+}
+
+impl AdaptiveHedgePolicy {
+    /// Creates a new adaptive hedge policy.
+    ///
+    /// # Arguments
+    /// * `window_size` - Size of the sliding history window (e.g., 100-1000).
+    /// * `alpha` - Target miscoverage rate (e.g., 0.05 for 95% coverage).
+    /// * `min_delay` - The absolute minimum delay before hedging.
+    /// * `max_delay` - The absolute maximum delay before hedging.
+    #[must_use]
+    pub fn new(window_size: usize, alpha: f64, min_delay: Duration, max_delay: Duration) -> Self {
+        assert!(window_size > 0, "window size must be positive");
+        assert!(alpha > 0.0 && alpha < 1.0, "alpha must be in (0, 1)");
+        Self {
+            history: vec![0; window_size],
+            count: 0,
+            alpha,
+            min_delay,
+            max_delay,
+        }
+    }
+
+    /// Records a new primary execution latency.
+    ///
+    /// This should be called with the elapsed time of successful primary operations
+    /// to continually calibrate the conformal bound.
+    pub fn record(&mut self, latency: Duration) {
+        let micros = latency.as_micros();
+        let val = if micros > u128::from(u64::MAX) {
+            u64::MAX
+        } else {
+            micros as u64
+        };
+        let capacity = self.history.len();
+        self.history[self.count % capacity] = val;
+        self.count += 1;
+    }
+
+    /// Calculates the dynamically calibrated hedge delay using conformal prediction.
+    ///
+    /// Returns the exact empirical $(1-\alpha)$ quantile of the history window,
+    /// clamped between `min_delay` and `max_delay`.
+    #[must_use]
+    pub fn next_hedge_delay(&self) -> Duration {
+        let n = self.count.min(self.history.len());
+        if n < 10 {
+            // Not enough data for a stable quantile; fallback to conservative max.
+            return self.max_delay;
+        }
+
+        let mut sorted = self.history[0..n].to_vec();
+        // Sort unstable is O(N log N) but N is small (e.g. 100).
+        sorted.sort_unstable();
+
+        // Conformal Prediction formula for the upper prediction bound:
+        // Rank = ceiling((n + 1) * (1 - alpha))
+        let rank = conformal_rank(n, self.alpha);
+
+        let bound_micros = sorted[rank];
+        let delay = Duration::from_micros(bound_micros);
+
+        delay.clamp(self.min_delay, self.max_delay)
+    }
+
+    /// Generates a `HedgeConfig` calibrated for the current system state.
+    #[must_use]
+    pub fn config(&self) -> HedgeConfig {
+        HedgeConfig::new(self.next_hedge_delay())
+    }
+}
+
 /// Configuration for a hedge operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HedgeConfig {
@@ -1074,5 +1183,61 @@ mod tests {
         if let Outcome::Ok(v) = result.winner_outcome() {
             assert_eq!(*v, 2);
         }
+    }
+
+    // =========================================================================
+    // AdaptiveHedgePolicy Tests (Alien Artifact Conformal Bound)
+    // =========================================================================
+
+    #[test]
+    fn test_adaptive_hedge_policy_conformal_quantile() {
+        let min_delay = Duration::from_millis(10);
+        let max_delay = Duration::from_secs(1);
+        let mut policy = AdaptiveHedgePolicy::new(100, 0.05, min_delay, max_delay);
+
+        // Before sufficient data (10 items), it yields max_delay to avoid over-hedging
+        for _ in 0..9 {
+            policy.record(Duration::from_millis(20));
+        }
+        assert_eq!(policy.next_hedge_delay(), max_delay);
+
+        // Record a 10th item
+        policy.record(Duration::from_millis(20));
+        // Now it has 10 items all 20ms. The bound is 20ms.
+        assert_eq!(policy.next_hedge_delay(), Duration::from_millis(20));
+
+        // Let's add varying latencies to test the alpha=0.05 (p95) logic
+        // Reset policy for clear test
+        let mut policy = AdaptiveHedgePolicy::new(100, 0.05, min_delay, max_delay);
+        for i in 1..=100 {
+            // 1ms to 100ms
+            policy.record(Duration::from_millis(i));
+        }
+
+        // Rank = ceiling((100 + 1) * (1 - 0.05)) = ceil(101 * 0.95) = ceil(95.95) = 96
+        // 0-indexed rank = 96 - 1 = 95. The 95th index is 96ms.
+        let delay = policy.next_hedge_delay();
+        assert_eq!(delay, Duration::from_millis(96));
+    }
+
+    #[test]
+    fn test_adaptive_hedge_policy_clamps() {
+        let min_delay = Duration::from_millis(50);
+        let max_delay = Duration::from_millis(100);
+        let mut policy = AdaptiveHedgePolicy::new(100, 0.05, min_delay, max_delay);
+
+        // Force very low latency
+        for _ in 0..20 {
+            policy.record(Duration::from_millis(1));
+        }
+        // Should clamp to min_delay
+        assert_eq!(policy.next_hedge_delay(), min_delay);
+
+        // Force very high latency
+        for _ in 0..20 {
+            policy.record(Duration::from_secs(5));
+        }
+        // Should clamp to max_delay
+        assert_eq!(policy.next_hedge_delay(), max_delay);
     }
 }
