@@ -101,7 +101,9 @@ impl PeakEwmaHedgeController {
         loop {
             // Exact Peak-EWMA update: H(t+1) = max(sample, α * H(t))
             let decayed = decay_nanos(current, self.decay_factor);
-            let next = sample.max(decayed);
+            // Clamp the stored atomic state itself so concurrent observers never
+            // publish out-of-range values, even before projecting via HedgeConfig.
+            let next = sample.max(decayed).clamp(self.min_delay, self.max_delay);
 
             match self.estimate_nanos.compare_exchange_weak(
                 current,
@@ -133,6 +135,12 @@ impl PeakEwmaHedgeController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    fn raw_estimate_nanos(controller: &PeakEwmaHedgeController) -> u64 {
+        controller.estimate_nanos.load(Ordering::Relaxed)
+    }
 
     #[test]
     fn adaptive_hedge_tracks_peak_instantly() {
@@ -170,6 +178,10 @@ mod tests {
         assert_eq!(
             controller.current_config().hedge_delay,
             Duration::from_millis(500)
+        );
+        assert_eq!(
+            raw_estimate_nanos(&controller),
+            duration_nanos_saturating_u64(Duration::from_millis(500))
         );
     }
 
@@ -239,6 +251,95 @@ mod tests {
         assert_eq!(
             controller.current_config().hedge_delay,
             Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn adaptive_hedge_clamps_raw_atomic_state_at_upper_bound() {
+        let controller = PeakEwmaHedgeController::new(
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            0.99,
+        );
+
+        controller.observe(Duration::from_secs(1));
+
+        assert_eq!(
+            raw_estimate_nanos(&controller),
+            duration_nanos_saturating_u64(Duration::from_millis(50))
+        );
+    }
+
+    #[test]
+    fn adaptive_hedge_clamps_raw_atomic_state_at_lower_bound_after_decay() {
+        let controller = PeakEwmaHedgeController::new(
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            0.5,
+        );
+
+        for _ in 0..8 {
+            controller.observe(Duration::ZERO);
+        }
+
+        assert_eq!(
+            raw_estimate_nanos(&controller),
+            duration_nanos_saturating_u64(Duration::from_millis(10))
+        );
+    }
+
+    #[test]
+    fn adaptive_hedge_keeps_atomic_state_bounded_under_multithreaded_observe_contention() {
+        let controller = Arc::new(PeakEwmaHedgeController::new(
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            0.95,
+        ));
+        let start = Arc::new(Barrier::new(5));
+        let samples = [
+            Duration::ZERO,
+            Duration::from_millis(5),
+            Duration::from_millis(25),
+            Duration::from_millis(200),
+        ];
+
+        let handles: Vec<_> = (0..4)
+            .map(|thread_idx| {
+                let controller = Arc::clone(&controller);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    for round in 0..512 {
+                        let sample = samples[(thread_idx + round) % samples.len()];
+                        controller.observe(sample);
+                        let raw = raw_estimate_nanos(&controller);
+                        assert!(
+                            raw >= controller.min_delay && raw <= controller.max_delay,
+                            "raw estimate {raw} escaped bounds [{}..={}]",
+                            controller.min_delay,
+                            controller.max_delay
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        start.wait();
+        for handle in handles {
+            handle
+                .join()
+                .expect("observe() contention thread should not panic");
+        }
+
+        let final_raw = raw_estimate_nanos(&controller);
+        assert!(
+            final_raw >= controller.min_delay && final_raw <= controller.max_delay,
+            "final raw estimate {final_raw} escaped bounds [{}..={}]",
+            controller.min_delay,
+            controller.max_delay
         );
     }
 }
