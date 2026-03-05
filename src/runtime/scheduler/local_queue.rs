@@ -247,6 +247,22 @@ pub struct Stealer {
 impl Stealer {
     const SKIPPED_LOCALS_INLINE_CAP: usize = 8;
 
+    /// Returns the exact length of the queue.
+    /// Uses a short-lived lock, making it suitable for Power of Two Choices sampling
+    /// without heavy contention since steal sampling occurs outside the hot execution path.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
+
+    /// Returns true if the queue has no stealable items.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().is_empty()
+    }
+
     #[inline]
     fn restore_skipped_locals(
         stack: &mut IntrusiveStack,

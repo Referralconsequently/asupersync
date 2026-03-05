@@ -6,18 +6,58 @@ use crate::util::DetRng;
 
 /// Tries to steal a task from a list of stealers.
 ///
-/// Starts at a random index and iterates through all stealers.
+/// Implements "The Power of Two Choices" randomized load balancing.
+/// Instead of a sequential scan, this selects two candidates at random,
+/// queries their lengths, and attempts to steal from the more loaded queue.
+/// If that queue is empty or fails, it falls back to the other candidate.
+/// This drastically reduces tail-latency on task distribution and minimizes
+/// lock contention compared to linear probing or pure random choice.
 #[inline]
 pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {
-    if stealers.is_empty() {
+    let len = stealers.len();
+    if len == 0 {
         return None;
     }
+    if len == 1 {
+        return stealers[0].steal();
+    }
 
-    let len = stealers.len();
+    // Alien Artifact: Power of Two Choices (Mitzenmacher 2001)
+    // Select two distinct random queues.
+    let idx1 = rng.next_usize(len);
+    let mut idx2 = rng.next_usize(len);
+    if idx1 == idx2 {
+        idx2 = (idx1 + 1) % len;
+    }
+
+    let len1 = stealers[idx1].len();
+    let len2 = stealers[idx2].len();
+
+    // Prefer the queue that appears to have more work.
+    let (primary, secondary) = if len1 >= len2 {
+        (idx1, idx2)
+    } else {
+        (idx2, idx1)
+    };
+
+    // Attempt steal from primary choice
+    if let Some(task) = stealers[primary].steal() {
+        return Some(task);
+    }
+
+    // Fallback to secondary if primary was empty/unstealable
+    if let Some(task) = stealers[secondary].steal() {
+        return Some(task);
+    }
+
+    // Fallback to linear scan if both failed but there might be hidden work
+    // (e.g. they had tasks but they were local, so steal() returned None).
     let start = rng.next_usize(len);
-
     for i in 0..len {
         let idx = circular_index(start, i, len);
+        if idx == primary || idx == secondary {
+            continue; // Already tried
+        }
         if let Some(task) = stealers[idx].steal() {
             return Some(task);
         }
