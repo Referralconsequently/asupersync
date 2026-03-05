@@ -1255,6 +1255,14 @@ mod tests {
         );
 
         drop(held);
+        let ready = poll_once(&mut fut);
+        let waiter_acquired = matches!(ready, Some(Ok(_)));
+        crate::assert_with_log!(
+            waiter_acquired,
+            "waiter acquires after release",
+            true,
+            waiter_acquired
+        );
         crate::test_complete!("try_acquire_respects_fifo_with_available_permits");
     }
 

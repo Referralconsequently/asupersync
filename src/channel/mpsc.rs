@@ -1259,6 +1259,8 @@ mod tests {
             format!("{:?}", poll)
         );
 
+        permit.abort();
+
         let try_reserve = tx.try_reserve();
         crate::assert_with_log!(
             matches!(try_reserve, Err(SendError::Full(()))),
@@ -1267,8 +1269,17 @@ mod tests {
             format!("{:?}", try_reserve)
         );
 
+        let poll2 = reserve_fut.as_mut().poll(&mut cx_task);
+        let waiter_acquired = match poll2 {
+            Poll::Ready(Ok(permit2)) => {
+                permit2.abort();
+                true
+            }
+            _ => false,
+        };
+        crate::assert_with_log!(waiter_acquired, "waiter acquires", true, waiter_acquired);
+
         drop(reserve_fut);
-        permit.abort();
         crate::test_complete!("try_reserve_full_when_waiter_queued");
     }
 
@@ -1565,10 +1576,15 @@ mod tests {
             format!("{:?}", try_result)
         );
 
-        // The queued waiter should succeed on next poll.
         let poll2 = reserve_fut.as_mut().poll(&mut cx_task);
-        let ready = matches!(poll2, Poll::Ready(Ok(_)));
-        crate::assert_with_log!(ready, "waiter acquires", true, ready);
+        let waiter_acquired = match poll2 {
+            Poll::Ready(Ok(permit2)) => {
+                permit2.abort();
+                true
+            }
+            _ => false,
+        };
+        crate::assert_with_log!(waiter_acquired, "waiter acquires", true, waiter_acquired);
 
         drop(reserve_fut);
         drop(rx);

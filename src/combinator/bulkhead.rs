@@ -286,9 +286,10 @@ impl Bulkhead {
     /// Try to acquire permit without waiting.
     ///
     /// Returns `Some(permit)` if acquired immediately, `None` if bulkhead is full.
+    /// Queued operations hold priority once they enter the FIFO wait queue.
     #[must_use]
     pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
-        // Prevent barging if there are queued operations
+        // Prevent barging if there are queued operations.
         if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
             return None;
         }
@@ -956,6 +957,42 @@ mod tests {
         assert!(entry_id < 1000); // Sanity check
 
         assert_eq!(bh.metrics().total_queued, 1);
+    }
+
+    #[test]
+    fn try_acquire_yields_to_queued_entry() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            queue_timeout: Duration::from_mins(1),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+
+        let permit = bh.try_acquire(1).unwrap();
+        let entry_id = bh.enqueue(1, now).unwrap();
+
+        permit.release();
+
+        assert!(
+            bh.try_acquire(1).is_none(),
+            "queued entry should block barging try_acquire"
+        );
+
+        let granted_id = bh.process_queue(now);
+        assert_eq!(granted_id, Some(entry_id));
+        assert_eq!(
+            bh.available(),
+            0,
+            "queued entry should consume the released permit"
+        );
+
+        let claimed = bh.check_entry(entry_id, now).unwrap();
+        assert!(
+            claimed.is_some(),
+            "queued entry should be claimable after process_queue"
+        );
     }
 
     #[test]
