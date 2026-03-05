@@ -167,8 +167,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             "content-encoding".to_string(),
             encoding.as_token().to_string(),
         );
-        resp.headers
-            .insert("vary".to_string(), "accept-encoding".to_string());
+        append_vary_token(&mut resp, "accept-encoding");
 
         resp
     }
@@ -389,5 +388,33 @@ mod tests {
         let policy = CompressionPolicy::default();
         assert_eq!(policy.min_body_size, 256);
         assert_eq!(policy.supported_encodings.len(), 3);
+    }
+
+    /// Regression: compression must not clobber a pre-existing Vary header
+    /// set by the inner handler.
+    #[cfg(feature = "compression")]
+    #[test]
+    fn compression_preserves_existing_vary_header() {
+        fn handler_with_vary() -> Response {
+            let body = "Hello, World! ".repeat(100);
+            Response::new(StatusCode::OK, body.into_bytes())
+                .header("content-type", "text/plain; charset=utf-8")
+                .header("vary", "origin")
+        }
+
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(handler_with_vary), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.headers.get("content-encoding").unwrap(), "gzip");
+        let vary = resp.headers.get("vary").unwrap();
+        assert!(
+            vary.contains("origin"),
+            "existing Vary value must be preserved, got: {vary}"
+        );
+        assert!(
+            vary.contains("accept-encoding"),
+            "accept-encoding must be appended to Vary, got: {vary}"
+        );
     }
 }
