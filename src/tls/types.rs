@@ -471,8 +471,8 @@ impl CertificatePin {
 
     /// Compute the SPKI SHA-256 pin for a certificate.
     #[cfg(feature = "tls")]
-    pub fn compute_spki_sha256(cert: &Certificate) -> Result<Self, TlsError> {
-        use ring::digest::{SHA256, digest};
+    pub fn compute_spki_sha256(_cert: &Certificate) -> Result<Self, TlsError> {
+        // use ring::digest::{SHA256, digest};
         // use x509_parser::prelude::*;
         // let (_, parsed) = X509Certificate::from_der(cert.as_der())
         //     .map_err(|e| TlsError::Certificate(format!("failed to parse certificate: {e}")))?;
