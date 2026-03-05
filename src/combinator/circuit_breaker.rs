@@ -537,7 +537,7 @@ impl CircuitBreaker {
                         match self.state_bits.compare_exchange_weak(
                             current_bits,
                             new_state.to_bits(),
-                            Ordering::Acquire,
+                            Ordering::Release,
                             Ordering::Acquire,
                         ) {
                             Ok(_) => {
