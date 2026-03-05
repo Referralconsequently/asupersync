@@ -387,6 +387,14 @@ impl BlockingPool {
         self.maybe_spawn_thread();
         self.notify_one();
 
+        // Check shutdown again to close the TOCTOU window. If the pool started shutting
+        // down while we were pushing, workers might be exiting and ignoring the queue.
+        // We cancel the task to prevent deadlocks where a caller waits forever on a lost task.
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            cancelled.store(true, Ordering::Release);
+            completion.signal_done();
+        }
+
         handle
     }
 
