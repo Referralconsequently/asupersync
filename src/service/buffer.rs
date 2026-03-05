@@ -262,57 +262,45 @@ where
         loop {
             let this = self.as_mut().get_mut();
 
-            let is_waiting = matches!(this.state, BufferFutureState::WaitingForReady { .. });
-            if is_waiting {
-                let (shared, mut req) = match &mut this.state {
-                    BufferFutureState::WaitingForReady { request, shared } => {
-                        (shared.clone(), request.take().unwrap())
-                    }
-                    _ => unreachable!(),
-                };
+            let state = std::mem::replace(&mut this.state, BufferFutureState::Done);
 
-                let mut inner = shared.inner.lock();
-                match inner.poll_ready(cx) {
-                    Poll::Ready(Ok(())) => {
-                        let future = inner.call(req);
-                        drop(inner);
+            match state {
+                BufferFutureState::WaitingForReady { mut request, shared } => {
+                    let mut inner = shared.inner.lock();
+                    match inner.poll_ready(cx) {
+                        Poll::Ready(Ok(())) => {
+                            let req = request.take().unwrap();
+                            let future = inner.call(req);
+                            drop(inner);
 
-                        let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                        for w in wakers {
-                            w.wake();
+                            let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                            for w in wakers {
+                                w.wake();
+                            }
+
+                            this.state = BufferFutureState::Active { future, shared };
+                            // Loop around to poll Active
                         }
-
-                        this.state = BufferFutureState::Active { future, shared };
-                        continue;
-                    }
-                    Poll::Ready(Err(e)) => {
-                        drop(inner);
-                        this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
-                        continue;
-                    }
-                    Poll::Pending => {
-                        drop(inner);
-                        let mut wakers = shared.inner_wakers.lock();
-                        if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
-                            wakers.push(cx.waker().clone());
+                        Poll::Ready(Err(e)) => {
+                            drop(inner);
+                            this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
+                            // Loop around to poll Error
                         }
-                        drop(wakers);
-                        this.state = BufferFutureState::WaitingForReady {
-                            request: Some(req),
-                            shared,
-                        };
-                        return Poll::Pending;
+                        Poll::Pending => {
+                            drop(inner);
+                            {
+                                let mut wakers = shared.inner_wakers.lock();
+                                if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
+                                    wakers.push(cx.waker().clone());
+                                }
+                            }
+                            this.state = BufferFutureState::WaitingForReady { request, shared };
+                            return Poll::Pending;
+                        }
                     }
                 }
-            }
-
-            match &mut this.state {
-                BufferFutureState::WaitingForReady { .. } => unreachable!(),
-                BufferFutureState::Active { future, shared } => match Pin::new(future).poll(cx) {
+                BufferFutureState::Active { mut future, shared } => match Pin::new(&mut future).poll(cx) {
                     Poll::Ready(result) => {
-                        let shared = shared.clone();
-                        this.state = BufferFutureState::Done;
-
                         let mut pending = shared.pending.lock();
                         *pending = pending.saturating_sub(1);
                         let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
@@ -326,11 +314,13 @@ where
                             Err(e) => return Poll::Ready(Err(BufferError::Inner(e))),
                         }
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        this.state = BufferFutureState::Active { future, shared };
+                        return Poll::Pending;
+                    }
                 },
-                BufferFutureState::Error(err) => {
+                BufferFutureState::Error(mut err) => {
                     let err = err.take().expect("polled after completion");
-                    this.state = BufferFutureState::Done;
                     return Poll::Ready(Err(err));
                 }
                 BufferFutureState::Done => {
@@ -808,7 +798,7 @@ mod tests {
 
     #[test]
     fn buffer_future_debug() {
-        let err = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32, i32>::error(
+        let err = BufferFuture::<std::future::Ready<Result<i32, std::convert::Infallible>>, std::convert::Infallible, EchoService, i32>::error(
             BufferError::Full,
         );
         let dbg = format!("{err:?}");
@@ -818,7 +808,7 @@ mod tests {
 
     #[test]
     fn buffer_future_error_debug() {
-        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32, i32>::error(
+        let future = BufferFuture::<std::future::Ready<Result<i32, std::convert::Infallible>>, std::convert::Infallible, EchoService, i32>::error(
             BufferError::Full,
         );
         let dbg = format!("{future:?}");
@@ -828,7 +818,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "polled after completion")]
     fn buffer_future_panics_when_polled_after_completion() {
-        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32, i32>::error(
+        let future = BufferFuture::<std::future::Ready<Result<i32, std::convert::Infallible>>, std::convert::Infallible, EchoService, i32>::error(
             BufferError::Full,
         );
         let waker = noop_waker();
