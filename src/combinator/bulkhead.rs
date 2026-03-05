@@ -298,7 +298,7 @@ impl Bulkhead {
             if available < weight {
                 return None;
             }
-            
+
             // Re-check pending count inside the CAS loop to prevent TOCTOU races
             // where an enqueue happens right after our initial check.
             if self.pending_queue_count.load(Ordering::Relaxed) > 0 {

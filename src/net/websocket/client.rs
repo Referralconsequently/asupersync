@@ -440,11 +440,10 @@ where
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {
-                        // Cap pending pongs to prevent memory DoS via
-                        // Ping flooding.  RFC 6455 allows responding with
-                        // just the latest payload.
+                        // Cap pending pongs to prevent memory DoS via ping
+                        // flooding while preserving FIFO order of newest items.
                         if self.pending_pongs.len() >= 16 {
-                            self.pending_pongs.clear();
+                            let _ = self.pending_pongs.pop_front();
                         }
                         self.pending_pongs.push_back(frame.payload);
                     }

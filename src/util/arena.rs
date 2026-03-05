@@ -350,7 +350,7 @@ impl<T> Arena<T> {
                 guard.first_free = Some(i as u32);
             }
             guard.prev_free = Some(i);
-            
+
             guard.current_index += 1;
         }
 
@@ -571,7 +571,11 @@ mod tests {
         assert!(result.is_err());
 
         // Before the fix, arena.len() would be 3 (unchanged) but element 0 was deleted
-        assert_eq!(arena.len(), 2, "len must reflect deletions that happened before the panic");
+        assert_eq!(
+            arena.len(),
+            2,
+            "len must reflect deletions that happened before the panic"
+        );
 
         // Element 20 and 30 should still be accessible
         assert_eq!(arena.get(idx2), Some(&20));

@@ -49,10 +49,7 @@ use std::task::{Poll, Waker};
 
 const MAX_PENDING_PONGS: usize = 16;
 
-fn enqueue_pending_pong(
-    pending_pongs: &mut std::collections::VecDeque<Bytes>,
-    payload: Bytes,
-) {
+fn enqueue_pending_pong(pending_pongs: &mut std::collections::VecDeque<Bytes>, payload: Bytes) {
     if pending_pongs.len() >= MAX_PENDING_PONGS {
         let _ = pending_pongs.pop_front();
     }
@@ -783,9 +780,15 @@ mod tests {
             // Push multiple pong payloads
             {
                 let mut shared = read.shared.lock();
-                shared.pending_pongs.push_back(Bytes::from_static(b"pong-a"));
-                shared.pending_pongs.push_back(Bytes::from_static(b"pong-b"));
-                shared.pending_pongs.push_back(Bytes::from_static(b"pong-c"));
+                shared
+                    .pending_pongs
+                    .push_back(Bytes::from_static(b"pong-a"));
+                shared
+                    .pending_pongs
+                    .push_back(Bytes::from_static(b"pong-b"));
+                shared
+                    .pending_pongs
+                    .push_back(Bytes::from_static(b"pong-c"));
             }
 
             // Encode pongs (same block as recv() does)

@@ -882,12 +882,15 @@ impl NameRegistry {
                     }
                     NameCollisionPolicy::Wait { deadline } => {
                         // Enqueue a budgeted waiter.
-                        self.waiters.entry(name).or_default().push_back(WaiterEntry {
-                            holder,
-                            region,
-                            enqueued_at: now,
-                            deadline,
-                        });
+                        self.waiters
+                            .entry(name)
+                            .or_default()
+                            .push_back(WaiterEntry {
+                                holder,
+                                region,
+                                enqueued_at: now,
+                                deadline,
+                            });
                         Ok(NameCollisionOutcome::Enqueued)
                     }
                 }
@@ -1017,7 +1020,10 @@ impl NameRegistry {
     /// Returns the number of active waiters across all names.
     #[must_use]
     pub fn waiter_count(&self) -> usize {
-        self.waiters.values().map(std::collections::VecDeque::len).sum()
+        self.waiters
+            .values()
+            .map(std::collections::VecDeque::len)
+            .sum()
     }
 
     /// Look up which task holds a given name.

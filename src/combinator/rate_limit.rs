@@ -552,7 +552,8 @@ impl RateLimiter {
             }
         }
         if timeout_count > 0 {
-            self.pending_queue_count.fetch_sub(timeout_count, Ordering::Relaxed);
+            self.pending_queue_count
+                .fetch_sub(timeout_count, Ordering::Relaxed);
         }
 
         // Try to grant awaiting entries
@@ -690,8 +691,7 @@ impl RateLimiter {
             state.last_refill = 0;
         }
 
-        let mut queue = self.wait_queue.write();
-        queue.clear();
+        self.wait_queue.write().clear();
         self.pending_queue_count.store(0, Ordering::Relaxed);
     }
 }
@@ -1175,6 +1175,45 @@ mod tests {
 
         // Zero cost should always succeed
         assert!(rl.try_acquire(0, now));
+    }
+
+    #[test]
+    fn reset_clears_pending_queue_state() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now), "first token should be available");
+
+        let entry_id = rl.enqueue(1, now).expect("second request should enqueue");
+        assert_ne!(entry_id, u64::MAX, "enqueued entries use real IDs");
+        assert_eq!(
+            rl.pending_queue_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(rl.wait_queue.read().len(), 1);
+
+        rl.reset();
+
+        assert_eq!(
+            rl.pending_queue_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "reset must clear pending queue count"
+        );
+        assert!(
+            rl.wait_queue.read().is_empty(),
+            "reset must clear wait queue"
+        );
+        assert!(
+            (rl.available_tokens() - 1.0).abs() < f64::EPSILON,
+            "reset must restore full burst capacity"
+        );
     }
 
     // =========================================================================
