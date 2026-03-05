@@ -11,10 +11,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_orchestration_state_machine"
+TARGET_OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_orchestration_state_machine"
+STAGING_ROOT="${TMPDIR:-/tmp}/asupersync-e2e-staging/doctor_orchestration_state_machine"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
+ARTIFACT_BASENAME="artifacts_${TIMESTAMP}"
+ARTIFACT_DIR="${STAGING_ROOT}/${ARTIFACT_BASENAME}"
+PUBLISHED_ARTIFACT_DIR="${TARGET_OUTPUT_DIR}/${ARTIFACT_BASENAME}"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
 RUN1_JSON="${ARTIFACT_DIR}/suite_run1.json"
 RUN2_JSON="${ARTIFACT_DIR}/suite_run2.json"
@@ -38,7 +41,61 @@ if [[ ! -x "${RCH_BIN}" ]]; then
     exit 1
 fi
 
-mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}"
+ensure_artifact_dirs() {
+    mkdir -p "${ARTIFACT_DIR}"
+}
+
+publish_artifacts() {
+    mkdir -p "${TARGET_OUTPUT_DIR}" "${PUBLISHED_ARTIFACT_DIR}" \
+        && cp -a "${ARTIFACT_DIR}/." "${PUBLISHED_ARTIFACT_DIR}/"
+}
+
+write_summary() {
+    local destination="$1"
+    local artifact_path="$2"
+    local log_file="$3"
+    local artifact_dir="$4"
+
+    cat > "${destination}" <<ENDJSON
+{
+  "schema_version": "e2e-suite-summary-v3",
+  "suite_id": "${SUITE_ID}",
+  "scenario_id": "${SCENARIO_ID}",
+  "seed": "${TEST_SEED}",
+  "started_ts": "${RUN_STARTED_TS}",
+  "ended_ts": "${RUN_ENDED_TS}",
+  "status": "${SUITE_STATUS}",
+  "failure_class": "${FAILURE_CLASS}",
+  "repro_command": "${REPRO_COMMAND}",
+  "artifact_path": "${artifact_path}",
+  "suite": "${SUITE_ID}",
+  "timestamp": "${TIMESTAMP}",
+  "test_log_level": "${TEST_LOG_LEVEL}",
+  "tests_passed": ${TESTS_PASSED},
+  "tests_failed": ${TESTS_FAILED},
+  "exit_code": ${EXIT_CODE},
+  "pattern_failures": ${CHECK_FAILURES},
+  "log_file": "${log_file}",
+  "artifact_dir": "${artifact_dir}",
+  "checks_passed": ${CHECKS_PASSED}
+}
+ENDJSON
+}
+
+mark_publish_failure() {
+    local failure_message="$1"
+
+    EXIT_CODE=1
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    SUITE_STATUS="failed"
+    FAILURE_CLASS="artifact_publish_failure"
+    TESTS_PASSED=0
+    TESTS_FAILED=1
+    write_summary "${SUMMARY_FILE}" "${ARTIFACT_DIR}/summary.json" "${ARTIFACT_DIR}/run1.log" "${ARTIFACT_DIR}"
+    echo "  ERROR: ${failure_message}" >&2
+}
+
+ensure_artifact_dirs
 
 echo "==================================================================="
 echo "   Asupersync Doctor Orchestration State-Machine E2E              "
@@ -49,7 +106,8 @@ echo "  TEST_LOG_LEVEL:   ${TEST_LOG_LEVEL}"
 echo "  RUST_LOG:         ${RUST_LOG}"
 echo "  TEST_SEED:        ${TEST_SEED}"
 echo "  Test filter:      ${TEST_FILTER}"
-echo "  Artifact dir:     ${ARTIFACT_DIR}"
+echo "  Artifact staging: ${ARTIFACT_DIR}"
+echo "  Artifact output:  ${PUBLISHED_ARTIFACT_DIR}"
 echo ""
 
 EXIT_CODE=0
@@ -67,7 +125,8 @@ run_suite_call() {
     local passed_count=""
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
-        local target_dir="/tmp/rch-doctor-orch-sm-${TIMESTAMP}"
+        ensure_artifact_dirs
+        local target_dir="/tmp/rch-doctor-orch-sm-${TIMESTAMP}-${run_id}-attempt${attempt}"
         local -a run_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
             cargo test --quiet --features cli --lib "${TEST_FILTER}" -- --nocapture
@@ -187,30 +246,26 @@ fi
 
 REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")"
 
-cat > "${SUMMARY_FILE}" <<ENDJSON
-{
-  "schema_version": "e2e-suite-summary-v3",
-  "suite_id": "${SUITE_ID}",
-  "scenario_id": "${SCENARIO_ID}",
-  "seed": "${TEST_SEED}",
-  "started_ts": "${RUN_STARTED_TS}",
-  "ended_ts": "${RUN_ENDED_TS}",
-  "status": "${SUITE_STATUS}",
-  "failure_class": "${FAILURE_CLASS}",
-  "repro_command": "${REPRO_COMMAND}",
-  "artifact_path": "${SUMMARY_FILE}",
-  "suite": "${SUITE_ID}",
-  "timestamp": "${TIMESTAMP}",
-  "test_log_level": "${TEST_LOG_LEVEL}",
-  "tests_passed": ${TESTS_PASSED},
-  "tests_failed": ${TESTS_FAILED},
-  "exit_code": ${EXIT_CODE},
-  "pattern_failures": ${CHECK_FAILURES},
-  "log_file": "${RUN1_LOG}",
-  "artifact_dir": "${ARTIFACT_DIR}",
-  "checks_passed": ${CHECKS_PASSED}
-}
-ENDJSON
+write_summary \
+    "${SUMMARY_FILE}" \
+    "${PUBLISHED_ARTIFACT_DIR}/summary.json" \
+    "${PUBLISHED_ARTIFACT_DIR}/run1.log" \
+    "${PUBLISHED_ARTIFACT_DIR}"
+
+STAGED_SUMMARY_FOR_PUBLISH="${ARTIFACT_DIR}/summary.publish.tmp"
+mv "${SUMMARY_FILE}" "${STAGED_SUMMARY_FOR_PUBLISH}"
+
+if publish_artifacts; then
+    mv "${STAGED_SUMMARY_FOR_PUBLISH}" "${SUMMARY_FILE}"
+    if cp "${SUMMARY_FILE}" "${PUBLISHED_ARTIFACT_DIR}/summary.json"; then
+        SUMMARY_FILE="${PUBLISHED_ARTIFACT_DIR}/summary.json"
+    else
+        mark_publish_failure "failed to copy summary to ${PUBLISHED_ARTIFACT_DIR}/summary.json"
+    fi
+else
+    mv "${STAGED_SUMMARY_FOR_PUBLISH}" "${SUMMARY_FILE}"
+    mark_publish_failure "failed to publish artifacts to ${PUBLISHED_ARTIFACT_DIR}"
+fi
 
 echo ""
 echo "==================================================================="

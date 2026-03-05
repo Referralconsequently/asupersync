@@ -170,6 +170,13 @@ Coverage intent:
 - asymmetric lanes near and beyond ratio threshold
 - deterministic evidence for when auto policy selects fused vs sequential dual kernels
 
+Command-surface split:
+
+- Comparator/rollback bundle: manifest-level `command_bundle` in the profile-pack
+  snapshot remains anchored to `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives`.
+- Probe-specific bundle: the dual-policy log `repro_command` remains anchored to
+  `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`.
+
 Current default policy note (profile-pack schema v3):
 
 - `x86-avx2-balanced-v1` is split-biased for `mul_slices2` (`mul_window_min > mul_window_max`), so auto mode keeps dual-mul on the sequential path by default.
@@ -264,6 +271,34 @@ rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-202
   cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL \
   --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'
 ```
+
+### E5 High-Confidence Tail Closure Check (`asupersync-36m6p`, 2026-03-05)
+
+`artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` now exposes a
+structured `closure_assessment` block so the Track-E closure state is machine
+checkable rather than inferred from prose alone.
+
+- `closure_assessment.ready_for_e5_closure = false`
+- `closure_assessment.acceptance_criterion_4_status = not_met`
+- `closure_assessment.material_uplift_demonstrated = false`
+- `closure_assessment.overall_tail_direction_vs_baseline = regressed`
+- `closure_assessment.operation_tail_pattern_vs_baseline = mixed`
+- `closure_assessment.scope_sufficiency = insufficient`
+
+Why this remains open:
+
+- overall proxy auto tails are still above baseline on the narrowed
+  high-confidence corpus (`p95/p99 = 9.3392 us` vs `9.0743 us`)
+- operation-level proxy tails are mixed: `mul_slices2_fused`,
+  `mul_slices2_sequential`, and `addmul_slices2_sequential` remain above
+  baseline, while `addmul_slices2_fused` improves versus baseline
+- the packet still covers only one closure-critical scenario, so it cannot
+  substitute for the broader SIMD-active corpus required for AC#4 closure
+
+Interpretation: this high-confidence packet is now a negative-evidence guardrail
+against premature E5 closure. It proves the current narrowed corpus is not
+enough to claim material uplift and therefore keeps `closure_assessment` in the
+not-ready state until a broader SIMD-active multi-scenario refresh lands.
 
 ## Calibration Checklist for Closure
 

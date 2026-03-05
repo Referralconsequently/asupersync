@@ -38,10 +38,18 @@ The packet ties together:
 2. Correctness + replay:
    - `artifacts/raptorq_replay_catalog_v1.json`
    - `tests/raptorq_perf_invariants.rs`
-3. Performance + governance:
+3. Performance + budgets:
+   - `docs/raptorq_baseline_bench_profile.md`
    - `artifacts/raptorq_optimization_decision_records_v1.json`
+   - `tests/ci_regression_gates.rs`
+4. Governance + rollout:
    - `artifacts/raptorq_controlled_rollout_policy_v1.json`
    - `artifacts/raptorq_expected_loss_decision_contract_v1.json`
+   - `docs/raptorq_controlled_rollout_policy.md`
+   - `docs/raptorq_expected_loss_decision_contract.md`
+5. Dossier + backlog:
+   - `artifacts/raptorq_post_closure_opportunity_backlog_v1.json`
+   - `docs/raptorq_post_closure_opportunity_backlog.md`
 
 ## Track Completion Matrix
 
@@ -73,7 +81,9 @@ The closure packet now carries explicit Track-G handoff fields:
 
 These fields are included directly in
 `artifacts/raptorq_program_closure_signoff_packet_v1.json` so G7 closure
-readiness can consume the handoff without implicit assumptions.
+readiness can consume the handoff without implicit assumptions. The handoff is
+not closure-ready until `TRACK_G` is still the sole blocker and
+`h2_closure_packet_dependency_status_alignment` stays green.
 
 ## Radical Lever Coverage Requirement
 
@@ -114,6 +124,7 @@ Cargo-heavy commands in this packet must use `rch exec --`:
 
 ```bash
 rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_schema_and_lever_coverage -- --nocapture
+rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_dependency_status_alignment -- --nocapture
 rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_docs_are_cross_linked -- --nocapture
 rch exec -- cargo test --test ci_regression_gates -- --nocapture
 rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --bundle

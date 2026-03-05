@@ -148,6 +148,13 @@ Recent evidence alignment updates (2026-02-22):
 - Added machine-checkable blocker summary fields in `coverage_summary` (`partial_measured_levers`, `pending_measured_levers`, `closure_blocker_levers`) to reduce ambiguity in F7/F8 closure tracking and make invariant tests explicit about blocker semantics.
 - Fresh top-impact support rerun (child bead `asupersync-3ltrv.2`) reconfirmed `rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` PASS (2/2) on 2026-02-22; after F7 v3 closure promotion, the remaining G3 closure blocker is `F8` only.
 - Folded in latest F7 implementation-hardening evidence from `asupersync-n5fk6.1` completion (`agent-mail asupersync-n5fk6 #1780/#1781`): Arc-backed cache artifact sharing + flattened deterministic signature representation are explicitly referenced in the F7 decision card and support keeping F7 at `approved_guarded` without reopening blocker status.
+
+Recent evidence alignment updates (2026-03-05):
+
+- Added an explicit E5 `command_surface_split` record to keep Track-E reproducibility semantics machine-checkable:
+  - manifest-level comparator/rollback `command_bundle` stays anchored to `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives`
+  - probe-specific `repro_command` stays anchored to `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`
+- Captured the support-slice validation bundle (`agent-mail asupersync-36m6p #4585`): `dual_policy_snapshot_exposes_profile_pack_metadata`, `e5_profile_pack_doc_explains_command_bundle_split`, and `e5_profile_pack_doc_mentions_current_x86_default_contract` all pass, and `rch exec -- cargo check --all-targets` remains green.
 - **F8 closure evidence landed (FrostyCave)**: Published `artifacts/raptorq_track_f_wavefront_pipeline_v1.json` with closure-grade evidence:
   - Implemented bounded wavefront decode pipeline (`decode_wavefront`) in `src/raptorq/decoder.rs` with fused assembly+peeling in bounded batches and catch-up propagation for deterministic results.
   - Added `g2_f8_wavefront_closure_evidence` test to `tests/ci_regression_gates.rs` covering k=48, k=64, and k=48-large scenarios across batch sizes [4, 8, 16].
