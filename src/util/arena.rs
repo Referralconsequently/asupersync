@@ -563,9 +563,7 @@ mod tests {
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             arena.retain(|v| {
-                if *v == 20 {
-                    panic!("boom");
-                }
+                assert!(*v != 20, "boom");
                 false // 10 is deleted before panic
             });
         }));

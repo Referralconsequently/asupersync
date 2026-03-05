@@ -1383,6 +1383,33 @@ mod tests {
     }
 
     #[test]
+    fn request_rejects_unread_prefetched_bytes() {
+        let response_bytes =
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n\x81\x00";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/ws".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Connection".to_string(), "Upgrade".to_string()),
+                ("Upgrade".to_string(), "websocket".to_string()),
+            ],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let err = block_on(Http1Client::request(io, req)).expect_err("must reject");
+        match err {
+            HttpError::PrefetchedDataRemaining(count) => assert_eq!(count, 2),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn decode_response_no_body() {
         let mut codec = Http1ClientCodec::new();
         let mut buf = BytesMut::from(&b"HTTP/1.1 204 No Content\r\n\r\n"[..]);
