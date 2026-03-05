@@ -68,10 +68,7 @@ impl PeakEwmaHedgeController {
         );
         let min_nanos = duration_nanos_saturating_u64(min_delay);
         let max_nanos = duration_nanos_saturating_u64(max_delay);
-        assert!(
-            min_nanos <= max_nanos,
-            "min_delay must be <= max_delay"
-        );
+        assert!(min_nanos <= max_nanos, "min_delay must be <= max_delay");
         let initial_nanos = duration_nanos_saturating_u64(initial).clamp(min_nanos, max_nanos);
         Self {
             estimate_nanos: AtomicU64::new(initial_nanos),
