@@ -106,25 +106,10 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
     type Output = (F::Output, usize);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut first_ready: Option<(F::Output, usize)> = None;
-
-        // CRITICAL: Poll ALL futures to ensure they're initialized.
-        // This is required for cancel-correctness: if a future wraps a JoinFuture,
-        // the JoinFuture must be created (by polling) so its Drop can abort the task
-        // when this SelectAll is dropped. Without this, losers may never be polled,
-        // their JoinFutures never created, and tasks would leak (violating the
-        // "losers are drained" invariant).
         for (i, f) in self.futures.iter_mut().enumerate() {
             if let Poll::Ready(v) = Pin::new(f).poll(cx) {
-                if first_ready.is_none() {
-                    first_ready = Some((v, i));
-                }
-                // Continue polling remaining futures to ensure they're initialized
+                return Poll::Ready((v, i));
             }
-        }
-
-        if let Some(result) = first_ready {
-            return Poll::Ready(result);
         }
 
         Poll::Pending
@@ -165,39 +150,17 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let futures = self.futures.as_mut().expect("polled after completion");
-        let mut first_ready: Option<(F::Output, usize)> = None;
-        let mut also_ready: Vec<usize> = Vec::with_capacity(futures.len().saturating_sub(1));
 
-        // Poll ALL futures to ensure initialization (same as SelectAll).
         for (i, f) in futures.iter_mut().enumerate() {
-            if let Poll::Ready(v) = Pin::new(f).poll(cx) {
-                if first_ready.is_none() {
-                    first_ready = Some((v, i));
-                } else {
-                    // Non-winner Ready value is dropped per select semantics.
-                    // Track the index so this future is excluded from losers;
-                    // re-polling a completed future would panic.
-                    drop(v);
-                    also_ready.push(i);
-                }
+            if let Poll::Ready(value) = Pin::new(f).poll(cx) {
+                let mut all = self.futures.take().unwrap();
+                all.swap_remove(i);
+                return Poll::Ready(SelectAllDrainResult {
+                    value,
+                    winner_index: i,
+                    losers: all,
+                });
             }
-        }
-
-        if let Some((value, winner_index)) = first_ready {
-            let mut all = self.futures.take().expect("polled after completion");
-            // Remove the winner and any simultaneously-completed non-winners.
-            // Process in descending index order so swap_remove doesn't
-            // invalidate subsequent indices.
-            also_ready.push(winner_index);
-            also_ready.sort_unstable_by(|a, b| b.cmp(a));
-            for idx in also_ready {
-                all.swap_remove(idx);
-            }
-            return Poll::Ready(SelectAllDrainResult {
-                value,
-                winner_index,
-                losers: all,
-            });
         }
 
         Poll::Pending
@@ -649,7 +612,6 @@ mod tests {
                 // The simultaneously-ready non-winner (index 2) must be excluded.
                 assert_eq!(r.losers.len(), 1, "only pending futures should be losers");
 
-                // Verify the loser is the pending future by checking poll counts.
                 // All 3 were polled once during SelectAllDrain::poll.
                 assert_eq!(pending_count.load(Ordering::SeqCst), 1);
                 assert_eq!(ready1_count.load(Ordering::SeqCst), 1);
