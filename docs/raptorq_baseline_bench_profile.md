@@ -232,6 +232,11 @@ Recorded in `artifacts/raptorq_track_e_gf256_bench_v1.json` under `simd_policy_a
 
 Updated decision after broader corpus (`simd_policy_ablation_2026_03_04`):
 
+This default-selection result is recorded in
+`artifacts/raptorq_track_e_gf256_bench_v1.json` under
+`simd_policy_ablation_2026_03_04.decision` and is the canonical E5 artifact for
+the current x86 auto-window contract.
+
 - Keep `mul` auto window disabled by default on x86 (`mul_min_total > mul_max_total`).
 - Move x86 `addmul` auto window to `24576..32768` total bytes with `addmul_min_lane=8192`.
 - Rationale: same-target deterministic corpus over `RQ-E-GF256-DUAL-*` showed strongest repeatable uplift in balanced high-throughput lanes (`DUAL-004/005/006`), with targeted `addmul_slices2_auto` median deltas of `-6.1424%`, `-14.4411%`, and `-6.3938%` versus baseline (`avg -8.9924%`).

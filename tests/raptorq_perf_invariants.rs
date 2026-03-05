@@ -1754,6 +1754,76 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
     );
 }
 
+/// Validate the E5 SIMD ablation artifact pins the current x86 default-window
+/// decision and keeps the comparator command bundle reproducible.
+#[test]
+fn e5_simd_ablation_artifact_matches_current_x86_defaults() {
+    let artifact: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/raptorq_track_e_gf256_bench_v1.json"
+    ))
+    .expect("Track-E benchmark artifact must be valid JSON");
+    let ablation = &artifact["simd_policy_ablation_2026_03_04"];
+
+    assert_eq!(
+        ablation["methodology"]["runner"].as_str(),
+        Some("rch exec"),
+        "E5 ablation corpus must remain rch-offloaded"
+    );
+    assert_eq!(
+        ablation["methodology"]["bench_filter"].as_str(),
+        Some("RQ-E-GF256-DUAL"),
+        "E5 ablation corpus must stay anchored to the dual-policy benchmark family"
+    );
+
+    let commands = ablation["command_bundles"]
+        .as_array()
+        .expect("simd_policy_ablation_2026_03_04.command_bundles must be an array");
+    assert_eq!(
+        commands.len(),
+        3,
+        "E5 ablation corpus must keep baseline + two candidate command bundles"
+    );
+    for entry in commands {
+        let command = entry["command"]
+            .as_str()
+            .expect("command bundle entries must include command");
+        assert!(
+            command.contains("rch exec --"),
+            "E5 ablation command must use rch: {command}"
+        );
+        assert!(
+            command.contains("CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual"),
+            "E5 ablation command must pin the shared comparator target dir: {command}"
+        );
+        assert!(
+            command.contains("--features simd-intrinsics"),
+            "E5 ablation command must exercise the SIMD path: {command}"
+        );
+    }
+
+    let decision = &ablation["decision"];
+    assert_eq!(
+        decision["selected_profile_defaults"].as_str(),
+        Some("update x86 addmul auto window"),
+        "E5 ablation decision must remain the x86 addmul-window update"
+    );
+    assert_eq!(
+        decision["changes"]["mul_window"].as_str(),
+        Some("unchanged: disabled (mul_min_total > mul_max_total)"),
+        "E5 ablation decision must keep x86 mul auto disabled by default"
+    );
+    assert_eq!(
+        decision["changes"]["addmul_window"].as_str(),
+        Some("24576..32768 total bytes"),
+        "E5 ablation decision must keep the selected x86 addmul window"
+    );
+    assert_eq!(
+        decision["changes"]["addmul_min_lane"].as_u64(),
+        Some(8192),
+        "E5 ablation decision must keep the selected x86 addmul lane floor"
+    );
+}
+
 /// Validate G3 decision-record artifact schema and high-impact lever coverage.
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -2052,6 +2122,27 @@ fn g3_decision_record_docs_are_cross_linked() {
         assert!(
             RAPTORQ_OPT_DECISIONS_MD.contains(required),
             "decision-record doc must mention {required}"
+        );
+    }
+}
+
+/// Validate the baseline/profile doc stays aligned with the current E5
+/// artifact-backed x86 default-window contract.
+#[test]
+fn e5_profile_pack_doc_mentions_current_x86_default_contract() {
+    for required in [
+        "artifacts/raptorq_track_e_gf256_bench_v1.json",
+        "simd_policy_ablation_2026_03_04",
+        "raptorq-track-e-dual-policy-probe-v3",
+        "replay:rq-e-gf256-profile-pack-v3",
+        "mul_min_total > mul_max_total",
+        "24576..32768",
+        "addmul_min_lane=8192",
+        "CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline profile doc must mention {required}"
         );
     }
 }
