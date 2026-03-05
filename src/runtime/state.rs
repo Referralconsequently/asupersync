@@ -1126,6 +1126,13 @@ impl RuntimeState {
                     details = %error,
                     "obligation leaks detected (fail-fast)"
                 );
+                // Reset reentrancy guard before panicking. Without this,
+                // panic_any unwinds past `self.handling_leaks = false` at the
+                // end of this function. If the mutex is recovered via
+                // PoisonError::into_inner (which our ContendedMutex callers
+                // do), the flag stays true and all future obligation leak
+                // handling is silently disabled.
+                self.handling_leaks = false;
                 std::panic::panic_any(msg);
             }
             ObligationLeakResponse::Log => {
