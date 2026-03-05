@@ -326,70 +326,100 @@ impl<M: ConnectionManager> DbPool<M> {
     /// Returns a `PooledConnection` that automatically returns the connection
     /// to the pool when dropped.
     pub fn get(&self) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
-        let mut inner = self.inner.lock();
+        loop {
+            let mut inner = self.inner.lock();
 
-        if inner.closed {
+            if inner.closed {
+                return Err(DbPoolError::Closed);
+            }
+
+            if let Some(idle) = inner.idle.pop_front() {
+                // Drop lock before expensive operations
+                let is_expired = idle.is_expired(&self.config);
+                let is_stale = idle.is_idle_too_long(&self.config);
+                let needs_validation = self.config.validate_on_checkout;
+                drop(inner);
+
+                // Evict expired or stale connections.
+                if is_expired || is_stale {
+                    {
+                        let mut inner = self.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    self.manager.disconnect(idle.conn);
+                    continue;
+                }
+
+                // Validate if configured.
+                if needs_validation && !self.manager.is_valid(&idle.conn) {
+                    {
+                        let mut inner = self.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                    self.stats
+                        .total_validation_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    self.manager.disconnect(idle.conn);
+                    continue;
+                }
+
+                return self.finish_checkout(idle.conn, idle.created_at);
+            }
+
+            // No valid idle connection; create new if under capacity.
+            if inner.total < self.config.max_size {
+                inner.total += 1;
+                drop(inner); // Release lock during creation.
+
+                match self.manager.connect() {
+                    Ok(conn) => {
+                        self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                        return self.finish_checkout(conn, Instant::now());
+                    }
+                    Err(e) => {
+                        // Roll back total count on failure.
+                        let mut inner = self.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                        return Err(DbPoolError::Connect(e));
+                    }
+                }
+            } else {
+                return Err(DbPoolError::Full);
+            }
+        }
+    }
+
+    fn finish_checkout(
+        &self,
+        conn: M::Connection,
+        created_at: Instant,
+    ) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
+        let is_closed = {
+            let mut inner = self.inner.lock();
+            if inner.closed {
+                inner.total = inner.total.saturating_sub(1);
+                true
+            } else {
+                false
+            }
+        };
+
+        if is_closed {
+            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+            self.manager.disconnect(conn);
             return Err(DbPoolError::Closed);
         }
 
-        // Try to get a valid idle connection.
-        while let Some(idle) = inner.idle.pop_front() {
-            // Evict expired or stale connections.
-            if idle.is_expired(&self.config) || idle.is_idle_too_long(&self.config) {
-                inner.total = inner.total.saturating_sub(1);
-                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                self.manager.disconnect(idle.conn);
-                continue;
-            }
-
-            // Validate if configured.
-            if self.config.validate_on_checkout && !self.manager.is_valid(&idle.conn) {
-                inner.total = inner.total.saturating_sub(1);
-                self.stats
-                    .total_validation_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                self.manager.disconnect(idle.conn);
-                continue;
-            }
-
-            self.stats
-                .total_acquisitions
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(PooledConnection {
-                conn: Some(idle.conn),
-                pool: self,
-                created_at: idle.created_at,
-            });
-        }
-
-        // No valid idle connection; create new if under capacity.
-        if inner.total < self.config.max_size {
-            inner.total += 1;
-            drop(inner); // Release lock during creation.
-
-            match self.manager.connect() {
-                Ok(conn) => {
-                    self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .total_acquisitions
-                        .fetch_add(1, Ordering::Relaxed);
-                    Ok(PooledConnection {
-                        conn: Some(conn),
-                        pool: self,
-                        created_at: Instant::now(),
-                    })
-                }
-                Err(e) => {
-                    // Roll back total count on failure.
-                    let mut inner = self.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
-                    Err(DbPoolError::Connect(e))
-                }
-            }
-        } else {
-            Err(DbPoolError::Full)
-        }
+        self.stats
+            .total_acquisitions
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(PooledConnection {
+            conn: Some(conn),
+            pool: self,
+            created_at,
+        })
     }
 
     /// Acquire a connection with retry and exponential backoff.
@@ -457,24 +487,33 @@ impl<M: ConnectionManager> DbPool<M> {
 
     /// Return a connection to the pool, preserving its original creation time.
     fn return_connection(&self, conn: M::Connection, created_at: Instant) {
-        let mut inner = self.inner.lock();
-        if inner.closed {
-            inner.total = inner.total.saturating_sub(1);
+        let is_closed = {
+            let mut inner = self.inner.lock();
+            if inner.closed {
+                inner.total = inner.total.saturating_sub(1);
+                true
+            } else {
+                inner.idle.push_back(IdleConnection {
+                    conn,
+                    created_at,
+                    last_used: Instant::now(),
+                });
+                false
+            }
+        };
+
+        if is_closed {
             self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             self.manager.disconnect(conn);
-            return;
         }
-        inner.idle.push_back(IdleConnection {
-            conn,
-            created_at,
-            last_used: Instant::now(),
-        });
     }
 
     /// Discard a connection (don't return to pool).
     fn discard_connection(&self, conn: M::Connection) {
-        let mut inner = self.inner.lock();
-        inner.total = inner.total.saturating_sub(1);
+        {
+            let mut inner = self.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+        }
         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
         self.manager.disconnect(conn);
     }
@@ -654,8 +693,8 @@ impl<M: ConnectionManager> fmt::Debug for PooledConnection<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -742,6 +781,120 @@ mod tests {
 
         fn disconnect(&self, _conn: Self::Connection) {
             self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingGate {
+        state: Arc<(Mutex<BlockingGateState>, Condvar)>,
+    }
+
+    #[derive(Default)]
+    struct BlockingGateState {
+        entered: bool,
+        release: bool,
+    }
+
+    impl BlockingGate {
+        fn wait_until_entered(&self) {
+            let (lock, cvar) = &*self.state;
+            let mut state = lock.lock().expect("gate lock poisoned");
+            while !state.entered {
+                state = cvar.wait(state).expect("gate wait poisoned");
+            }
+        }
+
+        fn release(&self) {
+            let (lock, cvar) = &*self.state;
+            let mut state = lock.lock().expect("gate lock poisoned");
+            state.release = true;
+            cvar.notify_all();
+        }
+
+        fn block_here(&self) {
+            let (lock, cvar) = &*self.state;
+            let mut state = lock.lock().expect("gate lock poisoned");
+            state.entered = true;
+            cvar.notify_all();
+            while !state.release {
+                state = cvar.wait(state).expect("gate wait poisoned");
+            }
+        }
+    }
+
+    struct BlockingValidateManager {
+        inner: TestManager,
+        gate: BlockingGate,
+    }
+
+    impl BlockingValidateManager {
+        fn new(gate: BlockingGate) -> Self {
+            Self {
+                inner: TestManager::new(),
+                gate,
+            }
+        }
+
+        fn disconnects(&self) -> usize {
+            self.inner.disconnects()
+        }
+    }
+
+    impl ConnectionManager for BlockingValidateManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        fn connect(&self) -> Result<Self::Connection, Self::Error> {
+            self.inner.connect()
+        }
+
+        fn is_valid(&self, conn: &Self::Connection) -> bool {
+            self.gate.block_here();
+            self.inner.is_valid(conn)
+        }
+
+        fn disconnect(&self, conn: Self::Connection) {
+            self.inner.disconnect(conn);
+        }
+    }
+
+    struct BlockingConnectManager {
+        inner: TestManager,
+        gate: BlockingGate,
+    }
+
+    impl BlockingConnectManager {
+        fn new(gate: BlockingGate) -> Self {
+            Self {
+                inner: TestManager::new(),
+                gate,
+            }
+        }
+
+        fn creates(&self) -> usize {
+            self.inner.creates()
+        }
+
+        fn disconnects(&self) -> usize {
+            self.inner.disconnects()
+        }
+    }
+
+    impl ConnectionManager for BlockingConnectManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        fn connect(&self) -> Result<Self::Connection, Self::Error> {
+            self.gate.block_here();
+            self.inner.connect()
+        }
+
+        fn is_valid(&self, conn: &Self::Connection) -> bool {
+            self.inner.is_valid(conn)
+        }
+
+        fn disconnect(&self, conn: Self::Connection) {
+            self.inner.disconnect(conn);
         }
     }
 
@@ -1068,6 +1221,61 @@ mod tests {
         assert_eq!(pool.stats().total_discards, 1);
         assert_eq!(pool.manager.disconnects(), 1);
         crate::test_complete!("close_discards_returned_connections");
+    }
+
+    #[test]
+    fn close_racing_idle_checkout_returns_closed() {
+        init_test("close_racing_idle_checkout_returns_closed");
+        let gate = BlockingGate::default();
+        let pool = Arc::new(DbPool::new(
+            BlockingValidateManager::new(gate.clone()),
+            DbPoolConfig::default(),
+        ));
+
+        let conn = pool.get().unwrap();
+        conn.return_to_pool();
+        assert_eq!(pool.stats().idle, 1);
+
+        let checkout_pool = Arc::clone(&pool);
+        let handle =
+            std::thread::spawn(move || matches!(checkout_pool.get(), Err(DbPoolError::Closed)));
+
+        gate.wait_until_entered();
+        pool.close();
+        gate.release();
+
+        assert!(handle.join().expect("checkout thread panicked"));
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.stats().idle, 0);
+        assert_eq!(pool.stats().total_discards, 1);
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("close_racing_idle_checkout_returns_closed");
+    }
+
+    #[test]
+    fn close_racing_connect_returns_closed() {
+        init_test("close_racing_connect_returns_closed");
+        let gate = BlockingGate::default();
+        let pool = Arc::new(DbPool::new(
+            BlockingConnectManager::new(gate.clone()),
+            DbPoolConfig::default(),
+        ));
+
+        let checkout_pool = Arc::clone(&pool);
+        let handle =
+            std::thread::spawn(move || matches!(checkout_pool.get(), Err(DbPoolError::Closed)));
+
+        gate.wait_until_entered();
+        pool.close();
+        gate.release();
+
+        assert!(handle.join().expect("checkout thread panicked"));
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.stats().idle, 0);
+        assert_eq!(pool.stats().total_discards, 1);
+        assert_eq!(pool.manager.creates(), 1);
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("close_racing_connect_returns_closed");
     }
 
     // ================================================================
