@@ -25,7 +25,7 @@ fn contract_ids_from_json(json: &serde_json::Value) -> Vec<String> {
     let contracts = json.get("contracts").expect("contracts key");
     for (_domain, items) in contracts.as_object().unwrap() {
         for item in items.as_array().unwrap() {
-            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+            if let Some(id) = item.get("id").and_then(|v: &serde_json::Value| v.as_str()) {
                 ids.push(id.to_string());
             }
         }
@@ -98,7 +98,7 @@ fn json_schema_version_is_present() {
     let json = parse_json();
     let version = json
         .get("schema_version")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         .expect("schema_version");
     assert_eq!(version, "1.0.0");
 }
@@ -144,7 +144,7 @@ fn json_total_contracts_matches_count() {
     let ids = contract_ids_from_json(&json);
     let declared = json
         .get("summary")
-        .and_then(|s| s.get("total_contracts"))
+        .and_then(|s: &serde_json::Value| s.get("total_contracts"))
         .and_then(serde_json::Value::as_u64)
         .expect("summary.total_contracts");
     assert_eq!(
@@ -163,13 +163,17 @@ fn pool_contracts_cover_minimum_set() {
     let json = parse_json();
     let pool = json
         .get("contracts")
-        .and_then(|c| c.get("pool"))
-        .and_then(|p| p.as_array())
+        .and_then(|c: &serde_json::Value| c.get("pool"))
+        .and_then(|p: &serde_json::Value| p.as_array())
         .expect("contracts.pool array");
 
     let ids: HashSet<String> = pool
         .iter()
-        .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(String::from))
+        .filter_map(|c: &serde_json::Value| {
+            c.get("id")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .map(String::from)
+        })
         .collect();
 
     let required = [
@@ -191,23 +195,27 @@ fn pool_config_parameters_have_defaults() {
     let json = parse_json();
     let pool = json
         .get("contracts")
-        .and_then(|c| c.get("pool"))
-        .and_then(|p| p.as_array())
+        .and_then(|c: &serde_json::Value| c.get("pool"))
+        .and_then(|p: &serde_json::Value| p.as_array())
         .expect("contracts.pool");
 
     let config_contract = pool
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-POOL-02"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-POOL-02")
+        })
         .expect("C-POOL-02");
 
     let params = config_contract
         .get("parameters")
-        .and_then(|p| p.as_array())
+        .and_then(|p: &serde_json::Value| p.as_array())
         .expect("C-POOL-02 parameters");
 
     let param_names: HashSet<&str> = params
         .iter()
-        .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+        .filter_map(|p: &serde_json::Value| {
+            p.get("name").and_then(|n: &serde_json::Value| n.as_str())
+        })
         .collect();
 
     let required_params = [
@@ -227,7 +235,10 @@ fn pool_config_parameters_have_defaults() {
 
     // Verify each parameter has a default
     for param in params {
-        let name = param.get("name").and_then(|n| n.as_str()).unwrap();
+        let name = param
+            .get("name")
+            .and_then(|n: &serde_json::Value| n.as_str())
+            .unwrap();
         let has_default = param.get("default").is_some() || param.get("default_secs").is_some();
         assert!(has_default, "pool parameter '{name}' missing default value");
     }
@@ -238,21 +249,25 @@ fn pool_cancel_safety_covers_all_phases() {
     let json = parse_json();
     let pool = json
         .get("contracts")
-        .and_then(|c| c.get("pool"))
-        .and_then(|p| p.as_array())
+        .and_then(|c: &serde_json::Value| c.get("pool"))
+        .and_then(|p: &serde_json::Value| p.as_array())
         .expect("contracts.pool");
 
     let cancel_contract = pool
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-POOL-05"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-POOL-05")
+        })
         .expect("C-POOL-05");
 
     let phases: HashSet<&str> = cancel_contract
         .get("phases")
-        .and_then(|p| p.as_array())
+        .and_then(|p: &serde_json::Value| p.as_array())
         .expect("C-POOL-05 phases")
         .iter()
-        .filter_map(|p| p.get("phase").and_then(|v| v.as_str()))
+        .filter_map(|p: &serde_json::Value| {
+            p.get("phase").and_then(|v: &serde_json::Value| v.as_str())
+        })
         .collect();
 
     assert!(phases.contains("wait"), "missing wait-phase cancel-safety");
@@ -268,21 +283,25 @@ fn pool_stats_has_minimum_fields() {
     let json = parse_json();
     let pool = json
         .get("contracts")
-        .and_then(|c| c.get("pool"))
-        .and_then(|p| p.as_array())
+        .and_then(|c: &serde_json::Value| c.get("pool"))
+        .and_then(|p: &serde_json::Value| p.as_array())
         .expect("contracts.pool");
 
     let stats_contract = pool
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-POOL-04"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-POOL-04")
+        })
         .expect("C-POOL-04");
 
     let fields: HashSet<&str> = stats_contract
         .get("required_fields")
-        .and_then(|f| f.as_array())
+        .and_then(|f: &serde_json::Value| f.as_array())
         .expect("C-POOL-04 required_fields")
         .iter()
-        .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+        .filter_map(|f: &serde_json::Value| {
+            f.get("name").and_then(|n: &serde_json::Value| n.as_str())
+        })
         .collect();
 
     let required = [
@@ -307,13 +326,17 @@ fn transaction_contracts_cover_minimum_set() {
     let json = parse_json();
     let txn = json
         .get("contracts")
-        .and_then(|c| c.get("transaction"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("transaction"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.transaction");
 
     let ids: HashSet<String> = txn
         .iter()
-        .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(String::from))
+        .filter_map(|c: &serde_json::Value| {
+            c.get("id")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .map(String::from)
+        })
         .collect();
 
     let required = [
@@ -333,13 +356,15 @@ fn transaction_closure_wrapper_defines_outcome_mapping() {
     let json = parse_json();
     let txn = json
         .get("contracts")
-        .and_then(|c| c.get("transaction"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("transaction"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.transaction");
 
     let closure_contract = txn
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-TXN-02"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-TXN-02")
+        })
         .expect("C-TXN-02");
 
     let mapping = closure_contract
@@ -347,19 +372,23 @@ fn transaction_closure_wrapper_defines_outcome_mapping() {
         .expect("C-TXN-02 outcome_mapping");
 
     assert_eq!(
-        mapping.get("Ok").and_then(|v| v.as_str()),
+        mapping
+            .get("Ok")
+            .and_then(|v: &serde_json::Value| v.as_str()),
         Some("commit"),
         "Ok must map to commit"
     );
     assert_eq!(
-        mapping.get("Err").and_then(|v| v.as_str()),
+        mapping
+            .get("Err")
+            .and_then(|v: &serde_json::Value| v.as_str()),
         Some("rollback"),
         "Err must map to rollback"
     );
     assert!(
         mapping
             .get("Cancelled")
-            .and_then(|v| v.as_str())
+            .and_then(|v: &serde_json::Value| v.as_str())
             .is_some_and(|s| s.contains("rollback")),
         "Cancelled must include rollback"
     );
@@ -370,13 +399,15 @@ fn transaction_retry_defines_eligibility_per_backend() {
     let json = parse_json();
     let txn = json
         .get("contracts")
-        .and_then(|c| c.get("transaction"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("transaction"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.transaction");
 
     let retry_contract = txn
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-TXN-04"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-TXN-04")
+        })
         .expect("C-TXN-04");
 
     let eligibility = retry_contract
@@ -394,7 +425,7 @@ fn transaction_retry_defines_eligibility_per_backend() {
     // PostgreSQL must reference SQLSTATE 40001
     let pg = eligibility
         .get("postgresql")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         .unwrap();
     assert!(
         pg.contains("40001"),
@@ -407,13 +438,15 @@ fn transaction_savepoints_defined_for_all_backends() {
     let json = parse_json();
     let txn = json
         .get("contracts")
-        .and_then(|c| c.get("transaction"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("transaction"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.transaction");
 
     let savepoint_contract = txn
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-TXN-03"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-TXN-03")
+        })
         .expect("C-TXN-03");
 
     let patterns = savepoint_contract
@@ -423,7 +456,7 @@ fn transaction_savepoints_defined_for_all_backends() {
     for backend in &["postgresql", "mysql", "sqlite"] {
         let cmds = patterns
             .get(*backend)
-            .and_then(|v| v.as_array())
+            .and_then(|v: &serde_json::Value| v.as_array())
             .unwrap_or_else(|| panic!("missing sql_patterns for {backend}"));
         // Each backend must define at least 3 operations (create, release, rollback)
         assert!(
@@ -439,13 +472,15 @@ fn isolation_levels_defined_for_all_backends() {
     let json = parse_json();
     let txn = json
         .get("contracts")
-        .and_then(|c| c.get("transaction"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("transaction"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.transaction");
 
     let isolation_contract = txn
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-TXN-05"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-TXN-05")
+        })
         .expect("C-TXN-05");
 
     let support = isolation_contract
@@ -478,13 +513,17 @@ fn timeout_contracts_cover_minimum_set() {
     let json = parse_json();
     let tmo = json
         .get("contracts")
-        .and_then(|c| c.get("timeout"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("timeout"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.timeout");
 
     let ids: HashSet<String> = tmo
         .iter()
-        .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(String::from))
+        .filter_map(|c: &serde_json::Value| {
+            c.get("id")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .map(String::from)
+        })
         .collect();
 
     let required = [
@@ -503,13 +542,15 @@ fn connection_timeout_respects_cx_cancel() {
     let json = parse_json();
     let tmo = json
         .get("contracts")
-        .and_then(|c| c.get("timeout"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("timeout"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.timeout");
 
     let conn_timeout = tmo
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-TMO-01"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-TMO-01")
+        })
         .expect("C-TMO-01");
 
     let respects = conn_timeout
@@ -525,18 +566,20 @@ fn max_lifetime_uses_monotonic_clock() {
     let json = parse_json();
     let tmo = json
         .get("contracts")
-        .and_then(|c| c.get("timeout"))
-        .and_then(|t| t.as_array())
+        .and_then(|c: &serde_json::Value| c.get("timeout"))
+        .and_then(|t: &serde_json::Value| t.as_array())
         .expect("contracts.timeout");
 
     let lifetime = tmo
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-TMO-04"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-TMO-04")
+        })
         .expect("C-TMO-04");
 
     let clock = lifetime
         .get("clock")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         .expect("C-TMO-04 clock");
 
     assert!(
@@ -552,13 +595,17 @@ fn observability_contracts_cover_minimum_set() {
     let json = parse_json();
     let obs = json
         .get("contracts")
-        .and_then(|c| c.get("observability"))
-        .and_then(|o| o.as_array())
+        .and_then(|c: &serde_json::Value| c.get("observability"))
+        .and_then(|o: &serde_json::Value| o.as_array())
         .expect("contracts.observability");
 
     let ids: HashSet<String> = obs
         .iter()
-        .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(String::from))
+        .filter_map(|c: &serde_json::Value| {
+            c.get("id")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .map(String::from)
+        })
         .collect();
 
     let required = [
@@ -577,21 +624,25 @@ fn connection_events_include_lifecycle_milestones() {
     let json = parse_json();
     let obs = json
         .get("contracts")
-        .and_then(|c| c.get("observability"))
-        .and_then(|o| o.as_array())
+        .and_then(|c: &serde_json::Value| c.get("observability"))
+        .and_then(|o: &serde_json::Value| o.as_array())
         .expect("contracts.observability");
 
     let conn_events = obs
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-OBS-01"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-OBS-01")
+        })
         .expect("C-OBS-01");
 
     let events: HashSet<&str> = conn_events
         .get("events")
-        .and_then(|e| e.as_array())
+        .and_then(|e: &serde_json::Value| e.as_array())
         .expect("C-OBS-01 events")
         .iter()
-        .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+        .filter_map(|e: &serde_json::Value| {
+            e.get("name").and_then(|n: &serde_json::Value| n.as_str())
+        })
         .collect();
 
     let required_events = [
@@ -610,21 +661,25 @@ fn transaction_events_include_lifecycle_milestones() {
     let json = parse_json();
     let obs = json
         .get("contracts")
-        .and_then(|c| c.get("observability"))
-        .and_then(|o| o.as_array())
+        .and_then(|c: &serde_json::Value| c.get("observability"))
+        .and_then(|o: &serde_json::Value| o.as_array())
         .expect("contracts.observability");
 
     let txn_events = obs
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-OBS-02"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-OBS-02")
+        })
         .expect("C-OBS-02");
 
     let events: HashSet<&str> = txn_events
         .get("events")
-        .and_then(|e| e.as_array())
+        .and_then(|e: &serde_json::Value| e.as_array())
         .expect("C-OBS-02 events")
         .iter()
-        .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+        .filter_map(|e: &serde_json::Value| {
+            e.get("name").and_then(|n: &serde_json::Value| n.as_str())
+        })
         .collect();
 
     let required_events = [
@@ -642,21 +697,25 @@ fn pool_health_metrics_include_utilization() {
     let json = parse_json();
     let obs = json
         .get("contracts")
-        .and_then(|c| c.get("observability"))
-        .and_then(|o| o.as_array())
+        .and_then(|c: &serde_json::Value| c.get("observability"))
+        .and_then(|o: &serde_json::Value| o.as_array())
         .expect("contracts.observability");
 
     let metrics = obs
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-OBS-03"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-OBS-03")
+        })
         .expect("C-OBS-03");
 
     let metric_names: HashSet<&str> = metrics
         .get("derived_metrics")
-        .and_then(|m| m.as_array())
+        .and_then(|m: &serde_json::Value| m.as_array())
         .expect("C-OBS-03 derived_metrics")
         .iter()
-        .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+        .filter_map(|m: &serde_json::Value| {
+            m.get("name").and_then(|n: &serde_json::Value| n.as_str())
+        })
         .collect();
 
     assert!(
@@ -676,21 +735,26 @@ fn error_categories_cover_common_failures() {
     let json = parse_json();
     let err = json
         .get("contracts")
-        .and_then(|c| c.get("error_normalization"))
-        .and_then(|e| e.as_array())
+        .and_then(|c: &serde_json::Value| c.get("error_normalization"))
+        .and_then(|e: &serde_json::Value| e.as_array())
         .expect("contracts.error_normalization");
 
     let categories_contract = err
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-ERR-01"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-ERR-01")
+        })
         .expect("C-ERR-01");
 
     let categories: HashSet<&str> = categories_contract
         .get("categories")
-        .and_then(|c| c.as_array())
+        .and_then(|c: &serde_json::Value| c.as_array())
         .expect("C-ERR-01 categories")
         .iter()
-        .filter_map(|c| c.get("category").and_then(|v| v.as_str()))
+        .filter_map(|c: &serde_json::Value| {
+            c.get("category")
+                .and_then(|v: &serde_json::Value| v.as_str())
+        })
         .collect();
 
     let required = [
@@ -714,22 +778,27 @@ fn error_categories_cover_all_backends() {
     let json = parse_json();
     let err = json
         .get("contracts")
-        .and_then(|c| c.get("error_normalization"))
-        .and_then(|e| e.as_array())
+        .and_then(|c: &serde_json::Value| c.get("error_normalization"))
+        .and_then(|e: &serde_json::Value| e.as_array())
         .expect("contracts.error_normalization");
 
     let categories_contract = err
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-ERR-01"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-ERR-01")
+        })
         .expect("C-ERR-01");
 
     let categories = categories_contract
         .get("categories")
-        .and_then(|c| c.as_array())
+        .and_then(|c: &serde_json::Value| c.as_array())
         .expect("C-ERR-01 categories");
 
     for cat in categories {
-        let category_name = cat.get("category").and_then(|v| v.as_str()).unwrap();
+        let category_name = cat
+            .get("category")
+            .and_then(|v: &serde_json::Value| v.as_str())
+            .unwrap();
         for backend in &["postgresql", "mysql", "sqlite"] {
             assert!(
                 cat.get(*backend).is_some(),
@@ -744,21 +813,23 @@ fn error_method_parity_defines_required_methods() {
     let json = parse_json();
     let err = json
         .get("contracts")
-        .and_then(|c| c.get("error_normalization"))
-        .and_then(|e| e.as_array())
+        .and_then(|c: &serde_json::Value| c.get("error_normalization"))
+        .and_then(|e: &serde_json::Value| e.as_array())
         .expect("contracts.error_normalization");
 
     let methods_contract = err
         .iter()
-        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some("C-ERR-02"))
+        .find(|c: &&serde_json::Value| {
+            c.get("id").and_then(|v: &serde_json::Value| v.as_str()) == Some("C-ERR-02")
+        })
         .expect("C-ERR-02");
 
     let methods: HashSet<&str> = methods_contract
         .get("required_methods")
-        .and_then(|m| m.as_array())
+        .and_then(|m: &serde_json::Value| m.as_array())
         .expect("C-ERR-02 required_methods")
         .iter()
-        .filter_map(|m| m.as_str())
+        .filter_map(|m: &serde_json::Value| m.as_str())
         .collect();
 
     let required = [
@@ -807,11 +878,14 @@ fn summary_lists_all_three_backends() {
     let json = parse_json();
     let backends = json
         .get("summary")
-        .and_then(|s| s.get("backends"))
-        .and_then(|b| b.as_array())
+        .and_then(|s: &serde_json::Value| s.get("backends"))
+        .and_then(|b: &serde_json::Value| b.as_array())
         .expect("summary.backends");
 
-    let backend_set: HashSet<&str> = backends.iter().filter_map(|b| b.as_str()).collect();
+    let backend_set: HashSet<&str> = backends
+        .iter()
+        .filter_map(|b: &serde_json::Value| b.as_str())
+        .collect();
 
     assert!(backend_set.contains("postgresql"), "missing postgresql");
     assert!(backend_set.contains("mysql"), "missing mysql");
@@ -823,19 +897,19 @@ fn summary_pool_integration_status_tracks_gaps() {
     let json = parse_json();
     let pool_status = json
         .get("summary")
-        .and_then(|s| s.get("pool_integration_status"))
+        .and_then(|s: &serde_json::Value| s.get("pool_integration_status"))
         .expect("summary.pool_integration_status");
 
     // PostgreSQL and MySQL should be marked as not_wired (blocking gaps)
     let pg = pool_status
         .get("postgresql")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         .expect("pg status");
     assert_eq!(pg, "not_wired", "PostgreSQL pool status must be not_wired");
 
     let mysql = pool_status
         .get("mysql")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         .expect("mysql status");
     assert_eq!(mysql, "not_wired", "MySQL pool status must be not_wired");
 }
@@ -845,13 +919,15 @@ fn blocking_gaps_include_critical_pool_items() {
     let json = parse_json();
     let gaps = json
         .get("summary")
-        .and_then(|s| s.get("blocking_gaps"))
-        .and_then(|g| g.as_array())
+        .and_then(|s: &serde_json::Value| s.get("blocking_gaps"))
+        .and_then(|g: &serde_json::Value| g.as_array())
         .expect("summary.blocking_gaps");
 
     let gap_ids: HashSet<&str> = gaps
         .iter()
-        .filter_map(|g| g.get("id").and_then(|v| v.as_str()))
+        .filter_map(|g: &serde_json::Value| {
+            g.get("id").and_then(|v: &serde_json::Value| v.as_str())
+        })
         .collect();
 
     assert!(gap_ids.contains("PG-G4"), "must list PG-G4 as blocking gap");
@@ -865,13 +941,15 @@ fn dependencies_reference_valid_beads() {
 
     let blocked_by = deps
         .get("blocked_by")
-        .and_then(|b| b.as_array())
+        .and_then(|b: &serde_json::Value| b.as_array())
         .expect("dependencies.blocked_by");
 
     // Must reference T6.2 as a blocker
     let blocker_beads: HashSet<&str> = blocked_by
         .iter()
-        .filter_map(|b| b.get("bead").and_then(|v| v.as_str()))
+        .filter_map(|b: &serde_json::Value| {
+            b.get("bead").and_then(|v: &serde_json::Value| v.as_str())
+        })
         .collect();
 
     assert!(
@@ -881,12 +959,14 @@ fn dependencies_reference_valid_beads() {
 
     let blocks = deps
         .get("blocks")
-        .and_then(|b| b.as_array())
+        .and_then(|b: &serde_json::Value| b.as_array())
         .expect("dependencies.blocks");
 
     let downstream_beads: HashSet<&str> = blocks
         .iter()
-        .filter_map(|b| b.get("bead").and_then(|v| v.as_str()))
+        .filter_map(|b: &serde_json::Value| {
+            b.get("bead").and_then(|v: &serde_json::Value| v.as_str())
+        })
         .collect();
 
     assert!(
@@ -918,7 +998,7 @@ fn source_modules_reference_existing_files() {
     for (key, expected) in &expected_paths {
         let path = modules
             .get(*key)
-            .and_then(|v| v.as_str())
+            .and_then(|v: &serde_json::Value| v.as_str())
             .unwrap_or_else(|| panic!("missing source_modules.{key}"));
         assert_eq!(
             path, *expected,
@@ -974,7 +1054,7 @@ fn bead_id_consistent_between_md_and_json() {
     let json = parse_json();
     let json_bead = json
         .get("bead_id")
-        .and_then(|v| v.as_str())
+        .and_then(|v: &serde_json::Value| v.as_str())
         .expect("bead_id in JSON");
 
     assert!(

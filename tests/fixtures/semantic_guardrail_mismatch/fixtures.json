@@ -113,6 +113,63 @@
         "CI matrix lane failed: e2e",
         "artifact:phase6-e2e-artifacts-broken-fixture"
       ]
+    },
+    {
+      "fixture_id": "e2e-lane-replay-rch-prefix-drift",
+      "surface": "e2e",
+      "purpose": "CI matrix policy gate must fail when a required-rch lane replay command is no longer rch-routed.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": ".github/ci_matrix_policy.json",
+        "find": "rch exec -- bash ./scripts/run_all_e2e.sh --verify-matrix",
+        "replace": "bash ./scripts/run_all_e2e.sh --verify-matrix"
+      },
+      "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
+      "expected_exit": 1,
+      "expected_substrings": [
+        "CI matrix lane failed: e2e",
+        "replay:rch_prefix"
+      ]
+    },
+    {
+      "fixture_id": "lint-build-step-fallback-phrase-drift",
+      "surface": "e2e",
+      "purpose": "CI matrix policy gate must fail when an rch-required step loses the mandated fallback phrase contract.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": ".github/workflows/ci.yml",
+        "find": "echo \"rch unavailable; falling back to local cargo check --all-targets --all-features\"",
+        "replace": "echo \"rch unavailable; local cargo check --all-targets --all-features\""
+      },
+      "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
+      "expected_exit": 1,
+      "expected_substrings": [
+        "CI matrix lane failed: lint-build",
+        "step_fallback:Check compilation"
+      ]
+    },
+    {
+      "fixture_id": "e2e-lane-artifact-threshold-drift",
+      "surface": "e2e",
+      "purpose": "CI matrix policy gate must fail when required_artifacts_min exceeds available artifact contracts.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": ".github/ci_matrix_policy.json",
+        "find": "\"required_artifacts_min\": 2",
+        "replace": "\"required_artifacts_min\": 3"
+      },
+      "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
+      "expected_exit": 1,
+      "expected_substrings": [
+        "CI matrix lane failed: e2e",
+        "threshold:required_artifacts_min(2<3)"
+      ]
     }
   ]
 }

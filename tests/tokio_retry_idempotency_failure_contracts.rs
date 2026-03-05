@@ -130,7 +130,7 @@ fn json_total_contracts_matches_actual_count() {
     let contracts = json["contracts"].as_object().unwrap();
     let actual: usize = contracts
         .values()
-        .map(|v| v.as_array().unwrap().len())
+        .map(|v: &serde_json::Value| v.as_array().unwrap().len())
         .sum();
     let declared = json["summary"]["total_contracts"].as_u64().unwrap() as usize;
     assert_eq!(actual, declared, "declared {declared} but found {actual}");
@@ -224,7 +224,7 @@ fn transaction_retry_defines_non_retryable_categories() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v: &serde_json::Value| v.as_str().unwrap())
         .collect();
     assert!(non_retryable.contains(&"constraint_violation"));
     assert!(non_retryable.contains(&"syntax_error"));
@@ -247,7 +247,7 @@ fn cancel_aware_retry_requirements_defined() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v: &serde_json::Value| v.as_str().unwrap())
         .collect();
     assert!(reqs.contains(&"check_cancel_before_attempt"));
     assert!(reqs.contains(&"propagate_cancelled_outcome"));
@@ -359,7 +359,7 @@ fn mysql_error_methods_document_gaps() {
         .as_object()
         .unwrap()
         .values()
-        .filter(|v| v.as_str().unwrap() == "implemented")
+        .filter(|v: &&serde_json::Value| v.as_str().unwrap() == "implemented")
         .count();
     assert!(
         impl_count >= 6,
@@ -543,7 +543,7 @@ fn circuit_breaker_integration_requirements_defined() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v: &serde_json::Value| v.as_str().unwrap())
         .collect();
     assert!(reqs.contains(&"open_circuit_stops_retry"));
     assert!(reqs.contains(&"half_open_probes_not_retry_attempts"));
@@ -572,7 +572,7 @@ fn rate_limiter_integration_requirements_defined() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v: &serde_json::Value| v.as_str().unwrap())
         .collect();
     assert!(reqs.contains(&"rate_limit_rejection_not_retryable"));
     assert!(reqs.contains(&"retry_delay_respects_token_availability"));
@@ -635,7 +635,7 @@ fn timeout_backpressure_requirements() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v: &serde_json::Value| v.as_str().unwrap())
         .collect();
     assert!(reqs.contains(&"connection_timeout_prevents_unbounded_wait"));
     assert!(reqs.contains(&"retry_budget_prevents_retry_storms"));
@@ -673,7 +673,7 @@ fn summary_status_counts_are_consistent() {
     let summary_domains = json["summary"]["domains"].as_object().unwrap();
 
     for (domain, items) in contracts {
-        let items = items.as_array().unwrap();
+        let items: &Vec<serde_json::Value> = items.as_array().unwrap();
         let mut implemented = 0u64;
         let mut partial = 0u64;
         let mut defined = 0u64;
@@ -728,7 +728,7 @@ fn summary_systems_list_complete() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v.as_str().unwrap())
+        .map(|v: &serde_json::Value| v.as_str().unwrap())
         .collect();
     assert!(systems.contains(&"postgresql"));
     assert!(systems.contains(&"mysql"));

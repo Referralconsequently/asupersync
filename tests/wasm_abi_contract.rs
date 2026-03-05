@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+use asupersync::types::NextjsBootstrapPhase::*;
 use asupersync::types::wasm_abi::ErrorBoundaryAction;
 use asupersync::types::{
     CancelPhase, NextjsBootstrapPhase, NextjsIntegrationSnapshot, NextjsNavigationType,
@@ -305,8 +306,6 @@ fn wasm_abortsignal_interop_contract_is_deterministic() {
 
 #[test]
 fn nextjs_bootstrap_state_machine_paths_are_explicit() {
-    use NextjsBootstrapPhase::*;
-
     assert!(is_valid_bootstrap_transition(ServerRendered, Hydrating));
     assert!(is_valid_bootstrap_transition(Hydrating, Hydrated));
     assert!(is_valid_bootstrap_transition(Hydrated, RuntimeReady));
@@ -331,8 +330,6 @@ fn nextjs_bootstrap_state_machine_paths_are_explicit() {
 
 #[test]
 fn nextjs_bootstrap_recovery_paths_are_navigation_and_retry_safe() {
-    use NextjsBootstrapPhase::*;
-
     // Local retry after failure keeps the same phase until a boundary-level
     // recovery action (remount/hard navigation) starts a new lifecycle.
     assert!(is_valid_bootstrap_transition(RuntimeFailed, RuntimeFailed));
