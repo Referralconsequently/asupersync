@@ -6,10 +6,12 @@ use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
     AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
     DoctorScenarioCoveragePackSmokeReport, DoctorScenarioCoveragePacksContract,
-    EvidenceTimelineContract, EvidenceTimelineWorkflowTranscript,
-    advanced_diagnostics_report_bundle, build_doctor_scenario_coverage_pack_smoke_report,
-    doctor_scenario_coverage_packs_contract, evidence_timeline_contract,
-    run_evidence_timeline_keyboard_flow_smoke, validate_advanced_diagnostics_report_extension,
+    DoctorStressSoakContract, DoctorStressSoakSmokeReport, EvidenceTimelineContract,
+    EvidenceTimelineWorkflowTranscript, advanced_diagnostics_report_bundle,
+    build_doctor_scenario_coverage_pack_smoke_report, build_doctor_stress_soak_smoke_report,
+    doctor_scenario_coverage_packs_contract, doctor_stress_soak_contract,
+    evidence_timeline_contract, run_evidence_timeline_keyboard_flow_smoke,
+    validate_advanced_diagnostics_report_extension,
     validate_advanced_diagnostics_report_extension_contract,
 };
 use asupersync::cli::{
@@ -297,6 +299,10 @@ enum DoctorCommand {
     ScenarioCoveragePackContract,
     /// Emit deterministic scenario-pack smoke report with transcript assertions
     ScenarioCoveragePackSmoke(DoctorScenarioCoveragePackSmokeArgs),
+    /// Emit deterministic stress/soak contract for long-duration diagnostics runs
+    StressSoakContract,
+    /// Emit deterministic stress/soak smoke report with sustained-budget gates
+    StressSoakSmoke(DoctorStressSoakSmokeArgs),
     /// Export advanced diagnostics reports to deterministic markdown/json artifacts
     ReportExport(DoctorReportExportArgs),
     /// Export core diagnostics reports into FrankenSuite evidence/decision artifacts
@@ -372,6 +378,17 @@ struct DoctorScenarioCoveragePackSmokeArgs {
     selection_mode: String,
 
     /// Deterministic root seed used for pack transcript generation
+    #[arg(long = "seed", default_value = "seed-4242")]
+    seed: String,
+}
+
+#[derive(Args, Debug)]
+struct DoctorStressSoakSmokeArgs {
+    /// Stress/soak profile mode (`fast` or `soak`)
+    #[arg(long = "profile-mode", default_value = "soak")]
+    profile_mode: String,
+
+    /// Deterministic root seed used for stress/soak generation
     #[arg(long = "seed", default_value = "seed-4242")]
     seed: String,
 }
@@ -845,6 +862,10 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::ScenarioCoveragePackSmoke(smoke_args) => {
             doctor_scenario_coverage_pack_smoke(&smoke_args, output)
         }
+        DoctorCommand::StressSoakContract => doctor_stress_soak_contract_command(output),
+        DoctorCommand::StressSoakSmoke(smoke_args) => {
+            doctor_stress_soak_smoke_command(&smoke_args, output)
+        }
         DoctorCommand::ReportExport(export_args) => doctor_report_export(&export_args, output),
         DoctorCommand::FrankenExport(export_args) => doctor_franken_export(&export_args, output),
         DoctorCommand::PackageCli(package_args) => doctor_package_cli(&package_args, output),
@@ -1007,6 +1028,38 @@ fn doctor_scenario_coverage_pack_smoke(
             .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
     let payload = DoctorScenarioCoveragePackSmokeOutput { report };
+    output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_stress_soak_contract_command(output: &mut Output) -> Result<(), CliError> {
+    let contract: DoctorStressSoakContract = doctor_stress_soak_contract();
+    let payload = DoctorStressSoakContractOutput { contract };
+    output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_stress_soak_smoke_command(
+    args: &DoctorStressSoakSmokeArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let contract: DoctorStressSoakContract = doctor_stress_soak_contract();
+    let report = build_doctor_stress_soak_smoke_report(&contract, &args.profile_mode, &args.seed)
+        .map_err(|err| {
+        CliError::new(
+            "doctor_stress_soak_smoke_error",
+            "Failed to build stress/soak smoke report",
+        )
+        .detail(err)
+        .context("profile_mode", args.profile_mode.clone())
+        .context("seed", args.seed.clone())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let payload = DoctorStressSoakSmokeOutput { report };
     output.write(&payload).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
@@ -1228,6 +1281,30 @@ impl Outputtable for DoctorScenarioCoveragePackSmokeOutput {
     fn human_format(&self) -> String {
         serde_json::to_string_pretty(&self.report)
             .unwrap_or_else(|_| "failed to render scenario coverage-pack smoke payload".to_string())
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorStressSoakContractOutput {
+    contract: DoctorStressSoakContract,
+}
+
+impl Outputtable for DoctorStressSoakContractOutput {
+    fn human_format(&self) -> String {
+        serde_json::to_string_pretty(&self.contract)
+            .unwrap_or_else(|_| "failed to render stress/soak contract payload".to_string())
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorStressSoakSmokeOutput {
+    report: DoctorStressSoakSmokeReport,
+}
+
+impl Outputtable for DoctorStressSoakSmokeOutput {
+    fn human_format(&self) -> String {
+        serde_json::to_string_pretty(&self.report)
+            .unwrap_or_else(|_| "failed to render stress/soak smoke payload".to_string())
     }
 }
 
@@ -4776,6 +4853,42 @@ mod tests {
         };
         assert_eq!(args.selection_mode, "retry");
         assert_eq!(args.seed, "seed-007");
+    }
+
+    #[test]
+    fn doctor_stress_soak_contract_command_parses() {
+        let cli = Cli::try_parse_from(["asupersync", "doctor", "stress-soak-contract"])
+            .expect("parse doctor stress-soak-contract");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::StressSoakContract,
+        }) = cli.command
+        else {
+            panic!("expected doctor stress-soak-contract command");
+        };
+    }
+
+    #[test]
+    fn doctor_stress_soak_smoke_command_parses() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "stress-soak-smoke",
+            "--profile-mode",
+            "fast",
+            "--seed",
+            "seed-5150",
+        ])
+        .expect("parse doctor stress-soak-smoke");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::StressSoakSmoke(args),
+        }) = cli.command
+        else {
+            panic!("expected doctor stress-soak-smoke command");
+        };
+        assert_eq!(args.profile_mode, "fast");
+        assert_eq!(args.seed, "seed-5150");
     }
 
     #[test]

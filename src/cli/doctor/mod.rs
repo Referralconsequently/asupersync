@@ -1559,6 +1559,151 @@ pub struct DoctorScenarioCoveragePackSmokeReport {
     pub runs: Vec<DoctorScenarioCoveragePackRun>,
 }
 
+/// Deterministic stress/soak contract for long-running doctor diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorStressSoakContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Required e2e harness dependency version.
+    pub e2e_harness_contract_version: String,
+    /// Required structured logging dependency version.
+    pub logging_contract_version: String,
+    /// Supported profile modes in lexical order.
+    pub profile_modes: Vec<String>,
+    /// Required scenario-catalog fields in lexical order.
+    pub required_scenario_fields: Vec<String>,
+    /// Required run-report fields in lexical order.
+    pub required_run_fields: Vec<String>,
+    /// Required metric fields in lexical order.
+    pub required_metric_fields: Vec<String>,
+    /// Deterministic sustained-budget policy statements.
+    pub sustained_budget_policy: Vec<String>,
+    /// Canonical scenario catalog in lexical `scenario_id` order.
+    pub scenario_catalog: Vec<DoctorStressSoakScenarioSpec>,
+    /// Canonical budget envelopes in lexical `budget_id` order.
+    pub budget_envelopes: Vec<DoctorStressSoakBudgetEnvelope>,
+}
+
+/// One deterministic stress/soak scenario specification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorStressSoakScenarioSpec {
+    /// Stable scenario identifier.
+    pub scenario_id: String,
+    /// Workload class (`high_finding_volume`, `concurrent_operator_actions`, `cancel_recovery_pressure`).
+    pub workload_class: String,
+    /// Expected terminal outcome (`success`, `failed`, `cancelled`).
+    pub expected_outcome: String,
+    /// Referenced budget envelope identifier.
+    pub budget_id: String,
+    /// Deterministic stage identifiers used for transcript generation.
+    pub stages: Vec<String>,
+    /// Deterministic checkpoint cadence in logical steps.
+    pub checkpoint_interval_steps: u32,
+    /// Baseline run duration in logical steps (before profile multiplier).
+    pub duration_steps: u32,
+    /// Operator-facing scenario summary.
+    pub description: String,
+}
+
+/// One deterministic budget envelope for stress/soak gates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorStressSoakBudgetEnvelope {
+    /// Stable budget identifier.
+    pub budget_id: String,
+    /// Maximum allowed p95 latency (ms).
+    pub max_latency_p95_ms: u32,
+    /// Maximum allowed memory footprint (MiB).
+    pub max_memory_mb: u32,
+    /// Maximum allowed error rate (basis points).
+    pub max_error_rate_basis_points: u32,
+    /// Maximum allowed drift indicator (basis points).
+    pub max_drift_basis_points: u32,
+}
+
+/// One checkpoint sample emitted during stress/soak execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorStressSoakCheckpointMetric {
+    /// 1-based checkpoint index.
+    pub checkpoint_index: u32,
+    /// Observed p95 latency (ms).
+    pub latency_p95_ms: u32,
+    /// Observed memory footprint (MiB).
+    pub memory_mb: u32,
+    /// Observed error rate (basis points).
+    pub error_rate_basis_points: u32,
+    /// Observed drift score (basis points).
+    pub drift_basis_points: u32,
+    /// Whether this checkpoint satisfied all envelope limits.
+    pub within_budget: bool,
+}
+
+/// Deterministic failure payload emitted for budget-envelope violations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorStressSoakFailureOutput {
+    /// Stable failure class identifier.
+    pub failure_class: String,
+    /// Saturation indicators explaining the failure.
+    pub saturation_indicators: Vec<String>,
+    /// Canonical trace-correlation key for replay joins.
+    pub trace_correlation: String,
+    /// Exact rerun command to reproduce this failure.
+    pub rerun_command: String,
+}
+
+/// One deterministic stress/soak run report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorStressSoakRunReport {
+    /// Deterministic run identifier.
+    pub run_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Workload class.
+    pub workload_class: String,
+    /// Profile mode (`fast` or `soak`).
+    pub profile_mode: String,
+    /// Expected top-level outcome.
+    pub expected_outcome: String,
+    /// Observed terminal state (`completed`, `failed`, `cancelled`).
+    pub terminal_state: String,
+    /// Run status (`passed` or `budget_failed`).
+    pub status: String,
+    /// Effective duration in logical steps.
+    pub duration_steps: u32,
+    /// Number of recorded checkpoints.
+    pub checkpoint_count: u32,
+    /// Deterministic checkpoint metric history.
+    pub checkpoint_metrics: Vec<DoctorStressSoakCheckpointMetric>,
+    /// Sustained budget gate result across post-warmup checkpoints.
+    pub sustained_budget_pass: bool,
+    /// Optional failure payload when sustained-budget checks fail.
+    pub failure_output: Option<DoctorStressSoakFailureOutput>,
+    /// Deterministic rerun command for this run.
+    pub repro_command: String,
+    /// Deterministic harness transcript.
+    pub transcript: E2eHarnessTranscript,
+    /// Deterministic harness artifact index.
+    pub artifact_index: Vec<E2eHarnessArtifactIndexEntry>,
+}
+
+/// Deterministic smoke report for doctor stress/soak scenarios.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorStressSoakSmokeReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Profile mode used for this smoke report.
+    pub profile_mode: String,
+    /// Requester identity.
+    pub requested_by: String,
+    /// Root deterministic seed.
+    pub seed: String,
+    /// Human-readable sustained-budget pass criteria.
+    pub pass_criteria: String,
+    /// Ordered run reports.
+    pub runs: Vec<DoctorStressSoakRunReport>,
+    /// Scenario ids that failed sustained-budget checks.
+    pub failing_scenarios: Vec<String>,
+}
+
 /// Deterministic beads/bv command-center contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BeadsCommandCenterContract {
@@ -3113,6 +3258,8 @@ const EVIDENCE_TIMELINE_CONTRACT_VERSION: &str = "doctor-evidence-timeline-v1";
 const DOCTOR_SCENARIO_COVERAGE_PACK_CONTRACT_VERSION: &str = "doctor-scenario-coverage-packs-v1";
 const DOCTOR_SCENARIO_COVERAGE_PACK_REPORT_VERSION: &str =
     "doctor-scenario-coverage-pack-report-v1";
+const DOCTOR_STRESS_SOAK_CONTRACT_VERSION: &str = "doctor-stress-soak-v1";
+const DOCTOR_STRESS_SOAK_REPORT_VERSION: &str = "doctor-stress-soak-report-v1";
 const DOCTOR_VISUAL_HARNESS_MANIFEST_VERSION: &str = "doctor-visual-harness-manifest-v1";
 const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
 const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
@@ -10999,6 +11146,664 @@ pub fn build_doctor_scenario_coverage_pack_smoke_report(
         seed: normalized_seed.to_string(),
         failure_clusters,
         runs,
+    })
+}
+
+fn stress_profile_parameters(profile_mode: &str) -> Result<(usize, usize, u32), String> {
+    match profile_mode {
+        "fast" => Ok((4, 1, 1)),
+        "soak" => Ok((8, 2, 3)),
+        _ => Err(format!("unsupported profile_mode {profile_mode}")),
+    }
+}
+
+fn budget_envelope_for_id<'a>(
+    contract: &'a DoctorStressSoakContract,
+    budget_id: &str,
+) -> Result<&'a DoctorStressSoakBudgetEnvelope, String> {
+    contract
+        .budget_envelopes
+        .iter()
+        .find(|budget| budget.budget_id == budget_id)
+        .ok_or_else(|| format!("scenario references unknown budget_id {budget_id}"))
+}
+
+fn build_stress_checkpoint_metrics(
+    seed: &str,
+    scenario: &DoctorStressSoakScenarioSpec,
+    budget: &DoctorStressSoakBudgetEnvelope,
+    profile_mode: &str,
+    checkpoint_count: usize,
+    warmup_count: usize,
+) -> Result<Vec<DoctorStressSoakCheckpointMetric>, String> {
+    let seed_bias = seed
+        .bytes()
+        .fold(0_u32, |acc, byte| acc.saturating_add(u32::from(byte)))
+        % 7;
+    let scenario_bias = scenario
+        .scenario_id
+        .bytes()
+        .fold(0_u32, |acc, byte| acc.saturating_add(u32::from(byte)))
+        % 11;
+    let profile_bias = if profile_mode == "soak" { 2 } else { 0 };
+
+    let mut metrics = Vec::with_capacity(checkpoint_count);
+    for raw_index in 0..checkpoint_count {
+        let checkpoint_index =
+            u32::try_from(raw_index + 1).map_err(|_| "checkpoint index overflow".to_string())?;
+        let mut latency_p95_ms = budget
+            .max_latency_p95_ms
+            .saturating_sub(12)
+            .saturating_add((seed_bias + scenario_bias + checkpoint_index + profile_bias) % 8);
+        let mut memory_mb = budget
+            .max_memory_mb
+            .saturating_sub(16)
+            .saturating_add((scenario_bias + checkpoint_index + profile_bias) % 10);
+        let mut error_rate_basis_points = budget
+            .max_error_rate_basis_points
+            .saturating_sub(18)
+            .saturating_add((seed_bias + checkpoint_index) % 7);
+        let mut drift_basis_points = budget
+            .max_drift_basis_points
+            .saturating_sub(12)
+            .saturating_add((scenario_bias + checkpoint_index) % 6);
+
+        if scenario.workload_class == "cancel_recovery_pressure"
+            && raw_index + 1 == checkpoint_count
+            && raw_index >= warmup_count
+        {
+            latency_p95_ms = budget.max_latency_p95_ms.saturating_add(17);
+            memory_mb = budget.max_memory_mb.saturating_add(9);
+            error_rate_basis_points = budget.max_error_rate_basis_points.saturating_add(35);
+            drift_basis_points = budget.max_drift_basis_points.saturating_add(24);
+        }
+
+        let within_budget = latency_p95_ms <= budget.max_latency_p95_ms
+            && memory_mb <= budget.max_memory_mb
+            && error_rate_basis_points <= budget.max_error_rate_basis_points
+            && drift_basis_points <= budget.max_drift_basis_points;
+
+        metrics.push(DoctorStressSoakCheckpointMetric {
+            checkpoint_index,
+            latency_p95_ms,
+            memory_mb,
+            error_rate_basis_points,
+            drift_basis_points,
+            within_budget,
+        });
+    }
+
+    Ok(metrics)
+}
+
+fn sustained_budget_conformance(
+    checkpoint_metrics: &[DoctorStressSoakCheckpointMetric],
+    warmup_count: usize,
+) -> bool {
+    checkpoint_metrics.len() > warmup_count
+        && checkpoint_metrics
+            .iter()
+            .skip(warmup_count)
+            .all(|metric| metric.within_budget)
+}
+
+fn saturation_indicators(
+    checkpoint_metrics: &[DoctorStressSoakCheckpointMetric],
+    budget: &DoctorStressSoakBudgetEnvelope,
+) -> Vec<String> {
+    let mut indicators = Vec::new();
+    if checkpoint_metrics
+        .iter()
+        .any(|metric| metric.latency_p95_ms > budget.max_latency_p95_ms)
+    {
+        indicators.push("latency_p95_budget_breach".to_string());
+    }
+    if checkpoint_metrics
+        .iter()
+        .any(|metric| metric.memory_mb > budget.max_memory_mb)
+    {
+        indicators.push("memory_budget_breach".to_string());
+    }
+    if checkpoint_metrics
+        .iter()
+        .any(|metric| metric.error_rate_basis_points > budget.max_error_rate_basis_points)
+    {
+        indicators.push("error_rate_budget_breach".to_string());
+    }
+    if checkpoint_metrics
+        .iter()
+        .any(|metric| metric.drift_basis_points > budget.max_drift_basis_points)
+    {
+        indicators.push("drift_budget_breach".to_string());
+    }
+    indicators.sort();
+    indicators.dedup();
+    indicators
+}
+
+/// Returns the canonical deterministic stress/soak contract for doctor diagnostics.
+#[must_use]
+pub fn doctor_stress_soak_contract() -> DoctorStressSoakContract {
+    DoctorStressSoakContract {
+        contract_version: DOCTOR_STRESS_SOAK_CONTRACT_VERSION.to_string(),
+        e2e_harness_contract_version: E2E_HARNESS_CONTRACT_VERSION.to_string(),
+        logging_contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        profile_modes: vec!["fast".to_string(), "soak".to_string()],
+        required_scenario_fields: vec![
+            "budget_id".to_string(),
+            "checkpoint_interval_steps".to_string(),
+            "description".to_string(),
+            "duration_steps".to_string(),
+            "expected_outcome".to_string(),
+            "scenario_id".to_string(),
+            "stages".to_string(),
+            "workload_class".to_string(),
+        ],
+        required_run_fields: vec![
+            "artifact_index".to_string(),
+            "checkpoint_count".to_string(),
+            "checkpoint_metrics".to_string(),
+            "duration_steps".to_string(),
+            "failure_output".to_string(),
+            "profile_mode".to_string(),
+            "repro_command".to_string(),
+            "run_id".to_string(),
+            "scenario_id".to_string(),
+            "status".to_string(),
+            "sustained_budget_pass".to_string(),
+            "terminal_state".to_string(),
+            "transcript".to_string(),
+            "workload_class".to_string(),
+        ],
+        required_metric_fields: vec![
+            "checkpoint_index".to_string(),
+            "drift_basis_points".to_string(),
+            "error_rate_basis_points".to_string(),
+            "latency_p95_ms".to_string(),
+            "memory_mb".to_string(),
+            "within_budget".to_string(),
+        ],
+        sustained_budget_policy: vec![
+            "A run only passes when every post-warmup checkpoint remains within the scenario envelope."
+                .to_string(),
+            "Fast profile uses 4 checkpoints with warmup window 1; soak profile uses 8 checkpoints with warmup window 2."
+                .to_string(),
+            "Failure payloads must include saturation indicators, trace correlation, and exact rerun command."
+                .to_string(),
+        ],
+        scenario_catalog: vec![
+            DoctorStressSoakScenarioSpec {
+                scenario_id: "doctor-stress-cancel-recovery-pressure".to_string(),
+                workload_class: "cancel_recovery_pressure".to_string(),
+                expected_outcome: "cancelled".to_string(),
+                budget_id: "budget-cancel-recovery".to_string(),
+                stages: vec![
+                    "bootstrap".to_string(),
+                    "inject_cancellation".to_string(),
+                    "drain_obligations".to_string(),
+                    "verify_recovery".to_string(),
+                ],
+                checkpoint_interval_steps: 90,
+                duration_steps: 720,
+                description: "Cancellation/recovery pressure path expected to emit budget-failure evidence."
+                    .to_string(),
+            },
+            DoctorStressSoakScenarioSpec {
+                scenario_id: "doctor-stress-concurrent-operator-actions".to_string(),
+                workload_class: "concurrent_operator_actions".to_string(),
+                expected_outcome: "success".to_string(),
+                budget_id: "budget-concurrency".to_string(),
+                stages: vec![
+                    "bootstrap".to_string(),
+                    "dispatch_operator_actions".to_string(),
+                    "merge_findings".to_string(),
+                    "verify_consistency".to_string(),
+                ],
+                checkpoint_interval_steps: 75,
+                duration_steps: 600,
+                description:
+                    "Concurrent operator actions with sustained budget conformance expectations."
+                        .to_string(),
+            },
+            DoctorStressSoakScenarioSpec {
+                scenario_id: "doctor-stress-high-finding-volume".to_string(),
+                workload_class: "high_finding_volume".to_string(),
+                expected_outcome: "success".to_string(),
+                budget_id: "budget-high-finding-volume".to_string(),
+                stages: vec![
+                    "bootstrap".to_string(),
+                    "ingest_findings".to_string(),
+                    "rank_findings".to_string(),
+                    "emit_report".to_string(),
+                ],
+                checkpoint_interval_steps: 60,
+                duration_steps: 480,
+                description: "High finding-volume path that should remain inside envelope bounds."
+                    .to_string(),
+            },
+        ],
+        budget_envelopes: vec![
+            DoctorStressSoakBudgetEnvelope {
+                budget_id: "budget-cancel-recovery".to_string(),
+                max_latency_p95_ms: 240,
+                max_memory_mb: 640,
+                max_error_rate_basis_points: 120,
+                max_drift_basis_points: 80,
+            },
+            DoctorStressSoakBudgetEnvelope {
+                budget_id: "budget-concurrency".to_string(),
+                max_latency_p95_ms: 190,
+                max_memory_mb: 512,
+                max_error_rate_basis_points: 90,
+                max_drift_basis_points: 55,
+            },
+            DoctorStressSoakBudgetEnvelope {
+                budget_id: "budget-high-finding-volume".to_string(),
+                max_latency_p95_ms: 160,
+                max_memory_mb: 448,
+                max_error_rate_basis_points: 75,
+                max_drift_basis_points: 45,
+            },
+        ],
+    }
+}
+
+/// Validates invariants for [`DoctorStressSoakContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when schema, ordering, or deterministic policy invariants fail.
+pub fn validate_doctor_stress_soak_contract(
+    contract: &DoctorStressSoakContract,
+) -> Result<(), String> {
+    if contract.contract_version != DOCTOR_STRESS_SOAK_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.e2e_harness_contract_version != E2E_HARNESS_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected e2e_harness_contract_version {}",
+            contract.e2e_harness_contract_version
+        ));
+    }
+    if contract.logging_contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected logging_contract_version {}",
+            contract.logging_contract_version
+        ));
+    }
+
+    validate_lexical_string_set(&contract.profile_modes, "profile_modes")?;
+    for required_mode in ["fast", "soak"] {
+        if !contract
+            .profile_modes
+            .iter()
+            .any(|mode| mode == required_mode)
+        {
+            return Err(format!("profile_modes missing {required_mode}"));
+        }
+    }
+
+    validate_lexical_string_set(
+        &contract.required_scenario_fields,
+        "required_scenario_fields",
+    )?;
+    for required in [
+        "budget_id",
+        "checkpoint_interval_steps",
+        "description",
+        "duration_steps",
+        "expected_outcome",
+        "scenario_id",
+        "stages",
+        "workload_class",
+    ] {
+        if !contract
+            .required_scenario_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_scenario_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_run_fields, "required_run_fields")?;
+    for required in [
+        "artifact_index",
+        "checkpoint_count",
+        "checkpoint_metrics",
+        "duration_steps",
+        "failure_output",
+        "profile_mode",
+        "repro_command",
+        "run_id",
+        "scenario_id",
+        "status",
+        "sustained_budget_pass",
+        "terminal_state",
+        "transcript",
+        "workload_class",
+    ] {
+        if !contract
+            .required_run_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_run_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_metric_fields, "required_metric_fields")?;
+    for required in [
+        "checkpoint_index",
+        "drift_basis_points",
+        "error_rate_basis_points",
+        "latency_p95_ms",
+        "memory_mb",
+        "within_budget",
+    ] {
+        if !contract
+            .required_metric_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_metric_fields missing {required}"));
+        }
+    }
+
+    if contract.sustained_budget_policy.is_empty() {
+        return Err("sustained_budget_policy must be non-empty".to_string());
+    }
+    if contract
+        .sustained_budget_policy
+        .iter()
+        .any(|line| line.trim().is_empty())
+    {
+        return Err("sustained_budget_policy must not contain empty entries".to_string());
+    }
+
+    if contract.scenario_catalog.is_empty() {
+        return Err("scenario_catalog must be non-empty".to_string());
+    }
+    let scenario_ids = contract
+        .scenario_catalog
+        .iter()
+        .map(|scenario| scenario.scenario_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&scenario_ids, "scenario_catalog.scenario_id")?;
+
+    if contract.budget_envelopes.is_empty() {
+        return Err("budget_envelopes must be non-empty".to_string());
+    }
+    let budget_ids = contract
+        .budget_envelopes
+        .iter()
+        .map(|budget| budget.budget_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&budget_ids, "budget_envelopes.budget_id")?;
+    for budget in &contract.budget_envelopes {
+        if !is_slug_like(&budget.budget_id) {
+            return Err(format!("budget_id must be slug-like: {}", budget.budget_id));
+        }
+        if budget.max_latency_p95_ms == 0
+            || budget.max_memory_mb == 0
+            || budget.max_error_rate_basis_points == 0
+            || budget.max_drift_basis_points == 0
+        {
+            return Err(format!(
+                "budget envelope {} must use strictly positive limits",
+                budget.budget_id
+            ));
+        }
+    }
+
+    let mut workload_classes = BTreeSet::new();
+    for scenario in &contract.scenario_catalog {
+        if !is_slug_like(&scenario.scenario_id) {
+            return Err(format!(
+                "scenario_id must be slug-like: {}",
+                scenario.scenario_id
+            ));
+        }
+        if !matches!(
+            scenario.workload_class.as_str(),
+            "high_finding_volume" | "concurrent_operator_actions" | "cancel_recovery_pressure"
+        ) {
+            return Err(format!(
+                "unsupported workload_class {} for {}",
+                scenario.workload_class, scenario.scenario_id
+            ));
+        }
+        if !matches!(
+            scenario.expected_outcome.as_str(),
+            "success" | "failed" | "cancelled"
+        ) {
+            return Err(format!(
+                "unsupported expected_outcome {} for {}",
+                scenario.expected_outcome, scenario.scenario_id
+            ));
+        }
+        if scenario.description.trim().is_empty() {
+            return Err(format!(
+                "description must be non-empty for {}",
+                scenario.scenario_id
+            ));
+        }
+        if scenario.checkpoint_interval_steps == 0 {
+            return Err(format!(
+                "checkpoint_interval_steps must be > 0 for {}",
+                scenario.scenario_id
+            ));
+        }
+        if scenario.duration_steps == 0 {
+            return Err(format!(
+                "duration_steps must be > 0 for {}",
+                scenario.scenario_id
+            ));
+        }
+        if scenario.stages.is_empty() {
+            return Err(format!(
+                "stages must be non-empty for {}",
+                scenario.scenario_id
+            ));
+        }
+        let mut stage_set = BTreeSet::new();
+        for stage in &scenario.stages {
+            if !is_slug_like(stage) {
+                return Err(format!(
+                    "stage {stage} must be slug-like for {}",
+                    scenario.scenario_id
+                ));
+            }
+            if !stage_set.insert(stage.clone()) {
+                return Err(format!(
+                    "duplicate stage {stage} for {}",
+                    scenario.scenario_id
+                ));
+            }
+        }
+        if !budget_ids
+            .iter()
+            .any(|budget_id| budget_id == &scenario.budget_id)
+        {
+            return Err(format!(
+                "scenario {} references unknown budget_id {}",
+                scenario.scenario_id, scenario.budget_id
+            ));
+        }
+        workload_classes.insert(scenario.workload_class.clone());
+    }
+
+    for required_class in [
+        "cancel_recovery_pressure",
+        "concurrent_operator_actions",
+        "high_finding_volume",
+    ] {
+        if !workload_classes.contains(required_class) {
+            return Err(format!(
+                "scenario_catalog missing required workload_class {required_class}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Builds deterministic stress/soak smoke report with sustained budget evaluation.
+///
+/// # Errors
+///
+/// Returns `Err` when validation, profile selection, or report generation fails.
+pub fn build_doctor_stress_soak_smoke_report(
+    contract: &DoctorStressSoakContract,
+    profile_mode: &str,
+    seed: &str,
+) -> Result<DoctorStressSoakSmokeReport, String> {
+    validate_doctor_stress_soak_contract(contract)?;
+    let normalized_seed = seed.trim();
+    if !is_slug_like(normalized_seed) {
+        return Err("seed must be slug-like".to_string());
+    }
+    let normalized_profile_mode = profile_mode.trim();
+    if !contract
+        .profile_modes
+        .iter()
+        .any(|mode| mode == normalized_profile_mode)
+    {
+        return Err(format!(
+            "unsupported profile_mode {normalized_profile_mode}"
+        ));
+    }
+
+    let (checkpoint_count, warmup_count, duration_multiplier) =
+        stress_profile_parameters(normalized_profile_mode)?;
+    let harness_contract = e2e_harness_core_contract();
+
+    let mut scenarios = contract.scenario_catalog.clone();
+    scenarios.sort_by(|left, right| left.scenario_id.cmp(&right.scenario_id));
+
+    let mut runs = Vec::with_capacity(scenarios.len());
+    for (index, scenario) in scenarios.iter().enumerate() {
+        let run_id = format!(
+            "run-doctor-stress-{:02}-{}",
+            index + 1,
+            scenario.scenario_id
+        );
+        let correlation_id = format!("corr-{}", scenario.scenario_id);
+        let mut raw = BTreeMap::new();
+        raw.insert("run_id".to_string(), run_id.clone());
+        raw.insert("scenario_id".to_string(), scenario.scenario_id.clone());
+        raw.insert("correlation_id".to_string(), correlation_id);
+        raw.insert("seed".to_string(), normalized_seed.to_string());
+        raw.insert(
+            "script_id".to_string(),
+            format!("script-{}", scenario.scenario_id),
+        );
+        raw.insert(
+            "requested_by".to_string(),
+            "doctor_stress_soak_smoke".to_string(),
+        );
+        raw.insert("timeout_secs".to_string(), "240".to_string());
+        raw.insert(
+            "expected_outcome".to_string(),
+            scenario.expected_outcome.clone(),
+        );
+
+        let config = parse_e2e_harness_config(&harness_contract, &raw)?;
+        let mut stage_plan = scenario.stages.clone();
+        for checkpoint_index in 1..=checkpoint_count {
+            stage_plan.push(format!("checkpoint_{checkpoint_index:02}"));
+        }
+        let transcript = build_e2e_harness_transcript(&harness_contract, &config, &stage_plan)?;
+        let artifact_index = build_e2e_harness_artifact_index(&harness_contract, &transcript)?;
+
+        let expected_terminal = expected_terminal_state_for_outcome(&scenario.expected_outcome)?;
+        let terminal_state = transcript
+            .events
+            .last()
+            .ok_or_else(|| format!("transcript empty for scenario {}", scenario.scenario_id))?
+            .state
+            .clone();
+        if terminal_state != expected_terminal {
+            return Err(format!(
+                "terminal_state mismatch for {}: expected {} observed {}",
+                scenario.scenario_id, expected_terminal, terminal_state
+            ));
+        }
+
+        let budget = budget_envelope_for_id(contract, &scenario.budget_id)?;
+        let checkpoint_metrics = build_stress_checkpoint_metrics(
+            normalized_seed,
+            scenario,
+            budget,
+            normalized_profile_mode,
+            checkpoint_count,
+            warmup_count,
+        )?;
+        let sustained_budget_pass = sustained_budget_conformance(&checkpoint_metrics, warmup_count);
+        let repro_command = format!(
+            "asupersync doctor stress-soak-smoke --profile-mode {} --seed {}",
+            normalized_profile_mode, normalized_seed
+        );
+        let failure_output = if sustained_budget_pass {
+            None
+        } else {
+            Some(DoctorStressSoakFailureOutput {
+                failure_class: "sustained_budget_violation".to_string(),
+                saturation_indicators: saturation_indicators(&checkpoint_metrics, budget),
+                trace_correlation: format!(
+                    "trace-{}-{}",
+                    scenario.scenario_id, normalized_profile_mode
+                ),
+                rerun_command: repro_command.clone(),
+            })
+        };
+
+        runs.push(DoctorStressSoakRunReport {
+            run_id,
+            scenario_id: scenario.scenario_id.clone(),
+            workload_class: scenario.workload_class.clone(),
+            profile_mode: normalized_profile_mode.to_string(),
+            expected_outcome: scenario.expected_outcome.clone(),
+            terminal_state,
+            status: if sustained_budget_pass {
+                "passed".to_string()
+            } else {
+                "budget_failed".to_string()
+            },
+            duration_steps: scenario.duration_steps.saturating_mul(duration_multiplier),
+            checkpoint_count: u32::try_from(checkpoint_metrics.len())
+                .map_err(|_| "checkpoint_count overflow".to_string())?,
+            checkpoint_metrics,
+            sustained_budget_pass,
+            failure_output,
+            repro_command,
+            transcript,
+            artifact_index,
+        });
+    }
+
+    runs.sort_by(|left, right| left.scenario_id.cmp(&right.scenario_id));
+    let mut failing_scenarios = runs
+        .iter()
+        .filter(|run| !run.sustained_budget_pass)
+        .map(|run| run.scenario_id.clone())
+        .collect::<Vec<_>>();
+    failing_scenarios.sort();
+    failing_scenarios.dedup();
+
+    Ok(DoctorStressSoakSmokeReport {
+        schema_version: DOCTOR_STRESS_SOAK_REPORT_VERSION.to_string(),
+        profile_mode: normalized_profile_mode.to_string(),
+        requested_by: "doctor_stress_soak_smoke".to_string(),
+        seed: normalized_seed.to_string(),
+        pass_criteria: format!(
+            "all post-warmup checkpoints must remain inside envelope (warmup={warmup_count})"
+        ),
+        runs,
+        failing_scenarios,
     })
 }
 
@@ -19863,6 +20668,106 @@ impl RuntimeState {
                 linked.clear();
             }
         }
+    }
+
+    #[test]
+    fn doctor_stress_soak_contract_validates() {
+        let contract = doctor_stress_soak_contract();
+        validate_doctor_stress_soak_contract(&contract).expect("valid stress/soak contract");
+    }
+
+    #[test]
+    fn doctor_stress_soak_contract_round_trip_json() {
+        let contract = doctor_stress_soak_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: DoctorStressSoakContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_doctor_stress_soak_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn doctor_stress_soak_smoke_report_is_deterministic() {
+        let contract = doctor_stress_soak_contract();
+        let first =
+            build_doctor_stress_soak_smoke_report(&contract, "soak", "seed-4242").expect("first");
+        let second =
+            build_doctor_stress_soak_smoke_report(&contract, "soak", "seed-4242").expect("second");
+        assert_eq!(first, second);
+        assert_eq!(first.schema_version, "doctor-stress-soak-report-v1");
+    }
+
+    #[test]
+    fn doctor_stress_soak_profile_controls_checkpoint_depth() {
+        let contract = doctor_stress_soak_contract();
+        let fast = build_doctor_stress_soak_smoke_report(&contract, "fast", "seed-100")
+            .expect("fast report");
+        let soak = build_doctor_stress_soak_smoke_report(&contract, "soak", "seed-100")
+            .expect("soak report");
+
+        let fast_first = fast.runs.first().expect("fast run");
+        let soak_first = soak.runs.first().expect("soak run");
+        assert!(
+            soak_first.checkpoint_count > fast_first.checkpoint_count,
+            "soak profile must record more checkpoints than fast profile"
+        );
+        assert!(soak_first.duration_steps > fast_first.duration_steps);
+    }
+
+    #[test]
+    fn doctor_stress_soak_smoke_enforces_sustained_budget_conformance() {
+        let contract = doctor_stress_soak_contract();
+        let report =
+            build_doctor_stress_soak_smoke_report(&contract, "soak", "seed-909").expect("report");
+
+        assert!(
+            report
+                .failing_scenarios
+                .contains(&"doctor-stress-cancel-recovery-pressure".to_string()),
+            "cancel/recovery pressure scenario must emit budget failure"
+        );
+        assert!(
+            report
+                .runs
+                .iter()
+                .any(|run| run.status == "budget_failed" && !run.sustained_budget_pass)
+        );
+        assert!(
+            report
+                .runs
+                .iter()
+                .any(|run| run.status == "passed" && run.sustained_budget_pass)
+        );
+    }
+
+    #[test]
+    fn doctor_stress_soak_failure_output_includes_saturation_trace_and_rerun() {
+        let contract = doctor_stress_soak_contract();
+        let report =
+            build_doctor_stress_soak_smoke_report(&contract, "soak", "seed-5150").expect("report");
+
+        let failed = report
+            .runs
+            .iter()
+            .find(|run| run.status == "budget_failed")
+            .expect("must include failed run");
+        let failure_output = failed
+            .failure_output
+            .as_ref()
+            .expect("failed run must include failure output");
+        assert!(
+            !failure_output.saturation_indicators.is_empty(),
+            "failure output must include saturation indicators"
+        );
+        assert!(
+            failure_output.trace_correlation.starts_with("trace-"),
+            "failure output must include trace correlation"
+        );
+        assert!(
+            failure_output
+                .rerun_command
+                .contains("asupersync doctor stress-soak-smoke"),
+            "failure output must include precise rerun command"
+        );
     }
 
     #[test]
