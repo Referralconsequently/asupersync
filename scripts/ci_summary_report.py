@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -583,6 +584,143 @@ def compose_summary(
     return 0
 
 
+def run_self_test() -> int:
+    with tempfile.TemporaryDirectory(prefix="ci_summary_selftest_") as tmp:
+        tmpdir = Path(tmp)
+        coverage = tmpdir / "coverage.json"
+        no_mock = tmpdir / "no_mock.json"
+        ci_matrix = tmpdir / "ci_matrix.json"
+        e2e_matrix = tmpdir / "e2e_matrix.json"
+        forensics = tmpdir / "forensics.json"
+        output_json = tmpdir / "summary.json"
+        output_md = tmpdir / "summary.md"
+
+        write_json(
+            coverage,
+            {
+                "schema_version": "coverage-ratchet-report-v1",
+                "status": "pass",
+                "failure_count": 0,
+                "global_coverage": {"line_pct": 95.0, "floor_pct": 90.0},
+                "subsystem_results": [],
+            },
+        )
+        write_json(
+            no_mock,
+            {
+                "schema_version": "no-mock-policy-report-v1",
+                "status": "pass",
+                "policy_counts": {"allowlist_paths": 1, "waivers_active": 0},
+                "scan_counts": {
+                    "matching_paths": 0,
+                    "violating_paths": 0,
+                    "expired_waivers": 0,
+                },
+            },
+        )
+        write_json(
+            ci_matrix,
+            {
+                "schema_version": "ci-matrix-policy-report-v1",
+                "status": "fail",
+                "lane_count": 1,
+                "failing_lane_count": 1,
+                "failing_lane_ids": ["e2e"],
+                "rch_required_lane_count": 1,
+                "rch_noncompliant_lane_count": 0,
+                "rch_noncompliant_lane_ids": [],
+                "rch_noncompliant_step_count": 0,
+                "rch_noncompliant_step_refs": [],
+                "rch_missing_fallback_step_count": 0,
+                "rch_missing_fallback_step_refs": [],
+                "lanes": [
+                    {
+                        "lane_id": "e2e",
+                        "status": "fail",
+                        "missing_contracts": ["artifact:phase6-e2e-artifacts"],
+                        "replay_command": "rch exec -- bash ./scripts/run_all_e2e.sh --verify-matrix",
+                    }
+                ],
+            },
+        )
+        write_json(
+            e2e_matrix,
+            {
+                "schema_version": "e2e-scenario-matrix-validation-v1",
+                "status": "pass",
+                "suite_row_count": 0,
+                "raptorq_row_count": 0,
+                "suite_failures": 0,
+                "raptorq_failures": 0,
+                "suite_rows": [],
+                "raptorq_rows": [],
+            },
+        )
+        write_json(
+            forensics,
+            {
+                "schema_version": "raptorq-e2e-suite-log-v1",
+                "status": "fail",
+                "profile": "forensics",
+                "selected_scenarios": 0,
+                "passed_scenarios": 0,
+                "failed_scenarios": 0,
+                "artifact_dir": "artifacts/raptorq",
+            },
+        )
+
+        rc = compose_summary(
+            coverage_report=coverage,
+            no_mock_report=no_mock,
+            ci_matrix_report=ci_matrix,
+            e2e_matrix_report=e2e_matrix,
+            forensics_report=forensics,
+            output_json=output_json,
+            output_markdown=output_md,
+            previous_report=None,
+            fail_on_nonpass=False,
+        )
+        if rc != 0:
+            raise RuntimeError(f"compose_summary self-test failed with rc={rc}")
+
+        report = load_json(output_json)
+        reproduction = report.get("reproduction", {})
+        instructions = reproduction.get("instructions", [])
+        if not isinstance(instructions, list):
+            raise RuntimeError("self-test expected list reproduction.instructions")
+
+        ci_lane_instruction = next(
+            (
+                item
+                for item in instructions
+                if isinstance(item, dict) and item.get("source") == "ci_matrix_lane"
+            ),
+            None,
+        )
+        if ci_lane_instruction is None:
+            raise RuntimeError("self-test expected ci_matrix_lane reproduction instruction")
+        if ci_lane_instruction.get("replay_command") != "rch exec -- bash ./scripts/run_all_e2e.sh --verify-matrix":
+            raise RuntimeError("self-test expected deterministic ci_matrix replay command in instruction")
+
+        forensics_fallback = next(
+            (
+                item
+                for item in instructions
+                if isinstance(item, dict) and item.get("source") == "forensics_suite"
+            ),
+            None,
+        )
+        if forensics_fallback is None:
+            raise RuntimeError("self-test expected forensics_suite fallback instruction")
+
+        markdown = output_md.read_text(encoding="utf-8")
+        if "Reproduction Instructions" not in markdown:
+            raise RuntimeError("self-test expected markdown reproduction section")
+
+    print("CI summary report self-test passed")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -608,6 +746,11 @@ def build_parser() -> argparse.ArgumentParser:
     compose_parser.add_argument("--previous-report", type=Path)
     compose_parser.add_argument("--fail-on-nonpass", action="store_true")
 
+    subparsers.add_parser(
+        "self-test",
+        help="Run deterministic local self-tests for CI summary composition.",
+    )
+
     return parser
 
 
@@ -629,6 +772,8 @@ def main() -> int:
             previous_report=args.previous_report,
             fail_on_nonpass=args.fail_on_nonpass,
         )
+    if args.command == "self-test":
+        return run_self_test()
     parser.error("unknown command")
     return 2
 

@@ -1,7 +1,7 @@
 {
   "schema_version": "ci-matrix-policy-v1",
   "policy_id": "asupersync-umelq-15.1-ci-matrix",
-  "updated_at_utc": "2026-03-02T00:00:00Z",
+  "updated_at_utc": "2026-03-05T00:00:00Z",
   "workflow_path": ".github/workflows/ci.yml",
   "output": {
     "summary_path": "artifacts/ci_matrix_policy_summary.json",
@@ -123,6 +123,41 @@
       "thresholds": {
         "max_failures": 0,
         "required_artifacts_min": 2
+      }
+    },
+    {
+      "lane_id": "wasm-certification",
+      "title": "WASM certification cargo-test lane",
+      "owner": "wasm-runtime",
+      "required_job_ids": ["check"],
+      "required_step_names": [
+        "WASM bundler compatibility certification",
+        "WASM rollback and incident playbook certification",
+        "WASM GA readiness review board certification",
+        "WASM launch rollout and support stabilization certification"
+      ],
+      "required_artifact_names": [
+        "wasm-bundler-compatibility-certification",
+        "wasm-release-rollback-playbook-certification",
+        "wasm-ga-readiness-review-board-certification",
+        "wasm-launch-rollout-support-stabilization-certification"
+      ],
+      "replay_command": "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture && rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture && rch exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture && rch exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
+      "require_rch": true,
+      "rch_required_step_names": [
+        "WASM bundler compatibility certification",
+        "WASM rollback and incident playbook certification",
+        "WASM GA readiness review board certification",
+        "WASM launch rollout and support stabilization certification"
+      ],
+      "failure_taxonomy": [
+        "rch_routing_violation",
+        "certification_regression",
+        "artifact_retention_violation"
+      ],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 4
       }
     },
     {

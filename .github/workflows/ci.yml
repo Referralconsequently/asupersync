@@ -51,6 +51,9 @@ jobs:
       - name: CI matrix policy self-test
         run: python3 scripts/check_ci_matrix_policy.py --self-test
 
+      - name: CI summary compose self-test
+        run: python3 scripts/ci_summary_report.py self-test
+
       - name: CI matrix policy gate
         run: |
           mkdir -p artifacts
@@ -178,7 +181,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
+          else
+            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture"
+            cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
+          fi
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -213,7 +222,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
+          else
+            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture"
+            cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
+          fi
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -255,7 +270,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
+          else
+            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture"
+            cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
+          fi
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -299,7 +320,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
+          else
+            echo "rch unavailable; falling back to local cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture"
+            cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
+          fi
           python3 - <<'PY'
           import json
           from pathlib import Path
