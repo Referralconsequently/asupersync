@@ -217,6 +217,51 @@ impl<E: std::error::Error + 'static> std::error::Error for BufferError<E> {
     }
 }
 
+// ─── Pending guard ──────────────────────────────────────────────────────────
+
+/// RAII guard that decrements `pending` and wakes waiters on drop.
+///
+/// Used to prevent pending-count leaks when a panic occurs during the
+/// `BufferFuture` state machine transitions (where `mem::replace` has
+/// already set the state to `Done`).
+struct PendingGuard<S> {
+    shared: Option<Arc<SharedBuffer<S>>>,
+}
+
+impl<S> PendingGuard<S> {
+    fn new(shared: Arc<SharedBuffer<S>>) -> Self {
+        Self {
+            shared: Some(shared),
+        }
+    }
+
+    /// Defuse the guard, preventing the pending-count decrement on drop.
+    ///
+    /// Call this after successfully restoring the `BufferFutureState` so
+    /// the normal decrement path handles cleanup instead.
+    fn defuse(mut self) -> Arc<SharedBuffer<S>> {
+        self.shared.take().expect("guard already defused")
+    }
+}
+
+impl<S> Drop for PendingGuard<S> {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.take() {
+            let mut pending = shared.pending.lock();
+            *pending = pending.saturating_sub(1);
+            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+            drop(pending);
+            for w in wakers {
+                w.wake();
+            }
+            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+            for w in inner_wakers {
+                w.wake();
+            }
+        }
+    }
+}
+
 // ─── Buffer Future ──────────────────────────────────────────────────────────
 
 /// Future returned by the [`Buffer`] service.
@@ -280,14 +325,13 @@ where
                     mut request,
                     shared,
                 } => {
+                    // Guard ensures pending count is decremented even if a
+                    // panic occurs during poll_ready / call below.
+                    let guard = PendingGuard::new(Arc::clone(&shared));
+
                     if *shared.closed.lock() {
-                        let mut pending = shared.pending.lock();
-                        *pending = pending.saturating_sub(1);
-                        let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                        drop(pending);
-                        for w in wakers {
-                            w.wake();
-                        }
+                        // Guard will handle the decrement + wakeups on drop.
+                        drop(guard);
                         return Poll::Ready(Err(BufferError::Closed));
                     }
 
@@ -303,24 +347,15 @@ where
                                 w.wake();
                             }
 
+                            // Defuse: state restored with shared still tracked.
+                            let shared = guard.defuse();
                             this.state = BufferFutureState::Active { future, shared };
                             // Loop around to poll Active
                         }
                         Poll::Ready(Err(e)) => {
                             drop(inner);
-
-                            let mut pending = shared.pending.lock();
-                            *pending = pending.saturating_sub(1);
-                            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                            drop(pending);
-                            for w in wakers {
-                                w.wake();
-                            }
-                            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                            for w in inner_wakers {
-                                w.wake();
-                            }
-
+                            // Guard will handle the decrement + wakeups on drop.
+                            drop(guard);
                             this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
                             // Loop around to poll Error
                         }
@@ -332,33 +367,30 @@ where
                                     wakers.push(cx.waker().clone());
                                 }
                             }
+                            // Defuse: state restored with shared still tracked.
+                            let shared = guard.defuse();
                             this.state = BufferFutureState::WaitingForReady { request, shared };
                             return Poll::Pending;
                         }
                     }
                 }
                 BufferFutureState::Active { mut future, shared } => {
+                    // Guard ensures pending count is decremented even if the
+                    // inner future's poll panics.
+                    let guard = PendingGuard::new(Arc::clone(&shared));
+
                     match Pin::new(&mut future).poll(cx) {
                         Poll::Ready(result) => {
-                            let mut pending = shared.pending.lock();
-                            *pending = pending.saturating_sub(1);
-                            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                            drop(pending);
-                            for w in wakers {
-                                w.wake();
-                            }
-
-                            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                            for w in inner_wakers {
-                                w.wake();
-                            }
-
+                            // Guard will handle the decrement + wakeups on drop.
+                            drop(guard);
                             match result {
                                 Ok(v) => return Poll::Ready(Ok(v)),
                                 Err(e) => return Poll::Ready(Err(BufferError::Inner(e))),
                             }
                         }
                         Poll::Pending => {
+                            // Defuse: state restored with shared still tracked.
+                            let shared = guard.defuse();
                             this.state = BufferFutureState::Active { future, shared };
                             return Poll::Pending;
                         }
