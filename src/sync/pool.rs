@@ -1474,7 +1474,6 @@ where
                 F: AsyncResourceFactory<Resource = R>,
             {
                 fn drop(&mut self) {
-                    self.pool.process_returns();
                     if let Some(id) = self.waiter_id {
                         let mut state = self.pool.state.lock();
                         let pos = state.waiters.iter().position(|w| w.id == id);
@@ -1512,6 +1511,7 @@ where
                         }
                         self.pool.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
+                    self.pool.process_returns();
                 }
             }
 
