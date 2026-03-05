@@ -690,6 +690,7 @@ impl RateLimiter {
         {
             let mut state = self.state.lock();
             state.tokens = initial_tokens;
+            state.fractional = 0;
             state.last_refill = 0;
         }
 
@@ -1215,6 +1216,44 @@ mod tests {
         assert!(
             rl.available_tokens() == 1,
             "reset must restore full burst capacity"
+        );
+    }
+
+    #[test]
+    fn reset_clears_fractional_accumulator() {
+        // Regression: reset() must zero the fractional accumulator so the
+        // first refill period after reset starts fresh.
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_secs(10),
+            burst: 10,
+            ..Default::default()
+        });
+
+        // Drain all tokens and advance time to accumulate a fractional remainder.
+        let t0 = Time::from_millis(0);
+        assert!(rl.try_acquire(10, t0));
+
+        // Advance 5 seconds: adds 0.5 tokens → 0 whole tokens, fractional = 5000.
+        let t1 = Time::from_millis(5_000);
+        rl.refill(t1);
+        assert_eq!(rl.available_tokens(), 0, "half-period yields no whole token");
+
+        rl.reset();
+
+        // After reset, tokens should be full burst and fractional should be 0.
+        assert_eq!(rl.available_tokens(), 10);
+
+        // Drain again and advance exactly one period: should get exactly 1 token,
+        // NOT 1 + leftover from stale fractional.
+        let t2 = Time::from_millis(100_000);
+        assert!(rl.try_acquire(10, t2));
+        let t3 = Time::from_millis(110_000);
+        rl.refill(t3);
+        assert_eq!(
+            rl.available_tokens(),
+            1,
+            "exactly one period after reset+drain must yield exactly 1 token"
         );
     }
 

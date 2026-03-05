@@ -198,9 +198,7 @@ impl SignalDispatcher {
                     }
                 }
             })
-            .map_err(|e| {
-                io::Error::other(format!("failed to spawn signal poller: {e}"))
-            })?;
+            .map_err(|e| io::Error::other(format!("failed to spawn signal poller: {e}")))?;
 
         Ok(Self { slots })
     }
