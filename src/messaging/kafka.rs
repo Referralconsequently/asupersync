@@ -774,11 +774,11 @@ impl KafkaProducer {
     /// subsequent calls will retry the flush.
     pub async fn close(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        
+
         // Mark as closed to block new sends. We use swap to ensure it's
         // always closed before we start flushing.
         self.closed.store(true, Ordering::Release);
-        
+
         // Always flush. If a previous close was cancelled, this ensures
         // the remaining messages are still flushed upon retry.
         self.flush_inner(cx, timeout, true).await?;

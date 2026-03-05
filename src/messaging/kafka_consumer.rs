@@ -448,8 +448,9 @@ impl KafkaConsumer {
                     "offsets must be non-negative".to_string(),
                 ));
             }
-            if let Some(previous) =
-                state.committed_offsets.get(&(tpo.topic.clone(), tpo.partition))
+            if let Some(previous) = state
+                .committed_offsets
+                .get(&(tpo.topic.clone(), tpo.partition))
                 && tpo.offset < *previous
             {
                 return Err(KafkaError::Config(
@@ -478,25 +479,23 @@ impl KafkaConsumer {
             ));
         }
 
-        let (is_subscribed, is_assigned) = {
-            let state = self.state.lock();
-            (
-                state.subscribed_topics.contains(&tpo.topic),
-                state
-                    .assigned_partitions
-                    .contains(&(tpo.topic.clone(), tpo.partition)),
-            )
-        };
-        if !is_subscribed {
+        // Hold the lock across validation and mutation to prevent TOCTOU races
+        // where assignment state could change between checks and update.
+        let mut state = self.state.lock();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(KafkaError::Config("consumer is closed".to_string()));
+        }
+        if !state.subscribed_topics.contains(&tpo.topic) {
             return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
         }
-        if !is_assigned {
+        if !state
+            .assigned_partitions
+            .contains(&(tpo.topic.clone(), tpo.partition))
+        {
             return Err(KafkaError::Config(
                 "partition is not assigned to this consumer".to_string(),
             ));
         }
-
-        let mut state = self.state.lock();
         state
             .positions
             .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
@@ -962,6 +961,12 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(err, KafkaError::Config(msg) if msg.contains("closed")));
+
+            let seek_err = consumer
+                .seek(&cx, &TopicPartitionOffset::new("orders", 0, 42))
+                .await
+                .unwrap_err();
+            assert!(matches!(seek_err, KafkaError::Config(msg) if msg.contains("closed")));
         });
     }
 
