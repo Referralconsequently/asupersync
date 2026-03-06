@@ -29,6 +29,9 @@ OUTPUT_DIR="${PERF_OUTPUT_DIR:-${PROJECT_ROOT}/target/perf-results}"
 BASELINE_DIR="${PERF_BASELINE_DIR:-$DEFAULT_BASELINE_DIR}"
 TIMEOUT_SEC="${PERF_TIMEOUT:-0}"
 RCH_BIN="${RCH_BIN:-rch}"
+WORKLOAD_ID="${WORKLOAD_ID:-AA01-WL-CPU-001}"
+RUNTIME_PROFILE="${RUNTIME_PROFILE:-bench-release}"
+WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark}"
 
 DEFAULT_BENCHES=(
     phase0_baseline
@@ -54,8 +57,10 @@ BENCH_ARGS_STR="${PERF_BENCH_ARGS:-"-- --noplot"}"
 NO_COMPARE=0
 
 RUN_WITH_RCH=1
+RUN_WITH_RCH_BOOL="true"
 if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
     RUN_WITH_RCH=0
+    RUN_WITH_RCH_BOOL="false"
     echo "warning: '$RCH_BIN' not found; falling back to local cargo execution for this run" >&2
 fi
 
@@ -134,7 +139,7 @@ COMPARE_STDOUT="${ARTIFACT_DIR}/compare.txt"
 BASELINE_CURRENT="${ARTIFACT_DIR}/baseline_current.json"
 GATE_EVENTS_FILE="${ARTIFACT_DIR}/gate_events.ndjson"
 GATE_SCHEMA_VERSION="raptorq-g2-perf-gate-v1"
-RUN_REPRO_COMMAND="RCH_BIN=${RCH_BIN} PERF_TIMEOUT=${TIMEOUT_SEC} PERF_BENCH_ARGS='${BENCH_ARGS_STR}' ./scripts/run_perf_e2e.sh"
+RUN_REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' RCH_BIN=${RCH_BIN} PERF_TIMEOUT=${TIMEOUT_SEC} PERF_BENCH_ARGS='${BENCH_ARGS_STR}' ./scripts/run_perf_e2e.sh"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 : > "$GATE_EVENTS_FILE"
@@ -150,11 +155,14 @@ emit_gate_event() {
     local message="$4"
     local artifact_path="$5"
     local repro_command="$6"
-    printf '{"schema_version":"%s","event":"%s","status":"%s","scenario_id":"%s","seed":"%s","artifact_path":"%s","repro_command":"%s","message":"%s"}\n' \
+    printf '{"schema_version":"%s","event":"%s","status":"%s","scenario_id":"%s","workload_id":"%s","runtime_profile":"%s","workload_config_ref":"%s","seed":"%s","artifact_path":"%s","repro_command":"%s","message":"%s"}\n' \
         "$GATE_SCHEMA_VERSION" \
         "$(json_escape "$event")" \
         "$(json_escape "$status")" \
         "$(json_escape "$scenario_id")" \
+        "$(json_escape "$WORKLOAD_ID")" \
+        "$(json_escape "$RUNTIME_PROFILE")" \
+        "$(json_escape "$WORKLOAD_CONFIG_REF")" \
         "$(json_escape "${ASUPERSYNC_SEED:-}")" \
         "$(json_escape "$artifact_path")" \
         "$(json_escape "$repro_command")" \
@@ -174,6 +182,8 @@ echo "  Metric:            ${METRIC}"
 echo "  Max regression %:  ${MAX_REGRESSION_PCT}"
 echo "  Timeout:           ${TIMEOUT_SEC}s per bench"
 echo "  Seed:              ${ASUPERSYNC_SEED:-<unset>}"
+echo "  Workload:          ${WORKLOAD_ID}"
+echo "  Profile:           ${RUNTIME_PROFILE}"
 echo "  RCH mode:          $([[ "$RUN_WITH_RCH" -eq 1 ]] && echo enabled || echo disabled)"
 echo ""
 
@@ -328,6 +338,9 @@ cat > "$REPORT_FILE" <<EOF
 {
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_sha": "${GIT_SHA}",
+  "workload_id": "${WORKLOAD_ID}",
+  "runtime_profile": "${RUNTIME_PROFILE}",
+  "workload_config_ref": "${WORKLOAD_CONFIG_REF}",
   "seed": "${ASUPERSYNC_SEED:-}",
   "benchmarks": [${BENCH_RESULTS_JSON}],
   "baseline": {
@@ -345,7 +358,7 @@ cat > "$REPORT_FILE" <<EOF
     "timeout_sec": ${TIMEOUT_SEC},
     "bench_args": "${BENCH_ARGS_STR}",
     "rch_bin": "${RCH_BIN}",
-    "run_with_rch": ${RUN_WITH_RCH}
+    "run_with_rch": ${RUN_WITH_RCH_BOOL}
   },
   "env": {
     "CI": "${CI:-}",

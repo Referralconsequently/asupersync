@@ -13,7 +13,7 @@
 # Environment Variables:
 #   SKIP_STRESS    - Set to 1 to skip stress tests
 #   SKIP_LOOM      - Set to 1 to skip Loom tests
-#   STRESS_TIMEOUT - Timeout for stress tests in seconds (default: 180)
+#   STRESS_TIMEOUT - Timeout for stress tests in seconds (default: 600)
 #   RUST_LOG       - Standard Rust logging level
 
 set -euo pipefail
@@ -25,11 +25,40 @@ OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/scheduler"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_DIR="$OUTPUT_DIR/$TIMESTAMP"
-STRESS_TIMEOUT="${STRESS_TIMEOUT:-180}"
+STRESS_TIMEOUT="${STRESS_TIMEOUT:-600}"
+RCH_BIN="${RCH_BIN:-rch}"
+WORKLOAD_ID="${WORKLOAD_ID:-AA01-WL-BURST-001}"
+RUNTIME_PROFILE="${RUNTIME_PROFILE:-native-e2e}"
+WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/test_scheduler_wakeup_e2e.sh::scheduler_backoff+scheduler_lane_fairness+scheduler_stress_tests}"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
+
+RUN_WITH_RCH=0
+RUN_WITH_RCH_BOOL="false"
+if command -v "$RCH_BIN" >/dev/null 2>&1; then
+    RUN_WITH_RCH=1
+    RUN_WITH_RCH_BOOL="true"
+fi
+
+run_cargo() {
+    if [ "$RUN_WITH_RCH" -eq 1 ]; then
+        "$RCH_BIN" exec -- cargo "$@"
+    else
+        cargo "$@"
+    fi
+}
+
+run_timeout_cargo() {
+    local timeout_sec="$1"
+    shift
+    if [ "$RUN_WITH_RCH" -eq 1 ]; then
+        timeout "${timeout_sec}s" "$RCH_BIN" exec -- cargo "$@"
+    else
+        timeout "${timeout_sec}s" cargo "$@"
+    fi
+}
 
 mkdir -p "$LOG_DIR"
 
@@ -46,6 +75,9 @@ echo "  Log directory:   $LOG_DIR"
 echo "  Stress timeout:  ${STRESS_TIMEOUT}s"
 echo "  Skip stress:     ${SKIP_STRESS:-no}"
 echo "  Skip loom:       ${SKIP_LOOM:-no}"
+echo "  Workload:        ${WORKLOAD_ID}"
+echo "  Profile:         ${RUNTIME_PROFILE}"
+echo "  RCH mode:        $([ "$RUN_WITH_RCH" -eq 1 ] && printf "enabled" || printf "disabled")"
 echo "  Start time:      $(date -Iseconds)"
 echo ""
 
@@ -71,21 +103,22 @@ run_suite() {
 # 1. Scheduler unit tests (parker, queues, stealing, backoff)
 # --------------------------------------------------------------------------
 run_suite "scheduler_backoff" \
-    cargo test --test scheduler_backoff -- --nocapture || true
+    run_cargo test --test scheduler_backoff -- --nocapture || true
 
 # --------------------------------------------------------------------------
 # 2. Lane fairness tests
 # --------------------------------------------------------------------------
 run_suite "scheduler_lane_fairness" \
-    cargo test --test scheduler_lane_fairness -- --nocapture || true
+    run_cargo test --test scheduler_lane_fairness -- --nocapture || true
 
 # --------------------------------------------------------------------------
 # 3. Stress tests (ignored by default, need --ignored flag)
 # --------------------------------------------------------------------------
 if [ "${SKIP_STRESS:-0}" != "1" ]; then
-    run_suite "stress_tests" \
-        timeout "${STRESS_TIMEOUT}s" \
-        cargo test --release scheduler_stress -- --ignored --nocapture --test-threads=1 || true
+    # Run the scheduler-only ignored stress tests in one cargo invocation so RCH
+    # release-build setup is paid once instead of four separate timeout windows.
+    run_suite "scheduler_stress_tests" \
+        run_timeout_cargo "${STRESS_TIMEOUT}" test --release --lib 'three_lane::tests::stress_test_' -- --ignored --nocapture --test-threads=1 || true
 else
     echo "[skip] Stress tests (SKIP_STRESS=1)"
 fi
@@ -95,7 +128,7 @@ fi
 # --------------------------------------------------------------------------
 if [ "${SKIP_LOOM:-0}" != "1" ]; then
     run_suite "loom_tests" \
-        cargo test --test scheduler_loom --features loom-tests --release -- --nocapture || true
+        run_cargo test --test scheduler_loom --features loom-tests --release -- --nocapture || true
 else
     echo "[skip] Loom tests (SKIP_LOOM=1)"
 fi
@@ -107,7 +140,12 @@ echo ""
 echo ">>> Analyzing logs for issues..."
 ISSUES=0
 
-for pattern in "timed out" "timeout" "deadlock" "hung" "blocked forever"; do
+if grep -rEqi "(timed out|timeout( after| while| waiting| reached| expired)|deadline exceeded)" "$LOG_DIR"/*.log 2>/dev/null; then
+    echo "  WARNING: timeout-like failure detected"
+    ISSUES=$((ISSUES + 1))
+fi
+
+for pattern in "deadlock" "hung" "blocked forever"; do
     if grep -rqi "$pattern" "$LOG_DIR"/*.log 2>/dev/null; then
         echo "  WARNING: '$pattern' detected"
         ISSUES=$((ISSUES + 1))
@@ -138,7 +176,7 @@ FAILED_TESTS=$(grep -rh -c "^test .* FAILED$" "$LOG_DIR"/*.log 2>/dev/null | awk
 SUITE_ID="scheduler_e2e"
 SCENARIO_ID="E2E-SUITE-SCHEDULER-WAKEUP"
 SUMMARY_FILE="$LOG_DIR/summary.json"
-REPRO_COMMAND="TEST_SEED=${TEST_SEED} RUST_LOG=${RUST_LOG} bash ${SCRIPT_DIR}/$(basename "$0")"
+REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' TEST_SEED=${TEST_SEED} RUST_LOG=${RUST_LOG} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")"
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 if [ "$FAILED_SUITES" -eq 0 ] && [ "$ISSUES" -eq 0 ]; then
@@ -150,6 +188,9 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "schema_version": "e2e-suite-summary-v3",
   "suite_id": "${SUITE_ID}",
   "scenario_id": "${SCENARIO_ID}",
+  "workload_id": "${WORKLOAD_ID}",
+  "runtime_profile": "${RUNTIME_PROFILE}",
+  "workload_config_ref": "${WORKLOAD_CONFIG_REF}",
   "seed": "${TEST_SEED}",
   "started_ts": "${RUN_STARTED_TS}",
   "ended_ts": "${RUN_ENDED_TS}",
@@ -158,6 +199,8 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "artifact_path": "${SUMMARY_FILE}",
   "suite": "${SUITE_ID}",
   "timestamp": "${TIMESTAMP}",
+  "rch_bin": "${RCH_BIN}",
+  "run_with_rch": ${RUN_WITH_RCH_BOOL},
   "tests_passed": ${PASSED_TESTS},
   "tests_failed": ${FAILED_TESTS},
   "suites_total": ${TOTAL_SUITES},

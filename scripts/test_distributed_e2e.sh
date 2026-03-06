@@ -25,11 +25,40 @@ LOG_FILE="${OUTPUT_DIR}/distributed_e2e_${TIMESTAMP}.log"
 INVARIANT_LOG="${OUTPUT_DIR}/distributed_invariants_${TIMESTAMP}.log"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 TEST_FILTER="${1:-}"
+RCH_BIN="${RCH_BIN:-rch}"
+WORKLOAD_ID="${WORKLOAD_ID:-AA01-WL-DIST-001}"
+RUNTIME_PROFILE="${RUNTIME_PROFILE:-distributed-shadow}"
+WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/test_distributed_e2e.sh::e2e_distributed+distributed_trace_remote_invariants}"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-trace}"
 export RUST_LOG="${RUST_LOG:-asupersync=debug}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
+
+RUN_WITH_RCH=0
+RUN_WITH_RCH_BOOL="false"
+if command -v "$RCH_BIN" >/dev/null 2>&1; then
+    RUN_WITH_RCH=1
+    RUN_WITH_RCH_BOOL="true"
+fi
+
+run_cargo() {
+    if [ "$RUN_WITH_RCH" -eq 1 ]; then
+        "$RCH_BIN" exec -- cargo "$@"
+    else
+        cargo "$@"
+    fi
+}
+
+run_timeout_cargo() {
+    local timeout_sec="$1"
+    shift
+    if [ "$RUN_WITH_RCH" -eq 1 ]; then
+        timeout "$timeout_sec" "$RCH_BIN" exec -- cargo "$@"
+    else
+        timeout "$timeout_sec" cargo "$@"
+    fi
+}
 
 mkdir -p "$OUTPUT_DIR" "$ARTIFACT_DIR"
 
@@ -45,11 +74,14 @@ echo "  Timestamp:       ${TIMESTAMP}"
 echo "  Output:          ${LOG_FILE}"
 echo "  Invariants:      ${INVARIANT_LOG}"
 echo "  Artifacts:       ${ARTIFACT_DIR}"
+echo "  Workload:        ${WORKLOAD_ID}"
+echo "  Profile:         ${RUNTIME_PROFILE}"
+echo "  RCH mode:        $([ "$RUN_WITH_RCH" -eq 1 ] && printf "enabled" || printf "disabled")"
 echo ""
 
 # --- Section: Build Check ---
 echo ">>> [1/5] Pre-flight: checking compilation..."
-if ! cargo check --test e2e_distributed --test distributed_trace_remote_invariants --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
+if ! run_cargo check --test e2e_distributed --test distributed_trace_remote_invariants --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
     echo "  FATAL: compilation failed — see ${ARTIFACT_DIR}/compile_errors.log"
     exit 1
 fi
@@ -68,7 +100,7 @@ if [ -n "$TEST_FILTER" ]; then
 fi
 
 pushd "$PROJECT_ROOT" >/dev/null
-if timeout 180 cargo test "${CARGO_ARGS[@]}" -- "${RUN_ARGS[@]}" 2>&1 | tee "$LOG_FILE"; then
+if run_timeout_cargo 180 test "${CARGO_ARGS[@]}" -- "${RUN_ARGS[@]}" 2>&1 | tee "$LOG_FILE"; then
     TEST_RESULT=0
 else
     TEST_RESULT=$?
@@ -79,7 +111,7 @@ echo ""
 echo ">>> [3/5] Running distributed/trace/remote invariant tests..."
 
 INVARIANT_RESULT=0
-if timeout 120 cargo test --test distributed_trace_remote_invariants --all-features -- --nocapture --test-threads=1 2>&1 | tee "$INVARIANT_LOG"; then
+if run_timeout_cargo 120 test --test distributed_trace_remote_invariants --all-features -- --nocapture --test-threads=1 2>&1 | tee "$INVARIANT_LOG"; then
     INVARIANT_RESULT=0
 else
     INVARIANT_RESULT=$?
@@ -135,7 +167,7 @@ TOTAL_FAILED=$((E2E_FAILED + INV_FAILED))
 SUITE_ID="distributed_e2e"
 SCENARIO_ID="E2E-SUITE-DISTRIBUTED"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
-REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} bash ${SCRIPT_DIR}/$(basename "$0")"
+REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")${TEST_FILTER:+ ${TEST_FILTER}}"
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 if [ "$TEST_RESULT" -eq 0 ] && [ "$INVARIANT_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ]; then
@@ -147,6 +179,9 @@ cat > "${SUMMARY_FILE}" << ENDJSON
   "schema_version": "e2e-suite-summary-v3",
   "suite_id": "${SUITE_ID}",
   "scenario_id": "${SCENARIO_ID}",
+  "workload_id": "${WORKLOAD_ID}",
+  "runtime_profile": "${RUNTIME_PROFILE}",
+  "workload_config_ref": "${WORKLOAD_CONFIG_REF}",
   "seed": "${TEST_SEED}",
   "started_ts": "${RUN_STARTED_TS}",
   "ended_ts": "${RUN_ENDED_TS}",
@@ -156,6 +191,9 @@ cat > "${SUMMARY_FILE}" << ENDJSON
   "suite": "${SUITE_ID}",
   "timestamp": "${TIMESTAMP}",
   "test_log_level": "${TEST_LOG_LEVEL}",
+  "test_filter": "${TEST_FILTER}",
+  "rch_bin": "${RCH_BIN}",
+  "run_with_rch": ${RUN_WITH_RCH_BOOL},
   "suites": {
     "e2e": { "passed": ${E2E_PASSED}, "failed": ${E2E_FAILED}, "exit_code": ${TEST_RESULT} },
     "invariants": { "passed": ${INV_PASSED}, "failed": ${INV_FAILED}, "exit_code": ${INVARIANT_RESULT} }
