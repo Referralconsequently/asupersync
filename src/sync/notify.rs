@@ -364,23 +364,9 @@ impl Notified<'_> {
             };
 
             if is_gen_changed {
-                let (was_notified, notified_generation) = if index < waiters.entries.len() {
-                    let entry = &waiters.entries[index];
-                    (entry.notified, entry.generation)
-                } else {
-                    (false, self.initial_generation)
-                };
-
                 waiters.remove(index);
                 self.waiter_index = None;
-
-                if was_notified && notified_generation == self.initial_generation {
-                    // Woken by notify_one before broadcast. Pass the baton.
-                    self.notify.pass_baton(waiters);
-                } else {
-                    drop(waiters);
-                }
-                
+                drop(waiters);
                 return self.mark_done();
             }
 
@@ -435,6 +421,7 @@ impl Drop for Notified<'_> {
             if let Some(index) = self.waiter_index.take() {
                 let mut waiters = self.notify.waiters.lock();
 
+                let current_generation = self.notify.generation.load(Ordering::Acquire);
                 let (was_notified, notified_generation) = if index < waiters.entries.len() {
                     let entry = &waiters.entries[index];
                     (entry.notified, entry.generation)
@@ -445,9 +432,12 @@ impl Drop for Notified<'_> {
                 waiters.remove(index);
 
                 if was_notified {
-                    let was_broadcast_notify = notified_generation != self.initial_generation;
+                    let was_broadcast_notify = notified_generation != self.initial_generation
+                        || current_generation != self.initial_generation;
                     if was_broadcast_notify {
-                        // It was woken by broadcast. No stored token needed.
+                        // A broadcast already covered this waiter, even if an earlier
+                        // notify_one had already taken its waker. Do not mint a
+                        // replacement notify_one token on cancellation.
                         return;
                     }
 
