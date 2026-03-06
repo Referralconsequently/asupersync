@@ -9,6 +9,7 @@ use std::fs::{FileType, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// Async directory entry iterator.
@@ -22,7 +23,9 @@ impl ReadDir {
     #[allow(clippy::unused_async)]
     pub async fn next_entry(&mut self) -> io::Result<Option<DirEntry>> {
         match self.inner.next() {
-            Some(Ok(entry)) => Ok(Some(DirEntry { inner: entry })),
+            Some(Ok(entry)) => Ok(Some(DirEntry {
+                inner: Arc::new(entry),
+            })),
             Some(Err(err)) => Err(err),
             None => Ok(None),
         }
@@ -47,7 +50,9 @@ pub async fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
 /// A directory entry returned by [`ReadDir`].
 #[derive(Debug)]
 pub struct DirEntry {
-    inner: std::fs::DirEntry,
+    // Keep the original std entry alive so metadata/file_type can be offloaded
+    // without re-resolving the path and changing std::fs::DirEntry semantics.
+    inner: Arc<std::fs::DirEntry>,
 }
 
 impl DirEntry {
@@ -64,15 +69,15 @@ impl DirEntry {
     }
 
     /// Returns the metadata for the entry.
-    #[allow(clippy::unused_async)]
     pub async fn metadata(&self) -> io::Result<Metadata> {
-        self.inner.metadata()
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || inner.metadata()).await
     }
 
     /// Returns the file type for the entry.
-    #[allow(clippy::unused_async)]
     pub async fn file_type(&self) -> io::Result<FileType> {
-        self.inner.file_type()
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || inner.file_type()).await
     }
 }
 
@@ -83,7 +88,9 @@ impl Stream for ReadDir {
         let this = self.get_mut();
         let next = this.inner.next();
         let mapped = match next {
-            Some(Ok(entry)) => Some(Ok(DirEntry { inner: entry })),
+            Some(Ok(entry)) => Some(Ok(DirEntry {
+                inner: Arc::new(entry),
+            })),
             Some(Err(err)) => Some(Err(err)),
             None => None,
         };
@@ -190,5 +197,56 @@ mod tests {
         crate::assert_with_log!(len == 7, "len", 7, len);
         let _ = std::fs::remove_dir_all(&path);
         crate::test_complete!("test_dir_entry_metadata");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_entry_symlink_semantics() {
+        init_test("test_dir_entry_symlink_semantics");
+        let path = unique_temp_dir("dir_entry_symlink_semantics");
+        std::fs::create_dir_all(&path).unwrap();
+        let target = path.join("target.txt");
+        let link = path.join("link.txt");
+        std::fs::write(&target, b"target").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let (is_symlink, metadata_is_file, metadata_is_symlink, len) =
+            futures_lite::future::block_on(async {
+                let mut entries = read_dir(&path).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    if entry.file_name().to_string_lossy() == "link.txt" {
+                        let file_type = entry.file_type().await?;
+                        let metadata = entry.metadata().await?;
+                        return Ok::<_, io::Error>((
+                            file_type.is_symlink(),
+                            metadata.is_file(),
+                            metadata.file_type().is_symlink(),
+                            metadata.len(),
+                        ));
+                    }
+                }
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "missing symlink entry",
+                ))
+            })
+            .unwrap();
+
+        crate::assert_with_log!(is_symlink, "file_type reports symlink", true, is_symlink);
+        crate::assert_with_log!(
+            !metadata_is_file,
+            "metadata is not target file metadata",
+            false,
+            metadata_is_file
+        );
+        crate::assert_with_log!(
+            metadata_is_symlink,
+            "metadata preserves symlink semantics",
+            true,
+            metadata_is_symlink
+        );
+        crate::assert_with_log!(len > 0, "symlink metadata len", true, len > 0);
+        let _ = std::fs::remove_dir_all(&path);
+        crate::test_complete!("test_dir_entry_symlink_semantics");
     }
 }
