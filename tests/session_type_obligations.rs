@@ -7,11 +7,13 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::obligation::ledger::{LedgerStats, ObligationLedger};
 use asupersync::obligation::session_types::{
     Branch, End, Initiator, Select, Selected, Send, SessionProof, delegation, lease, send_permit,
-    two_phase,
+    session_protocol_adoption_specs, two_phase,
 };
-use asupersync::record::ObligationKind;
+use asupersync::record::{ObligationAbortReason, ObligationKind};
+use asupersync::types::{RegionId, TaskId, Time};
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
 use std::sync::Arc;
@@ -208,6 +210,35 @@ fn run_two_phase_abort(
     };
 
     (init_proof, exec_proof)
+}
+
+fn run_dynamic_commit(kind: ObligationKind, start_nanos: u64, end_nanos: u64) -> LedgerStats {
+    let mut ledger = ObligationLedger::new();
+    let token = ledger.acquire(
+        kind,
+        TaskId::new_for_test(7, 0),
+        RegionId::new_for_test(11, 0),
+        Time::from_nanos(start_nanos),
+    );
+    ledger.commit(token, Time::from_nanos(end_nanos));
+    ledger.stats()
+}
+
+fn run_dynamic_abort(
+    kind: ObligationKind,
+    reason: ObligationAbortReason,
+    start_nanos: u64,
+    end_nanos: u64,
+) -> LedgerStats {
+    let mut ledger = ObligationLedger::new();
+    let token = ledger.acquire(
+        kind,
+        TaskId::new_for_test(7, 0),
+        RegionId::new_for_test(11, 0),
+        Time::from_nanos(start_nanos),
+    );
+    ledger.abort(token, Time::from_nanos(end_nanos), reason);
+    ledger.stats()
 }
 
 // ============================================================================
@@ -1049,6 +1080,109 @@ fn backward_compat_obligation_kinds_match() {
     ] {
         let (tp, _) = run_two_phase_commit(3010, *kind);
         assert_eq!(tp.obligation_kind, *kind);
+    }
+}
+
+#[test]
+fn send_permit_typed_and_dynamic_commit_paths_agree() {
+    init_test_logging();
+
+    let (typed_sender, typed_receiver) = run_send_permit_commit(3100);
+    let dynamic_stats = run_dynamic_commit(ObligationKind::SendPermit, 10, 25);
+
+    assert_eq!(typed_sender.obligation_kind, ObligationKind::SendPermit);
+    assert_eq!(typed_receiver.obligation_kind, ObligationKind::SendPermit);
+    assert!(dynamic_stats.is_clean());
+    assert_eq!(dynamic_stats.total_acquired, 1);
+    assert_eq!(dynamic_stats.total_committed, 1);
+    assert_eq!(dynamic_stats.total_aborted, 0);
+}
+
+#[test]
+fn send_permit_typed_and_dynamic_abort_paths_agree() {
+    init_test_logging();
+
+    let (typed_sender, typed_receiver) = run_send_permit_abort(3101);
+    let dynamic_stats = run_dynamic_abort(
+        ObligationKind::SendPermit,
+        ObligationAbortReason::Explicit,
+        10,
+        25,
+    );
+
+    assert_eq!(typed_sender.obligation_kind, ObligationKind::SendPermit);
+    assert_eq!(typed_receiver.obligation_kind, ObligationKind::SendPermit);
+    assert!(dynamic_stats.is_clean());
+    assert_eq!(dynamic_stats.total_acquired, 1);
+    assert_eq!(dynamic_stats.total_committed, 0);
+    assert_eq!(dynamic_stats.total_aborted, 1);
+}
+
+#[test]
+fn lease_typed_and_dynamic_release_paths_agree() {
+    init_test_logging();
+
+    let (typed_holder, typed_resource) = run_lease_simple(3102);
+    let dynamic_stats = run_dynamic_commit(ObligationKind::Lease, 30, 45);
+
+    assert_eq!(typed_holder.obligation_kind, ObligationKind::Lease);
+    assert_eq!(typed_resource.obligation_kind, ObligationKind::Lease);
+    assert!(dynamic_stats.is_clean());
+    assert_eq!(dynamic_stats.total_acquired, 1);
+    assert_eq!(dynamic_stats.total_committed, 1);
+    assert_eq!(dynamic_stats.total_aborted, 0);
+}
+
+#[test]
+fn two_phase_typed_and_dynamic_abort_paths_agree() {
+    init_test_logging();
+
+    let (typed_initiator, typed_executor) =
+        run_two_phase_abort(3103, ObligationKind::IoOp, "cancelled");
+    let dynamic_stats =
+        run_dynamic_abort(ObligationKind::IoOp, ObligationAbortReason::Cancel, 50, 70);
+
+    assert_eq!(typed_initiator.obligation_kind, ObligationKind::IoOp);
+    assert_eq!(typed_executor.obligation_kind, ObligationKind::IoOp);
+    assert!(dynamic_stats.is_clean());
+    assert_eq!(dynamic_stats.total_acquired, 1);
+    assert_eq!(dynamic_stats.total_committed, 0);
+    assert_eq!(dynamic_stats.total_aborted, 1);
+}
+
+#[test]
+fn adoption_specs_reference_live_validation_surfaces() {
+    init_test_logging();
+
+    for spec in session_protocol_adoption_specs() {
+        assert!(
+            spec.migration_test_surfaces
+                .iter()
+                .all(|surface| !surface.contains("planned")),
+            "stale planned-only surface for {}",
+            spec.protocol_id
+        );
+        assert!(
+            spec.migration_test_surfaces
+                .iter()
+                .any(|surface| surface.contains("src/obligation/session_types.rs")),
+            "compile-fail surface missing for {}",
+            spec.protocol_id
+        );
+        assert!(
+            spec.migration_test_surfaces
+                .iter()
+                .any(|surface| surface.contains("tests/session_type_obligations.rs")),
+            "integration migration surface missing for {}",
+            spec.protocol_id
+        );
+        assert!(
+            spec.migration_test_surfaces
+                .iter()
+                .any(|surface| surface.contains("docs/integration.md")),
+            "migration guide surface missing for {}",
+            spec.protocol_id
+        );
     }
 }
 

@@ -1202,8 +1202,25 @@ Each adoption spec documents:
 1. Canonical states and transitions for migration review.
 2. Compile-time guarantees from typestate linearity.
 3. Runtime oracle complements that remain authoritative during rollout.
-4. Existing plus planned migration/compile-fail test surfaces.
+4. Existing migration/compile-fail validation surfaces.
 5. Stable diagnostics fields required to debug typed-protocol adoption.
+
+Current AA-05.3 validation surfaces:
+
+- compile-fail doctests in `src/obligation/session_types.rs`
+- typed/dynamic migration parity in `tests/session_type_obligations.rs`
+- rollout contract/unit invariants in `src/obligation/session_types.rs`
+
+Direct `rch` rerun commands:
+
+- `rch exec -- cargo test --doc -- --nocapture`
+- `rch exec -- cargo test --test session_type_obligations -- --nocapture`
+
+Troubleshooting rules:
+
+- If a compile-fail example starts compiling, treat it as a typestate regression and keep the typed surface experimental.
+- If typed and dynamic paths disagree on the valid resolution shape, treat `src/obligation/ledger.rs` as authoritative and debug the typed wrapper before expanding rollout scope.
+- When diagnosing rollout issues, log and inspect the stable fields `channel_id`, `from_state`, `to_state`, `trace_id`, `obligation_kind`, `protocol`, and `transition`.
 
 Current runtime-oracle complements:
 

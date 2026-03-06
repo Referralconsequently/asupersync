@@ -93,6 +93,48 @@
 //! Each `Chan` endpoint carries a reference to the `Cx` capability context.
 //! Transitions consume budget from the context, and the trace ID propagates
 //! through delegated channels for end-to-end distributed tracing.
+//!
+//! # Compile-Fail Migration Guards
+//!
+//! The typed surface stays explicitly opt-in until both compile-fail and
+//! typed-vs-dynamic migration checks remain green. These doctests are the
+//! compile-fail portion of the AA-05.3 contract.
+//!
+//! Sending a payload before selecting the `Send` or `Abort` branch is illegal:
+//!
+//! ```compile_fail
+//! use asupersync::obligation::session_types::send_permit;
+//!
+//! let (sender, _receiver) = send_permit::new_session::<u64>(7);
+//! let sender = sender.send(send_permit::ReserveMsg);
+//! let _illegal = sender.send(42_u64);
+//! ```
+//!
+//! A lease cannot be closed before the protocol reaches `End`:
+//!
+//! ```compile_fail
+//! use asupersync::obligation::session_types::lease;
+//!
+//! let (holder, _resource) = lease::new_session(9);
+//! let holder = holder.send(lease::AcquireMsg);
+//! let _proof = holder.close();
+//! ```
+//!
+//! Choosing the `Commit` branch forbids sending an abort message afterward:
+//!
+//! ```compile_fail
+//! use asupersync::obligation::session_types::two_phase;
+//! use asupersync::record::ObligationKind;
+//!
+//! let (initiator, _executor) = two_phase::new_session(11, ObligationKind::IoOp);
+//! let initiator = initiator.send(two_phase::ReserveMsg {
+//!     kind: ObligationKind::IoOp,
+//! });
+//! let initiator = initiator.select_left();
+//! let _illegal = initiator.send(two_phase::AbortMsg {
+//!     reason: "late abort".to_string(),
+//! });
+//! ```
 
 use crate::record::ObligationKind;
 use std::marker::PhantomData;
@@ -654,6 +696,11 @@ pub mod delegation {
 ///   - `session_fallback_total` (counter by reason)
 pub struct TracingContract;
 
+const DOC_COMPILE_FAIL_SURFACE: &str = "compile-fail doctests: src/obligation/session_types.rs";
+const MIGRATION_INTEGRATION_SURFACE: &str =
+    "typed/dynamic migration surface: tests/session_type_obligations.rs";
+const MIGRATION_GUIDE_SURFACE: &str = "migration guide: docs/integration.md";
+
 // ============================================================================
 // Adoption contract
 // ============================================================================
@@ -712,9 +759,9 @@ impl SessionProtocolAdoptionSpec {
                 "src/obligation/separation_logic.rs",
             ],
             migration_test_surfaces: &[
-                "existing unit tests: src/obligation/session_types.rs",
-                "planned compile-fail surface: tests/obligation_session_types_trybuild.rs",
-                "planned migration surface: tests/obligation_session_migration.rs",
+                DOC_COMPILE_FAIL_SURFACE,
+                MIGRATION_INTEGRATION_SURFACE,
+                MIGRATION_GUIDE_SURFACE,
             ],
             diagnostics_fields: &[
                 "channel_id",
@@ -759,9 +806,9 @@ impl SessionProtocolAdoptionSpec {
                 "src/obligation/separation_logic.rs",
             ],
             migration_test_surfaces: &[
-                "existing unit tests: src/obligation/session_types.rs",
-                "planned compile-fail surface: tests/obligation_session_types_trybuild.rs",
-                "planned migration surface: tests/registry_lease_session_migration.rs",
+                DOC_COMPILE_FAIL_SURFACE,
+                MIGRATION_INTEGRATION_SURFACE,
+                MIGRATION_GUIDE_SURFACE,
             ],
             diagnostics_fields: &[
                 "channel_id",
@@ -806,9 +853,9 @@ impl SessionProtocolAdoptionSpec {
                 "src/obligation/separation_logic.rs",
             ],
             migration_test_surfaces: &[
-                "existing unit tests: src/obligation/session_types.rs",
-                "planned compile-fail surface: tests/obligation_session_types_trybuild.rs",
-                "planned migration surface: tests/two_phase_session_migration.rs",
+                DOC_COMPILE_FAIL_SURFACE,
+                MIGRATION_INTEGRATION_SURFACE,
+                MIGRATION_GUIDE_SURFACE,
             ],
             diagnostics_fields: &[
                 "channel_id",
@@ -1063,6 +1110,13 @@ mod tests {
                 "deferred surfaces must be documented for {}",
                 spec.protocol_id
             );
+            assert!(
+                spec.migration_test_surfaces
+                    .iter()
+                    .all(|surface| !surface.contains("planned")),
+                "migration surfaces must point at concrete live paths for {}",
+                spec.protocol_id
+            );
         }
     }
 
@@ -1092,6 +1146,30 @@ mod tests {
             assert!(
                 spec.transitions.len() >= 3,
                 "state transitions must stay explicit for {}",
+                spec.protocol_id
+            );
+        }
+    }
+
+    #[test]
+    fn session_protocol_adoption_specs_reference_current_validation_surfaces() {
+        for spec in session_protocol_adoption_specs() {
+            assert!(
+                spec.migration_test_surfaces
+                    .contains(&DOC_COMPILE_FAIL_SURFACE),
+                "compile-fail doctest surface must stay wired for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.migration_test_surfaces
+                    .contains(&MIGRATION_INTEGRATION_SURFACE),
+                "typed/dynamic migration surface must stay wired for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.migration_test_surfaces
+                    .contains(&MIGRATION_GUIDE_SURFACE),
+                "migration guide surface must stay wired for {}",
                 spec.protocol_id
             );
         }
