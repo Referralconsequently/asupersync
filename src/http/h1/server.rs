@@ -356,7 +356,7 @@ where
             if expectation_action == ExpectationAction::Reject {
                 state.phase = ConnectionPhase::Writing;
                 let mut reject = Response::new(417, default_reason(417), Vec::new());
-                add_connection_close(&mut reject);
+                finalize_response_persistence(req.version, &mut reject, true);
                 framed.send(reject)?;
                 poll_fn(|cx| framed.poll_flush(cx))
                     .await
@@ -370,7 +370,8 @@ where
             }
 
             if expectation_action == ExpectationAction::Continue && request_expects_body(&req) {
-                let continue_response = Response::new(100, default_reason(100), Vec::new());
+                let mut continue_response = Response::new(100, default_reason(100), Vec::new());
+                finalize_response_persistence(req.version, &mut continue_response, false);
                 framed.send(continue_response)?;
                 poll_fn(|cx| framed.poll_flush(cx))
                     .await
@@ -379,16 +380,15 @@ where
 
             // Determine if we should close after this request
             let close_after = should_close_connection(&req, &self.config, &state);
+            let request_version = req.version;
 
             state.phase = ConnectionPhase::Processing;
 
             // Process request through handler
             let mut resp = (self.handler)(req).await;
 
-            // Add Connection header to response if closing
-            if close_after {
-                add_connection_close(&mut resp);
-            }
+            let close_after =
+                finalize_response_persistence(request_version, &mut resp, close_after);
 
             state.phase = ConnectionPhase::Writing;
 
@@ -525,6 +525,58 @@ fn add_connection_close(resp: &mut Response) {
         resp.headers
             .push(("Connection".to_owned(), "close".to_owned()));
     }
+}
+
+/// Add a `Connection: keep-alive` header to the response if not already present.
+fn add_connection_keep_alive(resp: &mut Response) {
+    let mut replaced = false;
+    for (name, value) in &mut resp.headers {
+        if name.eq_ignore_ascii_case("connection") {
+            "keep-alive".clone_into(value);
+            replaced = true;
+        }
+    }
+    if !replaced {
+        resp.headers
+            .push(("Connection".to_owned(), "keep-alive".to_owned()));
+    }
+}
+
+/// Check if the response explicitly requests closing the connection.
+fn response_requests_close(resp: &Response) -> bool {
+    for (name, value) in &resp.headers {
+        if name.eq_ignore_ascii_case("connection") {
+            for token in value.split(',').map(str::trim) {
+                if token.eq_ignore_ascii_case("close") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Align the response version/connection headers with the actual socket policy.
+fn finalize_response_persistence(
+    request_version: Version,
+    resp: &mut Response,
+    close_after: bool,
+) -> bool {
+    if request_version == Version::Http10 {
+        resp.version = Version::Http10;
+    }
+
+    let close_after = close_after || response_requests_close(resp);
+    if close_after {
+        add_connection_close(resp);
+        return true;
+    }
+
+    if request_version == Version::Http10 {
+        add_connection_keep_alive(resp);
+    }
+
+    false
 }
 
 /// Helper trait to await the next item from a `Stream` (since `Stream`
@@ -681,6 +733,66 @@ mod tests {
             .push(("Connection".to_owned(), "keep-alive".to_owned()));
         add_connection_close(&mut resp);
         // Should not add duplicate and should overwrite to close
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "close");
+    }
+
+    #[test]
+    fn add_connection_keep_alive_header() {
+        let mut resp = Response::new(200, "OK", Vec::new());
+        assert!(resp.headers.is_empty());
+        add_connection_keep_alive(&mut resp);
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "keep-alive");
+    }
+
+    #[test]
+    fn add_connection_keep_alive_header_already_present() {
+        let mut resp = Response::new(200, "OK", Vec::new());
+        resp.headers
+            .push(("Connection".to_owned(), "close".to_owned()));
+        add_connection_keep_alive(&mut resp);
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "keep-alive");
+    }
+
+    #[test]
+    fn finalize_response_persistence_http10_keepalive_normalizes_version_and_header() {
+        let mut resp = Response::new(200, "OK", Vec::new());
+
+        let close_after = finalize_response_persistence(Version::Http10, &mut resp, false);
+
+        assert!(!close_after);
+        assert_eq!(resp.version, Version::Http10);
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "keep-alive");
+    }
+
+    #[test]
+    fn finalize_response_persistence_http10_close_normalizes_version_and_header() {
+        let mut resp = Response::new(200, "OK", Vec::new());
+
+        let close_after = finalize_response_persistence(Version::Http10, &mut resp, true);
+
+        assert!(close_after);
+        assert_eq!(resp.version, Version::Http10);
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "close");
+    }
+
+    #[test]
+    fn finalize_response_persistence_preserves_handler_requested_close() {
+        let mut resp = Response::new(200, "OK", Vec::new()).with_header("Connection", "close");
+
+        let close_after = finalize_response_persistence(Version::Http11, &mut resp, false);
+
+        assert!(close_after);
+        assert_eq!(resp.version, Version::Http11);
         assert_eq!(resp.headers.len(), 1);
         assert_eq!(resp.headers[0].0, "Connection");
         assert_eq!(resp.headers[0].1, "close");
