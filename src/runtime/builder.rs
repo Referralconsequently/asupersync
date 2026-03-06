@@ -152,12 +152,47 @@ use crate::trace::distributed::LogicalClockMode;
 use crate::types::{Budget, CancelAttributionConfig};
 use crate::util::EntropySource;
 use parking_lot::{Mutex, MutexGuard};
+use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// Thread-local RuntimeHandle (issue #21)
+// ---------------------------------------------------------------------------
+//
+// When `Runtime::block_on` enters the poll loop, it installs a thread-local
+// `RuntimeHandle` so that futures running inside `block_on` can discover the
+// runtime and spawn tasks onto the real scheduler via
+// `Runtime::current_handle()`.
+
+thread_local! {
+    static CURRENT_RUNTIME_HANDLE: RefCell<Option<RuntimeHandle>> = const { RefCell::new(None) };
+}
+
+/// RAII guard that installs (and restores) a thread-local [`RuntimeHandle`].
+struct ScopedRuntimeHandle {
+    prev: Option<RuntimeHandle>,
+}
+
+impl ScopedRuntimeHandle {
+    fn new(handle: RuntimeHandle) -> Self {
+        let prev = CURRENT_RUNTIME_HANDLE.with(|cell| cell.replace(Some(handle)));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedRuntimeHandle {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        CURRENT_RUNTIME_HANDLE.with(|cell| {
+            *cell.borrow_mut() = prev;
+        });
+    }
+}
 
 /// Builder for constructing an Asupersync [`Runtime`] with custom configuration.
 ///
@@ -922,15 +957,40 @@ impl Runtime {
     }
 
     /// Run a future to completion on the current thread.
+    ///
+    /// While the future is being polled, a thread-local [`RuntimeHandle`] is
+    /// available via [`Runtime::current_handle`]. This allows futures inside
+    /// `block_on` to spawn tasks onto the real scheduler without having to
+    /// thread the handle through every layer.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         if let Some(callback) = self.inner.config.on_thread_start.as_ref() {
             callback();
         }
+        let _guard = ScopedRuntimeHandle::new(self.handle());
         let output = run_future_with_budget(future, self.inner.config.poll_budget);
         if let Some(callback) = self.inner.config.on_thread_stop.as_ref() {
             callback();
         }
         output
+    }
+
+    /// Returns a handle to the current runtime, if called from within
+    /// [`Runtime::block_on`] or a worker thread.
+    ///
+    /// Returns `None` when called outside of a runtime context.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// runtime.block_on(async {
+    ///     let handle = Runtime::current_handle()
+    ///         .expect("inside block_on");
+    ///     handle.spawn(async { do_work().await });
+    /// });
+    /// ```
+    #[must_use]
+    pub fn current_handle() -> Option<RuntimeHandle> {
+        CURRENT_RUNTIME_HANDLE.with(|cell| cell.borrow().clone())
     }
 
     /// Returns a reference to the runtime configuration.
@@ -2214,5 +2274,75 @@ worker_threads = 16
                 .expect("runtime build");
             assert_eq!(runtime.config().worker_threads, 8);
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #21: Thread-local RuntimeHandle from block_on
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn current_handle_available_inside_block_on() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let handle = Runtime::current_handle();
+            assert!(handle.is_some(), "current_handle should be Some inside block_on");
+        });
+    }
+
+    #[test]
+    fn current_handle_none_outside_block_on() {
+        init_test_logging();
+        assert!(
+            Runtime::current_handle().is_none(),
+            "current_handle should be None outside block_on"
+        );
+    }
+
+    #[test]
+    fn current_handle_spawn_completes_on_scheduler() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime build");
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+
+        let result = runtime.block_on(async move {
+            let handle = Runtime::current_handle().expect("inside block_on");
+            let join = handle.spawn(async move {
+                flag_clone.store(true, Ordering::SeqCst);
+                99u32
+            });
+            join.await
+        });
+
+        assert_eq!(result, 99);
+        assert!(flag.load(Ordering::SeqCst), "spawned task should have run");
+    }
+
+    #[test]
+    fn current_handle_restored_after_block_on() {
+        init_test_logging();
+        // Before block_on: None.
+        assert!(Runtime::current_handle().is_none());
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            assert!(Runtime::current_handle().is_some());
+        });
+
+        // After block_on: restored to None.
+        assert!(Runtime::current_handle().is_none());
     }
 }
