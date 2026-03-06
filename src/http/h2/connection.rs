@@ -499,6 +499,14 @@ impl Connection {
         // Check continuation timeout before processing
         self.check_continuation_timeout()?;
 
+        // Prevent memory exhaustion from PING/SETTINGS floods (CVE-2019-9512 / CVE-2019-9515).
+        if self.pending_ops.len() > 10_000 {
+            return Err(H2Error::connection(
+                ErrorCode::EnhanceYourCalm,
+                "too many pending operations, possible flood attack",
+            ));
+        }
+
         // Check for CONTINUATION requirement
         if let Some(expected_stream) = self.continuation_stream_id {
             match &frame {
