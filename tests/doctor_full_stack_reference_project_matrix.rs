@@ -19,6 +19,8 @@ use serde_json::Value;
 const DOC_PATH: &str = "docs/doctor_full_stack_reference_projects_contract.md";
 const SCRIPT_PATH: &str = "scripts/test_doctor_full_stack_reference_projects_e2e.sh";
 const ORCHESTRATION_SCRIPT_PATH: &str = "scripts/test_doctor_orchestration_state_machine_e2e.sh";
+const WORKSPACE_SCAN_SCRIPT_PATH: &str = "scripts/test_doctor_workspace_scan_e2e.sh";
+const REPORT_EXPORT_SCRIPT_PATH: &str = "scripts/test_doctor_report_export_e2e.sh";
 
 #[derive(Debug, Clone)]
 struct ProfileSpec {
@@ -46,6 +48,16 @@ fn load_orchestration_script() -> String {
         .expect("failed to load doctor orchestration state-machine e2e script")
 }
 
+fn load_workspace_scan_script() -> String {
+    std::fs::read_to_string(repo_root().join(WORKSPACE_SCAN_SCRIPT_PATH))
+        .expect("failed to load doctor workspace scan e2e script")
+}
+
+fn load_report_export_script() -> String {
+    std::fs::read_to_string(repo_root().join(REPORT_EXPORT_SCRIPT_PATH))
+        .expect("failed to load doctor report export e2e script")
+}
+
 fn unique_test_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,6 +79,53 @@ fn single_artifact_dir(staging_root: &Path) -> PathBuf {
         1,
         "expected exactly one artifact dir in {}",
         staging_root.display()
+    );
+    artifact_dirs
+        .into_iter()
+        .next()
+        .expect("artifact dir missing after len check")
+}
+
+fn unique_test_seed(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    format!("{prefix}:{nanos}")
+}
+
+fn write_executable_script(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("failed to write executable script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(path, perms).expect("failed to chmod executable script");
+    }
+}
+
+fn find_artifact_dir_by_suite_and_seed(output_root: &Path, suite_id: &str, seed: &str) -> PathBuf {
+    let artifact_dirs: Vec<PathBuf> = fs::read_dir(output_root)
+        .expect("failed to read artifact output root")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let summary_path = path.join("summary.json");
+            let summary = fs::read_to_string(summary_path).ok()?;
+            let summary: Value = serde_json::from_str(&summary).ok()?;
+            (summary.get("suite_id").and_then(Value::as_str) == Some(suite_id)
+                && summary.get("seed").and_then(Value::as_str) == Some(seed))
+            .then_some(path)
+        })
+        .collect();
+
+    assert_eq!(
+        artifact_dirs.len(),
+        1,
+        "expected exactly one artifact dir for suite {suite_id} seed {seed} in {}",
+        output_root.display()
     );
     artifact_dirs
         .into_iter()
@@ -418,6 +477,44 @@ fn orchestration_stage_script_uses_staging_before_publish() {
 }
 
 #[test]
+fn workspace_scan_stage_script_contains_fail_closed_rch_tokens() {
+    let script = load_workspace_scan_script();
+    let required_tokens = [
+        "rch_attempt_went_local()",
+        "update_run_failure_class()",
+        "fell back to local cargo; rejecting attempt",
+        "rm -f \"${run_json}\"",
+        "DOCTOR_FULLSTACK_SINGLE_RUN",
+        "FAILURE_CLASS=\"rch_local_fallback\"",
+    ];
+    for token in required_tokens {
+        assert!(
+            script.contains(token),
+            "workspace scan stage script missing fail-closed token {token}"
+        );
+    }
+}
+
+#[test]
+fn report_export_stage_script_contains_fail_closed_rch_tokens() {
+    let script = load_report_export_script();
+    let required_tokens = [
+        "rch_attempt_went_local()",
+        "update_run_failure_class()",
+        "fell back to local cargo; rejecting attempt",
+        "rm -f \"${run_json}\"",
+        "DOCTOR_FULLSTACK_SINGLE_RUN",
+        "FAILURE_CLASS=\"rch_local_fallback\"",
+    ];
+    for token in required_tokens {
+        assert!(
+            script.contains(token),
+            "report export stage script missing fail-closed token {token}"
+        );
+    }
+}
+
+#[test]
 fn orchestration_stage_script_rejects_rch_local_fallback() {
     let temp_root = unique_test_temp_dir("asupersync-orch-rch-local-fallback");
     let shim_dir = temp_root.join("shim");
@@ -426,7 +523,7 @@ fn orchestration_stage_script_rejects_rch_local_fallback() {
     fs::create_dir_all(&script_tmp).expect("failed to create tmp dir");
 
     let fake_rch = shim_dir.join("fake-rch");
-    fs::write(
+    write_executable_script(
         &fake_rch,
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -442,14 +539,7 @@ test orchestration_state_machine_epsilon ... ok
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ENDLOG
 "#,
-    )
-    .expect("failed to write fake rch");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&fake_rch, perms).expect("failed to chmod fake rch");
-    }
+    );
 
     let output = Command::new("bash")
         .arg(repo_root().join(ORCHESTRATION_SCRIPT_PATH))
@@ -484,6 +574,126 @@ ENDLOG
     assert_eq!(summary["exit_code"], 1);
     assert_eq!(summary["tests_passed"], 0);
     assert_eq!(summary["tests_failed"], 1);
+}
+
+#[test]
+fn workspace_scan_stage_script_rejects_rch_local_fallback() {
+    let temp_root = unique_test_temp_dir("asupersync-workspace-scan-rch-local-fallback");
+    let shim_dir = temp_root.join("shim");
+    fs::create_dir_all(&shim_dir).expect("failed to create shim dir");
+
+    let fake_rch = shim_dir.join("fake-rch");
+    write_executable_script(
+        &fake_rch,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+cat <<'ENDLOG'
+[RCH] local (all worker circuits open)
+{"scanner_version":"doctor-workspace-scan-v1","taxonomy_version":"capability-surfaces-v1"}
+ENDLOG
+"#,
+    );
+
+    let seed = unique_test_seed("4242:workspace-scan-rch-local-fallback");
+    let output = Command::new("bash")
+        .arg(repo_root().join(WORKSPACE_SCAN_SCRIPT_PATH))
+        .env("RCH_BIN", &fake_rch)
+        .env("TEST_SEED", &seed)
+        .env("DOCTOR_FULLSTACK_SINGLE_RUN", "1")
+        .env("RCH_RETRY_ATTEMPTS", "1")
+        .output()
+        .expect("failed to execute workspace scan script");
+
+    assert!(
+        !output.status.success(),
+        "workspace scan script should fail when rch falls back local"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(
+        stdout.contains("Status:         failed"),
+        "stdout should report failed status, got:\n{stdout}"
+    );
+
+    let artifact_dir = find_artifact_dir_by_suite_and_seed(
+        &repo_root().join("target/e2e-results/doctor_workspace_scan"),
+        "doctor_workspace_scan_e2e",
+        &seed,
+    );
+    let summary: Value = serde_json::from_str(
+        &fs::read_to_string(artifact_dir.join("summary.json"))
+            .expect("failed to read workspace scan summary"),
+    )
+    .expect("summary should parse as json");
+
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["failure_class"], "rch_local_fallback");
+    assert_eq!(summary["exit_code"], 1);
+    assert_eq!(summary["tests_passed"], 0);
+    assert_eq!(summary["tests_failed"], 1);
+    assert!(
+        !artifact_dir.join("scan_run1.json").exists(),
+        "workspace scan should not keep captured JSON from a local fallback attempt"
+    );
+}
+
+#[test]
+fn report_export_stage_script_rejects_rch_local_fallback() {
+    let temp_root = unique_test_temp_dir("asupersync-report-export-rch-local-fallback");
+    let shim_dir = temp_root.join("shim");
+    fs::create_dir_all(&shim_dir).expect("failed to create shim dir");
+
+    let fake_rch = shim_dir.join("fake-rch");
+    write_executable_script(
+        &fake_rch,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+cat <<'ENDLOG'
+[RCH] local (all worker circuits open)
+{"schema_version":"doctor-report-export-v1","core_schema_version":"doctor-core-report-v1","extension_schema_version":"doctor-advanced-report-v1"}
+ENDLOG
+"#,
+    );
+
+    let seed = unique_test_seed("4242:report-export-rch-local-fallback");
+    let output = Command::new("bash")
+        .arg(repo_root().join(REPORT_EXPORT_SCRIPT_PATH))
+        .env("RCH_BIN", &fake_rch)
+        .env("TEST_SEED", &seed)
+        .env("DOCTOR_FULLSTACK_SINGLE_RUN", "1")
+        .env("RCH_RETRY_ATTEMPTS", "1")
+        .output()
+        .expect("failed to execute report export script");
+
+    assert!(
+        !output.status.success(),
+        "report export script should fail when rch falls back local"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(
+        stdout.contains("Status:         failed"),
+        "stdout should report failed status, got:\n{stdout}"
+    );
+
+    let artifact_dir = find_artifact_dir_by_suite_and_seed(
+        &repo_root().join("target/e2e-results/doctor_report_export"),
+        "doctor_report_export_e2e",
+        &seed,
+    );
+    let summary: Value = serde_json::from_str(
+        &fs::read_to_string(artifact_dir.join("summary.json"))
+            .expect("failed to read report export summary"),
+    )
+    .expect("summary should parse as json");
+
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["failure_class"], "rch_local_fallback");
+    assert_eq!(summary["exit_code"], 1);
+    assert_eq!(summary["tests_passed"], 0);
+    assert_eq!(summary["tests_failed"], 1);
+    assert!(
+        !artifact_dir.join("report_export_run1.json").exists(),
+        "report export should not keep captured JSON from a local fallback attempt"
+    );
 }
 
 #[test]
