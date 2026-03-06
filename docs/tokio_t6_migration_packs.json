@@ -148,8 +148,8 @@
       "id": "CAV-01",
       "title": "Synchronous pool blocking",
       "severity": "medium",
-      "description": "DbPool::get() blocks the calling thread. Use try_get() in hot paths.",
-      "workaround": "Use get_with_retry() for fault-tolerant acquisition"
+      "description": "DbPool::get() blocks the calling thread. `try_get()` gives immediate capacity feedback but may still validate or create connections synchronously.",
+      "workaround": "Use try_get() when you need an immediate capacity signal, or get_with_retry() for fault-tolerant acquisition"
     },
     {
       "id": "CAV-02",

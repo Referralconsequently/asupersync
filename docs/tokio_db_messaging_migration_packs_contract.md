@@ -204,7 +204,7 @@ spawn a separate connection task.
 |-----------------------------|-------------------|
 | `pool.get().await?` | `pool.get()?` (synchronous; the pool manages async internally) |
 | `pool.get_timeout(dur).await?` | `pool.get()?` (uses `DbPoolConfig::connection_timeout`) |
-| Try non-blocking | `pool.try_get()` returns `Option` |
+| Try immediate acquire | `pool.try_get()` returns `Result<Option<_>, DbPoolError<_>>` |
 
 ### MIG-POOL-03: Pool Configuration
 

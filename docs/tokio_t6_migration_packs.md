@@ -999,7 +999,7 @@ pool.warm_up();
 
 // Step 4: Use
 let conn = pool.get()?;              // Blocking acquire
-let conn = pool.try_get()?;          // Non-blocking
+let maybe_conn = pool.try_get()?;    // Immediate attempt; None => at capacity
 let conn = pool.get_with_retry(&RetryPolicy::default_retry())?; // With backoff
 
 // Step 5: Observe
@@ -1101,7 +1101,7 @@ Unlike sqlx/deadpool/bb8 which use async pools, `DbPool` uses `std::sync::Mutex`
 
 - **Advantage**: No runtime dependency for pool management; works in any context
 - **Constraint**: `pool.get()` blocks the calling thread during acquire
-- **Recommendation**: Use `pool.try_get()` in hot paths where blocking is unacceptable, or use `pool.get_with_retry()` for fault-tolerant acquisition
+- **Recommendation**: Use `pool.try_get()` when you need immediate capacity feedback without retrying, or use `pool.get_with_retry()` for fault-tolerant acquisition
 
 ### 11.3 Phase 0 Stubs
 

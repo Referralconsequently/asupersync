@@ -482,10 +482,20 @@ impl<M: ConnectionManager> DbPool<M> {
         }
     }
 
-    /// Try to acquire without blocking. Returns `None` if no connection available.
+    /// Try to acquire without waiting for another borrower to return a
+    /// connection.
+    ///
+    /// Returns `Ok(None)` when the pool is currently at capacity. Other
+    /// acquisition failures are preserved so callers do not mistake a closed
+    /// pool or connection failure for benign contention. The immediate attempt
+    /// may still perform synchronous validation or connection creation work.
     #[must_use]
-    pub fn try_get(&self) -> Option<PooledConnection<'_, M>> {
-        self.get().ok()
+    pub fn try_get(&self) -> Result<Option<PooledConnection<'_, M>>, DbPoolError<M::Error>> {
+        match self.get() {
+            Ok(conn) => Ok(Some(conn)),
+            Err(DbPoolError::Full) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Return a connection to the pool, preserving its original creation time.
@@ -1658,7 +1668,7 @@ mod tests {
         init_test("try_get_success");
         let pool = DbPool::new(TestManager::new(), DbPoolConfig::default());
         let conn = pool.try_get();
-        assert!(conn.is_some());
+        assert!(matches!(conn, Ok(Some(_))));
         crate::test_complete!("try_get_success");
     }
 
@@ -1667,8 +1677,34 @@ mod tests {
         init_test("try_get_when_full");
         let pool = DbPool::new(TestManager::new(), DbPoolConfig::with_max_size(1));
         let _held = pool.get().unwrap();
-        assert!(pool.try_get().is_none());
+        assert!(matches!(pool.try_get(), Ok(None)));
         crate::test_complete!("try_get_when_full");
+    }
+
+    #[test]
+    fn try_get_when_closed_returns_error() {
+        init_test("try_get_when_closed_returns_error");
+        let pool = DbPool::new(TestManager::new(), DbPoolConfig::default());
+        pool.close();
+
+        assert!(matches!(pool.try_get(), Err(DbPoolError::Closed)));
+        crate::test_complete!("try_get_when_closed_returns_error");
+    }
+
+    #[test]
+    fn try_get_preserves_connect_failures() {
+        init_test("try_get_preserves_connect_failures");
+        let manager = TestManager::new();
+        manager.set_fail_connect(true);
+        let pool = DbPool::new(manager, DbPoolConfig::default());
+
+        match pool.try_get() {
+            Err(DbPoolError::Connect(err)) => {
+                assert_eq!(err.to_string(), "connection refused");
+            }
+            other => panic!("expected connect failure, got {other:?}"),
+        }
+        crate::test_complete!("try_get_preserves_connect_failures");
     }
 
     // ================================================================
