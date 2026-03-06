@@ -29,6 +29,7 @@ use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, trace, warn};
 use crate::types::{CancelKind, ObligationId, RegionId, TaskId, Time};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -975,6 +976,524 @@ pub struct AdvancedObservabilityContract {
     pub troubleshooting_dimensions: Vec<TroubleshootingDimensionSpec>,
     /// Compatibility notes for downstream readers.
     pub compatibility_notes: Vec<String>,
+}
+
+/// Tail-latency taxonomy contract version.
+pub const TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION: &str = "runtime-tail-latency-taxonomy-v1";
+
+/// Stable structured-log field defined by the tail-latency taxonomy contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyLogFieldSpec {
+    /// Stable structured-log field key.
+    pub key: String,
+    /// Unit for this field.
+    pub unit: String,
+    /// Whether every tail-latency emission must include the field.
+    pub required: bool,
+    /// Operator-facing meaning of the field.
+    pub meaning: String,
+}
+
+/// Concrete source binding for one tail-latency signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencySignalSpec {
+    /// Stable signal identifier.
+    pub signal_id: String,
+    /// Stable structured-log key emitted by runtime/test harnesses.
+    pub structured_log_key: String,
+    /// Unit for the signal.
+    pub unit: String,
+    /// Classification of the signal source.
+    pub producer_kind: String,
+    /// Fully qualified Rust symbol or explicit contract surface.
+    pub producer_symbol: String,
+    /// Repository-relative file path containing the producer.
+    pub producer_file: String,
+    /// Whether the signal is direct, proxy, or the unknown bucket.
+    pub measurement_class: String,
+    /// Whether the signal belongs to the compact always-on core.
+    pub core: bool,
+    /// Additional interpretation notes.
+    pub notes: String,
+}
+
+/// One term in the canonical tail decomposition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyTermSpec {
+    /// Stable term identifier.
+    pub term_id: String,
+    /// Operator-facing description of the contribution.
+    pub description: String,
+    /// Reserved structured-log key for direct duration attribution.
+    pub direct_duration_key: String,
+    /// Structured-log key describing whether attribution is measured/proxy/unknown.
+    pub attribution_state_key: String,
+    /// Concrete signals that feed the term.
+    pub signals: Vec<TailLatencySignalSpec>,
+}
+
+/// Versioned tail-latency decomposition contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyTaxonomyContract {
+    /// Contract version for artifacts and logs.
+    pub contract_version: String,
+    /// Canonical decomposition equation.
+    pub equation: String,
+    /// Stable field for the total latency under analysis.
+    pub total_latency_key: String,
+    /// Explicit bucket for unmeasured or ambiguous contribution.
+    pub unknown_bucket_key: String,
+    /// Compact always-on field set every emitter must understand.
+    pub required_log_fields: Vec<TailLatencyLogFieldSpec>,
+    /// Decomposition terms in canonical equation order.
+    pub terms: Vec<TailLatencyTermSpec>,
+    /// Required sampling/retention policy notes.
+    pub sampling_policy: Vec<String>,
+    /// Compatibility notes for downstream tools.
+    pub compatibility_notes: Vec<String>,
+}
+
+fn tail_latency_log_field(
+    key: &str,
+    unit: &str,
+    required: bool,
+    meaning: &str,
+) -> TailLatencyLogFieldSpec {
+    TailLatencyLogFieldSpec {
+        key: key.to_string(),
+        unit: unit.to_string(),
+        required,
+        meaning: meaning.to_string(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tail_latency_signal(
+    signal_id: &str,
+    structured_log_key: &str,
+    unit: &str,
+    producer_kind: &str,
+    producer_symbol: &str,
+    producer_file: &str,
+    measurement_class: &str,
+    core: bool,
+    notes: &str,
+) -> TailLatencySignalSpec {
+    TailLatencySignalSpec {
+        signal_id: signal_id.to_string(),
+        structured_log_key: structured_log_key.to_string(),
+        unit: unit.to_string(),
+        producer_kind: producer_kind.to_string(),
+        producer_symbol: producer_symbol.to_string(),
+        producer_file: producer_file.to_string(),
+        measurement_class: measurement_class.to_string(),
+        core,
+        notes: notes.to_string(),
+    }
+}
+
+fn queueing_tail_latency_term() -> TailLatencyTermSpec {
+    TailLatencyTermSpec {
+        term_id: "queueing".to_string(),
+        description:
+            "Backlog before useful work begins, spanning ready queues, waiters, and drain queues."
+                .to_string(),
+        direct_duration_key: "tail.queueing.ns".to_string(),
+        attribution_state_key: "tail.queueing.attribution_state".to_string(),
+        signals: vec![
+            tail_latency_signal(
+                "queueing.ready_queue_depth",
+                "tail.queueing.ready_queue_depth",
+                "count",
+                "snapshot_field",
+                "asupersync::obligation::lyapunov::StateSnapshot::ready_queue_depth",
+                "src/obligation/lyapunov.rs",
+                "proxy_signal",
+                true,
+                "Canonical scheduler backlog proxy used by the three-lane decision contract.",
+            ),
+            tail_latency_signal(
+                "queueing.draining_regions",
+                "tail.queueing.draining_regions",
+                "count",
+                "snapshot_field",
+                "asupersync::obligation::lyapunov::StateSnapshot::draining_regions",
+                "src/obligation/lyapunov.rs",
+                "proxy_signal",
+                true,
+                "Captures cancellation/finalizer drain backlog that elongates queueing tails.",
+            ),
+            tail_latency_signal(
+                "queueing.bulkhead_queue_depth",
+                "tail.queueing.bulkhead_queue_depth",
+                "count",
+                "stats_struct",
+                "asupersync::combinator::bulkhead::BulkheadMetrics::queue_depth",
+                "src/combinator/bulkhead.rs",
+                "proxy_signal",
+                false,
+                "Extended queueing proxy for admission-controlled bulkhead lanes.",
+            ),
+            tail_latency_signal(
+                "queueing.pool_waiters",
+                "tail.queueing.pool_waiters",
+                "count",
+                "stats_struct",
+                "asupersync::sync::pool::PoolStats::waiters",
+                "src/sync/pool.rs",
+                "proxy_signal",
+                false,
+                "Extended backlog proxy for pool acquisition queues.",
+            ),
+        ],
+    }
+}
+
+fn service_tail_latency_term() -> TailLatencyTermSpec {
+    TailLatencyTermSpec {
+        term_id: "service".to_string(),
+        description:
+            "CPU work once the task is scheduled, including poll consumption and budget burn."
+                .to_string(),
+        direct_duration_key: "tail.service.ns".to_string(),
+        attribution_state_key: "tail.service.attribution_state".to_string(),
+        signals: vec![
+            tail_latency_signal(
+                "service.poll_count",
+                "tail.service.poll_count",
+                "count",
+                "snapshot_field",
+                "asupersync::runtime::state::TaskSnapshot::poll_count",
+                "src/runtime/state.rs",
+                "proxy_signal",
+                true,
+                "Canonical always-on service proxy derived from task budget consumption.",
+            ),
+            tail_latency_signal(
+                "service.poll_quota_consumed",
+                "tail.service.poll_quota_consumed",
+                "quota_units",
+                "stats_struct",
+                "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::poll_quota_consumed",
+                "src/observability/resource_accounting.rs",
+                "proxy_signal",
+                true,
+                "Aggregated service-pressure counter for runtime/test emitters.",
+            ),
+            tail_latency_signal(
+                "service.cost_quota_consumed",
+                "tail.service.cost_quota_consumed",
+                "cost_units",
+                "stats_struct",
+                "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::cost_quota_consumed",
+                "src/observability/resource_accounting.rs",
+                "proxy_signal",
+                false,
+                "Extended service-pressure counter for cost-aware workloads.",
+            ),
+        ],
+    }
+}
+
+fn io_or_network_tail_latency_term() -> TailLatencyTermSpec {
+    TailLatencyTermSpec {
+        term_id: "io_or_network".to_string(),
+        description: "Latency spent waiting on or draining reactor/network activity.".to_string(),
+        direct_duration_key: "tail.io_or_network.ns".to_string(),
+        attribution_state_key: "tail.io_or_network.attribution_state".to_string(),
+        signals: vec![
+            tail_latency_signal(
+                "io_or_network.events_received",
+                "tail.io_or_network.events_received",
+                "count",
+                "stats_struct",
+                "asupersync::runtime::io_driver::IoStats::events_received",
+                "src/runtime/io_driver.rs",
+                "proxy_signal",
+                true,
+                "Canonical always-on I/O/network pressure proxy from the reactor driver.",
+            ),
+            tail_latency_signal(
+                "io_or_network.polls",
+                "tail.io_or_network.polls",
+                "count",
+                "stats_struct",
+                "asupersync::runtime::io_driver::IoStats::polls",
+                "src/runtime/io_driver.rs",
+                "proxy_signal",
+                false,
+                "Extended reactor activity proxy for sustained polling pressure.",
+            ),
+            tail_latency_signal(
+                "io_or_network.wakers_dispatched",
+                "tail.io_or_network.wakers_dispatched",
+                "count",
+                "stats_struct",
+                "asupersync::runtime::io_driver::IoStats::wakers_dispatched",
+                "src/runtime/io_driver.rs",
+                "proxy_signal",
+                false,
+                "Extended proxy for wake fan-out caused by readiness events.",
+            ),
+        ],
+    }
+}
+
+fn retries_tail_latency_term() -> TailLatencyTermSpec {
+    TailLatencyTermSpec {
+        term_id: "retries".to_string(),
+        description:
+            "Backoff and reattempt inflation introduced by retry/rate-limit/circuit-breaker control loops."
+                .to_string(),
+        direct_duration_key: "tail.retries.ns".to_string(),
+        attribution_state_key: "tail.retries.attribution_state".to_string(),
+        signals: vec![
+            tail_latency_signal(
+                "retries.total_delay_ns",
+                "tail.retries.total_delay_ns",
+                "ns",
+                "state_field",
+                "asupersync::combinator::retry::RetryState::total_delay",
+                "src/combinator/retry.rs",
+                "direct_duration",
+                true,
+                "Direct retry-delay contribution from the retry combinator.",
+            ),
+            tail_latency_signal(
+                "retries.rate_limit_total_wait_ns",
+                "tail.retries.rate_limit_total_wait_ns",
+                "ns",
+                "stats_struct",
+                "asupersync::combinator::rate_limit::RateLimitMetrics::total_wait_time",
+                "src/combinator/rate_limit.rs",
+                "direct_duration",
+                false,
+                "Extended direct delay when token-bucket admission defers work.",
+            ),
+            tail_latency_signal(
+                "retries.circuit_rejected_total",
+                "tail.retries.circuit_rejected_total",
+                "count",
+                "stats_struct",
+                "asupersync::combinator::circuit_breaker::CircuitBreakerMetrics::total_rejected",
+                "src/combinator/circuit_breaker.rs",
+                "proxy_signal",
+                false,
+                "Extended retry/control-loop pressure proxy when open circuits reject work.",
+            ),
+        ],
+    }
+}
+
+fn synchronization_tail_latency_term() -> TailLatencyTermSpec {
+    TailLatencyTermSpec {
+        term_id: "synchronization".to_string(),
+        description:
+            "Coordination delay from locks, pools, obligations, and cancellation-aware rendezvous."
+                .to_string(),
+        direct_duration_key: "tail.synchronization.ns".to_string(),
+        attribution_state_key: "tail.synchronization.attribution_state".to_string(),
+        signals: vec![
+            tail_latency_signal(
+                "synchronization.lock_wait_ns",
+                "tail.synchronization.lock_wait_ns",
+                "ns",
+                "stats_struct",
+                "asupersync::sync::contended_mutex::LockMetricsSnapshot::wait_ns",
+                "src/sync/contended_mutex.rs",
+                "direct_duration",
+                true,
+                "Canonical direct synchronization delay from contention-instrumented locks.",
+            ),
+            tail_latency_signal(
+                "synchronization.lock_hold_ns",
+                "tail.synchronization.lock_hold_ns",
+                "ns",
+                "stats_struct",
+                "asupersync::sync::contended_mutex::LockMetricsSnapshot::hold_ns",
+                "src/sync/contended_mutex.rs",
+                "proxy_signal",
+                false,
+                "Extended proxy for convoying and long critical sections.",
+            ),
+            tail_latency_signal(
+                "synchronization.pool_total_wait_ns",
+                "tail.synchronization.pool_total_wait_ns",
+                "ns",
+                "stats_struct",
+                "asupersync::sync::pool::PoolStats::total_wait_time",
+                "src/sync/pool.rs",
+                "direct_duration",
+                false,
+                "Extended direct delay from resource-pool acquisition waits.",
+            ),
+            tail_latency_signal(
+                "synchronization.obligations_pending",
+                "tail.synchronization.obligations_pending",
+                "count",
+                "stats_struct",
+                "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::obligations_pending",
+                "src/observability/resource_accounting.rs",
+                "proxy_signal",
+                true,
+                "Captures obligation/cancellation backlog that can extend synchronization tails.",
+            ),
+        ],
+    }
+}
+
+fn allocator_or_cache_tail_latency_term() -> TailLatencyTermSpec {
+    TailLatencyTermSpec {
+        term_id: "allocator_or_cache".to_string(),
+        description:
+            "Allocator and cache-locality pressure observable from region-heap churn and memory high-water marks."
+                .to_string(),
+        direct_duration_key: "tail.allocator_or_cache.ns".to_string(),
+        attribution_state_key: "tail.allocator_or_cache.attribution_state".to_string(),
+        signals: vec![
+            tail_latency_signal(
+                "allocator_or_cache.live_allocations",
+                "tail.allocator_or_cache.live_allocations",
+                "count",
+                "stats_struct",
+                "asupersync::runtime::region_heap::HeapStats::live",
+                "src/runtime/region_heap.rs",
+                "proxy_signal",
+                true,
+                "Canonical allocator-pressure proxy from live region-heap allocations.",
+            ),
+            tail_latency_signal(
+                "allocator_or_cache.bytes_live",
+                "tail.allocator_or_cache.bytes_live",
+                "bytes",
+                "stats_struct",
+                "asupersync::runtime::region_heap::HeapStats::bytes_live",
+                "src/runtime/region_heap.rs",
+                "proxy_signal",
+                false,
+                "Extended allocator-pressure proxy for live retained bytes.",
+            ),
+            tail_latency_signal(
+                "allocator_or_cache.heap_bytes_peak",
+                "tail.allocator_or_cache.heap_bytes_peak",
+                "bytes",
+                "stats_struct",
+                "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::heap_bytes_peak",
+                "src/observability/resource_accounting.rs",
+                "proxy_signal",
+                false,
+                "Extended region-level memory high-water mark for cache/allocator analysis.",
+            ),
+        ],
+    }
+}
+
+fn unknown_tail_latency_term() -> TailLatencyTermSpec {
+    TailLatencyTermSpec {
+        term_id: "unknown".to_string(),
+        description:
+            "Residual latency that remains unattributed after measured terms and proxies are accounted for."
+                .to_string(),
+        direct_duration_key: "tail.unknown.unmeasured_ns".to_string(),
+        attribution_state_key: "tail.unknown.attribution_state".to_string(),
+        signals: vec![tail_latency_signal(
+            "unknown.unmeasured_ns",
+            "tail.unknown.unmeasured_ns",
+            "ns",
+            "contract_field",
+            "asupersync::observability::diagnostics::tail_latency_taxonomy_contract",
+            "src/observability/diagnostics.rs",
+            "unknown_bucket",
+            true,
+            "Must be emitted whenever any term lacks direct attribution so latency does not disappear from evidence bundles.",
+        )],
+    }
+}
+
+/// Returns the tail-latency decomposition contract used by runtime-ascension work.
+#[must_use]
+pub fn tail_latency_taxonomy_contract() -> TailLatencyTaxonomyContract {
+    TailLatencyTaxonomyContract {
+        contract_version: TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION.to_string(),
+        equation: "tail_latency_ns = queueing_ns + service_ns + io_or_network_ns + retries_ns + synchronization_ns + allocator_or_cache_ns + unknown_ns".to_string(),
+        total_latency_key: "tail.total_latency_ns".to_string(),
+        unknown_bucket_key: "tail.unknown.unmeasured_ns".to_string(),
+        required_log_fields: vec![
+            tail_latency_log_field(
+                "tail.contract_version",
+                "schema_id",
+                true,
+                "Versioned tail-latency taxonomy contract identifier.",
+            ),
+            tail_latency_log_field(
+                "tail.total_latency_ns",
+                "ns",
+                true,
+                "Observed end-to-end tail latency for the operation under analysis.",
+            ),
+            tail_latency_log_field(
+                "tail.queueing.ready_queue_depth",
+                "count",
+                true,
+                "Always-on queueing proxy based on runnable backlog.",
+            ),
+            tail_latency_log_field(
+                "tail.service.poll_count",
+                "count",
+                true,
+                "Service-side work proxy based on task poll demand.",
+            ),
+            tail_latency_log_field(
+                "tail.io_or_network.events_received",
+                "count",
+                true,
+                "I/O or network pressure proxy based on reactor event volume.",
+            ),
+            tail_latency_log_field(
+                "tail.retries.total_delay_ns",
+                "ns",
+                true,
+                "Direct retry/backoff delay accumulated by retry combinators.",
+            ),
+            tail_latency_log_field(
+                "tail.synchronization.lock_wait_ns",
+                "ns",
+                true,
+                "Direct synchronization delay from contention-instrumented locks.",
+            ),
+            tail_latency_log_field(
+                "tail.allocator_or_cache.live_allocations",
+                "count",
+                true,
+                "Allocator/cache pressure proxy based on live region-heap allocations.",
+            ),
+            tail_latency_log_field(
+                "tail.unknown.unmeasured_ns",
+                "ns",
+                true,
+                "Residual latency that remains unattributed after measured terms and proxies are recorded.",
+            ),
+        ],
+        terms: vec![
+            queueing_tail_latency_term(),
+            service_tail_latency_term(),
+            io_or_network_tail_latency_term(),
+            retries_tail_latency_term(),
+            synchronization_tail_latency_term(),
+            allocator_or_cache_tail_latency_term(),
+            unknown_tail_latency_term(),
+        ],
+        sampling_policy: vec![
+            "Always emit the required core fields for any tail-latency event, even when extended observability sampling is disabled.".to_string(),
+            "Extended fields may be sampled or emitted only in replay/forensics modes, but they must retain the stable keys defined here.".to_string(),
+            "If a direct-duration field is unavailable for a term, preserve proxy signals and roll the residual duration into tail.unknown.unmeasured_ns.".to_string(),
+        ],
+        compatibility_notes: vec![
+            "Structured-log keys are append-only within a contract version; removals or unit changes require a new contract version.".to_string(),
+            "Proxy signals are not interchangeable with direct-duration fields; emitters must preserve both semantics explicitly.".to_string(),
+            "Unknown contribution is mandatory whenever attribution is incomplete so downstream controllers never treat missing data as zero.".to_string(),
+        ],
+    }
 }
 
 /// Baseline flow/event/outcome tuple consumed by the advanced classifier.
@@ -2125,6 +2644,62 @@ mod tests {
         })
         .expect_err("unknown flow must be rejected");
         assert!(err.contains("unknown flow_id"));
+    }
+
+    #[test]
+    fn tail_latency_taxonomy_contract_has_unique_required_keys() {
+        let contract = tail_latency_taxonomy_contract();
+        let keys: Vec<&str> = contract
+            .required_log_fields
+            .iter()
+            .map(|field| field.key.as_str())
+            .collect();
+        let mut unique_keys = keys.clone();
+        unique_keys.sort_unstable();
+        unique_keys.dedup();
+        assert_eq!(keys.len(), unique_keys.len());
+    }
+
+    #[test]
+    fn tail_latency_taxonomy_contract_includes_unknown_bucket_and_signals() {
+        let contract = tail_latency_taxonomy_contract();
+        assert_eq!(
+            contract.contract_version,
+            TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION
+        );
+        assert_eq!(contract.unknown_bucket_key, "tail.unknown.unmeasured_ns");
+        assert!(
+            contract
+                .required_log_fields
+                .iter()
+                .any(|field| field.key == contract.unknown_bucket_key && field.required)
+        );
+        assert!(contract.terms.iter().any(|term| {
+            term.term_id == "unknown"
+                && term.direct_duration_key == "tail.unknown.unmeasured_ns"
+                && term
+                    .signals
+                    .iter()
+                    .any(|signal| signal.structured_log_key == "tail.unknown.unmeasured_ns")
+        }));
+    }
+
+    #[test]
+    fn tail_latency_taxonomy_contract_core_signals_have_existing_files() {
+        let contract = tail_latency_taxonomy_contract();
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for signal in contract
+            .terms
+            .iter()
+            .flat_map(|term| term.signals.iter())
+            .filter(|signal| signal.core)
+        {
+            assert!(
+                repo_root.join(&signal.producer_file).exists(),
+                "producer file must exist: {}",
+                signal.producer_file
+            );
+        }
     }
 
     #[test]

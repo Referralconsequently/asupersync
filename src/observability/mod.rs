@@ -62,7 +62,9 @@ pub use context::{DiagnosticContext, Span, SpanId};
 pub use diagnostics::{
     BlockReason, CancelReasonInfo, CancellationExplanation, CancellationStep, DeadlockCycle,
     DeadlockSeverity, Diagnostics, DirectionalDeadlockReport, ObligationLeak, Reason,
-    RegionOpenExplanation, TaskBlockedExplanation,
+    RegionOpenExplanation, TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION, TailLatencyLogFieldSpec,
+    TailLatencySignalSpec, TailLatencyTaxonomyContract, TailLatencyTermSpec,
+    TaskBlockedExplanation, tail_latency_taxonomy_contract,
 };
 pub use entry::LogEntry;
 pub use level::LogLevel;
