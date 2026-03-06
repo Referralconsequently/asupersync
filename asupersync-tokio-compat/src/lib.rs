@@ -38,7 +38,9 @@
 //! # Hard Boundary Rules
 //!
 //! 1. The main `asupersync` crate does NOT depend on this crate (one-way dep).
-//! 2. No Tokio runtime is embedded or started by this crate.
+//! 2. Tokio is never the primary executor for Asupersync tasks. The compat
+//!    layer may use private current-thread Tokio runtimes on blocking threads
+//!    when a Tokio-only future must actually be driven.
 //! 3. `Cx` must cross every adapter boundary explicitly.
 //! 4. All spawned tasks are region-owned and cancellation-aware.
 
@@ -121,21 +123,21 @@ impl AdapterConfig {
 
     /// Set the cancellation mode.
     #[must_use]
-    pub fn with_cancellation_mode(mut self, mode: CancellationMode) -> Self {
+    pub const fn with_cancellation_mode(mut self, mode: CancellationMode) -> Self {
         self.cancellation_mode = mode;
         self
     }
 
     /// Set the fallback timeout for `TimeoutFallback` mode.
     #[must_use]
-    pub fn with_fallback_timeout(mut self, timeout: std::time::Duration) -> Self {
+    pub const fn with_fallback_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.fallback_timeout = Some(timeout);
         self
     }
 
     /// Set the minimum budget for proceeding with an adapter call.
     #[must_use]
-    pub fn with_min_budget(mut self, budget: u64) -> Self {
+    pub const fn with_min_budget(mut self, budget: u64) -> Self {
         self.min_budget_for_call = budget;
         self
     }

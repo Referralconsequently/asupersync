@@ -1,16 +1,18 @@
 //! Tokio runtime context bridge.
 //!
-//! Provides [`with_tokio_context`], the keystone function that satisfies
-//! `tokio::runtime::Handle::current()` for Tokio-locked crates while
-//! keeping Asupersync as the actual executor.
+//! Provides [`with_tokio_context`], the keystone function that drives
+//! Tokio-locked futures on a private Tokio runtime while keeping Asupersync
+//! as the outer orchestration runtime.
 //!
 //! # Problem
 //!
 //! Crates like `reqwest`, `aws-sdk-s3`, and `sqlx` internally call
 //! `tokio::runtime::Handle::current()`. Without a Tokio runtime context
-//! on the thread-local, this panics. This module creates a minimal Tokio
-//! `Runtime` (using only the `rt` feature — no multi-thread, no net, no fs)
-//! purely to install a valid `Handle` into thread-local storage.
+//! on the thread-local, this panics. Merely entering a Tokio handle context
+//! is not sufficient though: futures that use `tokio::spawn`, Tokio timers,
+//! or other Tokio driver-backed facilities need an actual Tokio runtime to
+//! poll them. This module therefore runs such futures inside a cached private
+//! current-thread Tokio runtime on an Asupersync blocking thread.
 //!
 //! # Example
 //!
@@ -54,15 +56,15 @@ fn get_or_create_tokio_rt() -> Arc<tokio::runtime::Runtime> {
 /// Execute an async closure inside a Tokio runtime context.
 ///
 /// This function:
-/// 1. Creates (or reuses) a minimal Tokio `Runtime` with a current-thread
-///    scheduler — just enough for `Handle::current()` to succeed.
-/// 2. Enters the Tokio runtime context (installs the `Handle` in TLS).
-/// 3. Runs the closure's future, checking Asupersync cancellation.
-/// 4. Drops the enter guard on completion.
-///
-/// The Tokio runtime is **not** driving I/O or timers for Asupersync.
-/// It exists solely to satisfy `Handle::current()` checks in Tokio-locked
-/// libraries.
+/// 1. Uses the Asupersync blocking pool to avoid blocking the caller's async
+///    thread while the Tokio runtime drives the future.
+/// 2. Creates (or reuses) a private current-thread Tokio runtime on that
+///    blocking thread.
+/// 3. Creates the closure's future inside `Runtime::block_on`, so both
+///    future construction and polling happen with a valid Tokio context.
+/// 4. Runs the closure's future with `Runtime::block_on`, which also drives
+///    Tokio tasks, timers, and other driver-backed facilities used by the
+///    wrapped future.
 ///
 /// # Returns
 ///
@@ -77,29 +79,31 @@ fn get_or_create_tokio_rt() -> Arc<tokio::runtime::Runtime> {
 #[allow(clippy::future_not_send)] // EnterGuard is !Send by design
 pub async fn with_tokio_context<F, Fut, T>(cx: &asupersync::Cx, f: F) -> Option<T>
 where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = T>,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = T> + 'static,
+    T: Send + 'static,
 {
     // Bail early if already cancelled.
     if cx.is_cancel_requested() {
         return None;
     }
 
-    let rt = get_or_create_tokio_rt();
-
-    // Enter the Tokio context so Handle::current() works on this thread.
-    let _guard = rt.enter();
-
-    // Create the user future while inside the Tokio context, so any
-    // client construction that calls Handle::current() succeeds.
-    let value = f().await;
-
-    // Check cancellation after completion.
-    if cx.is_cancel_requested() {
-        return None;
+    match crate::blocking::block_on_sync(
+        cx,
+        move || {
+            let rt = get_or_create_tokio_rt();
+            rt.block_on(async move { f().await })
+        },
+        crate::CancellationMode::Strict,
+    )
+    .await
+    {
+        crate::blocking::BlockingOutcome::Ok(value) => Some(value),
+        crate::blocking::BlockingOutcome::Cancelled => None,
+        crate::blocking::BlockingOutcome::Panicked(message) => {
+            panic!("Tokio compatibility future panicked: {message}")
+        }
     }
-
-    Some(value)
 }
 
 /// Execute a synchronous closure inside a Tokio runtime context.
@@ -174,14 +178,29 @@ mod tests {
     }
 
     #[test]
-    fn runtime_is_reused_on_same_thread() {
-        // Call twice; the second should reuse the cached runtime.
-        run(async {
+    fn tokio_spawn_runs_inside_context() {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
             let cx = asupersync::Cx::for_testing();
-            let a = with_tokio_context(&cx, || async { 1 }).await;
-            let b = with_tokio_context(&cx, || async { 2 }).await;
-            assert_eq!(a, Some(1));
-            assert_eq!(b, Some(2));
+            let result = run(with_tokio_context(&cx, || async {
+                tokio::spawn(async { 7 })
+                    .await
+                    .expect("Tokio task should join successfully")
+            }));
+            tx.send(result).expect("channel send must succeed");
         });
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Tokio-compat future should not stall");
+        assert_eq!(result, Some(7));
+    }
+
+    #[test]
+    fn runtime_is_reused_on_same_thread() {
+        let first = with_tokio_context_sync(get_or_create_tokio_rt);
+        let second = with_tokio_context_sync(get_or_create_tokio_rt);
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }

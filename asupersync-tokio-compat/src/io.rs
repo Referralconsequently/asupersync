@@ -46,17 +46,17 @@ pin_project! {
 
 impl<T> TokioIo<T> {
     /// Wrap an Asupersync I/O type for Tokio/hyper compatibility.
-    pub fn new(inner: T) -> Self {
+    pub const fn new(inner: T) -> Self {
         Self { inner }
     }
 
     /// Get a reference to the inner I/O type.
-    pub fn inner(&self) -> &T {
+    pub const fn inner(&self) -> &T {
         &self.inner
     }
 
     /// Get a mutable reference to the inner I/O type.
-    pub fn inner_mut(&mut self) -> &mut T {
+    pub const fn inner_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 
@@ -88,17 +88,17 @@ pin_project! {
 
 impl<T> AsupersyncIo<T> {
     /// Wrap a Tokio I/O type for Asupersync compatibility.
-    pub fn new(inner: T) -> Self {
+    pub const fn new(inner: T) -> Self {
         Self { inner }
     }
 
     /// Get a reference to the inner I/O type.
-    pub fn inner(&self) -> &T {
+    pub const fn inner(&self) -> &T {
         &self.inner
     }
 
     /// Get a mutable reference to the inner I/O type.
-    pub fn inner_mut(&mut self) -> &mut T {
+    pub const fn inner_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 

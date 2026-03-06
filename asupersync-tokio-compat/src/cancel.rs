@@ -51,7 +51,7 @@ pub enum CancelResult<T> {
 
 impl<F: Future> CancelAware<F> {
     /// Create a new cancel-aware wrapper around a future.
-    pub fn new(future: F, mode: CancellationMode) -> Self {
+    pub const fn new(future: F, mode: CancellationMode) -> Self {
         Self {
             future,
             cancel_requested: false,

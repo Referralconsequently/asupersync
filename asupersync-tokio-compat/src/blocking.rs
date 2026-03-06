@@ -63,19 +63,19 @@ pub enum BlockingOutcome<T> {
 impl<T> BlockingOutcome<T> {
     /// Returns `true` if the outcome is `Ok`.
     #[must_use]
-    pub fn is_ok(&self) -> bool {
+    pub const fn is_ok(&self) -> bool {
         matches!(self, Self::Ok(_))
     }
 
     /// Returns `true` if the outcome is `Cancelled`.
     #[must_use]
-    pub fn is_cancelled(&self) -> bool {
+    pub const fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled)
     }
 
     /// Returns `true` if the outcome is `Panicked`.
     #[must_use]
-    pub fn is_panicked(&self) -> bool {
+    pub const fn is_panicked(&self) -> bool {
         matches!(self, Self::Panicked(_))
     }
 
@@ -245,20 +245,21 @@ where
 
 /// Extract a human-readable message from a panic payload.
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_string()
-    }
+    payload.downcast_ref::<&str>().map_or_else(
+        || {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "unknown panic".to_string())
+        },
+        |s| (*s).to_string(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
@@ -269,8 +270,8 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
-    /// Minimal block_on for tests without a full runtime.
-    fn block_on<F: std::future::Future>(mut fut: F) -> F::Output {
+    /// Minimal `block_on` for tests without a full runtime.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut fut = std::pin::pin!(fut);
@@ -482,8 +483,6 @@ mod tests {
     #[test]
     fn blocking_closure_runs_on_different_thread_when_no_pool() {
         let cx = asupersync::Cx::for_testing();
-        let main_thread = std::thread::current().id();
-
         let outcome = block_on(block_on_sync(
             &cx,
             move || std::thread::current().id(),
