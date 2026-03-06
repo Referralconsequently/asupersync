@@ -21,7 +21,7 @@ asupersync = { version = "0.2.7", path = ".." }
 
 # Tokio sync primitives and I/O traits — does NOT require a running Tokio runtime.
 # Used for trait implementations and type bridging.
-tokio = { version = "1", default-features = false, features = ["sync"] }
+tokio = { version = "1", default-features = false, features = ["sync", "rt"] }
 
 # hyper v1 runtime traits (executor, timer, I/O).
 hyper = { version = "1", optional = true }

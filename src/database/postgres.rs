@@ -42,12 +42,15 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
+#[cfg(feature = "tls")]
+use crate::tls::{TlsConnectorBuilder, TlsStream};
 use crate::types::{CancelReason, Outcome};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 // ============================================================================
 // Error Types
@@ -92,6 +95,8 @@ pub enum PgError {
     InvalidUrl(String),
     /// TLS required but not available.
     TlsRequired,
+    /// TLS handshake or configuration error.
+    Tls(String),
     /// Transaction already finished.
     TransactionFinished,
     /// Unsupported authentication method.
@@ -144,7 +149,7 @@ impl PgError {
     pub fn is_connection_error(&self) -> bool {
         matches!(
             self,
-            Self::Io(_) | Self::ConnectionClosed | Self::TlsRequired
+            Self::Io(_) | Self::ConnectionClosed | Self::TlsRequired | Self::Tls(_)
         ) || self.code().is_some_and(|c| c.len() >= 2 && &c[..2] == "08")
     }
 
@@ -219,6 +224,7 @@ impl fmt::Display for PgError {
             ),
             Self::InvalidUrl(msg) => write!(f, "Invalid PostgreSQL URL: {msg}"),
             Self::TlsRequired => write!(f, "TLS required but not available"),
+            Self::Tls(msg) => write!(f, "PostgreSQL TLS error: {msg}"),
             Self::TransactionFinished => write!(f, "Transaction already finished"),
             Self::UnsupportedAuth(method) => {
                 write!(f, "Unsupported authentication method: {method}")
@@ -1539,15 +1545,47 @@ impl PgConnectOptions {
                 .map_or((host_port, 5432), |(h, p)| (h, p.parse().unwrap_or(5432)))
         };
 
+        // Parse query parameters
+        let mut ssl_mode = SslMode::Prefer;
+        let mut application_name = None;
+        let mut connect_timeout = None;
+        for kv in params.split('&').filter(|s| !s.is_empty()) {
+            if let Some((key, value)) = kv.split_once('=') {
+                match key {
+                    "sslmode" => {
+                        ssl_mode = match value {
+                            "disable" => SslMode::Disable,
+                            "prefer" => SslMode::Prefer,
+                            "require" => SslMode::Require,
+                            _ => {
+                                return Err(PgError::InvalidUrl(format!(
+                                    "unknown sslmode: {value}"
+                                )));
+                            }
+                        };
+                    }
+                    "application_name" => {
+                        application_name = Some(url_percent_decode(value));
+                    }
+                    "connect_timeout" => {
+                        if let Ok(secs) = value.parse::<u64>() {
+                            connect_timeout = Some(std::time::Duration::from_secs(secs));
+                        }
+                    }
+                    _ => {} // ignore unknown parameters
+                }
+            }
+        }
+
         Ok(Self {
             host: url_percent_decode(host),
             port,
             database: url_percent_decode(database),
             user: url_percent_decode(&user),
             password: password.as_deref().map(url_percent_decode),
-            application_name: None,
-            connect_timeout: None,
-            ssl_mode: SslMode::Prefer,
+            application_name,
+            connect_timeout,
+            ssl_mode,
         })
     }
 }
@@ -1581,13 +1619,102 @@ fn hex_digit(b: u8) -> Option<u8> {
 }
 
 // ============================================================================
+// PostgreSQL Stream (plain or TLS)
+// ============================================================================
+
+/// Transport stream that may be plain TCP or TLS-encrypted.
+enum PgStream {
+    /// Plain TCP connection.
+    Plain(TcpStream),
+    /// TLS-encrypted TCP connection.
+    #[cfg(feature = "tls")]
+    Tls(TlsStream<TcpStream>),
+}
+
+impl PgStream {
+    /// Shut down the underlying transport.
+    fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+        match self {
+            Self::Plain(s) => s.shutdown(how),
+            #[cfg(feature = "tls")]
+            Self::Tls(_) => Ok(()), // TLS stream dropped on connection close
+        }
+    }
+}
+
+impl AsyncRead for PgStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        // SAFETY: we only project to one field at a time and both variants are Unpin.
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for PgStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(s) => s.is_write_vectored(),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => s.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+// ============================================================================
 // PostgreSQL Connection
 // ============================================================================
 
 /// Inner connection state.
 struct PgConnectionInner {
-    /// TCP stream to the server.
-    stream: TcpStream,
+    /// Transport stream (plain TCP or TLS).
+    stream: PgStream,
     /// Read buffer for incoming messages.
     read_buf: Vec<u8>,
     /// Server process ID.
@@ -1641,6 +1768,31 @@ fn cancelled_reason(cx: &Cx) -> CancelReason {
 }
 
 impl PgConnection {
+    async fn connect_tcp_with<F, Fut>(
+        options: &PgConnectOptions,
+        connect: F,
+    ) -> Result<TcpStream, PgError>
+    where
+        F: FnOnce(String, Option<std::time::Duration>) -> Fut,
+        Fut: std::future::Future<Output = io::Result<TcpStream>>,
+    {
+        let addr = format!("{}:{}", options.host, options.port);
+        connect(addr, options.connect_timeout)
+            .await
+            .map_err(PgError::Io)
+    }
+
+    async fn connect_tcp(options: &PgConnectOptions) -> Result<TcpStream, PgError> {
+        Self::connect_tcp_with(options, |addr, timeout| async move {
+            if let Some(timeout) = timeout {
+                TcpStream::connect_timeout(addr, timeout).await
+            } else {
+                TcpStream::connect(addr).await
+            }
+        })
+        .await
+    }
+
     /// Connect to a PostgreSQL database.
     ///
     /// # Cancellation
@@ -1668,11 +1820,38 @@ impl PgConnection {
             return Outcome::Cancelled(cancelled_reason(cx));
         }
 
-        // Connect to the server
-        let addr = format!("{}:{}", options.host, options.port);
-        let stream = match TcpStream::connect(addr).await {
-            Ok(s) => s,
-            Err(e) => return Outcome::Err(PgError::Io(e)),
+        let tcp_stream = match Self::connect_tcp(&options).await {
+            Ok(stream) => stream,
+            Err(e) => return Outcome::Err(e),
+        };
+
+        // TLS negotiation based on ssl_mode
+        let stream = match options.ssl_mode {
+            SslMode::Disable => PgStream::Plain(tcp_stream),
+            #[cfg(feature = "tls")]
+            SslMode::Prefer | SslMode::Require => {
+                match Self::negotiate_tls(tcp_stream, &options).await {
+                    Ok(s) => s,
+                    Err(e) if options.ssl_mode == SslMode::Require => {
+                        return Outcome::Err(e);
+                    }
+                    Err(_) => {
+                        // Prefer mode: TLS failed, reconnect without TLS.
+                        match Self::connect_tcp(&options).await {
+                            Ok(stream) => PgStream::Plain(stream),
+                            Err(e) => return Outcome::Err(e),
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "tls"))]
+            SslMode::Require => {
+                return Outcome::Err(PgError::Tls(
+                    "TLS required but the `tls` feature is not enabled".into(),
+                ));
+            }
+            #[cfg(not(feature = "tls"))]
+            SslMode::Prefer => PgStream::Plain(tcp_stream),
         };
 
         let mut conn = Self {
@@ -1724,6 +1903,89 @@ impl PgConnection {
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
         self.inner.closed = true;
         Outcome::Cancelled(cancelled_reason(cx))
+    }
+
+    /// Negotiate TLS with the PostgreSQL server.
+    ///
+    /// Sends the 8-byte SSLRequest message and reads a single-byte response:
+    /// - `S`: server accepts TLS — upgrade via `TlsConnector`.
+    /// - `N`: server refuses TLS.
+    #[cfg(feature = "tls")]
+    async fn negotiate_tls(
+        mut tcp: TcpStream,
+        options: &PgConnectOptions,
+    ) -> Result<PgStream, PgError> {
+        // SSLRequest message: 8 bytes total
+        //   4 bytes: message length (8, including self)
+        //   4 bytes: SSL request code 80877103
+        let ssl_request: [u8; 8] = {
+            let len = 8i32.to_be_bytes();
+            let code = 80_877_103i32.to_be_bytes();
+            [
+                len[0], len[1], len[2], len[3], code[0], code[1], code[2], code[3],
+            ]
+        };
+
+        // Write SSLRequest
+        {
+            let mut pos = 0;
+            while pos < ssl_request.len() {
+                let written = std::future::poll_fn(|cx| {
+                    Pin::new(&mut tcp).poll_write(cx, &ssl_request[pos..])
+                })
+                .await
+                .map_err(PgError::Io)?;
+                if written == 0 {
+                    return Err(PgError::Io(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write SSLRequest",
+                    )));
+                }
+                pos += written;
+            }
+        }
+
+        // Read single-byte response
+        let mut response = [0u8; 1];
+        {
+            let mut read_buf = ReadBuf::new(&mut response);
+            std::future::poll_fn(|cx| Pin::new(&mut tcp).poll_read(cx, &mut read_buf))
+                .await
+                .map_err(PgError::Io)?;
+            if read_buf.filled().is_empty() {
+                return Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "server closed connection during TLS negotiation",
+                )));
+            }
+        }
+
+        match response[0] {
+            b'S' => {
+                // Server accepts TLS — perform handshake.
+                let connector = TlsConnectorBuilder::new()
+                    .with_webpki_roots()
+                    .build()
+                    .map_err(|e| PgError::Tls(e.to_string()))?;
+                let tls_stream = connector
+                    .connect(&options.host, tcp)
+                    .await
+                    .map_err(|e| PgError::Tls(e.to_string()))?;
+                Ok(PgStream::Tls(tls_stream))
+            }
+            b'N' => {
+                // Server refuses TLS.
+                if options.ssl_mode == SslMode::Require {
+                    Err(PgError::TlsRequired)
+                } else {
+                    // Prefer mode: fall back to plain.
+                    Ok(PgStream::Plain(tcp))
+                }
+            }
+            other => Err(PgError::Protocol(format!(
+                "unexpected TLS negotiation response: 0x{other:02X}"
+            ))),
+        }
     }
 
     /// Send the startup message.
@@ -3447,7 +3709,7 @@ mod tests {
         let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
         PgConnection {
             inner: PgConnectionInner {
-                stream,
+                stream: PgStream::Plain(stream),
                 read_buf: Vec::new(),
                 process_id: 0,
                 secret_key: 0,
@@ -3471,7 +3733,7 @@ mod tests {
         (
             PgConnection {
                 inner: PgConnectionInner {
-                    stream,
+                    stream: PgStream::Plain(stream),
                     read_buf: Vec::new(),
                     process_id: 0,
                     secret_key: 0,
@@ -5029,6 +5291,137 @@ mod tests {
         assert_user_cancelled(run(conn.query_prepared(&cx, &stmt, &params)));
         assert_user_cancelled(run(conn.execute_prepared(&cx, &stmt, &params)));
         assert_user_cancelled(run(conn.close_statement(&cx, &stmt)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #18: TLS support + sslmode URL parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_sslmode_disable() {
+        let opts =
+            PgConnectOptions::parse("postgres://user:pass@localhost/db?sslmode=disable").unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Disable);
+    }
+
+    #[test]
+    fn parse_sslmode_prefer() {
+        let opts =
+            PgConnectOptions::parse("postgres://user:pass@localhost/db?sslmode=prefer").unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Prefer);
+    }
+
+    #[test]
+    fn parse_sslmode_require() {
+        let opts =
+            PgConnectOptions::parse("postgres://user:pass@localhost/db?sslmode=require").unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Require);
+    }
+
+    #[test]
+    fn parse_sslmode_unknown_is_error() {
+        let result = PgConnectOptions::parse("postgres://user@localhost/db?sslmode=magic");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_sslmode_default_is_prefer() {
+        let opts = PgConnectOptions::parse("postgres://user@localhost/db").unwrap();
+        assert_eq!(opts.ssl_mode, SslMode::Prefer);
+    }
+
+    #[test]
+    fn parse_application_name_from_url() {
+        let opts = PgConnectOptions::parse(
+            "postgres://user@localhost/db?application_name=myapp&sslmode=disable",
+        )
+        .unwrap();
+        assert_eq!(opts.application_name.as_deref(), Some("myapp"));
+        assert_eq!(opts.ssl_mode, SslMode::Disable);
+    }
+
+    #[test]
+    fn parse_connect_timeout_from_url() {
+        let opts =
+            PgConnectOptions::parse("postgres://user@localhost/db?connect_timeout=30").unwrap();
+        assert_eq!(
+            opts.connect_timeout,
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn connect_tcp_with_passes_configured_connect_timeout() {
+        let opts =
+            PgConnectOptions::parse("postgres://user@localhost/db?connect_timeout=30").unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_for_connect = std::sync::Arc::clone(&seen);
+
+        let result = run(PgConnection::connect_tcp_with(
+            &opts,
+            move |addr, timeout| {
+                let seen = std::sync::Arc::clone(&seen_for_connect);
+                async move {
+                    *seen.lock().expect("lock poisoned") = Some((addr, timeout));
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "synthetic timeout"))
+                }
+            },
+        ));
+
+        match result {
+            Err(PgError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::TimedOut),
+            other => panic!("expected IO timeout, got {other:?}"),
+        }
+
+        let seen = seen.lock().expect("lock poisoned");
+        assert_eq!(
+            seen.as_ref(),
+            Some(&(
+                "localhost:5432".to_string(),
+                Some(std::time::Duration::from_secs(30))
+            ))
+        );
+    }
+
+    #[test]
+    fn connect_tcp_with_omits_timeout_when_not_configured() {
+        let opts = PgConnectOptions::parse("postgres://user@localhost/db").unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_for_connect = std::sync::Arc::clone(&seen);
+
+        let result = run(PgConnection::connect_tcp_with(
+            &opts,
+            move |addr, timeout| {
+                let seen = std::sync::Arc::clone(&seen_for_connect);
+                async move {
+                    *seen.lock().expect("lock poisoned") = Some((addr, timeout));
+                    Err(io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        "synthetic refusal",
+                    ))
+                }
+            },
+        ));
+
+        match result {
+            Err(PgError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused),
+            other => panic!("expected IO refusal, got {other:?}"),
+        }
+
+        let seen = seen.lock().expect("lock poisoned");
+        assert_eq!(seen.as_ref(), Some(&("localhost:5432".to_string(), None)));
+    }
+
+    #[test]
+    fn tls_error_is_connection_error() {
+        let err = PgError::Tls("handshake failed".into());
+        assert!(err.is_connection_error());
+    }
+
+    #[test]
+    fn tls_error_display() {
+        let err = PgError::Tls("cert expired".into());
+        assert!(err.to_string().contains("cert expired"));
     }
 
     #[test]

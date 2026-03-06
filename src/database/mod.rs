@@ -20,6 +20,11 @@
 pub mod pool;
 pub mod transaction;
 
+pub use pool::{
+    AsyncConnectionManager, AsyncDbPool, AsyncPooledConnection, ConnectionManager, DbPool,
+    DbPoolConfig, DbPoolError, DbPoolStats, PooledConnection,
+};
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 

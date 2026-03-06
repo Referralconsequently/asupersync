@@ -2290,7 +2290,10 @@ worker_threads = 16
 
         runtime.block_on(async {
             let handle = Runtime::current_handle();
-            assert!(handle.is_some(), "current_handle should be Some inside block_on");
+            assert!(
+                handle.is_some(),
+                "current_handle should be Some inside block_on"
+            );
         });
     }
 
