@@ -67,6 +67,25 @@ echo ""
 EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
+RUN_FAILURE_CLASS="none"
+
+rch_attempt_went_local() {
+    local log_path=""
+    for log_path in "$@"; do
+        [[ -f "${log_path}" ]] || continue
+        if grep -Eq '\[RCH\] local \(|falling back to local' "${log_path}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+update_run_failure_class() {
+    local failure_class="${1:-}"
+    if [[ "${failure_class}" == "rch_local_fallback" ]]; then
+        RUN_FAILURE_CLASS="rch_local_fallback"
+    fi
+}
 
 run_verification_slice() {
     local run_label="$1"
@@ -75,6 +94,8 @@ run_verification_slice() {
     local attempt_log=""
     local rc=0
     local target_dir="/tmp/rch-doctor-remediation-verification-${TIMESTAMP}-${run_label}"
+    local list_log=""
+    local list_rc=0
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         local -a run_cmd=(
@@ -90,6 +111,12 @@ run_verification_slice() {
             rc=$?
         fi
 
+        if rch_attempt_went_local "${attempt_log}"; then
+            echo "  ERROR: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local execution; rejecting captured test output"
+            rc=86
+            update_run_failure_class "rch_local_fallback"
+        fi
+
         if [[ ${rc} -eq 0 ]] && grep -q "test result: ok" "${attempt_log}"; then
             cp "${attempt_log}" "${run_log}"
             sed -nE 's/^test ([[:alnum:]_:]*verification_[[:alnum:]_]+) \.\.\. ok$/\1/p' "${run_log}" \
@@ -97,14 +124,31 @@ run_verification_slice() {
                 | sort -u > "${run_pass_list}"
             if [[ ! -s "${run_pass_list}" ]]; then
                 echo "  WARN: ${run_label} contained no explicit test-name lines; deriving from --list output"
-                local list_log="${attempt_log%.log}.list.log"
                 local -a list_cmd=(
                     env "CARGO_TARGET_DIR=${target_dir}" \
                     cargo test -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --list
                 )
+                list_log="${attempt_log%.log}.list.log"
                 if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${list_cmd[@]}" >"${list_log}" 2>&1; then
+                    list_rc=0
+                else
+                    list_rc=$?
+                fi
+                if rch_attempt_went_local "${list_log}"; then
+                    echo "  ERROR: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} used local fallback during --list derivation; rejecting captured output"
+                    list_rc=86
+                    update_run_failure_class "rch_local_fallback"
+                fi
+                if [[ ${list_rc} -eq 0 ]]; then
                     sed -nE 's/^(verification_[[:alnum:]_]+): test$/\1/p' "${list_log}" \
                         | sort -u > "${run_pass_list}"
+                else
+                    : > "${run_pass_list}"
+                    if [[ ${attempt} -lt ${RCH_RETRY_ATTEMPTS} ]]; then
+                        echo "  WARN: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} could not derive test names safely (exit=${list_rc}); retrying"
+                        sleep 1
+                    fi
+                    continue
                 fi
             fi
             return 0
@@ -180,6 +224,8 @@ FAILURE_CLASS="test_or_pattern_failure"
 if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
     SUITE_STATUS="passed"
     FAILURE_CLASS="none"
+elif [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" ]]; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 TESTS_PASSED=0

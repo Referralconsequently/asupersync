@@ -59,6 +59,25 @@ echo ""
 EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
+RUN_FAILURE_CLASS="none"
+
+rch_attempt_went_local() {
+    local log_path=""
+    for log_path in "$@"; do
+        [[ -f "${log_path}" ]] || continue
+        if grep -Eq '\[RCH\] local \(|falling back to local' "${log_path}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+update_run_failure_class() {
+    local failure_class="${1:-}"
+    if [[ "${failure_class}" == "rch_local_fallback" ]]; then
+        RUN_FAILURE_CLASS="rch_local_fallback"
+    fi
+}
 
 run_export_call() {
     local run_label="$1"
@@ -66,6 +85,7 @@ run_export_call() {
     local run_json="$3"
     local rc=0
     local attempt_log=""
+    local fell_back_local=0
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         local target_dir="/tmp/rch-doctor-advanced-provenance-${TIMESTAMP}-${run_label}-attempt${attempt}"
@@ -87,15 +107,25 @@ run_export_call() {
             rc=$?
         fi
 
+        fell_back_local=0
+        if rch_attempt_went_local "${attempt_log}"; then
+            echo "  ERROR: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local execution; rejecting captured payload"
+            fell_back_local=1
+            rc=86
+            update_run_failure_class "rch_local_fallback"
+        fi
+
         local payload=""
         payload="$(grep -E '"schema_version"[[:space:]]*:[[:space:]]*"doctor-report-export-v1"' "${attempt_log}" | tail -n1 || true)"
         if [[ -n "${payload}" ]] && printf '%s\n' "${payload}" | jq -e . >/dev/null 2>&1; then
-            cp "${attempt_log}" "${run_log}"
-            printf '%s\n' "${payload}" > "${run_json}"
-            if [[ ${rc} -ne 0 ]]; then
-                echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
+            if [[ ${fell_back_local} -eq 0 ]]; then
+                cp "${attempt_log}" "${run_log}"
+                printf '%s\n' "${payload}" > "${run_json}"
+                if [[ ${rc} -ne 0 ]]; then
+                    echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
+                fi
+                return 0
             fi
-            return 0
         fi
 
         if [[ ${attempt} -lt ${RCH_RETRY_ATTEMPTS} ]]; then
@@ -186,6 +216,8 @@ FAILURE_CLASS="test_or_pattern_failure"
 if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
     SUITE_STATUS="passed"
     FAILURE_CLASS="none"
+elif [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" ]]; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 TESTS_PASSED=0

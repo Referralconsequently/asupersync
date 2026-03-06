@@ -69,6 +69,25 @@ echo ""
 EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
+RUN_FAILURE_CLASS="none"
+
+rch_attempt_went_local() {
+    local log_path=""
+    for log_path in "$@"; do
+        [[ -f "${log_path}" ]] || continue
+        if grep -Eq '\[RCH\] local \(|falling back to local' "${log_path}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+update_run_failure_class() {
+    local failure_class="${1:-}"
+    if [[ "${failure_class}" == "rch_local_fallback" ]]; then
+        RUN_FAILURE_CLASS="rch_local_fallback"
+    fi
+}
 
 run_failure_slice() {
     local run_label="$1"
@@ -90,6 +109,12 @@ run_failure_slice() {
             rc=0
         else
             rc=$?
+        fi
+
+        if rch_attempt_went_local "${attempt_log}"; then
+            echo "  ERROR: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local execution; rejecting captured test output"
+            rc=86
+            update_run_failure_class "rch_local_fallback"
         fi
 
         if [[ ${rc} -eq 0 ]] && grep -q "test result: ok" "${attempt_log}"; then
@@ -169,6 +194,8 @@ FAILURE_CLASS="test_or_pattern_failure"
 if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
     SUITE_STATUS="passed"
     FAILURE_CLASS="none"
+elif [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" ]]; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 TESTS_PASSED=0
