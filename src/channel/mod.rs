@@ -48,6 +48,10 @@ pub mod partition;
 pub mod session;
 pub mod watch;
 
+#[cfg(test)]
+#[path = "deadlock_test.rs"]
+mod deadlock_test;
+
 // Re-export commonly used types from mpsc (the default channel)
 pub use mpsc::{Receiver, SendPermit, Sender, channel};
 pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};
