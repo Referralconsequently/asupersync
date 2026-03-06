@@ -11,6 +11,7 @@ use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
 use crate::tracing_compat::error;
+use crate::{cx::Cx, types::Time};
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -223,7 +224,7 @@ where
                 Err(ref e) if is_transient_accept_error(e) => {
                     transient_accept_streak = transient_accept_streak.saturating_add(1);
                     crate::time::sleep(
-                        crate::time::wall_now(),
+                        transient_accept_now(),
                         transient_accept_backoff_delay(transient_accept_streak),
                     )
                     .await;
@@ -374,6 +375,12 @@ fn transient_accept_backoff_delay(streak: u32) -> Duration {
     TRANSIENT_ACCEPT_BACKOFF_BASE
         .saturating_mul(1u32 << exponent)
         .min(TRANSIENT_ACCEPT_BACKOFF_CAP)
+}
+
+fn transient_accept_now() -> Time {
+    Cx::current()
+        .and_then(|current| current.timer_driver())
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
 #[cfg(test)]
