@@ -156,7 +156,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -938,12 +938,7 @@ impl Runtime {
     ) -> Result<Self, Error> {
         config.normalize();
         let (inner, workers) =
-            RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source).map_err(
-                |e| {
-                    Error::new(crate::error::ErrorKind::Internal)
-                        .with_message(format!("runtime init: {e}"))
-                },
-            )?;
+            RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source);
         let inner = Arc::new(inner);
         RuntimeInner::spawn_worker_threads(&inner, workers).map_err(|e| {
             Error::new(crate::error::ErrorKind::Internal).with_message(format!("runtime init: {e}"))
@@ -954,9 +949,7 @@ impl Runtime {
     /// Returns a handle that can spawn tasks from outside the runtime.
     #[must_use]
     pub fn handle(&self) -> RuntimeHandle {
-        RuntimeHandle {
-            inner: Arc::clone(&self.inner),
-        }
+        RuntimeHandle::strong(Arc::clone(&self.inner))
     }
 
     /// Run a future to completion on the current thread.
@@ -1051,11 +1044,50 @@ impl Runtime {
 /// let result = runtime.block_on(join);
 /// ```
 #[derive(Clone)]
+enum RuntimeHandleRef {
+    Strong(Arc<RuntimeInner>),
+    Weak(Weak<RuntimeInner>),
+}
+
+/// Handle for spawning tasks onto a runtime from outside async context.
+///
+/// Cheap to clone (shared handle backing). Use [`Runtime::handle`] to obtain one.
+///
+/// ```ignore
+/// let runtime = RuntimeBuilder::new().build()?;
+/// let handle = runtime.handle();
+///
+/// // Spawn from any thread.
+/// let join = handle.spawn(async { compute_result().await });
+/// let result = runtime.block_on(join);
+/// ```
+#[derive(Clone)]
 pub struct RuntimeHandle {
-    inner: Arc<RuntimeInner>,
+    inner: RuntimeHandleRef,
 }
 
 impl RuntimeHandle {
+    fn strong(inner: Arc<RuntimeInner>) -> Self {
+        Self {
+            inner: RuntimeHandleRef::Strong(inner),
+        }
+    }
+
+    fn weak(inner: &Arc<RuntimeInner>) -> Self {
+        Self {
+            inner: RuntimeHandleRef::Weak(Arc::downgrade(inner)),
+        }
+    }
+
+    fn inner(&self) -> Arc<RuntimeInner> {
+        match &self.inner {
+            RuntimeHandleRef::Strong(inner) => Arc::clone(inner),
+            RuntimeHandleRef::Weak(inner) => {
+                inner.upgrade().expect("runtime is no longer available")
+            }
+        }
+    }
+
     /// Spawn a task from outside async context.
     ///
     /// Panics if the root region rejects admission. Use [`RuntimeHandle::try_spawn`]
@@ -1075,7 +1107,7 @@ impl RuntimeHandle {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.inner.spawn(future)
+        self.inner().spawn(future)
     }
 
     /// Spawns a blocking task on the blocking pool.
@@ -1088,13 +1120,16 @@ impl RuntimeHandle {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
+        self.inner()
+            .blocking_pool
+            .as_ref()
+            .map(|pool| pool.spawn(f))
     }
 
     /// Returns a handle to the blocking pool, if configured.
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
-        self.inner.blocking_handle()
+        self.inner().blocking_handle()
     }
 }
 
@@ -1231,9 +1266,7 @@ impl RuntimeInner {
                 let id = worker.id;
                 format!("{}-{id}", runtime.config.thread_name_prefix)
             };
-            let runtime_handle = RuntimeHandle {
-                inner: Arc::clone(runtime),
-            };
+            let runtime_handle = RuntimeHandle::weak(runtime);
             let on_start = runtime.config.on_thread_start.clone();
             let on_stop = runtime.config.on_thread_stop.clone();
             let mut builder = std::thread::Builder::new().name(name);
@@ -1274,7 +1307,7 @@ impl RuntimeInner {
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
-    ) -> io::Result<(Self, Vec<ThreeLaneWorker>)> {
+    ) -> (Self, Vec<ThreeLaneWorker>) {
         // Runtime currently instantiates the unified RuntimeState path.
         // ShardedState exists behind migration work, but there is not yet a
         // RuntimeConfig layout switch wired here (see bd-2f7uj runbook).
@@ -1319,7 +1352,7 @@ impl RuntimeInner {
             guard.set_blocking_pool(pool.handle());
         }
 
-        Ok((
+        (
             Self {
                 config,
                 state,
@@ -1331,7 +1364,7 @@ impl RuntimeInner {
                 deadline_monitor_thread,
             },
             workers,
-        ))
+        )
     }
 
     /// Creates the blocking pool if configured with non-zero max threads.
