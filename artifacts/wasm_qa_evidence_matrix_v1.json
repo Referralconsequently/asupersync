@@ -1,0 +1,140 @@
+{
+  "contract_version": "wasm-qa-evidence-matrix-v1",
+  "bead_id": "asupersync-3qv04.8.1",
+  "runner_bundle_schema_version": "wasm-qa-evidence-smoke-bundle-v1",
+  "runner_report_schema_version": "wasm-qa-evidence-smoke-run-report-v1",
+  "runner_script": "scripts/run_wasm_qa_evidence_smoke.sh",
+  "evidence_layers": [
+    {
+      "layer_id": "L1",
+      "name": "Rust Cfg and Feature Gating",
+      "evidence_items": [
+        { "evidence_id": "L1-CFG-COMPILE", "description": "wasm32 cargo check passes with each wasm profile", "tool": "cargo/rch" },
+        { "evidence_id": "L1-CFG-NATIVE", "description": "Native cargo check still passes (no regression)", "tool": "cargo/rch" },
+        { "evidence_id": "L1-CFG-LEAK", "description": "No native-only import reachable under wasm32", "tool": "cargo/clippy" }
+      ]
+    },
+    {
+      "layer_id": "L2",
+      "name": "Exported ABI Handle Safety",
+      "evidence_items": [
+        { "evidence_id": "L2-ABI-OWNERSHIP", "description": "Exported handle single-owner invariant", "tool": "cargo test" },
+        { "evidence_id": "L2-ABI-DROP", "description": "Drop across wasm boundary releases resources", "tool": "cargo test" },
+        { "evidence_id": "L2-ABI-ERROR", "description": "Error values marshalled to JS-visible types", "tool": "cargo test" }
+      ]
+    },
+    {
+      "layer_id": "L3",
+      "name": "JS/TS Type Surface",
+      "evidence_items": [
+        { "evidence_id": "L3-TYPES-CORRECT", "description": ".d.ts declarations match actual exports", "tool": "tsc" },
+        { "evidence_id": "L3-EXPORTS-RESOLVE", "description": "Package exports resolve for ESM and CJS", "tool": "node" },
+        { "evidence_id": "L3-TREE-SHAKE", "description": "Tree shaking does not break live exports", "tool": "bundler" }
+      ]
+    },
+    {
+      "layer_id": "L4",
+      "name": "Browser Host-Bridge Correctness",
+      "evidence_items": [
+        { "evidence_id": "L4-FETCH-BASIC", "description": "Fetch bridge round-trip HTTP request", "tool": "E2E" },
+        { "evidence_id": "L4-STREAM-FLOW", "description": "ReadableStream/WritableStream backpressure", "tool": "E2E" },
+        { "evidence_id": "L4-WS-LIFECYCLE", "description": "WebSocket open/message/close lifecycle", "tool": "E2E" },
+        { "evidence_id": "L4-STORAGE-ROUNDTRIP", "description": "Storage bridge persist and retrieve", "tool": "E2E" },
+        { "evidence_id": "L4-ABORT", "description": "AbortSignal cancellation propagates", "tool": "E2E" }
+      ]
+    },
+    {
+      "layer_id": "L5",
+      "name": "Framework Adapter Lifecycle",
+      "evidence_items": [
+        { "evidence_id": "L5-REACT-MOUNT", "description": "React provider mount and init", "tool": "React test" },
+        { "evidence_id": "L5-REACT-STRICT", "description": "StrictMode double-mount safety", "tool": "React test" },
+        { "evidence_id": "L5-NEXT-SSR", "description": "SSR does not import wasm", "tool": "Next test" },
+        { "evidence_id": "L5-NEXT-HYDRATE", "description": "Client hydration bootstraps runtime", "tool": "Next test" }
+      ]
+    },
+    {
+      "layer_id": "L6",
+      "name": "Package Installability",
+      "evidence_items": [
+        { "evidence_id": "L6-NPM-INSTALL", "description": "npm install succeeds for each package", "tool": "npm" },
+        { "evidence_id": "L6-BUNDLER-VITE", "description": "Vite consumer builds and runs", "tool": "Vite" },
+        { "evidence_id": "L6-BUNDLER-WEBPACK", "description": "Webpack consumer builds and runs", "tool": "Webpack" },
+        { "evidence_id": "L6-BUNDLER-TURBOPACK", "description": "Turbopack consumer builds and runs", "tool": "Turbopack" }
+      ]
+    },
+    {
+      "layer_id": "L7",
+      "name": "Cross-Browser Execution",
+      "evidence_items": [
+        { "evidence_id": "L7-CHROME", "description": "E2E suite passes in Chrome", "tool": "Playwright" },
+        { "evidence_id": "L7-FIREFOX", "description": "E2E suite passes in Firefox", "tool": "Playwright" },
+        { "evidence_id": "L7-SAFARI", "description": "E2E suite passes in Safari/WebKit", "tool": "Playwright" }
+      ]
+    },
+    {
+      "layer_id": "L8",
+      "name": "Failure Forensics and Logging",
+      "evidence_items": [
+        { "evidence_id": "L8-CONSOLE-CAPTURE", "description": "Browser console captured in CI", "tool": "Playwright" },
+        { "evidence_id": "L8-WASM-VERSION", "description": "wasm module version in logs", "tool": "structured log" },
+        { "evidence_id": "L8-REPRO-COMMAND", "description": "Failure logs include repro command", "tool": "log schema" },
+        { "evidence_id": "L8-ARTIFACT-RETENTION", "description": "CI retains failure artifacts 7+ days", "tool": "CI config" }
+      ]
+    }
+  ],
+  "wasm_profiles": [
+    "wasm-browser-minimal",
+    "wasm-browser-dev",
+    "wasm-browser-prod",
+    "wasm-browser-deterministic"
+  ],
+  "cfg_gated_files": [
+    "src/net/tcp/stream.rs",
+    "src/net/tcp/listener.rs",
+    "src/net/tcp/split.rs",
+    "src/net/tcp/socket.rs",
+    "src/net/tcp/traits.rs",
+    "src/net/tcp/mod.rs",
+    "src/net/udp.rs",
+    "src/runtime/reactor/mod.rs",
+    "src/runtime/reactor/source.rs",
+    "src/cx/cx.rs",
+    "src/config.rs",
+    "src/lib.rs",
+    "src/http/h1/mod.rs"
+  ],
+  "structured_log_fields_required": [
+    "evidence_id",
+    "layer",
+    "tool",
+    "wasm_profile",
+    "browser",
+    "package_name",
+    "verdict",
+    "failure_reason",
+    "repro_command",
+    "artifact_path"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "WASM-QA-SMOKE-LAYERS",
+      "description": "Verify evidence layer catalog completeness and structure",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract layer -- --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-PROFILES",
+      "description": "Verify wasm profile catalog and cfg-gated file existence",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract profile -- --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-EVIDENCE",
+      "description": "Verify evidence item IDs are unique and well-formed",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract evidence -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-3qv04.8.4.4",
+    "asupersync-3qv04.6"
+  ]
+}
