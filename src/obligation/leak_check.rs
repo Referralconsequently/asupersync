@@ -200,17 +200,239 @@ impl fmt::Display for DiagnosticKind {
     }
 }
 
+/// Stable machine-readable diagnostic codes for CI/logging consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticCode {
+    /// Obligation definitely leaked at scope exit.
+    LeakExitDefinite,
+    /// Obligation may leak depending on control flow.
+    LeakExitPotential,
+    /// A live obligation was overwritten by a new reserve on the same variable.
+    OverwriteActive,
+    /// The same obligation was resolved more than once.
+    DoubleResolve,
+    /// A resolve was attempted on a variable that never held an obligation.
+    ResolveUnheld,
+}
+
+impl DiagnosticCode {
+    /// Stable string code for structured diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LeakExitDefinite => "OBL-STATIC-LEAK-EXIT-DEFINITE",
+            Self::LeakExitPotential => "OBL-STATIC-LEAK-EXIT-POTENTIAL",
+            Self::OverwriteActive => "OBL-STATIC-OVERWRITE-ACTIVE",
+            Self::DoubleResolve => "OBL-STATIC-DOUBLE-RESOLVE",
+            Self::ResolveUnheld => "OBL-STATIC-RESOLVE-UNHELD",
+        }
+    }
+
+    /// Deterministic remediation hint paired with the code.
+    #[must_use]
+    pub const fn remediation_hint(self) -> &'static str {
+        match self {
+            Self::LeakExitDefinite => {
+                "Resolve the obligation before scope exit by committing or aborting it."
+            }
+            Self::LeakExitPotential => {
+                "Ensure every branch resolves the obligation or makes ownership transfer explicit."
+            }
+            Self::OverwriteActive => {
+                "Resolve or move the existing obligation before reusing the same variable."
+            }
+            Self::DoubleResolve => {
+                "Remove the duplicate commit/abort so each obligation is consumed exactly once."
+            }
+            Self::ResolveUnheld => {
+                "Only resolve variables that were reserved on the current analyzed path."
+            }
+        }
+    }
+}
+
+impl fmt::Display for DiagnosticCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Distinguishes concrete instruction diagnostics from scope-exit findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticLocationKind {
+    /// The issue is attached to a specific instruction in the structured IR.
+    Instruction,
+    /// The issue is attached to scope exit after control-flow joining.
+    ScopeExit,
+}
+
+impl fmt::Display for DiagnosticLocationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Instruction => f.write_str("instruction"),
+            Self::ScopeExit => f.write_str("scope_exit"),
+        }
+    }
+}
+
+/// Stable location inside the structured obligation IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticLocation {
+    /// Whether the location refers to a concrete instruction or scope exit.
+    pub kind: DiagnosticLocationKind,
+    /// Nested instruction indices from the root body to the current instruction.
+    pub instruction_path: Vec<usize>,
+    /// Branch-arm selections taken between each nested instruction index.
+    pub branch_arms: Vec<usize>,
+}
+
+impl DiagnosticLocation {
+    /// Location for a concrete IR instruction.
+    #[must_use]
+    pub fn instruction(instruction_path: Vec<usize>, branch_arms: Vec<usize>) -> Self {
+        Self {
+            kind: DiagnosticLocationKind::Instruction,
+            instruction_path,
+            branch_arms,
+        }
+    }
+
+    /// Location for a scope-exit diagnostic after control-flow joins.
+    #[must_use]
+    pub fn scope_exit() -> Self {
+        Self {
+            kind: DiagnosticLocationKind::ScopeExit,
+            instruction_path: Vec::new(),
+            branch_arms: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Display for DiagnosticLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            DiagnosticLocationKind::ScopeExit => f.write_str("scope_exit"),
+            DiagnosticLocationKind::Instruction => {
+                f.write_str("instruction:")?;
+                if let Some(first) = self.instruction_path.first() {
+                    write!(f, "i{first}")?;
+                    for (depth, index) in self.instruction_path.iter().enumerate().skip(1) {
+                        let arm = self.branch_arms.get(depth - 1).copied().unwrap_or_default();
+                        write!(f, "/a{arm}/i{index}")?;
+                    }
+                } else {
+                    f.write_str("root")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Explicit scope and non-goals for the restricted static leak checker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticLeakCheckContract {
+    /// Stable identifier for the current restricted pilot.
+    pub checker_id: &'static str,
+    /// Structured IR surface covered by the checker.
+    pub ir_surface: &'static str,
+    /// Supported IR instructions in the prototype.
+    pub supported_instructions: &'static [&'static str],
+    /// Stable machine-readable codes emitted by the checker.
+    pub diagnostic_codes: &'static [&'static str],
+    /// Patterns intentionally covered by the pilot.
+    pub in_scope_patterns: &'static [&'static str],
+    /// Patterns intentionally left to runtime or future analyses.
+    pub out_of_scope_patterns: &'static [&'static str],
+    /// Runtime enforcement/oracle surfaces that remain authoritative.
+    pub runtime_oracles: &'static [&'static str],
+    /// Guidance for interpreting clean/dirty results conservatively.
+    pub interpretation_guidance: &'static [&'static str],
+}
+
+/// Contract for the restricted structured-IR static leak-checker pilot.
+#[must_use]
+pub const fn static_leak_check_contract() -> StaticLeakCheckContract {
+    StaticLeakCheckContract {
+        checker_id: "obligation-static-leak-checker-v1",
+        ir_surface: "Body with Instruction::{Reserve, Commit, Abort, Branch}",
+        supported_instructions: &["Reserve", "Commit", "Abort", "Branch"],
+        diagnostic_codes: &[
+            "OBL-STATIC-LEAK-EXIT-DEFINITE",
+            "OBL-STATIC-LEAK-EXIT-POTENTIAL",
+            "OBL-STATIC-OVERWRITE-ACTIVE",
+            "OBL-STATIC-DOUBLE-RESOLVE",
+            "OBL-STATIC-RESOLVE-UNHELD",
+        ],
+        in_scope_patterns: &[
+            "single-body reserve/commit-or-abort flows",
+            "branch-sensitive resolution on structured if/match-style control flow",
+            "conservative peak outstanding-obligation counting on the same structured IR",
+        ],
+        out_of_scope_patterns: &[
+            "loops/recursion without explicit unrolling into the IR",
+            "interprocedural aliasing, borrowing, or ownership transfer not represented in Body",
+            "ambient Drop-based cleanup or runtime side effects outside the IR",
+            "Rust-source parsing, macro expansion, and dynamic dispatch analysis",
+        ],
+        runtime_oracles: &[
+            "src/obligation/ledger.rs",
+            "src/obligation/marking.rs",
+            "src/obligation/no_leak_proof.rs",
+            "src/obligation/graded.rs",
+        ],
+        interpretation_guidance: &[
+            "clean results apply only to the supplied structured IR, not arbitrary Rust code",
+            "graded budget counts are conservative upper bounds for the restricted IR, not admission proofs",
+            "runtime oracles remain authoritative for uncovered patterns and production enforcement",
+        ],
+    }
+}
+
+/// Conservative budget summary for the restricted structured-IR analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradedBudgetSummary {
+    /// Maximum simultaneously-live obligations observed across all analyzed paths.
+    pub conservative_peak_outstanding: usize,
+    /// Outstanding obligations that may remain at scope exit after path joins.
+    pub exit_outstanding_upper_bound: usize,
+    /// Per-kind peak simultaneously-live obligation counts.
+    pub peak_outstanding_by_kind: BTreeMap<ObligationKind, usize>,
+    /// Peak count of ambiguous obligations where kind information was lost by joins.
+    pub ambiguous_peak_outstanding: usize,
+    /// Guidance for interpreting the budget summary conservatively.
+    pub interpretation: &'static str,
+}
+
+impl Default for GradedBudgetSummary {
+    fn default() -> Self {
+        Self {
+            conservative_peak_outstanding: 0,
+            exit_outstanding_upper_bound: 0,
+            peak_outstanding_by_kind: BTreeMap::new(),
+            ambiguous_peak_outstanding: 0,
+            interpretation: "Conservative upper bounds over the structured IR only; runtime oracles remain authoritative outside this restricted pilot.",
+        }
+    }
+}
+
 /// A diagnostic emitted by the checker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
+    /// Stable machine-readable code for logs/CI.
+    pub code: DiagnosticCode,
     /// What kind of issue.
     pub kind: DiagnosticKind,
     /// The variable involved.
     pub var: ObligationVar,
     /// The obligation kind, if known.
     pub obligation_kind: Option<ObligationKind>,
+    /// Stable location in the structured IR.
+    pub location: DiagnosticLocation,
     /// The function/scope name where the issue was found.
     pub scope: String,
+    /// Deterministic remediation hint for the issue class.
+    pub remediation_hint: &'static str,
     /// Human-readable message.
     pub message: String,
 }
@@ -219,8 +441,14 @@ impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[{}] {} in `{}`: {}",
-            self.kind, self.var, self.scope, self.message
+            "[{}/{} @ {}] {} in `{}`: {} | hint: {}",
+            self.kind,
+            self.code,
+            self.location,
+            self.var,
+            self.scope,
+            self.message,
+            self.remediation_hint
         )
     }
 }
@@ -236,6 +464,10 @@ pub struct CheckResult {
     pub scope: String,
     /// Diagnostics found.
     pub diagnostics: Vec<Diagnostic>,
+    /// Explicit boundary for what the prototype checker does and does not prove.
+    pub contract: StaticLeakCheckContract,
+    /// Conservative outstanding-obligation budget summary over the same IR.
+    pub graded_budget: GradedBudgetSummary,
 }
 
 impl CheckResult {
@@ -305,6 +537,12 @@ pub struct LeakChecker {
     diagnostics: Vec<Diagnostic>,
     /// Current scope name (for diagnostic messages).
     scope_name: String,
+    /// Conservative peak simultaneously-outstanding obligations across explored paths.
+    peak_outstanding: usize,
+    /// Conservative per-kind outstanding peaks.
+    peak_outstanding_by_kind: BTreeMap<ObligationKind, usize>,
+    /// Peak ambiguous outstanding obligations after kind-losing joins.
+    peak_ambiguous_outstanding: usize,
 }
 
 impl LeakChecker {
@@ -323,23 +561,44 @@ impl LeakChecker {
         self.state.clear();
         self.diagnostics.clear();
         self.scope_name.clone_from(&body.name);
+        self.peak_outstanding = 0;
+        self.peak_outstanding_by_kind.clear();
+        self.peak_ambiguous_outstanding = 0;
+        self.record_budget_snapshot();
 
-        self.check_instructions(&body.instructions);
+        self.check_instructions(&body.instructions, &[], &[]);
         self.check_exit_leaks();
 
         CheckResult {
             scope: body.name.clone(),
             diagnostics: self.diagnostics.clone(),
+            contract: static_leak_check_contract(),
+            graded_budget: self.graded_budget_summary(),
         }
     }
 
-    fn check_instructions(&mut self, instructions: &[Instruction]) {
-        for instr in instructions {
-            self.check_instruction(instr);
+    fn check_instructions(
+        &mut self,
+        instructions: &[Instruction],
+        instruction_prefix: &[usize],
+        branch_arms: &[usize],
+    ) {
+        for (index, instr) in instructions.iter().enumerate() {
+            let mut instruction_path = instruction_prefix.to_vec();
+            instruction_path.push(index);
+            self.check_instruction(instr, &instruction_path, branch_arms);
+            self.record_budget_snapshot();
         }
     }
 
-    fn check_instruction(&mut self, instr: &Instruction) {
+    fn check_instruction(
+        &mut self,
+        instr: &Instruction,
+        instruction_path: &[usize],
+        branch_arms: &[usize],
+    ) {
+        let location =
+            DiagnosticLocation::instruction(instruction_path.to_vec(), branch_arms.to_vec());
         match instr {
             Instruction::Reserve { var, kind } => {
                 // If var already holds an obligation, that's a leak (overwrite).
@@ -350,17 +609,18 @@ impl LeakChecker {
                         } else {
                             DiagnosticKind::PotentialLeak
                         };
-                        self.diagnostics.push(Diagnostic {
-                            kind: diagnostic_kind,
-                            var: *var,
-                            obligation_kind: existing.kind(),
-                            scope: self.scope_name.clone(),
-                            message: format!(
+                        self.push_diagnostic(
+                            DiagnosticCode::OverwriteActive,
+                            diagnostic_kind,
+                            *var,
+                            existing.kind(),
+                            location,
+                            format!(
                                 "{var} already holds {}, overwriting with new {} reserve",
                                 existing,
                                 kind.as_str(),
                             ),
-                        });
+                        );
                     }
                 }
                 self.state.insert(*var, VarState::Held(*kind));
@@ -377,33 +637,40 @@ impl LeakChecker {
                         self.state.insert(*var, VarState::Resolved);
                     }
                     Some(VarState::Resolved) => {
-                        self.diagnostics.push(Diagnostic {
-                            kind: DiagnosticKind::DoubleResolve,
-                            var: *var,
-                            obligation_kind: None,
-                            scope: self.scope_name.clone(),
-                            message: format!("{var} already resolved, {action} is redundant/error"),
-                        });
+                        self.push_diagnostic(
+                            DiagnosticCode::DoubleResolve,
+                            DiagnosticKind::DoubleResolve,
+                            *var,
+                            None,
+                            location,
+                            format!("{var} already resolved, {action} is redundant/error"),
+                        );
                     }
                     Some(VarState::Empty) | None => {
-                        self.diagnostics.push(Diagnostic {
-                            kind: DiagnosticKind::ResolveUnheld,
-                            var: *var,
-                            obligation_kind: None,
-                            scope: self.scope_name.clone(),
-                            message: format!("{var} was never reserved, cannot {action}"),
-                        });
+                        self.push_diagnostic(
+                            DiagnosticCode::ResolveUnheld,
+                            DiagnosticKind::ResolveUnheld,
+                            *var,
+                            None,
+                            location,
+                            format!("{var} was never reserved, cannot {action}"),
+                        );
                     }
                 }
             }
 
             Instruction::Branch { arms } => {
-                self.check_branch(arms);
+                self.check_branch(arms, &instruction_path, &branch_arms);
             }
         }
     }
 
-    fn check_branch(&mut self, arms: &[Vec<Instruction>]) {
+    fn check_branch(
+        &mut self,
+        arms: &[Vec<Instruction>],
+        parent_instruction_path: &[usize],
+        parent_branch_arms: &[usize],
+    ) {
         if arms.is_empty() {
             return;
         }
@@ -412,9 +679,11 @@ impl LeakChecker {
         let mut arm_states: Vec<BTreeMap<ObligationVar, VarState>> = Vec::new();
 
         // Analyze each arm independently, starting from the entry state.
-        for arm in arms {
+        for (arm_index, arm) in arms.iter().enumerate() {
             self.state.clone_from(&entry_state);
-            self.check_instructions(arm);
+            let mut branch_path = parent_branch_arms.to_vec();
+            branch_path.push(arm_index);
+            self.check_instructions(arm, parent_instruction_path, &branch_path);
             arm_states.push(self.state.clone());
         }
 
@@ -458,39 +727,107 @@ impl LeakChecker {
         for (var, state) in vars {
             match state {
                 VarState::Held(kind) => {
-                    self.diagnostics.push(Diagnostic {
-                        kind: DiagnosticKind::DefiniteLeak,
+                    self.push_diagnostic(
+                        DiagnosticCode::LeakExitDefinite,
+                        DiagnosticKind::DefiniteLeak,
                         var,
-                        obligation_kind: Some(kind),
-                        scope: self.scope_name.clone(),
-                        message: format!("{var} holds {} obligation at scope exit", kind.as_str(),),
-                    });
+                        Some(kind),
+                        DiagnosticLocation::scope_exit(),
+                        format!("{var} holds {} obligation at scope exit", kind.as_str(),),
+                    );
                 }
                 VarState::MayHold(kind) => {
-                    self.diagnostics.push(Diagnostic {
-                        kind: DiagnosticKind::PotentialLeak,
+                    self.push_diagnostic(
+                        DiagnosticCode::LeakExitPotential,
+                        DiagnosticKind::PotentialLeak,
                         var,
-                        obligation_kind: Some(kind),
-                        scope: self.scope_name.clone(),
-                        message: format!(
+                        Some(kind),
+                        DiagnosticLocation::scope_exit(),
+                        format!(
                             "{var} may hold {} obligation at scope exit (depends on control flow)",
                             kind.as_str(),
                         ),
-                    });
+                    );
                 }
                 VarState::MayHoldAmbiguous => {
-                    self.diagnostics.push(Diagnostic {
-                        kind: DiagnosticKind::PotentialLeak,
+                    self.push_diagnostic(
+                        DiagnosticCode::LeakExitPotential,
+                        DiagnosticKind::PotentialLeak,
                         var,
-                        obligation_kind: None,
-                        scope: self.scope_name.clone(),
-                        message: format!(
+                        None,
+                        DiagnosticLocation::scope_exit(),
+                        format!(
                             "{var} may hold an ambiguous obligation at scope exit (different kinds on different paths)",
                         ),
-                    });
+                    );
                 }
                 VarState::Empty | VarState::Resolved => {}
             }
+        }
+    }
+
+    fn push_diagnostic(
+        &mut self,
+        code: DiagnosticCode,
+        kind: DiagnosticKind,
+        var: ObligationVar,
+        obligation_kind: Option<ObligationKind>,
+        location: DiagnosticLocation,
+        message: String,
+    ) {
+        self.diagnostics.push(Diagnostic {
+            code,
+            kind,
+            var,
+            obligation_kind,
+            location,
+            scope: self.scope_name.clone(),
+            remediation_hint: code.remediation_hint(),
+            message,
+        });
+    }
+
+    fn record_budget_snapshot(&mut self) {
+        let mut outstanding = 0usize;
+        let mut outstanding_by_kind = BTreeMap::new();
+        let mut ambiguous_outstanding = 0usize;
+
+        for state in self.state.values() {
+            match state {
+                VarState::Held(kind) | VarState::MayHold(kind) => {
+                    outstanding += 1;
+                    *outstanding_by_kind.entry(*kind).or_insert(0usize) += 1;
+                }
+                VarState::MayHoldAmbiguous => {
+                    outstanding += 1;
+                    ambiguous_outstanding += 1;
+                }
+                VarState::Empty | VarState::Resolved => {}
+            }
+        }
+
+        self.peak_outstanding = self.peak_outstanding.max(outstanding);
+        self.peak_ambiguous_outstanding =
+            self.peak_ambiguous_outstanding.max(ambiguous_outstanding);
+        for (kind, count) in outstanding_by_kind {
+            self.peak_outstanding_by_kind
+                .entry(kind)
+                .and_modify(|peak| *peak = (*peak).max(count))
+                .or_insert(count);
+        }
+    }
+
+    fn graded_budget_summary(&self) -> GradedBudgetSummary {
+        GradedBudgetSummary {
+            conservative_peak_outstanding: self.peak_outstanding,
+            exit_outstanding_upper_bound: self
+                .state
+                .values()
+                .filter(|state| state.is_leak())
+                .count(),
+            peak_outstanding_by_kind: self.peak_outstanding_by_kind.clone(),
+            ambiguous_peak_outstanding: self.peak_ambiguous_outstanding,
+            ..GradedBudgetSummary::default()
         }
     }
 }
@@ -1584,6 +1921,140 @@ mod tests {
         crate::test_complete!("deterministic_diagnostic_order");
     }
 
+    #[test]
+    fn diagnostic_metadata_is_stable() {
+        init_test("diagnostic_metadata_is_stable");
+        let body = Body::new("metadata", vec![Instruction::Commit { var: v(0) }]);
+
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let diag = &result.diagnostics[0];
+
+        crate::assert_with_log!(
+            diag.code == DiagnosticCode::ResolveUnheld,
+            "machine code",
+            DiagnosticCode::ResolveUnheld,
+            diag.code
+        );
+        crate::assert_with_log!(
+            diag.location.kind == DiagnosticLocationKind::Instruction,
+            "location kind",
+            DiagnosticLocationKind::Instruction,
+            diag.location.kind
+        );
+        crate::assert_with_log!(
+            diag.location.instruction_path == vec![0usize],
+            "instruction path",
+            vec![0usize],
+            diag.location.instruction_path.clone()
+        );
+        crate::assert_with_log!(
+            !diag.remediation_hint.is_empty(),
+            "remediation hint",
+            true,
+            !diag.remediation_hint.is_empty()
+        );
+        crate::test_complete!("diagnostic_metadata_is_stable");
+    }
+
+    #[test]
+    fn graded_budget_summary_tracks_restricted_ir_peak() {
+        init_test("graded_budget_summary_tracks_restricted_ir_peak");
+        let body = Body::new(
+            "budget_peak",
+            vec![
+                Instruction::Reserve {
+                    var: v(0),
+                    kind: ObligationKind::SendPermit,
+                },
+                Instruction::Reserve {
+                    var: v(1),
+                    kind: ObligationKind::Ack,
+                },
+                Instruction::Branch {
+                    arms: vec![
+                        vec![
+                            Instruction::Commit { var: v(0) },
+                            Instruction::Commit { var: v(1) },
+                        ],
+                        vec![Instruction::Abort { var: v(0) }],
+                    ],
+                },
+            ],
+        );
+
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let budget = &result.graded_budget;
+
+        crate::assert_with_log!(
+            budget.conservative_peak_outstanding == 2,
+            "peak outstanding",
+            2usize,
+            budget.conservative_peak_outstanding
+        );
+        crate::assert_with_log!(
+            budget.exit_outstanding_upper_bound == 1,
+            "exit upper bound",
+            1usize,
+            budget.exit_outstanding_upper_bound
+        );
+        crate::assert_with_log!(
+            budget
+                .peak_outstanding_by_kind
+                .get(&ObligationKind::SendPermit)
+                == Some(&1),
+            "send peak",
+            Some(&1usize),
+            budget
+                .peak_outstanding_by_kind
+                .get(&ObligationKind::SendPermit)
+        );
+        crate::assert_with_log!(
+            budget.peak_outstanding_by_kind.get(&ObligationKind::Ack) == Some(&1),
+            "ack peak",
+            Some(&1usize),
+            budget.peak_outstanding_by_kind.get(&ObligationKind::Ack)
+        );
+        crate::test_complete!("graded_budget_summary_tracks_restricted_ir_peak");
+    }
+
+    #[test]
+    fn static_leak_check_contract_is_explicit() {
+        init_test("static_leak_check_contract_is_explicit");
+        let contract = static_leak_check_contract();
+
+        crate::assert_with_log!(
+            contract.supported_instructions == ["Reserve", "Commit", "Abort", "Branch"],
+            "supported instructions",
+            vec!["Reserve", "Commit", "Abort", "Branch"],
+            contract.supported_instructions.to_vec()
+        );
+        crate::assert_with_log!(
+            contract
+                .runtime_oracles
+                .contains(&"src/obligation/no_leak_proof.rs"),
+            "runtime oracle anchor",
+            true,
+            contract
+                .runtime_oracles
+                .contains(&"src/obligation/no_leak_proof.rs")
+        );
+        crate::assert_with_log!(
+            contract
+                .out_of_scope_patterns
+                .iter()
+                .any(|pattern| pattern.contains("Drop-based cleanup")),
+            "out-of-scope contract",
+            true,
+            contract
+                .out_of_scope_patterns
+                .iter()
+                .any(|pattern| pattern.contains("Drop-based cleanup"))
+        );
+        crate::test_complete!("static_leak_check_contract_is_explicit");
+    }
+
     // ---- Display impls -----------------------------------------------------
 
     #[test]
@@ -1603,10 +2074,13 @@ mod tests {
         );
 
         let diag = Diagnostic {
+            code: DiagnosticCode::LeakExitDefinite,
             kind: DiagnosticKind::DefiniteLeak,
             var: ObligationVar(0),
             obligation_kind: Some(ObligationKind::SendPermit),
+            location: DiagnosticLocation::scope_exit(),
             scope: "test_fn".to_string(),
+            remediation_hint: DiagnosticCode::LeakExitDefinite.remediation_hint(),
             message: "v0 leaked".to_string(),
         };
         let diag_str = format!("{diag}");
@@ -1614,6 +2088,8 @@ mod tests {
         crate::assert_with_log!(has_fn, "diag has scope", true, has_fn);
         let has_kind = diag_str.contains("definite-leak");
         crate::assert_with_log!(has_kind, "diag has kind", true, has_kind);
+        let has_code = diag_str.contains(DiagnosticCode::LeakExitDefinite.as_str());
+        crate::assert_with_log!(has_code, "diag has code", true, has_code);
         crate::test_complete!("display_impls");
     }
 
@@ -1689,6 +2165,8 @@ mod tests {
         let clean = CheckResult {
             scope: "clean_fn".to_string(),
             diagnostics: vec![],
+            contract: static_leak_check_contract(),
+            graded_budget: GradedBudgetSummary::default(),
         };
         let clean_str = format!("{clean}");
         let has_no_issues = clean_str.contains("no issues");
@@ -1697,12 +2175,17 @@ mod tests {
         let dirty = CheckResult {
             scope: "dirty_fn".to_string(),
             diagnostics: vec![Diagnostic {
+                code: DiagnosticCode::LeakExitDefinite,
                 kind: DiagnosticKind::DefiniteLeak,
                 var: v(0),
                 obligation_kind: Some(ObligationKind::SendPermit),
+                location: DiagnosticLocation::scope_exit(),
                 scope: "dirty_fn".to_string(),
+                remediation_hint: DiagnosticCode::LeakExitDefinite.remediation_hint(),
                 message: "test".to_string(),
             }],
+            contract: static_leak_check_contract(),
+            graded_budget: GradedBudgetSummary::default(),
         };
         let dirty_str = format!("{dirty}");
         let has_count = dirty_str.contains("1 diagnostic");

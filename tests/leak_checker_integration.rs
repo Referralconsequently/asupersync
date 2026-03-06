@@ -9,7 +9,8 @@ mod common;
 use common::*;
 
 use asupersync::obligation::{
-    BodyBuilder, DiagnosticKind, LeakChecker, ObligationAnalyzer, ObligationVar,
+    BodyBuilder, DiagnosticCode, DiagnosticKind, DiagnosticLocationKind, LeakChecker,
+    ObligationAnalyzer, ObligationVar, static_leak_check_contract,
 };
 use asupersync::record::ObligationKind;
 use asupersync::{assert_has_leaks, assert_no_leaks, obligation_body};
@@ -709,4 +710,69 @@ fn e2e_check_result_display_includes_scope() {
     );
 
     test_complete!("e2e_check_result_display_includes_scope");
+}
+
+#[test]
+fn e2e_dirty_result_exposes_machine_readable_metadata() {
+    init_test_logging();
+    test_phase!("e2e_dirty_result_exposes_machine_readable_metadata");
+
+    let body = obligation_body!("metadata_dirty", |b| {
+        let lease = b.reserve(ObligationKind::Lease);
+        b.branch(|bb| {
+            bb.arm(|a| {
+                a.commit(lease);
+            });
+            bb.arm(|_a| {});
+        });
+    });
+
+    let mut checker = LeakChecker::new();
+    let result = checker.check(&body);
+    let diag = result.leaks()[0];
+
+    assert_eq!(diag.code, DiagnosticCode::LeakExitPotential);
+    assert_eq!(diag.location.kind, DiagnosticLocationKind::ScopeExit);
+    assert!(
+        diag.remediation_hint.contains("every branch"),
+        "remediation hint should stay actionable"
+    );
+    assert_eq!(
+        result.contract.checker_id,
+        static_leak_check_contract().checker_id
+    );
+    assert_eq!(result.graded_budget.conservative_peak_outstanding, 1);
+    assert_eq!(result.graded_budget.exit_outstanding_upper_bound, 1);
+
+    test_complete!("e2e_dirty_result_exposes_machine_readable_metadata");
+}
+
+#[test]
+fn e2e_clean_result_reports_bounded_budget_surface() {
+    init_test_logging();
+    test_phase!("e2e_clean_result_reports_bounded_budget_surface");
+
+    let body = obligation_body!("metadata_clean", |b| {
+        let send = b.reserve(ObligationKind::SendPermit);
+        let ack = b.reserve(ObligationKind::Ack);
+        b.commit(send);
+        b.abort(ack);
+    });
+
+    let mut checker = LeakChecker::new();
+    let result = checker.check(&body);
+
+    assert!(result.is_clean(), "clean sample should stay clean");
+    assert_eq!(result.graded_budget.conservative_peak_outstanding, 2);
+    assert_eq!(result.graded_budget.exit_outstanding_upper_bound, 0);
+    assert!(
+        result
+            .contract
+            .out_of_scope_patterns
+            .iter()
+            .any(|pattern| pattern.contains("macro expansion")),
+        "contract should keep the restricted-scope warning explicit"
+    );
+
+    test_complete!("e2e_clean_result_reports_bounded_budget_surface");
 }

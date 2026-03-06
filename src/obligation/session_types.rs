@@ -655,6 +655,190 @@ pub mod delegation {
 pub struct TracingContract;
 
 // ============================================================================
+// Adoption contract
+// ============================================================================
+
+/// Code-backed rollout contract for an opt-in session-typed protocol family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProtocolAdoptionSpec {
+    /// Stable protocol identifier used in docs/tests/migration plans.
+    pub protocol_id: &'static str,
+    /// Typestate/session entrypoint that users opt into first.
+    pub typed_entrypoint: &'static str,
+    /// Existing dynamic/runtime-checked surface the typed API must coexist with.
+    pub dynamic_surface: &'static str,
+    /// Canonical protocol states in user-visible order.
+    pub states: &'static [&'static str],
+    /// Canonical state transitions that matter for migration review.
+    pub transitions: &'static [&'static str],
+    /// Compile-time guarantees expected from the typed encoding.
+    pub compile_time_constraints: &'static [&'static str],
+    /// Runtime oracles that still remain authoritative during rollout.
+    pub runtime_oracles: &'static [&'static str],
+    /// Existing and planned test surfaces for migration safety.
+    pub migration_test_surfaces: &'static [&'static str],
+    /// Stable diagnostics/log fields needed for debuggable adoption.
+    pub diagnostics_fields: &'static [&'static str],
+    /// Narrow surface that should adopt the typed API first.
+    pub initial_rollout_scope: &'static str,
+    /// Surfaces intentionally deferred until ergonomics and tooling improve.
+    pub avoid_for_now: &'static [&'static str],
+}
+
+impl SessionProtocolAdoptionSpec {
+    /// First adoption target: send-permit style two-phase delivery.
+    pub const fn send_permit() -> Self {
+        Self {
+            protocol_id: "send_permit",
+            typed_entrypoint: "asupersync::obligation::session_types::send_permit::new_session",
+            dynamic_surface: "channel reserve/send-or-abort flows plus asupersync::obligation::ledger::ObligationLedger::{acquire, commit, abort}",
+            states: &["Reserve", "Select<Send,Abort>", "End"],
+            transitions: &[
+                "send(ReserveMsg)",
+                "select_left() + send(T)",
+                "select_right() + send(AbortMsg)",
+                "close()",
+            ],
+            compile_time_constraints: &[
+                "payload send is impossible before Reserve",
+                "exactly one terminal branch (Send or Abort) is consumed",
+                "the endpoint is linearly moved on every transition",
+                "delegation transfers ownership of the protocol endpoint instead of cloning it",
+            ],
+            runtime_oracles: &[
+                "src/obligation/ledger.rs",
+                "src/obligation/marking.rs",
+                "src/obligation/no_leak_proof.rs",
+                "src/obligation/separation_logic.rs",
+            ],
+            migration_test_surfaces: &[
+                "existing unit tests: src/obligation/session_types.rs",
+                "planned compile-fail surface: tests/obligation_session_types_trybuild.rs",
+                "planned migration surface: tests/obligation_session_migration.rs",
+            ],
+            diagnostics_fields: &[
+                "channel_id",
+                "from_state",
+                "to_state",
+                "trace_id",
+                "obligation_kind",
+                "protocol",
+                "transition",
+            ],
+            initial_rollout_scope: "two-phase send/reserve paths that already resolve a SendPermit explicitly",
+            avoid_for_now: &[
+                "ambient channel wrappers that hide reserve/abort boundaries",
+                "surfaces that depend on implicit Drop-based cleanup instead of explicit resolution",
+            ],
+        }
+    }
+
+    /// First adoption target for renewable lease-style resources.
+    pub const fn lease() -> Self {
+        Self {
+            protocol_id: "lease",
+            typed_entrypoint: "asupersync::obligation::session_types::lease::new_session",
+            dynamic_surface: "lease-backed registry/resource flows such as asupersync::cx::NameLease plus ledger-backed Lease obligations",
+            states: &["Acquire", "HolderLoop<Renew|Release>", "End"],
+            transitions: &[
+                "send(AcquireMsg)",
+                "select_left() + send(RenewMsg)",
+                "select_right() + send(ReleaseMsg)",
+                "close()",
+            ],
+            compile_time_constraints: &[
+                "Acquire must happen before Renew or Release",
+                "Renew and Release are mutually exclusive per loop iteration",
+                "Release is terminal and cannot be followed by another Renew",
+                "delegated lease endpoints preserve a single holder at the type level",
+            ],
+            runtime_oracles: &[
+                "src/cx/registry.rs",
+                "src/obligation/ledger.rs",
+                "src/obligation/marking.rs",
+                "src/obligation/separation_logic.rs",
+            ],
+            migration_test_surfaces: &[
+                "existing unit tests: src/obligation/session_types.rs",
+                "planned compile-fail surface: tests/obligation_session_types_trybuild.rs",
+                "planned migration surface: tests/registry_lease_session_migration.rs",
+            ],
+            diagnostics_fields: &[
+                "channel_id",
+                "from_state",
+                "to_state",
+                "trace_id",
+                "obligation_kind",
+                "protocol",
+                "transition",
+            ],
+            initial_rollout_scope: "lease-backed naming/resource lifecycles with a single obvious holder and explicit release path",
+            avoid_for_now: &[
+                "multi-party renewal protocols without a single delegation owner",
+                "surfaces that currently encode renewal via ad hoc timers or hidden retries",
+            ],
+        }
+    }
+
+    /// First adoption target for reserve/commit two-phase effects.
+    pub const fn two_phase() -> Self {
+        Self {
+            protocol_id: "two_phase",
+            typed_entrypoint: "asupersync::obligation::session_types::two_phase::new_session",
+            dynamic_surface: "two-phase reserve/commit-or-abort effects backed by asupersync::obligation::ledger::ObligationLedger::{acquire, commit, abort}",
+            states: &["Reserve(K)", "Select<Commit,Abort>", "End"],
+            transitions: &[
+                "send(ReserveMsg)",
+                "select_left() + send(CommitMsg)",
+                "select_right() + send(AbortMsg)",
+                "close()",
+            ],
+            compile_time_constraints: &[
+                "Commit and Abort are mutually exclusive after Reserve",
+                "kind-specific reserve state cannot be skipped",
+                "terminal Commit or Abort consumes the endpoint",
+                "delegation keeps the reserved effect linear across task handoff",
+            ],
+            runtime_oracles: &[
+                "src/obligation/ledger.rs",
+                "src/obligation/dialectica.rs",
+                "src/obligation/no_aliasing_proof.rs",
+                "src/obligation/separation_logic.rs",
+            ],
+            migration_test_surfaces: &[
+                "existing unit tests: src/obligation/session_types.rs",
+                "planned compile-fail surface: tests/obligation_session_types_trybuild.rs",
+                "planned migration surface: tests/two_phase_session_migration.rs",
+            ],
+            diagnostics_fields: &[
+                "channel_id",
+                "from_state",
+                "to_state",
+                "trace_id",
+                "obligation_kind",
+                "protocol",
+                "transition",
+            ],
+            initial_rollout_scope: "small reserve/commit APIs where the effect boundary is already explicit and the fallback remains the ledger",
+            avoid_for_now: &[
+                "open-ended effect pipelines that cross opaque adapter boundaries",
+                "surfaces that require polymorphic branching beyond Commit or Abort in the first rollout",
+            ],
+        }
+    }
+}
+
+/// Canonical adoption order for session-typed obligation protocols.
+#[must_use]
+pub fn session_protocol_adoption_specs() -> Vec<SessionProtocolAdoptionSpec> {
+    vec![
+        SessionProtocolAdoptionSpec::send_permit(),
+        SessionProtocolAdoptionSpec::lease(),
+        SessionProtocolAdoptionSpec::two_phase(),
+    ]
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -828,6 +1012,88 @@ mod tests {
                 let _proof = ch.close();
             }
             Selected::Left(_) => panic!("expected Release"),
+        }
+    }
+
+    #[test]
+    fn session_protocol_adoption_specs_cover_priority_families() {
+        let specs = session_protocol_adoption_specs();
+        let ids = specs
+            .iter()
+            .map(|spec| spec.protocol_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["send_permit", "lease", "two_phase"]);
+        assert!(
+            specs.iter().all(|spec| !spec.typed_entrypoint.is_empty()),
+            "typed entrypoints must be explicit"
+        );
+        assert!(
+            specs.iter().all(|spec| !spec.dynamic_surface.is_empty()),
+            "dynamic coexistence surfaces must be explicit"
+        );
+    }
+
+    #[test]
+    fn session_protocol_adoption_specs_document_oracles_and_migration_surfaces() {
+        for spec in session_protocol_adoption_specs() {
+            assert!(
+                !spec.runtime_oracles.is_empty(),
+                "runtime oracles must remain explicit for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.runtime_oracles
+                    .iter()
+                    .all(|surface| surface.starts_with("src/")),
+                "runtime oracles must point at concrete source files for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.migration_test_surfaces.len() >= 2,
+                "migration surfaces must include existing and planned coverage for {}",
+                spec.protocol_id
+            );
+            assert!(
+                !spec.initial_rollout_scope.is_empty(),
+                "initial rollout scope must be documented for {}",
+                spec.protocol_id
+            );
+            assert!(
+                !spec.avoid_for_now.is_empty(),
+                "deferred surfaces must be documented for {}",
+                spec.protocol_id
+            );
+        }
+    }
+
+    #[test]
+    fn session_protocol_adoption_specs_keep_diagnostics_fields_stable() {
+        for spec in session_protocol_adoption_specs() {
+            assert!(
+                spec.diagnostics_fields.contains(&"channel_id"),
+                "channel_id must remain stable for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.diagnostics_fields.contains(&"trace_id"),
+                "trace_id must remain stable for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.diagnostics_fields.contains(&"protocol"),
+                "protocol field must remain stable for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.compile_time_constraints.len() >= 3,
+                "compile-time guarantees must stay substantive for {}",
+                spec.protocol_id
+            );
+            assert!(
+                spec.transitions.len() >= 3,
+                "state transitions must stay explicit for {}",
+                spec.protocol_id
+            );
         }
     }
 
