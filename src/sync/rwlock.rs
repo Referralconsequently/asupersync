@@ -284,7 +284,7 @@ impl<T> RwLock<T> {
             return Err(TryWriteError::Poisoned);
         }
 
-        if state.writer_active || state.readers > 0 {
+        if state.writer_active || state.readers > 0 || state.writer_waiters > 0 {
             return Err(TryWriteError::Locked);
         }
 

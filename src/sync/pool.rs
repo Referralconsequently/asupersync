@@ -1285,13 +1285,19 @@ where
             }
         }
 
-        let result = if let Some(idle) = state.idle.pop_front() {
-            state.active += 1;
-            state.total_acquisitions += 1;
-            if let Some(id) = waiter_id {
-                state.waiters.retain(|w| w.id != id);
+        let is_next_in_line = state.waiters.front().is_none_or(|w| Some(w.id) == waiter_id);
+
+        let result = if is_next_in_line {
+            if let Some(idle) = state.idle.pop_front() {
+                state.active += 1;
+                state.total_acquisitions += 1;
+                if let Some(id) = waiter_id {
+                    state.waiters.retain(|w| w.id != id);
+                }
+                Some((idle.resource, idle.created_at))
+            } else {
+                None
             }
-            Some((idle.resource, idle.created_at))
         } else {
             None
         };
@@ -1313,6 +1319,12 @@ where
         if state.closed || total >= self.config.max_size {
             return false;
         }
+
+        let is_next_in_line = state.waiters.front().is_none_or(|w| Some(w.id) == waiter_id);
+        if !is_next_in_line {
+            return false;
+        }
+
         state.creating += 1;
         if let Some(id) = waiter_id {
             state.waiters.retain(|w| w.id != id);

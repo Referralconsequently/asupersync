@@ -311,14 +311,14 @@ impl Notified<'_> {
     }
 
     fn poll_init(&mut self, cx: &Context<'_>) -> Poll<()> {
-        // Lock-free fast path: consume a stored notify token.
-        if self.try_consume_stored_notification() {
-            return self.mark_done();
-        }
-
         // Lock-free fast path: observe broadcast generation bump.
         let current_gen = self.notify.generation.load(Ordering::Acquire);
         if current_gen != self.initial_generation {
+            return self.mark_done();
+        }
+
+        // Lock-free fast path: consume a stored notify token.
+        if self.try_consume_stored_notification() {
             return self.mark_done();
         }
 
@@ -326,13 +326,13 @@ impl Notified<'_> {
         let mut waiters = self.notify.waiters.lock();
 
         // Re-check conditions under waiter lock to close races with concurrent notifiers.
-        if self.try_consume_stored_notification() {
+        let current_gen = self.notify.generation.load(Ordering::Acquire);
+        if current_gen != self.initial_generation {
             drop(waiters);
             return self.mark_done();
         }
 
-        let current_gen = self.notify.generation.load(Ordering::Acquire);
-        if current_gen != self.initial_generation {
+        if self.try_consume_stored_notification() {
             drop(waiters);
             return self.mark_done();
         }
