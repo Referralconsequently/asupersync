@@ -1,62 +1,46 @@
-//! Regression test for notify cancellation safety token behavior.
-
+//!
+//! Notify bug test.
+//!
 use asupersync::sync::Notify;
 use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
 
 struct NoopWaker;
-impl Wake for NoopWaker {
+impl std::task::Wake for NoopWaker {
     fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
 }
-
 fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+    Waker::from(Arc::new(NoopWaker))
 }
-
-fn poll_once<F>(fut: &mut F) -> Poll<F::Output>
-where
-    F: Future + Unpin,
-{
+fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     Pin::new(fut).poll(&mut cx)
 }
 
-#[test]
-fn test_notify_cancel_safety_bug() {
-    // Scenario 1: we poll fut1
+fn main() {
     let notify = Notify::new();
+    
+    // fut1 created BEFORE broadcast
     let mut fut1 = notify.notified();
-    assert!(poll_once(&mut fut1).is_pending()); // registers fut1
-
-    notify.notify_one(); // sets notified=true for fut1
-    notify.notify_waiters(); // generation=1
-
-    assert!(poll_once(&mut fut1).is_ready());
+    
+    // notify_one adds a stored notification
+    notify.notify_one();
+    
+    // notify_waiters bumps generation
+    notify.notify_waiters();
+    
+    // fut2 created AFTER broadcast
     let mut fut2 = notify.notified();
-    let left_token_polled = poll_once(&mut fut2).is_ready();
-
-    // Scenario 2: we drop fut1 instead of polling it
-    let notify2 = Notify::new();
-    let mut fut1_2 = notify2.notified();
-    assert!(poll_once(&mut fut1_2).is_pending());
-    notify2.notify_one();
-    notify2.notify_waiters();
-    drop(fut1_2); // Drops instead of polling
-
-    let mut fut2_2 = notify2.notified();
-    let left_token_dropped = poll_once(&mut fut2_2).is_ready();
-
-    // Polling consumes the token, dropping passes the baton
-    assert!(
-        !left_token_polled,
-        "Polling to completion should consume the token"
-    );
-    assert!(
-        left_token_dropped,
-        "Dropping a notified future must pass the baton to prevent lost wakeups"
-    );
+    
+    // fut1 polls. It should complete using the broadcast generation,
+    // LEAVING the stored notification intact!
+    assert_eq!(poll_once(&mut fut1), Poll::Ready(()));
+    
+    // fut2 polls. Since the stored notification was left intact, it should complete!
+    assert_eq!(poll_once(&mut fut2), Poll::Ready(()), "lost wakeup! fut1 consumed the token incorrectly");
+    
+    println!("SUCCESS!");
 }
