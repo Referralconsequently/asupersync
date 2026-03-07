@@ -1544,8 +1544,10 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         };
 
         let wrapped = async move {
-            let result =
-                CatchUnwind(Box::pin(run_gen_server_loop(server, child_cx, &mut cell))).await;
+            let result = CatchUnwind {
+                inner: Box::pin(run_gen_server_loop(server, child_cx, &mut cell)),
+            }
+            .await;
             match result {
                 Ok(server_final) => {
                     let _ = result_tx.send(&cx_for_send, Ok(server_final));

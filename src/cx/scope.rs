@@ -126,14 +126,20 @@ pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
     pub(crate) _policy: PhantomData<&'r P>,
 }
 
-pub(crate) struct CatchUnwind<F>(pub(crate) Pin<Box<F>>);
+#[pin_project::pin_project]
+pub(crate) struct CatchUnwind<F> {
+    #[pin]
+    pub(crate) inner: F,
+}
 
 impl<F: Future> Future for CatchUnwind<F> {
     type Output = std::thread::Result<F::Output>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = self.0.as_mut();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.inner.as_mut().poll(cx)
+        }));
         match result {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
@@ -151,7 +157,7 @@ pub(crate) fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> Stri
 }
 
 struct RegionRunner<'a, Fut> {
-    fut: CatchUnwind<Fut>,
+    fut: Pin<Box<CatchUnwind<Fut>>>,
     state: Option<&'a mut RuntimeState>,
     child_region: RegionId,
 }
@@ -161,8 +167,7 @@ impl<'a, Fut: Future> Future for RegionRunner<'a, Fut> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let fut = Pin::new(&mut this.fut);
-        match fut.poll(cx) {
+        match this.fut.as_mut().poll(cx) {
             Poll::Ready(res) => {
                 let state = this.state.take().expect("polled after ready");
                 Poll::Ready((res, state))
@@ -445,7 +450,7 @@ impl<P: Policy> Scope<'_, P> {
         // We use CatchUnwind to ensure panics are propagated as JoinError::Panicked
         // rather than silent channel closure (which looks like cancellation).
         let wrapped = async move {
-            let result_result = CatchUnwind(Box::pin(future)).await;
+            let result_result = CatchUnwind { inner: future }.await;
             match result_result {
                 Ok(result) => {
                     let _ = tx.send(&cx_for_send, Ok(result));
@@ -686,7 +691,7 @@ impl<P: Policy> Scope<'_, P> {
 
         // Wrap the future to send its result through the channel
         let wrapped = async move {
-            let result_result = CatchUnwind(Box::pin(future)).await;
+            let result_result = CatchUnwind { inner: future }.await;
             match result_result {
                 Ok(result) => {
                     let _ = result_tx.send(&cx_for_send, Ok(result));
@@ -902,7 +907,7 @@ impl<P: Policy> Scope<'_, P> {
         let fut = f(child_scope, &mut *state);
 
         let runner = RegionRunner {
-            fut: CatchUnwind(Box::pin(fut)),
+            fut: Box::pin(CatchUnwind { inner: fut }),
             state: Some(state),
             child_region,
         };

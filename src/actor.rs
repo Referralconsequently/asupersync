@@ -854,7 +854,10 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         // Create the actor loop future
         let wrapped = async move {
-            let result = CatchUnwind(Box::pin(run_actor_loop(actor, child_cx, &mut cell))).await;
+            let result = CatchUnwind {
+                inner: Box::pin(run_actor_loop(actor, child_cx, &mut cell)),
+            }
+            .await;
             match result {
                 Ok(actor_final) => {
                     let _ = result_tx.send(&cx_for_send, Ok(actor_final));
@@ -1034,7 +1037,10 @@ where
 
     loop {
         // Run the actor until it finishes (normally or via panic)
-        let result = CatchUnwind(Box::pin(run_actor_loop(current_actor, cx.clone(), cell))).await;
+        let result = CatchUnwind {
+            inner: Box::pin(run_actor_loop(current_actor, cx.clone(), cell)),
+        }
+        .await;
 
         match result {
             Ok(actor_final) => {
@@ -1882,15 +1888,15 @@ mod tests {
 
     #[test]
     fn actor_id_hash_consistency() {
-        use std::collections::hash_map::DefaultHasher;
+        use crate::util::DetHasher;
         use std::hash::{Hash, Hasher};
 
         let id1 = ActorId::from_task(TaskId::new_for_test(4, 2));
         let id2 = ActorId::from_task(TaskId::new_for_test(4, 2));
         assert_eq!(id1, id2);
 
-        let mut h1 = DefaultHasher::new();
-        let mut h2 = DefaultHasher::new();
+        let mut h1 = DetHasher::default();
+        let mut h2 = DetHasher::default();
         id1.hash(&mut h1);
         id2.hash(&mut h2);
         assert_eq!(h1.finish(), h2.finish(), "equal IDs must hash equal");
