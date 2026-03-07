@@ -1110,6 +1110,60 @@ impl RuntimeHandle {
         self.try_inner()?.spawn(future)
     }
 
+    /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
+    ///
+    /// Creates a child Cx in the runtime's root region and passes it to the
+    /// factory closure. The Cx participates in structured cancellation: it
+    /// will observe cancellation when the runtime shuts down.
+    ///
+    /// Panics if the runtime is no longer available or if the root region
+    /// rejects admission. Use [`RuntimeHandle::try_spawn_with_cx`] to handle
+    /// those failures explicitly.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let handle = runtime.handle();
+    /// handle.spawn_with_cx(|cx| async move {
+    ///     while !cx.is_cancel_requested() {
+    ///         // do work
+    ///     }
+    /// });
+    /// ```
+    pub fn spawn_with_cx<F, Fut>(&self, f: F)
+    where
+        F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.try_spawn_with_cx(f)
+            .expect("failed to spawn task with cx")
+    }
+
+    /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
+    /// returning runtime-availability or admission errors instead of panicking.
+    ///
+    /// Creates a child Cx in the runtime's root region and passes it to the
+    /// factory closure. The Cx participates in structured cancellation: it
+    /// will observe cancellation when the runtime shuts down.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let handle = runtime.handle();
+    /// handle.try_spawn_with_cx(|cx| async move {
+    ///     while !cx.is_cancel_requested() {
+    ///         // do work
+    ///     }
+    /// })?;
+    /// ```
+    pub fn try_spawn_with_cx<F, Fut>(&self, f: F) -> Result<(), SpawnError>
+    where
+        F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.try_inner()?.spawn_with_cx(f)
+    }
+
     /// Spawns a blocking task on the blocking pool.
     ///
     /// Returns `None` if the blocking pool is not configured or if this handle
@@ -1461,6 +1515,46 @@ impl RuntimeInner {
         self.scheduler.inject_ready(task_id, Budget::new().priority);
 
         Ok(JoinHandle::new(join_state))
+    }
+
+    /// Spawn a task with a [`Cx`](crate::cx::Cx) passed to the factory closure.
+    ///
+    /// The Cx is created in the root region and linked to the runtime's
+    /// cancellation tree, so it will observe cancellation when the runtime
+    /// shuts down.
+    fn spawn_with_cx<F, Fut>(&self, f: F) -> Result<(), SpawnError>
+    where
+        F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        use crate::runtime::StoredTask;
+        use crate::types::Outcome;
+
+        let (task_id, future) = {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+            let (task_id, _handle, cx, _result_tx) =
+                guard.create_task_infrastructure::<()>(self.root_region, Budget::new())?;
+
+            let future = f(cx);
+
+            let wrapped = async move {
+                future.await;
+                Outcome::Ok(())
+            };
+
+            guard.store_spawned_task(task_id, StoredTask::new_with_id(wrapped, task_id));
+
+            (task_id, ())
+        };
+
+        self.scheduler.inject_ready(task_id, Budget::new().priority);
+        let _ = future; // suppress unused binding warning
+
+        Ok(())
     }
 
     /// Returns a handle to the blocking pool, if configured.

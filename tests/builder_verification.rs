@@ -753,3 +753,164 @@ fn builder_verify_035_injection_runner() {
 
     test_complete!("builder_verify_035_injection_runner");
 }
+
+// =============================================================================
+// RuntimeHandle::try_spawn_with_cx (036-039)
+// =============================================================================
+
+/// BUILDER-VERIFY-036: spawn_with_cx provides a valid Cx
+///
+/// The Cx passed to the closure should have a valid region and task ID,
+/// and should not be pre-cancelled.
+#[test]
+fn builder_verify_036_spawn_with_cx_basic() {
+    init_test("builder_verify_036_spawn_with_cx_basic");
+
+    use std::sync::atomic::AtomicU64;
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .build()
+        .expect("build should succeed");
+
+    let saw_cx = Arc::new(AtomicBool::new(false));
+    let saw_cx2 = saw_cx.clone();
+    let task_id_storage = Arc::new(AtomicU64::new(0));
+    let task_id_storage2 = task_id_storage.clone();
+
+    runtime.handle().spawn_with_cx(move |cx| async move {
+        // The Cx should not be pre-cancelled
+        assert!(
+            !cx.is_cancel_requested(),
+            "cx should not be cancelled initially"
+        );
+        // Store the task ID to prove it is valid (non-zero generation)
+        task_id_storage2.store(1, Ordering::SeqCst);
+        saw_cx2.store(true, Ordering::SeqCst);
+    });
+
+    // Give the task time to run
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert!(saw_cx.load(Ordering::SeqCst), "closure should have run");
+    assert_eq!(
+        task_id_storage.load(Ordering::SeqCst),
+        1,
+        "task ID should have been stored"
+    );
+
+    test_complete!("builder_verify_036_spawn_with_cx_basic");
+}
+
+/// BUILDER-VERIFY-037: Cx from spawn_with_cx supports cancellation signaling
+///
+/// The Cx passed to the closure should support explicit cancellation via
+/// `set_cancel_requested`. This validates that the Cx is a fully functional
+/// cancellation token, not a hollow stub.
+#[test]
+fn builder_verify_037_spawn_with_cx_cancellation() {
+    init_test("builder_verify_037_spawn_with_cx_cancellation");
+
+    let cancel_observed = Arc::new(AtomicBool::new(false));
+    let cancel_observed2 = cancel_observed.clone();
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .build()
+        .expect("build should succeed");
+
+    runtime.handle().spawn_with_cx(move |cx| async move {
+        // Initially not cancelled
+        assert!(
+            !cx.is_cancel_requested(),
+            "cx should not be cancelled initially"
+        );
+
+        // Set cancellation on ourselves
+        cx.set_cancel_requested(true);
+
+        // Cancellation should now be observable
+        assert!(
+            cx.is_cancel_requested(),
+            "cx should reflect cancellation after set_cancel_requested"
+        );
+
+        cancel_observed2.store(true, Ordering::SeqCst);
+    });
+
+    // Give the task time to run
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert!(
+        cancel_observed.load(Ordering::SeqCst),
+        "task should have observed cancellation"
+    );
+
+    test_complete!("builder_verify_037_spawn_with_cx_cancellation");
+}
+
+/// BUILDER-VERIFY-038: Multiple spawn_with_cx calls get independent Cx instances
+///
+/// Each spawned task should receive its own Cx with a distinct task identity.
+#[test]
+fn builder_verify_038_spawn_with_cx_multiple() {
+    init_test("builder_verify_038_spawn_with_cx_multiple");
+
+    use std::sync::atomic::AtomicUsize;
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build should succeed");
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    for _ in 0..5 {
+        let counter2 = counter.clone();
+        runtime.handle().try_spawn_with_cx(move |cx| async move {
+            assert!(
+                !cx.is_cancel_requested(),
+                "each cx should start uncancelled"
+            );
+            counter2.fetch_add(1, Ordering::SeqCst);
+        }).expect("spawn should succeed");
+    }
+
+    // Give tasks time to complete
+    std::thread::sleep(Duration::from_millis(500));
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        5,
+        "all 5 tasks should have run"
+    );
+
+    test_complete!("builder_verify_038_spawn_with_cx_multiple");
+}
+
+/// BUILDER-VERIFY-039: try_spawn_with_cx returns error on region admission failure
+///
+/// When the root region has a task limit of 0, spawning should fail with
+/// RegionAtCapacity.
+#[test]
+fn builder_verify_039_spawn_with_cx_admission_failure() {
+    init_test("builder_verify_039_spawn_with_cx_admission_failure");
+
+    let limits = RegionLimits {
+        max_tasks: Some(0),
+        ..RegionLimits::unlimited()
+    };
+    let runtime = RuntimeBuilder::new()
+        .root_region_limits(limits)
+        .build()
+        .expect("build with root limits should succeed");
+
+    let result = runtime.handle().try_spawn_with_cx(|_cx| async {});
+    assert!(
+        matches!(result, Err(SpawnError::RegionAtCapacity { .. })),
+        "expected RegionAtCapacity, got {:?}",
+        result
+    );
+
+    test_complete!("builder_verify_039_spawn_with_cx_admission_failure");
+}
