@@ -1112,7 +1112,7 @@ impl HttpClient {
                 }
             }
             ProxyScheme::Socks5 => {
-                let tcp = connect_via_socks5(proxy, parsed).await?;
+                let tcp = connect_via_socks5(proxy, parsed, cx).await?;
                 if parsed.scheme == Scheme::Http {
                     return Ok(ProxyConnection {
                         io: ClientIo::Plain(tcp),
@@ -1689,17 +1689,23 @@ fn absolute_request_target(parsed: &ParsedUrl) -> String {
 async fn connect_via_socks5(
     proxy: &ProxyEndpoint,
     target: &ParsedUrl,
+    cx: &Cx,
 ) -> Result<TcpStream, ClientError> {
+    check_cx(cx)?;
     let addr = format!("{}:{}", proxy.host, proxy.port);
     let mut stream = TcpStream::connect(addr)
         .await
         .map_err(ClientError::ConnectError)?;
 
+    check_cx(cx)?;
     socks5_negotiate_auth(&mut stream, proxy.socks5_credentials()).await?;
+    check_cx(cx)?;
     let connect_req = build_socks5_connect_request(target)?;
     stream.write_all(&connect_req).await?;
     stream.flush().await?;
+    check_cx(cx)?;
     read_socks5_connect_reply(&mut stream).await?;
+    check_cx(cx)?;
 
     Ok(stream)
 }
