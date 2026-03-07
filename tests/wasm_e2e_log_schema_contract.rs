@@ -463,7 +463,7 @@ fn no_duplicate_field_names_across_required_and_optional() {
         }
     }
 
-    let unique: HashSet<&str> = all_names.iter().map(|s| s.as_str()).collect();
+    let unique: HashSet<&str> = all_names.iter().map(std::string::String::as_str).collect();
     assert_eq!(
         all_names.len(),
         unique.len(),

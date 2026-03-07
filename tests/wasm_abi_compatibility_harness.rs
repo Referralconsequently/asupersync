@@ -9,8 +9,10 @@
 
 #![allow(missing_docs)]
 
+use asupersync::types::WasmDispatchError;
 use asupersync::types::wasm_abi::{
     ErrorBoundaryAction, WasmHandleError, WasmHandleOwnership, WasmHandleTable,
+    WasmScopeEnterRequest, WasmTaskSpawnRequest,
 };
 use asupersync::types::{CancelPhase, NextjsBootstrapPhase, is_valid_bootstrap_transition};
 use asupersync::{
@@ -18,8 +20,8 @@ use asupersync::{
     WASM_ABI_SIGNATURE_FINGERPRINT_V1, WASM_ABI_SIGNATURES_V1, WasmAbiChangeClass,
     WasmAbiCompatibilityDecision, WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope,
     WasmAbiPayloadShape, WasmAbiRecoverability, WasmAbiValue, WasmAbiVersion, WasmAbiVersionBump,
-    WasmAbortInteropSnapshot, WasmAbortPropagationMode, WasmBoundaryState, WasmHandleKind,
-    WasmHandleRef, apply_abort_signal_event, apply_runtime_cancel_phase_event,
+    WasmAbortInteropSnapshot, WasmAbortPropagationMode, WasmBoundaryState, WasmExportDispatcher,
+    WasmHandleKind, WasmHandleRef, apply_abort_signal_event, apply_runtime_cancel_phase_event,
     classify_wasm_abi_compatibility, is_valid_wasm_boundary_transition,
     outcome_to_error_boundary_action, outcome_to_suspense_state, outcome_to_transition_state,
     required_wasm_abi_bump, validate_wasm_boundary_transition, wasm_abi_signature_fingerprint,
@@ -541,6 +543,164 @@ fn handle_memory_report_is_consistent() {
     assert_eq!(report.free_slots, 1);
 }
 
+#[test]
+fn handle_descendants_postorder_is_deterministic_and_skips_released_children() {
+    let mut table = WasmHandleTable::new();
+
+    let root = table.allocate(WasmHandleKind::Runtime);
+    let child_a = table.allocate_with_parent(WasmHandleKind::Region, Some(root));
+    let grandchild_a = table.allocate_with_parent(WasmHandleKind::Task, Some(child_a));
+    let child_b = table.allocate_with_parent(WasmHandleKind::FetchRequest, Some(root));
+    let grandchild_b = table.allocate_with_parent(WasmHandleKind::Task, Some(child_b));
+
+    table.release(&grandchild_a).unwrap();
+
+    let descendants = table.descendants_postorder(&root);
+    assert_eq!(
+        descendants,
+        vec![child_a, grandchild_b, child_b],
+        "descendants must be stable post-order and skip released children"
+    );
+}
+
+#[test]
+fn release_pinned_handle_is_rejected_without_mutating_counts() {
+    let mut table = WasmHandleTable::new();
+    let handle = table.allocate(WasmHandleKind::Task);
+    table.pin(&handle).unwrap();
+
+    let err = table.release(&handle).unwrap_err();
+    assert_eq!(err, WasmHandleError::ReleasePinned { slot: handle.slot });
+    assert_eq!(
+        table.live_count(),
+        1,
+        "failed release must not drop live count"
+    );
+    assert_eq!(
+        table.memory_report().free_slots,
+        0,
+        "failed release must not recycle slot"
+    );
+
+    let entry = table.get(&handle).unwrap();
+    assert!(entry.pinned, "failed release must leave pin state intact");
+    assert_eq!(entry.ownership, WasmHandleOwnership::WasmOwned);
+}
+
+#[test]
+fn transfer_to_js_cannot_repeat_or_cross_release_boundary() {
+    let mut table = WasmHandleTable::new();
+    let handle = table.allocate(WasmHandleKind::FetchRequest);
+
+    table.transfer_to_js(&handle).unwrap();
+    let err = table.transfer_to_js(&handle).unwrap_err();
+    assert_eq!(
+        err,
+        WasmHandleError::InvalidTransfer {
+            slot: handle.slot,
+            current: WasmHandleOwnership::TransferredToJs,
+        }
+    );
+
+    table.release(&handle).unwrap();
+    let err = table.transfer_to_js(&handle).unwrap_err();
+    assert!(
+        matches!(err, WasmHandleError::StaleGeneration { .. }),
+        "released handles must fail closed on post-release transfer"
+    );
+}
+
+#[test]
+fn explicit_scope_close_releases_descendants_without_leaks() {
+    let mut dispatcher = WasmExportDispatcher::new();
+    let runtime = dispatcher.runtime_create(None).unwrap();
+    let scope = dispatcher
+        .scope_enter(
+            &WasmScopeEnterRequest {
+                parent: runtime,
+                label: Some("scope-close".to_string()),
+            },
+            None,
+        )
+        .unwrap();
+    let task = dispatcher
+        .task_spawn(
+            &WasmTaskSpawnRequest {
+                scope,
+                label: Some("close-me".to_string()),
+                cancel_kind: Some("user".to_string()),
+            },
+            None,
+        )
+        .unwrap();
+
+    let outcome = dispatcher.scope_close(&scope, None).unwrap();
+    assert!(matches!(outcome, WasmAbiOutcomeEnvelope::Ok { .. }));
+    assert!(dispatcher.handles().get(&scope).is_err());
+    assert!(dispatcher.handles().get(&task).is_err());
+    assert!(
+        dispatcher.handles().get(&runtime).is_ok(),
+        "scope_close must not release the parent runtime handle"
+    );
+    assert_eq!(dispatcher.handles().live_count(), 1);
+    assert!(
+        dispatcher.handles().detect_leaks().is_empty(),
+        "explicit close must drain descendants without leaks"
+    );
+}
+
+#[test]
+fn explicit_scope_close_rejects_stale_second_close_without_touching_runtime() {
+    let mut dispatcher = WasmExportDispatcher::new();
+    let runtime = dispatcher.runtime_create(None).unwrap();
+    let scope = dispatcher
+        .scope_enter(
+            &WasmScopeEnterRequest {
+                parent: runtime,
+                label: Some("double-close".to_string()),
+            },
+            None,
+        )
+        .unwrap();
+
+    dispatcher.scope_close(&scope, None).unwrap();
+    let err = dispatcher.scope_close(&scope, None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            WasmDispatchError::Handle(WasmHandleError::StaleGeneration { slot, .. })
+                if slot == scope.slot
+        ),
+        "second scope_close must fail on a stale handle instead of double-freeing"
+    );
+    assert!(
+        dispatcher.handles().get(&runtime).is_ok(),
+        "failed second scope_close must not disturb the parent runtime"
+    );
+    assert_eq!(dispatcher.handles().live_count(), 1);
+}
+
+#[test]
+fn explicit_runtime_close_rejects_stale_second_close_without_leaks() {
+    let mut dispatcher = WasmExportDispatcher::new();
+    let runtime = dispatcher.runtime_create(None).unwrap();
+
+    let outcome = dispatcher.runtime_close(&runtime, None).unwrap();
+    assert!(matches!(outcome, WasmAbiOutcomeEnvelope::Ok { .. }));
+
+    let err = dispatcher.runtime_close(&runtime, None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            WasmDispatchError::Handle(WasmHandleError::StaleGeneration { slot, .. })
+                if slot == runtime.slot
+        ),
+        "second runtime_close must fail on a stale handle instead of double-freeing"
+    );
+    assert_eq!(dispatcher.handles().live_count(), 0);
+    assert!(dispatcher.handles().detect_leaks().is_empty());
+}
+
 // ─── Cancel phase → boundary state mapping ──────────────────────────
 
 #[test]
@@ -597,6 +757,19 @@ fn abort_js_to_runtime_propagation() {
 }
 
 #[test]
+fn abort_signal_does_not_propagate_to_runtime_in_runtime_to_js_mode() {
+    let update = apply_abort_signal_event(WasmAbortInteropSnapshot {
+        mode: WasmAbortPropagationMode::RuntimeToAbortSignal,
+        boundary_state: WasmBoundaryState::Active,
+        abort_signal_aborted: false,
+    });
+    assert_eq!(update.next_boundary_state, WasmBoundaryState::Active);
+    assert!(update.abort_signal_aborted);
+    assert!(!update.propagated_to_runtime);
+    assert!(!update.propagated_to_abort_signal);
+}
+
+#[test]
 fn abort_bidirectional_propagation() {
     // Runtime cancel in bidirectional mode propagates to JS
     let update = apply_runtime_cancel_phase_event(
@@ -618,6 +791,22 @@ fn abort_bidirectional_propagation() {
     });
     assert!(update.propagated_to_runtime);
     assert!(update.abort_signal_aborted);
+}
+
+#[test]
+fn runtime_cancel_does_not_abort_signal_in_abort_to_runtime_only_mode() {
+    let update = apply_runtime_cancel_phase_event(
+        WasmAbortInteropSnapshot {
+            mode: WasmAbortPropagationMode::AbortSignalToRuntime,
+            boundary_state: WasmBoundaryState::Active,
+            abort_signal_aborted: false,
+        },
+        CancelPhase::Requested,
+    );
+    assert_eq!(update.next_boundary_state, WasmBoundaryState::Cancelling);
+    assert!(!update.abort_signal_aborted);
+    assert!(!update.propagated_to_runtime);
+    assert!(!update.propagated_to_abort_signal);
 }
 
 #[test]
@@ -789,6 +978,47 @@ fn outcome_panicked_mappings() {
     assert_eq!(
         outcome_to_transition_state(&panicked),
         TransitionTaskState::Reverted
+    );
+}
+
+#[test]
+fn dispatch_error_to_failure_preserves_error_class() {
+    let incompatible = WasmDispatchError::Incompatible {
+        decision: WasmAbiCompatibilityDecision::MajorMismatch {
+            producer_major: 1,
+            consumer_major: 2,
+        },
+    };
+    let failure = incompatible.to_failure();
+    assert_eq!(failure.code, WasmAbiErrorCode::CompatibilityRejected);
+    assert_eq!(failure.recoverability, WasmAbiRecoverability::Permanent);
+
+    let handle = WasmDispatchError::Handle(WasmHandleError::AlreadyReleased { slot: 3 });
+    let failure = handle.to_failure();
+    assert_eq!(failure.code, WasmAbiErrorCode::InvalidHandle);
+    assert_eq!(failure.recoverability, WasmAbiRecoverability::Permanent);
+
+    let invalid_request = WasmDispatchError::InvalidRequest {
+        reason: "missing payload".to_string(),
+    };
+    let failure = invalid_request.to_failure();
+    assert_eq!(failure.code, WasmAbiErrorCode::DecodeFailure);
+    assert_eq!(failure.recoverability, WasmAbiRecoverability::Permanent);
+}
+
+#[test]
+fn dispatch_error_to_outcome_wraps_failure_without_losing_message() {
+    let err = WasmDispatchError::InvalidState {
+        state: WasmBoundaryState::Draining,
+        symbol: asupersync::WasmAbiSymbol::TaskJoin,
+    };
+    let expected_failure = err.to_failure();
+    let outcome = err.to_outcome();
+    assert_eq!(
+        outcome,
+        WasmAbiOutcomeEnvelope::Err {
+            failure: expected_failure,
+        }
     );
 }
 

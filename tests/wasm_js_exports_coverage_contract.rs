@@ -97,14 +97,14 @@ fn top_level_types_field_matches_exports_types() {
 fn browser_core_types_file_listed_in_files_array() {
     let v = read_pkg("browser-core");
     let types_path = v["types"].as_str().unwrap().trim_start_matches("./");
-    let files: Vec<&str> = v["files"]
+    let has_types_path = v["files"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|f| f.as_str())
-        .collect();
+        .any(|x| x == types_path);
     assert!(
-        files.contains(&types_path),
+        has_types_path,
         "browser-core types file {types_path} not in files array"
     );
 }
@@ -147,7 +147,9 @@ fn browser_core_main_is_js_not_wasm() {
     let v = read_pkg("browser-core");
     let main = v["main"].as_str().unwrap();
     assert!(
-        main.ends_with(".js"),
+        std::path::Path::new(main)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("js")),
         "browser-core main must be .js (not .wasm), got {main}"
     );
 }
@@ -158,7 +160,10 @@ fn higher_level_main_points_to_dist_index() {
         let v = read_pkg(pkg);
         let main = v["main"].as_str().unwrap();
         assert!(
-            main.starts_with("./dist/") && main.ends_with(".js"),
+            main.starts_with("./dist/")
+                && std::path::Path::new(main)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("js")),
             "{pkg} main must be ./dist/*.js, got {main}"
         );
     }
@@ -260,7 +265,7 @@ fn package_directory_matches_scope_name() {
     for pkg in &["browser-core", "browser", "react", "next"] {
         let v = read_pkg(pkg);
         let name = v["name"].as_str().unwrap();
-        let expected_suffix = name.split('/').last().unwrap();
+        let expected_suffix = name.split('/').next_back().unwrap();
         assert_eq!(
             expected_suffix, *pkg,
             "package directory {pkg} must match scope name suffix {expected_suffix}"

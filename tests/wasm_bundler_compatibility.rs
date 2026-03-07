@@ -278,6 +278,87 @@ fn matrix_server_runtimes_reference_boundary_strategy() {
     );
 }
 
+// ─── Package manager coverage ────────────────────────────────────────
+
+#[test]
+fn matrix_covers_supported_package_managers() {
+    let doc = load_matrix();
+    let managers = [
+        "| `pnpm` 9.x",
+        "| `npm` 10.x",
+        "| `yarn` 4.x",
+        "| `bun` 1.x",
+    ];
+    let mut missing = Vec::new();
+    for manager in &managers {
+        if !doc.contains(manager) {
+            missing.push(*manager);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "Matrix missing package-manager coverage:\n{}",
+        missing
+            .iter()
+            .map(|m| format!("  - {m}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn matrix_package_manager_section_references_workspace_contract() {
+    let doc = load_matrix();
+    for marker in [
+        "packageManager",
+        "pnpm-workspace.yaml",
+        ".npmrc",
+        "validate_npm_pack_smoke.sh",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "Package-manager section missing workspace contract marker: {marker}"
+        );
+    }
+}
+
+// ─── Module resolution coverage ──────────────────────────────────────
+
+#[test]
+fn matrix_covers_module_resolution_modes() {
+    let doc = load_matrix();
+    for marker in ["moduleResolution", "| `bundler` |", "| `NodeNext` |"] {
+        assert!(
+            doc.contains(marker),
+            "Matrix must document TypeScript resolver marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn matrix_documents_resolver_examples_and_baseline_files() {
+    let doc = load_matrix();
+    for marker in [
+        "tsconfig.base.json",
+        "\"module\": \"ES2020\"",
+        "\"moduleResolution\": \"bundler\"",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "Matrix must document resolver baseline marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn matrix_documents_unsupported_legacy_resolvers() {
+    let doc = load_matrix();
+    assert!(
+        doc.contains("node16") || doc.contains("classic"),
+        "Matrix must document unsupported legacy resolver modes"
+    );
+}
+
 // ─── Module format coverage ──────────────────────────────────────────
 
 #[test]
@@ -540,6 +621,10 @@ fn matrix_documents_validation_commands() {
         doc.contains("cargo check --target wasm32-unknown-unknown"),
         "Matrix must document cargo check validation commands for wasm32"
     );
+    assert!(
+        doc.contains("bash scripts/validate_npm_pack_smoke.sh"),
+        "Matrix must document the package-manager/resolver smoke gate"
+    );
 }
 
 #[test]
@@ -666,6 +751,8 @@ fn matrix_has_required_sections() {
     let sections = [
         "Purpose",
         "Package Artifacts",
+        "Package Manager Compatibility Matrix",
+        "TypeScript Module Resolution Compatibility",
         "Bundler Compatibility Matrix",
         "Runtime Compatibility Matrix",
         "Module Format Compatibility",

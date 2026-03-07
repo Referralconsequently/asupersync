@@ -18,7 +18,127 @@ fn read_pkg(pkg: &str) -> serde_json::Value {
     serde_json::from_str(&content).expect("invalid JSON")
 }
 
+fn read_root_pkg() -> serde_json::Value {
+    let path = repo_root().join("package.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    serde_json::from_str(&content).expect("invalid JSON")
+}
+
+fn read_tsconfig_base() -> serde_json::Value {
+    let path = repo_root().join("tsconfig.base.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    serde_json::from_str(&content).expect("invalid JSON")
+}
+
+fn read_pkg_tsconfig(pkg: &str) -> serde_json::Value {
+    let path = repo_root().join("packages").join(pkg).join("tsconfig.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    serde_json::from_str(&content).expect("invalid JSON")
+}
+
 const ALL_PKGS: &[&str] = &["browser-core", "browser", "react", "next"];
+
+// ── Workspace and Resolver Contract ──────────────────────────────────
+
+#[test]
+fn root_workspace_pins_pnpm_package_manager() {
+    let root = read_root_pkg();
+    let package_manager = root["packageManager"]
+        .as_str()
+        .expect("root packageManager must be string");
+    assert!(
+        package_manager.starts_with("pnpm@"),
+        "root packageManager must pin pnpm, got {package_manager}"
+    );
+}
+
+#[test]
+fn root_workspace_declares_node_and_pnpm_engines() {
+    let root = read_root_pkg();
+    let engines = root["engines"]
+        .as_object()
+        .expect("engines object required");
+    assert!(
+        engines.contains_key("node"),
+        "root package.json must declare a node engine"
+    );
+    assert!(
+        engines.contains_key("pnpm"),
+        "root package.json must declare a pnpm engine"
+    );
+}
+
+#[test]
+fn root_workspace_scripts_use_pnpm_for_package_builds() {
+    let root = read_root_pkg();
+    let scripts = root["scripts"]
+        .as_object()
+        .expect("scripts object required");
+    for key in ["build:packages", "build", "typecheck"] {
+        let script = scripts[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("root script {key} must be a string"));
+        assert!(
+            script.contains("pnpm"),
+            "root script {key} must use pnpm for workspace package operations"
+        );
+    }
+}
+
+#[test]
+fn pnpm_workspace_and_npmrc_exist() {
+    let workspace = repo_root().join("pnpm-workspace.yaml");
+    let npmrc = repo_root().join(".npmrc");
+    assert!(workspace.exists(), "pnpm-workspace.yaml must exist");
+    assert!(npmrc.exists(), ".npmrc must exist");
+
+    let workspace_text = std::fs::read_to_string(&workspace).unwrap();
+    assert!(
+        workspace_text.contains("packages/*"),
+        "pnpm-workspace.yaml must enumerate packages/*"
+    );
+
+    let npmrc_text = std::fs::read_to_string(&npmrc).unwrap();
+    assert!(
+        npmrc_text.contains("enable-pre-post-scripts=true"),
+        ".npmrc must retain deterministic package script policy"
+    );
+}
+
+#[test]
+fn tsconfig_base_uses_bundler_resolution() {
+    let tsconfig = read_tsconfig_base();
+    assert_eq!(
+        tsconfig["compilerOptions"]["moduleResolution"].as_str(),
+        Some("bundler"),
+        "tsconfig.base.json must pin moduleResolution=bundler"
+    );
+    assert_eq!(
+        tsconfig["compilerOptions"]["module"].as_str(),
+        Some("ES2020"),
+        "tsconfig.base.json must keep ESM module output"
+    );
+}
+
+#[test]
+fn package_tsconfigs_inherit_root_resolver_contract() {
+    for pkg in ["browser", "react", "next"] {
+        let tsconfig = read_pkg_tsconfig(pkg);
+        assert_eq!(
+            tsconfig["extends"].as_str(),
+            Some("../../tsconfig.base.json"),
+            "{pkg} tsconfig must extend the root TypeScript baseline"
+        );
+        let compiler_options = tsconfig["compilerOptions"].as_object().unwrap();
+        assert!(
+            !compiler_options.contains_key("moduleResolution"),
+            "{pkg} tsconfig must not override moduleResolution"
+        );
+    }
+}
 
 // ── Pack-Ready Manifest Fields ───────────────────────────────────────
 
@@ -112,7 +232,9 @@ fn exports_import_path_ends_with_js() {
             .and_then(|v| v.as_str())
             .unwrap_or_else(|| panic!("{pkg} missing exports[\".\"].import/default"));
         assert!(
-            import_path.ends_with(".js"),
+            std::path::Path::new(import_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("js")),
             "{pkg} exports import path must end with .js, got {import_path}"
         );
     }
@@ -180,7 +302,9 @@ fn browser_core_files_include_wasm_and_js() {
 
     // Must have at least one .js and one .d.ts
     assert!(
-        files.iter().any(|f| f.ends_with(".js")),
+        files.iter().any(|f| std::path::Path::new(f)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))),
         "browser-core files must include at least one .js file"
     );
     assert!(
@@ -194,30 +318,30 @@ fn browser_core_files_include_wasm_and_js() {
 #[test]
 fn dependency_versions_use_workspace_protocol() {
     let browser = read_pkg("browser");
-    let bc_dep = browser["dependencies"]["@asupersync/browser-core"]
+    let browser_core_dep = browser["dependencies"]["@asupersync/browser-core"]
         .as_str()
         .unwrap();
     assert!(
-        bc_dep.starts_with("workspace:"),
-        "browser -> browser-core must use workspace protocol, got {bc_dep}"
+        browser_core_dep.starts_with("workspace:"),
+        "browser -> browser-core must use workspace protocol, got {browser_core_dep}"
     );
 
     let react = read_pkg("react");
-    let br_dep = react["dependencies"]["@asupersync/browser"]
+    let browser_dep = react["dependencies"]["@asupersync/browser"]
         .as_str()
         .unwrap();
     assert!(
-        br_dep.starts_with("workspace:"),
-        "react -> browser must use workspace protocol, got {br_dep}"
+        browser_dep.starts_with("workspace:"),
+        "react -> browser must use workspace protocol, got {browser_dep}"
     );
 
     let next = read_pkg("next");
-    let br_dep = next["dependencies"]["@asupersync/browser"]
+    let browser_dep_next = next["dependencies"]["@asupersync/browser"]
         .as_str()
         .unwrap();
     assert!(
-        br_dep.starts_with("workspace:"),
-        "next -> browser must use workspace protocol, got {br_dep}"
+        browser_dep_next.starts_with("workspace:"),
+        "next -> browser must use workspace protocol, got {browser_dep_next}"
     );
 }
 
@@ -255,6 +379,7 @@ fn dependency_graph_is_acyclic() {
     let mut visited: HashSet<String> = HashSet::new();
     let mut in_stack: HashSet<String> = HashSet::new();
 
+    #[allow(clippy::items_after_statements)]
     fn dfs(
         node: &str,
         edges: &HashMap<String, Vec<String>>,
@@ -311,6 +436,10 @@ fn validate_script_exists() {
     assert!(path.exists(), "validate_npm_pack_smoke.sh must exist");
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("npm pack"), "must reference npm pack");
+    assert!(
+        content.contains("packageManager") && content.contains("moduleResolution"),
+        "validate script must check package-manager and resolver contracts"
+    );
     assert!(
         content.contains("VALIDATION PASSED"),
         "must report validation result"

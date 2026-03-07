@@ -37,7 +37,11 @@ fn doc_references_bead() {
     let doc = load_doc();
     assert!(
         doc.contains("asupersync-3qv04.8.1"),
-        "doc must reference bead id"
+        "doc must reference foundational bead id"
+    );
+    assert!(
+        doc.contains("asupersync-3qv04.8.4.4"),
+        "doc must reference log-schema hardening bead id"
     );
 }
 
@@ -49,6 +53,9 @@ fn doc_has_required_sections() {
         "Contract Artifacts",
         "Evidence Layers",
         "Structured Logging Contract",
+        "E2E Log Schema",
+        "Artifact Bundle Layout",
+        "Retention Policy",
         "Comparator-Smoke Runner",
         "Validation",
         "Cross-References",
@@ -125,6 +132,14 @@ fn artifact_versions_are_stable() {
     assert_eq!(
         artifact["runner_report_schema_version"].as_str(),
         Some("wasm-qa-evidence-smoke-run-report-v1")
+    );
+    assert_eq!(
+        artifact["artifact_bundle_schema_version"].as_str(),
+        Some("wasm-qa-artifact-bundle-v1")
+    );
+    assert_eq!(
+        artifact["e2e_log_schema_version"].as_str(),
+        Some("wasm-qa-e2e-log-v1")
     );
     assert_eq!(
         artifact["runner_script"].as_str(),
@@ -293,6 +308,95 @@ fn structured_log_fields_are_unique_and_nonempty() {
     }
 }
 
+#[test]
+fn structured_log_fields_cover_forensics_bundle_requirements() {
+    let artifact = load_artifact();
+    let fields: BTreeSet<&str> = artifact["structured_log_fields_required"]
+        .as_array()
+        .expect("structured_log_fields_required must be array")
+        .iter()
+        .map(|field| {
+            field
+                .as_str()
+                .expect("structured_log_fields_required entry must be string")
+        })
+        .collect();
+    for required in [
+        "schema_version",
+        "event_kind",
+        "scenario_id",
+        "run_id",
+        "timestamp_utc",
+        "module_fingerprint",
+        "command_exit_code",
+        "bundle_manifest_path",
+        "retention_class",
+        "retention_until_utc",
+    ] {
+        assert!(
+            fields.contains(required),
+            "structured log fields must include {required}"
+        );
+    }
+}
+
+#[test]
+fn artifact_bundle_layout_is_stable() {
+    let artifact = load_artifact();
+    let files: BTreeSet<&str> = artifact["artifact_bundle_layout_required"]
+        .as_array()
+        .expect("artifact_bundle_layout_required must be array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("artifact bundle layout entry must be string")
+        })
+        .collect();
+    for required in [
+        "bundle_manifest.json",
+        "run_report.json",
+        "run.log",
+        "events.ndjson",
+    ] {
+        assert!(
+            files.contains(required),
+            "artifact bundle layout must include {required}"
+        );
+    }
+}
+
+#[test]
+fn retention_policy_declares_hot_warm_cold_classes() {
+    let artifact = load_artifact();
+    assert_eq!(
+        artifact["retention_policy"]["schema_version"].as_str(),
+        Some("wasm-qa-artifact-retention-v1")
+    );
+    let mut classes = BTreeSet::new();
+    for class in artifact["retention_policy"]["classes"]
+        .as_array()
+        .expect("retention_policy.classes must be array")
+    {
+        let class_name = class["class"]
+            .as_str()
+            .expect("retention class name must be string");
+        let min_days = class["min_days"]
+            .as_i64()
+            .expect("retention class min_days must be integer");
+        assert!(
+            min_days >= 7,
+            "retention class {class_name} must retain >=7 days"
+        );
+        classes.insert(class_name.to_string());
+    }
+    let expected: BTreeSet<String> = ["hot", "warm", "cold"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
+    assert_eq!(classes, expected, "retention classes must be hot/warm/cold");
+}
+
 // -- Smoke runner and scenarios --
 
 #[test]
@@ -358,6 +462,10 @@ fn runner_script_exists_and_declares_modes() {
         "--execute",
         "wasm-qa-evidence-smoke-bundle-v1",
         "wasm-qa-evidence-smoke-run-report-v1",
+        "wasm-qa-e2e-log-v1",
+        "events.ndjson",
+        "retention_class",
+        "retention_until_utc",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
