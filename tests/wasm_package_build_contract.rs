@@ -15,8 +15,8 @@ fn repo_root() -> PathBuf {
 #[test]
 fn pnpm_workspace_yaml_exists_and_lists_packages() {
     let path = repo_root().join("pnpm-workspace.yaml");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     assert!(
         content.contains("packages:"),
         "pnpm-workspace.yaml must declare packages"
@@ -30,14 +30,21 @@ fn pnpm_workspace_yaml_exists_and_lists_packages() {
 #[test]
 fn root_package_json_exists_with_workspace_scripts() {
     let path = repo_root().join("package.json");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     let v: serde_json::Value = serde_json::from_str(&content).expect("invalid JSON");
 
     assert_eq!(v["private"], true, "root package.json must be private");
 
     let scripts = v["scripts"].as_object().expect("scripts must be an object");
-    for required in &["build", "build:wasm", "build:packages", "clean", "typecheck", "validate"] {
+    for required in &[
+        "build",
+        "build:wasm",
+        "build:packages",
+        "clean",
+        "typecheck",
+        "validate",
+    ] {
         assert!(
             scripts.contains_key(*required),
             "root package.json missing script: {required}"
@@ -56,8 +63,8 @@ fn npmrc_exists() {
 #[test]
 fn tsconfig_base_exists() {
     let path = repo_root().join("tsconfig.base.json");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     let v: serde_json::Value = serde_json::from_str(&content).expect("invalid JSON");
     assert!(
         v["compilerOptions"]["strict"] == true,
@@ -98,23 +105,10 @@ fn higher_level_packages_are_esm_modules() {
         let path = repo_root().join("packages").join(pkg).join("package.json");
         let content = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            v["type"].as_str().unwrap(),
-            "module",
-            "{pkg} must be ESM"
-        );
-        assert!(
-            v["main"].as_str().is_some(),
-            "{pkg} must have main field"
-        );
-        assert!(
-            v["types"].as_str().is_some(),
-            "{pkg} must have types field"
-        );
-        assert!(
-            v["exports"].is_object(),
-            "{pkg} must have exports map"
-        );
+        assert_eq!(v["type"].as_str().unwrap(), "module", "{pkg} must be ESM");
+        assert!(v["main"].as_str().is_some(), "{pkg} must have main field");
+        assert!(v["types"].as_str().is_some(), "{pkg} must have types field");
+        assert!(v["exports"].is_object(), "{pkg} must have exports map");
     }
 }
 
@@ -153,10 +147,7 @@ fn higher_level_packages_have_typescript_source() {
 #[test]
 fn higher_level_packages_have_tsconfig() {
     for pkg in &["browser", "react", "next"] {
-        let path = repo_root()
-            .join("packages")
-            .join(pkg)
-            .join("tsconfig.json");
+        let path = repo_root().join("packages").join(pkg).join("tsconfig.json");
         assert!(path.exists(), "missing tsconfig.json for {pkg}");
         let content = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -239,7 +230,10 @@ fn clean_script_exists() {
     let path = repo_root().join("scripts/clean_packages.sh");
     assert!(path.exists(), "clean_packages.sh must exist");
     let content = std::fs::read_to_string(&path).unwrap();
-    assert!(content.contains("pkg/browser-core"), "must clean staging dir");
+    assert!(
+        content.contains("pkg/browser-core"),
+        "must clean staging dir"
+    );
 }
 
 #[test]
@@ -291,6 +285,191 @@ fn browser_core_exports_map_includes_wasm_and_metadata() {
     );
 }
 
+// ── Exports Map & Tree-Shake Safety (asupersync-3qv04.4.2) ──────────
+
+#[test]
+fn all_packages_have_side_effects_false() {
+    for pkg in PACKAGES {
+        let v = read_pkg_json(pkg);
+        assert_eq!(
+            v["sideEffects"], false,
+            "{pkg} must have sideEffects: false for tree-shaking"
+        );
+    }
+}
+
+#[test]
+fn no_internal_or_native_subpath_exports() {
+    for pkg in PACKAGES {
+        let v = read_pkg_json(pkg);
+        if let Some(exports) = v["exports"].as_object() {
+            for key in exports.keys() {
+                assert!(
+                    !key.contains("/internal"),
+                    "{pkg} exports must not expose ./internal/* subpaths (found {key})"
+                );
+                assert!(
+                    !key.contains("/native"),
+                    "{pkg} exports must not expose ./native/* subpaths (found {key})"
+                );
+                assert!(
+                    !key.contains("/src/"),
+                    "{pkg} exports must not expose ./src/* subpaths (found {key})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exports_root_entry_types_condition_first() {
+    // TypeScript requires "types" to be the first condition in conditional exports.
+    // JSON object key order is preserved by Node.js but serde_json sorts keys,
+    // so we check the raw file text for ordering.
+    for pkg in PACKAGES {
+        let path = repo_root().join("packages").join(pkg).join("package.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // Find the exports["."] block and verify "types" appears before "import"/"default"
+        if let Some(types_pos) = raw.find("\"types\": \"./") {
+            if let Some(import_pos) = raw.find("\"import\": \"./") {
+                assert!(
+                    types_pos < import_pos,
+                    "{pkg}: 'types' condition must appear before 'import' in exports[\".\"] \
+                     for correct TypeScript resolution"
+                );
+            }
+            if let Some(default_pos) = raw.find("\"default\": \"./") {
+                assert!(
+                    types_pos < default_pos,
+                    "{pkg}: 'types' condition must appear before 'default' in exports[\".\"]"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn higher_level_packages_only_export_safe_subpaths() {
+    // Higher-level packages may export "." plus named public subpaths
+    // (e.g. "./tracing"), but must never expose internal/native/src paths.
+    for pkg in &["browser", "react", "next"] {
+        let v = read_pkg_json(pkg);
+        let exports = v["exports"].as_object().expect("exports required");
+        assert!(exports.contains_key("."), "{pkg} must export root \".\"");
+        for key in exports.keys() {
+            assert!(
+                !key.contains("/internal") && !key.contains("/native") && !key.contains("/src/"),
+                "{pkg} exports must not expose internal paths (found {key})"
+            );
+            // All subpaths must be shallow (single segment after ./)
+            if key != "." {
+                let segments_count = key.trim_start_matches("./").split('/').count();
+                assert_eq!(
+                    segments_count,
+                    1,
+                    "{pkg} export {key} is too deep — only single-segment subpaths allowed"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn browser_core_exports_cover_all_published_artifacts() {
+    let v = read_pkg_json("browser-core");
+    let exports = v["exports"].as_object().expect("exports required");
+    let files: Vec<&str> = v["files"]
+        .as_array()
+        .expect("files required")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+
+    // Collect all file paths referenced by any export (direct or conditional)
+    let mut exported_files: Vec<String> = Vec::new();
+    for (_key, val) in exports {
+        if let Some(s) = val.as_str() {
+            exported_files.push(s.trim_start_matches("./").to_string());
+        } else if let Some(obj) = val.as_object() {
+            for (_cond, path) in obj {
+                if let Some(p) = path.as_str() {
+                    exported_files.push(p.trim_start_matches("./").to_string());
+                }
+            }
+        }
+    }
+
+    // Every non-README, non-ambient file in "files" should be reachable through exports
+    for file in &files {
+        if *file == "README.md" || *file == "asupersync_bg.wasm.d.ts" {
+            continue; // README is metadata; .wasm.d.ts is TS ambient, not a direct import
+        }
+        let is_exported = exported_files.iter().any(|e| e == file);
+        assert!(
+            is_exported,
+            "browser-core file {file} is in 'files' but not reachable via any export"
+        );
+    }
+}
+
+#[test]
+fn browser_core_exports_only_reference_published_files() {
+    let v = read_pkg_json("browser-core");
+    let exports = v["exports"].as_object().expect("exports required");
+    let files: Vec<String> = v["files"]
+        .as_array()
+        .expect("files required")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect();
+
+    for (key, val) in exports {
+        if key == "." {
+            // Root entry references files via conditional export object
+            if let Some(obj) = val.as_object() {
+                for (_cond, path) in obj {
+                    if let Some(p) = path.as_str() {
+                        let bare = p.trim_start_matches("./");
+                        assert!(
+                            files.contains(&bare.to_string()),
+                            "exports root condition references {p} not in files array"
+                        );
+                    }
+                }
+            }
+        } else if let Some(target) = val.as_str() {
+            let bare = target.trim_start_matches("./");
+            assert!(
+                files.contains(&bare.to_string()),
+                "exports key {key} -> {target} references file not in files array"
+            );
+        }
+    }
+}
+
+#[test]
+fn browser_core_is_esm_module() {
+    let v = read_pkg_json("browser-core");
+    assert_eq!(
+        v["type"].as_str().unwrap(),
+        "module",
+        "browser-core must be ESM"
+    );
+}
+
+#[test]
+fn all_packages_have_publish_config_public() {
+    for pkg in PACKAGES {
+        let v = read_pkg_json(pkg);
+        assert_eq!(
+            v["publishConfig"]["access"].as_str().unwrap(),
+            "public",
+            "{pkg} must have publishConfig.access = public"
+        );
+    }
+}
+
 // ── Version Consistency ──────────────────────────────────────────────
 
 #[test]
@@ -299,10 +478,7 @@ fn all_packages_share_same_version() {
         .iter()
         .map(|pkg| {
             let v = read_pkg_json(pkg);
-            (
-                pkg.to_string(),
-                v["version"].as_str().unwrap().to_string(),
-            )
+            (pkg.to_string(), v["version"].as_str().unwrap().to_string())
         })
         .collect();
     let first = &versions[0].1;
@@ -318,7 +494,7 @@ fn all_packages_share_same_version() {
 
 fn read_pkg_json(pkg: &str) -> serde_json::Value {
     let path = repo_root().join("packages").join(pkg).join("package.json");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("cannot read {}", path.display()));
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("cannot read {}", path.display()));
     serde_json::from_str(&content).expect("invalid JSON")
 }
