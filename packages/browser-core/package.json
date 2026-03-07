@@ -12,12 +12,17 @@
     "directory": "packages/browser-core"
   },
   "type": "module",
-  "main": "./asupersync.js",
-  "module": "./asupersync.js",
-  "types": "./asupersync.d.ts",
+  "main": "./index.js",
+  "module": "./index.js",
+  "types": "./index.d.ts",
   "exports": {
     ".": {
-      "types": "./asupersync.d.ts",
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "default": "./index.js"
+    },
+    "./types": {
+      "types": "./types.d.ts",
       "import": "./asupersync.js",
       "default": "./asupersync.js"
     },
@@ -28,8 +33,11 @@
     "./asupersync_bg.wasm.map": "./asupersync_bg.wasm.map"
   },
   "files": [
+    "index.js",
+    "index.d.ts",
     "asupersync.js",
     "asupersync.d.ts",
+    "types.d.ts",
     "asupersync.js.map",
     "asupersync_bg.wasm",
     "asupersync_bg.wasm.d.ts",
