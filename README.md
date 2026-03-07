@@ -1275,9 +1275,13 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`asupersync_plan_v4.md`](./asupersync_plan_v4.md) | **Design Bible**: Complete specification, invariants, philosophy |
 | [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
 | [`asupersync_v4_api_skeleton.rs`](./asupersync_v4_api_skeleton.rs) | **API Skeleton**: Rust types and signatures |
-| [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract |
+| [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract, support matrix, and fail-closed boundary guidance |
 | [`docs/wasm_quickstart_migration.md`](./docs/wasm_quickstart_migration.md) | **Browser Quickstart + Migration**: deterministic onboarding commands, migration anti-pattern map, deferred-surface fallback guidance |
 | [`docs/wasm_canonical_examples.md`](./docs/wasm_canonical_examples.md) | **Browser Canonical Examples**: vanilla/TypeScript/React/Next scenario catalog with deterministic repro commands and artifact pointers |
+| [`docs/wasm_troubleshooting_compendium.md`](./docs/wasm_troubleshooting_compendium.md) | **Browser Troubleshooting Cookbook**: unsupported-runtime recovery paths, failure recipes, and deterministic verification commands |
+| [`docs/wasm_dx_error_taxonomy.md`](./docs/wasm_dx_error_taxonomy.md) | **Browser DX Error Taxonomy**: package error codes, diagnostics fields, recoverability classes, and actionable guidance |
+| [`docs/wasm_typescript_package_topology.md`](./docs/wasm_typescript_package_topology.md) | **Browser Package Reference**: package ownership, exported API layers, lifecycle rules, and JS/TS upgrade playbook |
+| [`docs/wasm_abi_compatibility_policy.md`](./docs/wasm_abi_compatibility_policy.md) | **Browser ABI Compatibility Policy**: packaged ABI matrix, downgrade behavior, and consumer upgrade checklist |
 | [`docs/wasm_pilot_cohort_rubric.md`](./docs/wasm_pilot_cohort_rubric.md) | **Pilot Cohort Rubric**: deterministic intake scoring, risk tiers, exclusions, and onboarding acceptance criteria |
 | [`docs/wasm_browser_scheduler_semantics.md`](./docs/wasm_browser_scheduler_semantics.md) | **Browser Scheduler + Trace Contract**: scheduler/event-loop law plus browser trace schema v1 taxonomy, compatibility, and redaction rules |
 | [`docs/wasm_react_reference_patterns.md`](./docs/wasm_react_reference_patterns.md) | **React Reference Pattern Catalog**: deterministic task-group, retry, bulkhead, and tracing-hook scenarios with replay commands |

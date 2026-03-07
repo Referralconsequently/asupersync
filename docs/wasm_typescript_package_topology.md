@@ -32,6 +32,26 @@ Layer contract:
 4. Public exports must be tree-shake safe and must not expose
    `./internal/*` or `./native/*` subpaths.
 
+## Shipped Package Reference Map
+
+Use this section as the day-two ownership guide for the committed JS/TS package
+surface.
+
+| Package | Owns | Key shipped exports | Use it when | Avoid it when |
+|---|---|---|---|---|
+| `@asupersync/browser-core` | low-level ABI/types/handle primitives | `RuntimeHandle`, `RegionHandle`, `TaskHandle`, `FetchHandle`, `CancellationToken`, `runtimeCreate`, `scopeEnter`, `taskSpawn`, `fetchRequest`, `websocketOpen`, `abiVersion`, `abiFingerprint`, `rawBindings` | you need direct access to ABI handles, raw outcome envelopes, or packaged metadata-driven negotiation | you want app-facing ergonomics or unsupported-runtime guidance |
+| `@asupersync/browser` | high-level browser SDK and diagnostics | `BrowserRuntime`, SDK `RegionHandle` / `TaskHandle` / `FetchHandle` / `CancellationToken`, `createCancellationToken`, `createBrowserSdkDiagnostics`, `detectBrowserRuntimeSupport`, `assertBrowserRuntimeSupport`, `unwrapOutcome`, `formatOutcomeFailure` | you are writing browser-only runtime code and want a friendlier API over browser-core | you are in SSR/server/edge code or need framework-specific boundary guidance |
+| `@asupersync/react` | React client-boundary adapter surface | browser re-exports plus `detectReactRuntimeSupport`, `createReactUnsupportedRuntimeError`, `assertReactRuntimeSupport` | you need React-specific client-boundary checks over the browser SDK | you are calling runtime APIs during SSR or outside a client-rendered tree |
+| `@asupersync/next` | Next.js boundary adapter surface | browser re-exports plus `NextRuntimeTarget`, `detectNextRuntimeSupport`, `createNextUnsupportedRuntimeError`, `assertNextRuntimeSupport` | you need explicit client/server/edge boundary guidance in a Next app | you expect server or edge modules to run Browser Edition directly |
+
+Practical package-selection rule:
+
+1. Start with `@asupersync/browser`.
+2. Drop to `@asupersync/browser-core` only when you need raw ABI handles,
+   metadata, or version negotiation.
+3. Move up to `@asupersync/react` or `@asupersync/next` when framework boundary
+   diagnostics matter more than raw package minimalism.
+
 ## Rust Crate Layout and Artifact Provenance
 
 The TypeScript package topology is layered over a separate Rust crate layout.
@@ -112,6 +132,71 @@ Required symbols and package owners:
 
 Any symbol owner outside the declared package topology fails policy.
 
+### API Ownership Notes
+
+- `@asupersync/browser-core` is the source of truth for ABI version/fingerprint,
+  four-valued `Outcome`, low-level handle classes, and the raw binding aliases.
+- `@asupersync/browser` is the source of truth for user-facing runtime classes,
+  structured unsupported-runtime diagnostics, and browser capability snapshots.
+- `@asupersync/react` and `@asupersync/next` intentionally stay thin: they add
+  framework-boundary diagnostics and re-export the browser SDK instead of
+  introducing competing runtime semantics.
+
+## Runtime and Lifecycle Rules for JS/TS Consumers
+
+These are the practical rules users need after initial setup:
+
+1. `BrowserRuntime` (or `RuntimeHandle` at the low level) is the ownership root.
+   Create it in a supported browser client boundary and close it explicitly.
+2. Region creation is structured. Enter scopes/regions from a runtime or parent
+   region instead of inventing detached task roots.
+3. Task, fetch, and websocket work should be opened from region scope. Keep
+   handles local to the scope that owns their cleanup responsibility.
+4. Cancellation remains explicit. Pass `kind` / `message` when cancelling so
+   diagnostics and replay traces preserve intent.
+5. Use `unwrapOutcome(...)` or explicit `outcome` branching at the browser SDK
+   level; do not assume exceptions are the primary success/error channel.
+6. Unsupported-runtime helpers (`assert*RuntimeSupport`) are boundary guards,
+   not soft hints. Treat their failure as a signal to move the call site, not as
+   something to catch and ignore.
+7. Do not move live handles across client/server boundaries. Server and edge
+   code should exchange serializable requests/results only.
+
+## Upgrade and Versioning Playbook
+
+Package versioning and ABI versioning are related but not identical:
+
+- package versions describe published JS/TS artifacts
+- ABI version + fingerprint describe compatibility of the packaged runtime wire
+  contract exposed by `@asupersync/browser-core`
+
+Consumer rules:
+
+1. Prefer upgrading all `@asupersync/*` packages together.
+2. When mixing versions intentionally, inspect `abi-metadata.json`,
+   `abiVersion()`, and `abiFingerprint()` before relying on version-sensitive
+   calls.
+3. Treat omitted `consumerVersion` as bootstrap/introspection-only; supply an
+   explicit consumer version before long-lived or version-sensitive operations.
+4. Minor producer additions are allowed only when compatibility classification
+   remains `Exact` or `BackwardCompatible`.
+5. `ConsumerTooOld` and `MajorMismatch` are fail-closed signals. Upgrade the
+   consumer package set instead of trying to paper over the mismatch.
+6. Higher-level packages (`@asupersync/browser`, `@asupersync/react`,
+   `@asupersync/next`) must not invent their own ABI-version state; they follow
+   the packaged `browser-core` metadata.
+
+Recommended upgrade checklist:
+
+1. Inspect `packages/browser-core/abi-metadata.json` (or the published package
+   sidecar) for `abi_version` and fingerprint changes.
+2. Re-run the packaged ABI compatibility matrix:
+   `rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture`
+3. Re-run the shipped package export/diagnostics contract:
+   `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture`
+4. If a major ABI change landed, upgrade all `@asupersync/*` packages together
+   and follow the migration note in `docs/wasm_abi_compatibility_policy.md`.
+
 ## Resolution Matrix and E2E Command Contract
 
 The policy encodes deterministic install-and-run command pairs for:
@@ -191,3 +276,16 @@ python3 scripts/check_wasm_typescript_package_policy.py \
   --only-scenario TS-PKG-NEXT-ESM \
   --only-scenario TS-PKG-NEXT-CJS
 ```
+
+Reference verification:
+
+```bash
+rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
+```
+
+## Cross-References
+
+- `docs/integration.md` (support boundary and package-selection guardrails)
+- `docs/wasm_dx_error_taxonomy.md` (developer-facing error and diagnostics model)
+- `docs/wasm_abi_compatibility_policy.md` (packaged ABI upgrade/downgrade rules)

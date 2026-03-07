@@ -290,6 +290,34 @@ The package-level matrix is enforced by:
 The package-layer contract intentionally complements, rather than replaces,
 the Rust-native compatibility harness.
 
+### 10.4 JS/TS Consumer Upgrade Checklist
+
+Use this checklist when upgrading published Browser Edition packages rather than
+raw Rust crates:
+
+1. Upgrade `@asupersync/browser-core`, `@asupersync/browser`,
+   `@asupersync/react`, and `@asupersync/next` together unless you have a
+   deliberate compatibility experiment.
+2. Inspect packaged metadata first:
+   - `packages/browser-core/abi-metadata.json`
+   - `abi_version()`
+   - `abi_fingerprint()`
+3. If compatibility class is `Exact` or `BackwardCompatible`, proceed and log
+   the negotiated producer/consumer versions in diagnostics.
+4. If compatibility class is `ConsumerTooOld` or `MajorMismatch`, stop and
+   upgrade the consumer package set before retrying.
+5. Treat omitted `consumerVersion` as bootstrap/introspection-only. Do not rely
+   on it for long-lived negotiated behavior.
+6. Re-run the package-facing verification pair after an upgrade:
+
+```bash
+rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
+rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+```
+
+7. Keep higher-level package versions aligned with the `browser-core` metadata
+   they consume; adapter packages must not invent divergent ABI-version state.
+
 ---
 
 ## 11. CI and Harness Integration
@@ -339,5 +367,6 @@ python3 scripts/check_wasm_abi_policy.py --policy .github/wasm_abi_policy.json
 - Existing contract tests: `tests/wasm_abi_contract.rs`
 - Compatibility harness: `tests/wasm_abi_compatibility_harness.rs`
 - Packaged ABI matrix contract: `tests/wasm_packaged_abi_compatibility_matrix.rs`
+- JS/TS package topology + API ownership: `docs/wasm_typescript_package_topology.md`
 - CI policy: `.github/wasm_abi_policy.json`
 - CI gate: `scripts/check_wasm_abi_policy.py`

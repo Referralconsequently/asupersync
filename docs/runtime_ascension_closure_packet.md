@@ -1,8 +1,8 @@
 # Runtime Ascension Closure Packet and Launch Doctrine
 
-Bead: `asupersync-1508v.10.6.1`  
-Follow-on: `asupersync-1508v.10.6.2`  
-Parent: `asupersync-1508v.10.6`
+Owner bead: `asupersync-1508v.10.6`  
+Prep lineage: `asupersync-1508v.10.6.1`, `asupersync-1508v.10.6.2`  
+Parent epic: `asupersync-1508v.10`
 
 ## Purpose
 
@@ -17,6 +17,17 @@ is not ready.
 1. Canonical artifact: `artifacts/runtime_ascension_closure_packet_v1.json`
 2. Smoke runner: `scripts/run_runtime_ascension_closure_smoke.sh`
 3. Invariant suite: `tests/runtime_ascension_closure_packet_contract.rs`
+
+## Execution State
+
+| Field | Value |
+|-------|-------|
+| Current phase | `active_closure_execution` |
+| Packet mode | `preparatory` |
+| Current verdict | `NO_GO` |
+| Remaining blocker bead(s) | `asupersync-1508v.8.6` |
+| Completed milestones | closure packet contract scaffold, evidence registry command matrix |
+| Immediate next actions | run smoke bundle in execute mode, refresh comparative demo evidence after blocker closure, re-evaluate launch verdict |
 
 ## Current Decision Snapshot
 
@@ -35,6 +46,13 @@ Upstream closure state captured by this packet:
   - `asupersync-1508v.6.6`
 - open blocker:
   - `asupersync-1508v.8.6`
+
+Delivery checklist for `asupersync-1508v.10.6`:
+
+1. [x] Establish closure packet contract scaffold and evidence registry linkage.
+2. [x] Add command-id matrix that maps every promoted claim to deterministic rerun commands.
+3. [ ] Execute comparative demo refresh bundle after `asupersync-1508v.8.6` closure.
+4. [ ] Promote packet verdict from `NO_GO` to `GO` only after refreshed evidence and doctrine checks.
 
 ## Comparative Demo Matrix
 
@@ -163,6 +181,7 @@ closure packet's cited evidence surfaces.
 | `RACP-VERIFY-STATIC-SAFETY-SESSIONS` | Re-run the typed session-obligation surface | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa105b cargo test --test session_type_obligations -- --nocapture` |
 | `RACP-VERIFY-TRACE-INTELLIGENCE` | Re-run replay minimization validation | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa063 cargo test --test replay_minimization_validation_contract -- --nocapture` |
 | `RACP-VERIFY-WORKLOAD-CORPUS` | Re-run workload corpus validation | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa015 cargo test --test runtime_workload_corpus_contract -- --nocapture` |
+| `RACP-RUN-SMOKE-BUNDLE` | Run packet smoke bundle and emit report manifest | `./scripts/run_runtime_ascension_closure_smoke.sh --execute` |
 
 Use these commands to refresh this packet's inputs:
 
@@ -178,6 +197,9 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa104 cargo 
 
 # This closure packet contract
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa106 cargo test --test runtime_ascension_closure_packet_contract -- --nocapture
+
+# Smoke bundle runner (writes run_report.json + per-scenario manifests)
+./scripts/run_runtime_ascension_closure_smoke.sh --execute
 ```
 
 Operator troubleshooting recipe:

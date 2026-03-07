@@ -184,10 +184,14 @@ for sid in "${SELECTED_SCENARIOS[@]}"; do
 done
 
 RUN_REPORT="${RUN_DIR}/run_report.json"
+GENERATED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat >"$RUN_REPORT" <<JSON
 {
   "schema_version": "$(json_escape "$(report_schema_version)")",
   "contract_version": "$(json_escape "$(contract_version)")",
+  "script_path": "scripts/run_runtime_ascension_closure_smoke.sh",
+  "project_root": "$(json_escape "$PROJECT_ROOT")",
+  "generated_ts": "$(json_escape "$GENERATED_TS")",
   "run_dir": "$(json_escape "$RUN_DIR")",
   "dry_run": $( [[ "$DRY_RUN" -eq 1 ]] && printf 'true' || printf 'false' ),
   "results": [${RESULTS_JSON}],
@@ -200,6 +204,7 @@ echo "==================================================================="
 echo "  RUNTIME ASCENSION CLOSURE PACKET SMOKE SUMMARY                   "
 echo "==================================================================="
 echo "  Run dir:   ${RUN_DIR}"
+echo "  Report:    ${RUN_REPORT}"
 echo "  Mode:      $([ "$DRY_RUN" -eq 1 ] && printf "DRY-RUN" || printf "EXECUTE")"
 echo "  Status:    $([ "$OVERALL_RC" -eq 0 ] && printf "PASSED" || printf "FAILED")"
 echo "==================================================================="

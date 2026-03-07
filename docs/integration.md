@@ -260,21 +260,95 @@ Navigation top-level (required):
 
 ### Browser Runtime Support Boundary (DX Contract)
 
-Browser Edition is **direct-runtime** only for browser execution contexts. All
-server/edge/node environments are **bridge-only** unless explicitly promoted by
-validation beads.
+Browser Edition is **direct-runtime** only where the shipped package guards and
+validation evidence explicitly say it is supported. All other environments are
+**bridge-only** or out of scope; there is no automatic fallback from an
+unsupported runtime into a partially functional direct-execution mode.
 
 Support posture:
 
-- direct runtime: browser main thread and validated browser-worker contexts
-- bridge-only: Node.js, Next.js server components/route handlers, edge/serverless
-  runtime contexts with incomplete browser APIs
+- direct runtime today: browser main thread with a real `window` +
+  `document` environment and `WebAssembly` support
+- bridge-only: Next.js server components, route handlers, edge runtimes, and
+  other server-side render environments
+- currently unsupported for direct runtime: Node.js-only contexts and browser
+  worker/service-worker contexts that do not provide the DOM prerequisites the
+  shipped package guards require
 - non-goals for browser runtime closure: native-only modules (`fs`, `process`,
   `signal`, `server`), native DB clients, and native transport surfaces
 
 Documentation updates for Browser Edition should keep this boundary explicit and
 must not imply automatic fallback from unsupported runtimes into partially
 functional direct execution.
+
+### Browser Environment Support Matrix
+
+This matrix is the current shipped support posture for the JS/TS packages, not
+an aspirational roadmap.
+
+| Environment | Current posture | Direct runtime allowed | Canonical package surface | Shipped diagnostic contract | Required action |
+|---|---|---|---|---|---|
+| Browser main thread (`window` + `document` + `WebAssembly`) | supported | yes | `@asupersync/browser`, `@asupersync/react`, `@asupersync/next` client target | `reason = "supported"` | create runtime/scope handles here |
+| Browser worker / service worker | deferred and currently unsupported | no | none yet | `@asupersync/browser` reports `reason = "missing_browser_dom"` because the current guard requires a DOM window/document | keep direct runtime on the browser main thread; use explicit message/data boundaries until a worker lane is validated and promoted |
+| React client-rendered tree in a browser | supported | yes | `@asupersync/react` | `assertReactRuntimeSupport()` returns success only when browser prerequisites are present | import and create runtime from client-rendered components only |
+| React SSR / Node render path | bridge-only | no | `@asupersync/react` bridge-only usage only | `REACT_UNSUPPORTED_RUNTIME_CODE` with browser-derived reason/guidance | move runtime creation to the client tree and keep SSR on serialized data/bridge boundaries |
+| Next.js client component | supported | yes | `@asupersync/next` with `target = "client"` | `assertNextRuntimeSupport("client")` succeeds only when browser prerequisites are present | import from client components only |
+| Next.js server component / route handler | bridge-only | no | `@asupersync/next` bridge-only adapters | `NEXT_UNSUPPORTED_RUNTIME_CODE` with message `Direct Browser Edition runtime execution is unsupported in Next server runtimes.` | move runtime creation into a client component or browser-only module |
+| Next.js edge runtime | bridge-only | no | `@asupersync/next` bridge-only adapters | `NEXT_UNSUPPORTED_RUNTIME_CODE` with `target = "edge"` | keep edge code on bridge-only adapters and do not call direct runtime APIs |
+| Node.js CLI / tests / serverless code without DOM globals | unsupported for Browser Edition direct runtime | no | use native `asupersync` or explicit bridge code instead | browser/react guards surface `missing_global_this` or `missing_browser_dom` | switch to the native runtime lane or move Browser Edition code behind a browser-only entrypoint |
+
+### Runtime Capability Requirements and Compatibility Guidance
+
+Hard prerequisites enforced today by `detectBrowserRuntimeSupport(...)`:
+
+- browser-like `globalThis`
+- `window`
+- `document`
+- `WebAssembly`
+
+Capability snapshot fields emitted alongside unsupported-runtime diagnostics:
+
+- `hasAbortController`
+- `hasDocument`
+- `hasFetch`
+- `hasWebAssembly`
+- `hasWebSocket`
+- `hasWindow`
+
+`AbortController`, `fetch`, and `WebSocket` are not currently hard gates for
+basic runtime creation, but they are surfaced intentionally so feature-specific
+failures can be explained without guesswork.
+
+Shipped unsupported-runtime error contract:
+
+| Package | Error code | Typical unsupported trigger | Correct fallback |
+|---|---|---|---|
+| `@asupersync/browser` | `ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME` | missing `globalThis`, DOM window/document, or `WebAssembly` | load the package from a browser-only entrypoint or use a server/client bridge |
+| `@asupersync/react` | `ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME` | SSR or React usage outside a client-rendered browser tree | keep direct runtime creation inside the client tree |
+| `@asupersync/next` | `ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME` | `target = "server"` / `target = "edge"` or missing browser prerequisites in client code | move runtime creation into a client component and keep server/edge code bridge-only |
+
+Package-selection guidance:
+
+- Use `@asupersync/browser` for browser-only modules that directly manage
+  runtime, region, task, fetch, or websocket handles.
+- Use `@asupersync/react` only inside client-rendered React trees; do not
+  initialize Browser Edition during SSR.
+- Use `@asupersync/next` only from client components for direct runtime
+  behavior; server and edge code should exchange serializable data with a
+  browser-owned runtime rather than carrying live handles across the boundary.
+
+Non-goals and fail-closed guardrails:
+
+- no automatic downgrade from unsupported server/edge/node contexts into hidden
+  partial direct execution
+- no transfer of live browser runtime handles (`BrowserRuntime`, region/task
+  handles, cancellation tokens) across client/server boundaries
+- no claim that browser-worker direct runtime is currently supported until the
+  shipped package guards and validation lanes are updated together
+- no support promise for native-only modules or native database/transport
+  surfaces in Browser Edition
+- no documentation that suggests `@asupersync/next` server or edge code can
+  safely call direct Browser Edition runtime constructors
 
 Browser Edition doc map (current canonical locations):
 
@@ -295,6 +369,7 @@ Browser Edition doc map (current canonical locations):
    - `docs/wasm_canonical_examples.md`
 7. Troubleshooting and diagnostics cookbook:
    - `docs/wasm_troubleshooting_compendium.md`
+   - `docs/wasm_dx_error_taxonomy.md`
 8. Rationale index and decision ledger:
    - `docs/wasm_rationale_index.md`
 9. Pilot triage and roadmap assimilation:
@@ -312,6 +387,8 @@ Doc-drift verification hooks (required for Browser Edition doc changes):
    - docs must not advertise forbidden wasm32 surfaces as supported.
 4. Repro command check:
    - each troubleshooting or diagnostics flow must include a deterministic command path.
+5. Diagnostic parity check:
+   - unsupported-runtime guidance must reference shipped package error codes or support reasons, not invented terminology.
 
 Recommended command bundle for doc validation workflows:
 
@@ -324,6 +401,9 @@ rch exec -- cargo clippy --all-targets -- -D warnings
 
 # Validate formatting contract
 rch exec -- cargo fmt --check
+
+# Verify shipped browser package diagnostics and guidance strings
+rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
 ```
 
 ### Examples
