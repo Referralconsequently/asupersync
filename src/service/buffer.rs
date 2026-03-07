@@ -85,6 +85,19 @@ pub struct Buffer<S> {
     shared: Arc<SharedBuffer<S>>,
 }
 
+struct InnerWakers {
+    wakers: Mutex<Vec<std::task::Waker>>,
+}
+
+impl std::task::Wake for InnerWakers {
+    fn wake(self: Arc<Self>) {
+        let wakers = std::mem::take(&mut *self.wakers.lock());
+        for w in wakers {
+            w.wake();
+        }
+    }
+}
+
 struct SharedBuffer<S> {
     /// The inner service, protected by a mutex for shared access.
     inner: Mutex<S>,
@@ -97,7 +110,7 @@ struct SharedBuffer<S> {
     /// Wakers waiting for capacity to become available.
     ready_wakers: Mutex<Vec<std::task::Waker>>,
     /// Wakers waiting for the inner service to become ready.
-    inner_wakers: Mutex<Vec<std::task::Waker>>,
+    inner_wakers: Arc<InnerWakers>,
 }
 
 impl<S> Buffer<S> {
@@ -116,7 +129,9 @@ impl<S> Buffer<S> {
                 pending: Mutex::new(0),
                 closed: Mutex::new(false),
                 ready_wakers: Mutex::new(Vec::new()),
-                inner_wakers: Mutex::new(Vec::new()),
+                inner_wakers: Arc::new(InnerWakers {
+                    wakers: Mutex::new(Vec::new()),
+                }),
             }),
         }
     }
@@ -152,7 +167,7 @@ impl<S> Buffer<S> {
     pub fn close(&self) {
         *self.shared.closed.lock() = true;
         let ready_wakers = std::mem::take(&mut *self.shared.ready_wakers.lock());
-        let inner_wakers = std::mem::take(&mut *self.shared.inner_wakers.lock());
+        let inner_wakers = std::mem::take(&mut *self.shared.inner_wakers.wakers.lock());
         for w in ready_wakers {
             w.wake();
         }
@@ -254,7 +269,7 @@ impl<S> Drop for PendingGuard<S> {
             for w in wakers {
                 w.wake();
             }
-            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
             for w in inner_wakers {
                 w.wake();
             }
@@ -335,14 +350,26 @@ where
                         return Poll::Ready(Err(BufferError::Closed));
                     }
 
+                    {
+                        // Register the caller before polling the inner service with the
+                        // fanout waker. Otherwise a readiness edge can race with this
+                        // task's registration and be lost.
+                        let mut wakers = shared.inner_wakers.wakers.lock();
+                        if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                            wakers.push(cx.waker().clone());
+                        }
+                    }
+
                     let mut inner = shared.inner.lock();
-                    match inner.poll_ready(cx) {
+                    let waker = std::task::Waker::from(Arc::clone(&shared.inner_wakers));
+                    let mut inner_cx = std::task::Context::from_waker(&waker);
+                    match inner.poll_ready(&mut inner_cx) {
                         Poll::Ready(Ok(())) => {
                             let req = request.take().unwrap();
                             let future = inner.call(req);
                             drop(inner);
 
-                            let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                            let wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
                             for w in wakers {
                                 w.wake();
                             }
@@ -361,12 +388,6 @@ where
                         }
                         Poll::Pending => {
                             drop(inner);
-                            {
-                                let mut wakers = shared.inner_wakers.lock();
-                                if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                                    wakers.push(cx.waker().clone());
-                                }
-                            }
                             // Defuse: state restored with shared still tracked.
                             let shared = guard.defuse();
                             this.state = BufferFutureState::WaitingForReady { request, shared };
@@ -423,7 +444,7 @@ impl<F, E, S, R> Drop for BufferFuture<F, E, S, R> {
 
                 // Also wake any other tasks waiting for inner_ready, since we
                 // might have been holding the spot, or we just freed a slot.
-                let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                let inner_wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
                 for w in inner_wakers {
                     w.wake();
                 }
@@ -1065,5 +1086,128 @@ mod tests {
         let result = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
         crate::test_complete!("close_wakes_tasks_waiting_for_inner_ready");
+    }
+
+    struct SingleWakerService {
+        waker: Mutex<Option<std::task::Waker>>,
+        ready: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Service<i32> for SingleWakerService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                Poll::Ready(Ok(()))
+            } else {
+                *self.waker.lock() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            std::future::ready(Ok(req))
+        }
+    }
+
+    struct WakeDuringPollReadyService {
+        woke_once: bool,
+    }
+
+    impl Service<i32> for WakeDuringPollReadyService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.woke_once {
+                Poll::Ready(Ok(()))
+            } else {
+                self.woke_once = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            std::future::ready(Ok(req))
+        }
+    }
+
+    #[test]
+    fn buffer_lost_wakeup() {
+        init_test("buffer_lost_wakeup");
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let inner = SingleWakerService {
+            waker: Mutex::new(None),
+            ready: ready.clone(),
+        };
+
+        let mut svc = Buffer::new(inner, 10);
+        let dummy_waker = noop_waker();
+        let mut cx_dummy = Context::from_waker(&dummy_waker);
+        let _ = svc.poll_ready(&mut cx_dummy);
+
+        let mut fut1 = svc.call(1);
+        let mut fut2 = svc.call(2);
+
+        let (waker1, flag1) = flag_waker();
+        let mut cx1 = Context::from_waker(&waker1);
+
+        let (waker2, _flag2) = flag_waker();
+        let mut cx2 = Context::from_waker(&waker2);
+
+        // fut1 polls, registers waker1 with inner service
+        assert!(Pin::new(&mut fut1).poll(&mut cx1).is_pending());
+
+        // fut2 polls, overwrites waker in inner service with waker2
+        assert!(Pin::new(&mut fut2).poll(&mut cx2).is_pending());
+
+        // fut2 is dropped!
+        drop(fut2);
+
+        // inner service becomes ready and wakes the registered waker (waker2)
+        ready.store(true, std::sync::atomic::Ordering::SeqCst);
+        let guard = svc.shared.inner.lock();
+        let waker = guard.waker.lock().take();
+        if let Some(w) = waker {
+            w.wake();
+        }
+        drop(guard);
+
+        // Now, is fut1 woken?
+        assert!(
+            flag1.load(std::sync::atomic::Ordering::SeqCst),
+            "LOST WAKEUP! fut1 was not woken when fut2 was dropped"
+        );
+
+        crate::test_complete!("buffer_lost_wakeup");
+    }
+
+    #[test]
+    fn buffer_wake_during_poll_ready_is_not_lost() {
+        init_test("buffer_wake_during_poll_ready_is_not_lost");
+
+        let mut svc = Buffer::new(WakeDuringPollReadyService { woke_once: false }, 4);
+        let dummy_waker = noop_waker();
+        let mut dummy_cx = Context::from_waker(&dummy_waker);
+        assert!(matches!(svc.poll_ready(&mut dummy_cx), Poll::Ready(Ok(()))));
+
+        let mut future = svc.call(7);
+        let (waker, flag) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        assert!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            "wake emitted during inner poll_ready must reach the waiting buffer future"
+        );
+
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(7))));
+
+        crate::test_complete!("buffer_wake_during_poll_ready_is_not_lost");
     }
 }

@@ -397,7 +397,7 @@ impl NatsReadBuffer {
     }
 
     fn consume(&mut self, n: usize) {
-        self.pos = self.pos.saturating_add(n);
+        self.pos = self.pos.saturating_add(n).min(self.buf.len());
         // Compact buffer when we've consumed a lot
         if self.pos > 0 && (self.pos > 4096 && self.pos > (self.buf.len() / 2)) {
             self.buf.drain(..self.pos);
@@ -1710,6 +1710,18 @@ mod tests {
         // Now should be able to add more
         let more = vec![0u8; 200];
         buf.extend(&more).unwrap();
+    }
+
+    #[test]
+    fn test_read_buffer_consume_clamps_when_over_consumed() {
+        let mut buf = NatsReadBuffer::new();
+        buf.extend(b"abc").unwrap();
+        buf.consume(usize::MAX);
+        assert!(buf.available().is_empty());
+
+        // Buffer remains usable after an oversized consume request.
+        buf.extend(b"xy").unwrap();
+        assert_eq!(buf.available(), b"xy");
     }
 
     #[test]

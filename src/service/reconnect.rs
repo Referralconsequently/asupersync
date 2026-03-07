@@ -11,6 +11,8 @@ use super::{Layer, Service};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 // ─── MakeService trait ────────────────────────────────────────────────────
@@ -97,6 +99,8 @@ impl<E: std::error::Error + 'static, M: std::error::Error + 'static> std::error:
 pub struct Reconnect<M: MakeService> {
     maker: M,
     inner: Option<M::Service>,
+    refresh_pending: Arc<AtomicBool>,
+    service_epoch: Arc<AtomicU64>,
     /// Number of successful reconnections.
     successes: u64,
     /// Number of failed reconnection attempts.
@@ -110,6 +114,8 @@ impl<M: MakeService> Reconnect<M> {
         Self {
             maker,
             inner: Some(initial),
+            refresh_pending: Arc::new(AtomicBool::new(false)),
+            service_epoch: Arc::new(AtomicU64::new(1)),
             successes: 0,
             failures: 0,
         }
@@ -121,6 +127,8 @@ impl<M: MakeService> Reconnect<M> {
         Self {
             maker,
             inner: None,
+            refresh_pending: Arc::new(AtomicBool::new(false)),
+            service_epoch: Arc::new(AtomicU64::new(0)),
             successes: 0,
             failures: 0,
         }
@@ -133,11 +141,13 @@ impl<M: MakeService> Reconnect<M> {
         match self.maker.make_service() {
             Ok(svc) => {
                 self.inner = Some(svc);
+                self.refresh_pending.store(false, Ordering::Release);
+                self.service_epoch.fetch_add(1, Ordering::AcqRel);
                 self.successes += 1;
                 Ok(())
             }
             Err(e) => {
-                self.inner = None;
+                self.invalidate_inner();
                 self.failures += 1;
                 Err(e)
             }
@@ -181,7 +191,15 @@ impl<M: MakeService> Reconnect<M> {
 
     /// Disconnect the inner service.
     pub fn disconnect(&mut self) {
-        self.inner = None;
+        self.invalidate_inner();
+    }
+
+    fn invalidate_inner(&mut self) {
+        let had_inner = self.inner.take().is_some();
+        self.refresh_pending.store(false, Ordering::Release);
+        if had_inner {
+            self.service_epoch.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -189,6 +207,11 @@ impl<M: MakeService> fmt::Debug for Reconnect<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Reconnect")
             .field("connected", &self.inner.is_some())
+            .field(
+                "reconnect_pending",
+                &self.refresh_pending.load(Ordering::Relaxed),
+            )
+            .field("service_epoch", &self.service_epoch.load(Ordering::Relaxed))
             .field("successes", &self.successes)
             .field("failures", &self.failures)
             .field("maker", &self.maker)
@@ -207,6 +230,10 @@ where
     type Future = ReconnectFuture<<M::Service as Service<Request>>::Future, M::Error>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.refresh_pending.swap(false, Ordering::AcqRel) {
+            self.invalidate_inner();
+        }
+
         // Ensure we have a connection.
         if self.inner.is_none() {
             self.reconnect().map_err(ReconnectError::Connect)?;
@@ -220,7 +247,7 @@ where
             Poll::Ready(Err(e)) => {
                 // Inner service is broken — drop it to trigger reconnection
                 // on the next poll_ready call.
-                self.inner = None;
+                self.invalidate_inner();
                 Poll::Ready(Err(ReconnectError::Inner(e)))
             }
             other => other.map_err(ReconnectError::Inner),
@@ -235,6 +262,9 @@ where
             .call(req);
         ReconnectFuture {
             inner: fut,
+            refresh_pending: Arc::clone(&self.refresh_pending),
+            service_epoch: Arc::clone(&self.service_epoch),
+            call_epoch: self.service_epoch.load(Ordering::Acquire),
             _maker_error: std::marker::PhantomData,
         }
     }
@@ -243,6 +273,9 @@ where
 /// Future returned by [`Reconnect`].
 pub struct ReconnectFuture<F, ME> {
     inner: F,
+    refresh_pending: Arc<AtomicBool>,
+    service_epoch: Arc<AtomicU64>,
+    call_epoch: u64,
     _maker_error: std::marker::PhantomData<fn() -> ME>,
 }
 
@@ -259,9 +292,16 @@ where
     type Output = Result<T, ReconnectError<E, ME>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner)
-            .poll(cx)
-            .map_err(ReconnectError::Inner)
+        match Pin::new(&mut self.inner).poll(cx) {
+            Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+            Poll::Ready(Err(error)) => {
+                if self.service_epoch.load(Ordering::Acquire) == self.call_epoch {
+                    self.refresh_pending.store(true, Ordering::Release);
+                }
+                Poll::Ready(Err(ReconnectError::Inner(error)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -270,6 +310,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -325,6 +368,182 @@ mod tests {
                 Ok(MockSvc { id: 42 })
             }
         }
+    }
+
+    #[derive(Debug, Clone)]
+    struct ReconnectingMaker {
+        next_id: Arc<AtomicU32>,
+    }
+
+    impl ReconnectingMaker {
+        fn new(next_id: u32) -> Self {
+            Self {
+                next_id: Arc::new(AtomicU32::new(next_id)),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ReconnectingCallError;
+
+    impl fmt::Display for ReconnectingCallError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "reconnecting call error")
+        }
+    }
+
+    impl std::error::Error for ReconnectingCallError {}
+
+    #[derive(Debug)]
+    struct ReconnectingSvc {
+        id: u32,
+        fail_next_call: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ManualCallController {
+        state: Arc<std::sync::Mutex<Option<Result<u32, ReconnectingCallError>>>>,
+    }
+
+    impl ManualCallController {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
+
+        fn fail(&self) {
+            *self.state.lock().expect("manual call state poisoned") =
+                Some(Err(ReconnectingCallError));
+        }
+
+        fn future(&self) -> ManualCallFuture {
+            ManualCallFuture {
+                state: Arc::clone(&self.state),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ManualCallFuture {
+        state: Arc<std::sync::Mutex<Option<Result<u32, ReconnectingCallError>>>>,
+    }
+
+    impl Future for ManualCallFuture {
+        type Output = Result<u32, ReconnectingCallError>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let mut state = self.state.lock().expect("manual call state poisoned");
+            state.take().map_or(Poll::Pending, Poll::Ready)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct StaleFailureMaker {
+        next_id: Arc<AtomicU32>,
+    }
+
+    impl StaleFailureMaker {
+        fn new(next_id: u32) -> Self {
+            Self {
+                next_id: Arc::new(AtomicU32::new(next_id)),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaleFailureSvc {
+        id: u32,
+        delayed_failure: ManualCallController,
+    }
+
+    impl MakeService for ReconnectingMaker {
+        type Service = ReconnectingSvc;
+        type Error = MockMakerError;
+
+        fn make_service(&self) -> Result<Self::Service, Self::Error> {
+            Ok(ReconnectingSvc {
+                id: self.next_id.fetch_add(1, Ordering::SeqCst),
+                fail_next_call: false,
+            })
+        }
+    }
+
+    impl Service<()> for ReconnectingSvc {
+        type Response = u32;
+        type Error = ReconnectingCallError;
+        type Future = std::future::Ready<Result<u32, ReconnectingCallError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            if self.fail_next_call {
+                self.fail_next_call = false;
+                std::future::ready(Err(ReconnectingCallError))
+            } else {
+                std::future::ready(Ok(self.id))
+            }
+        }
+    }
+
+    impl MakeService for StaleFailureMaker {
+        type Service = StaleFailureSvc;
+        type Error = MockMakerError;
+
+        fn make_service(&self) -> Result<Self::Service, Self::Error> {
+            Ok(StaleFailureSvc {
+                id: self.next_id.fetch_add(1, Ordering::SeqCst),
+                delayed_failure: ManualCallController::new(),
+            })
+        }
+    }
+
+    enum StaleFailureFuture {
+        Ready(Option<Result<u32, ReconnectingCallError>>),
+        Pending(ManualCallFuture),
+    }
+
+    impl Future for StaleFailureFuture {
+        type Output = Result<u32, ReconnectingCallError>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            match &mut *self {
+                Self::Ready(result) => {
+                    Poll::Ready(result.take().expect("ready future polled after completion"))
+                }
+                Self::Pending(future) => Pin::new(future).poll(cx),
+            }
+        }
+    }
+
+    impl Service<u8> for StaleFailureSvc {
+        type Response = u32;
+        type Error = ReconnectingCallError;
+        type Future = StaleFailureFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: u8) -> Self::Future {
+            match req {
+                1 => StaleFailureFuture::Pending(self.delayed_failure.future()),
+                2 => StaleFailureFuture::Ready(Some(Err(ReconnectingCallError))),
+                _ => StaleFailureFuture::Ready(Some(Ok(self.id))),
+            }
+        }
+    }
+
+    fn noop_waker() -> Waker {
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        Waker::from(Arc::new(NoopWaker))
     }
 
     // ================================================================
@@ -415,6 +634,91 @@ mod tests {
         assert!(rc.is_connected());
         assert_eq!(rc.reconnect_count(), 1);
         crate::test_complete!("reconnect_failure_tracked");
+    }
+
+    #[test]
+    fn reconnects_after_call_error() {
+        init_test("reconnects_after_call_error");
+        let maker = ReconnectingMaker::new(1);
+        let initial = ReconnectingSvc {
+            id: 0,
+            fail_next_call: true,
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = rc.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let mut first_call = rc.call(());
+        let first_result = Pin::new(&mut first_call).poll(&mut cx);
+        assert!(matches!(
+            first_result,
+            Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+        ));
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(0));
+        assert_eq!(rc.reconnect_count(), 0);
+
+        let reconnected = rc.poll_ready(&mut cx);
+        assert!(matches!(reconnected, Poll::Ready(Ok(()))));
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(1));
+        assert_eq!(rc.reconnect_count(), 1);
+
+        let mut second_call = rc.call(());
+        let second_result = Pin::new(&mut second_call).poll(&mut cx);
+        assert!(matches!(second_result, Poll::Ready(Ok(1))));
+
+        crate::test_complete!("reconnects_after_call_error");
+    }
+
+    #[test]
+    fn stale_call_error_does_not_drop_reconnected_service() {
+        init_test("stale_call_error_does_not_drop_reconnected_service");
+        let delayed_failure = ManualCallController::new();
+        let maker = StaleFailureMaker::new(1);
+        let initial = StaleFailureSvc {
+            id: 0,
+            delayed_failure: delayed_failure.clone(),
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut stale_call = rc.call(1);
+        assert!(matches!(
+            Pin::new(&mut stale_call).poll(&mut cx),
+            Poll::Pending
+        ));
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut failing_call = rc.call(2);
+        assert!(matches!(
+            Pin::new(&mut failing_call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+        ));
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(1));
+        assert_eq!(rc.reconnect_count(), 1);
+
+        delayed_failure.fail();
+        assert!(matches!(
+            Pin::new(&mut stale_call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+        ));
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(1));
+        assert_eq!(
+            rc.reconnect_count(),
+            1,
+            "stale failures from a retired service must not force another reconnect"
+        );
+
+        crate::test_complete!("stale_call_error_does_not_drop_reconnected_service");
     }
 
     #[test]
@@ -516,6 +820,9 @@ mod tests {
     fn reconnect_future_debug() {
         let fut: ReconnectFuture<_, std::io::Error> = ReconnectFuture {
             inner: std::future::ready(Ok::<i32, std::io::Error>(42)),
+            refresh_pending: Arc::new(AtomicBool::new(false)),
+            service_epoch: Arc::new(AtomicU64::new(0)),
+            call_epoch: 0,
             _maker_error: std::marker::PhantomData,
         };
         let dbg = format!("{fut:?}");

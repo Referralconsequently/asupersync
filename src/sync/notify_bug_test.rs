@@ -104,20 +104,23 @@ fn notify_one_not_consumed_by_broadcasted_waiter() {
 
     // fut1 created BEFORE broadcast
     let mut fut1 = notify.notified();
-    
+
     // notify_one adds a stored notification
     notify.notify_one();
-    
+
     // notify_waiters bumps generation
     notify.notify_waiters();
-    
+
     // fut2 created AFTER broadcast
     let mut fut2 = notify.notified();
-    
+
     // fut1 polls. It should complete using the broadcast generation,
     // LEAVING the stored notification intact!
     assert!(Pin::new(&mut fut1).poll(&mut cx).is_ready());
-    
+
     // fut2 polls. Since the stored notification was left intact, it should complete!
-    assert!(Pin::new(&mut fut2).poll(&mut cx).is_ready(), "lost wakeup! fut1 consumed the token incorrectly");
+    assert!(
+        Pin::new(&mut fut2).poll(&mut cx).is_ready(),
+        "lost wakeup! fut1 consumed the token incorrectly"
+    );
 }

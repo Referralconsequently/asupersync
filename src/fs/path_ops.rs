@@ -165,21 +165,28 @@ fn write_atomic_blocking(path: &Path, contents: &[u8]) -> io::Result<()> {
         )
     })?;
 
-    let tmp_path = unique_tmp_path(parent, file_name);
-    let mut tmp_guard = TempPathGuard::new(tmp_path.clone());
+    loop {
+        let tmp_path = unique_tmp_path(parent, file_name);
+        let mut file = match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        };
+        let mut tmp_guard = TempPathGuard::new(tmp_path.clone());
 
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&tmp_path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    drop(file);
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
 
-    std::fs::rename(&tmp_path, path)?;
-    tmp_guard.disarm();
-    sync_parent_dir(parent)?;
-    Ok(())
+        std::fs::rename(&tmp_path, path)?;
+        tmp_guard.disarm();
+        sync_parent_dir(parent)?;
+        return Ok(());
+    }
 }
 
 fn normalized_parent(path: &Path) -> &Path {
@@ -558,6 +565,50 @@ mod tests {
             );
         });
         crate::test_complete!("write_atomic_missing_parent_fails_cleanly");
+    }
+
+    #[test]
+    fn write_atomic_retries_when_stale_temp_name_exists() {
+        init_test("write_atomic_retries_when_stale_temp_name_exists");
+        let dir = TempDir::new("write_atomic_collision").unwrap();
+        let path = dir.path().join("target.txt");
+        let file_name = path.file_name().expect("target file name");
+        let start = ATOMIC_WRITE_COUNTER.load(Ordering::Relaxed);
+
+        for offset in 0..8 {
+            let counter = start.saturating_add(offset);
+            let stale = dir.path().join(format!(
+                ".{}.asupersync-tmp-{}-{counter}",
+                file_name.to_string_lossy(),
+                std::process::id()
+            ));
+            fs::write(stale, b"stale-temp").unwrap();
+        }
+
+        future::block_on(async {
+            write_atomic(&path, b"fresh").await.unwrap();
+
+            let bytes = read(&path).await.unwrap();
+            crate::assert_with_log!(bytes == b"fresh", "fresh content written", b"fresh", bytes);
+
+            let stale_count = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".asupersync-tmp-")
+                })
+                .count();
+            crate::assert_with_log!(
+                stale_count >= 8,
+                "preexisting stale temp files preserved",
+                ">= 8",
+                stale_count
+            );
+        });
+        crate::test_complete!("write_atomic_retries_when_stale_temp_name_exists");
     }
 
     #[cfg(unix)]
