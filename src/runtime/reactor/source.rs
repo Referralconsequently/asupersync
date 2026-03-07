@@ -263,6 +263,74 @@ mod platform {
     }
 }
 
+// wasm32/browser implementation
+#[cfg(target_arch = "wasm32")]
+mod platform {
+    use super::next_source_id;
+
+    /// Browser-host sources do not expose raw OS handles.
+    ///
+    /// The browser reactor currently tracks registrations by token only, so
+    /// wasm builds keep the `Source` surface as a pure marker trait until the
+    /// browser host bindings define concrete source kinds.
+    pub trait Source: Send + Sync {}
+
+    impl<T: Send + Sync> Source for T {}
+
+    /// Optional trait for sources that have a unique identifier.
+    pub trait SourceId {
+        /// Returns a unique identifier for this source instance.
+        fn source_id(&self) -> u64;
+    }
+
+    /// Wrapper that adds a unique source ID to any browser source.
+    #[derive(Debug)]
+    pub struct SourceWrapper<T> {
+        inner: T,
+        id: u64,
+    }
+
+    impl<T> SourceWrapper<T> {
+        /// Creates a new source wrapper around an I/O object.
+        #[must_use]
+        pub fn new(inner: T) -> Self {
+            Self {
+                inner,
+                id: next_source_id(),
+            }
+        }
+
+        /// Creates a new source wrapper with a specific ID.
+        #[must_use]
+        pub fn with_id(inner: T, id: u64) -> Self {
+            Self { inner, id }
+        }
+
+        /// Returns a reference to the inner value.
+        #[must_use]
+        pub fn get_ref(&self) -> &T {
+            &self.inner
+        }
+
+        /// Returns a mutable reference to the inner value.
+        pub fn get_mut(&mut self) -> &mut T {
+            &mut self.inner
+        }
+
+        /// Consumes the wrapper and returns the inner value.
+        #[must_use]
+        pub fn into_inner(self) -> T {
+            self.inner
+        }
+    }
+
+    impl<T> SourceId for SourceWrapper<T> {
+        fn source_id(&self) -> u64 {
+            self.id
+        }
+    }
+}
+
 // Re-export platform-specific types
 pub use platform::{Source, SourceId, SourceWrapper};
 

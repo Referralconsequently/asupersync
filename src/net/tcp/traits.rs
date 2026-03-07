@@ -206,80 +206,89 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
 
     /// Bind to the configured address with the specified options.
     pub async fn bind(self) -> io::Result<super::listener::TcpListener> {
-        use crate::net::lookup_all;
-        use socket2::{Domain, Protocol, Socket, Type};
-
-        let addrs = lookup_all(self.addr).await?;
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no socket addresses found",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self;
+            Err(super::browser_tcp_unsupported("TcpListenerBuilder::bind"))
         }
 
-        let mut last_err = None;
-        for addr in addrs {
-            let domain = if addr.is_ipv4() {
-                Domain::IPV4
-            } else {
-                Domain::IPV6
-            };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use crate::net::lookup_all;
+            use socket2::{Domain, Protocol, Socket, Type};
 
-            let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-                Ok(s) => s,
-                Err(e) => {
+            let addrs = lookup_all(self.addr).await?;
+            if addrs.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no socket addresses found",
+                ));
+            }
+
+            let mut last_err = None;
+            for addr in addrs {
+                let domain = if addr.is_ipv4() {
+                    Domain::IPV4
+                } else {
+                    Domain::IPV6
+                };
+
+                let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        last_err = Some(e);
+                        continue;
+                    }
+                };
+
+                // Apply socket options
+                if self.reuse_addr {
+                    if let Err(e) = socket.set_reuse_address(true) {
+                        last_err = Some(e);
+                        continue;
+                    }
+                }
+
+                #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+                if self.reuse_port {
+                    if let Err(e) = socket.set_reuse_port(true) {
+                        last_err = Some(e);
+                        continue;
+                    }
+                }
+
+                if addr.is_ipv6() && self.only_v6 {
+                    if let Err(e) = socket.set_only_v6(true) {
+                        last_err = Some(e);
+                        continue;
+                    }
+                }
+
+                // Bind the socket
+                if let Err(e) = socket.bind(&addr.into()) {
                     last_err = Some(e);
                     continue;
                 }
-            };
 
-            // Apply socket options
-            if self.reuse_addr {
-                if let Err(e) = socket.set_reuse_address(true) {
+                // Listen with backlog
+                let backlog = i32::try_from(self.backlog.unwrap_or(128)).unwrap_or(i32::MAX);
+                if let Err(e) = socket.listen(backlog) {
                     last_err = Some(e);
                     continue;
                 }
-            }
 
-            #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
-            if self.reuse_port {
-                if let Err(e) = socket.set_reuse_port(true) {
+                // Set non-blocking
+                if let Err(e) = socket.set_nonblocking(true) {
                     last_err = Some(e);
                     continue;
                 }
+
+                let listener: std::net::TcpListener = socket.into();
+                return super::listener::TcpListener::from_std(listener);
             }
 
-            if addr.is_ipv6() && self.only_v6 {
-                if let Err(e) = socket.set_only_v6(true) {
-                    last_err = Some(e);
-                    continue;
-                }
-            }
-
-            // Bind the socket
-            if let Err(e) = socket.bind(&addr.into()) {
-                last_err = Some(e);
-                continue;
-            }
-
-            // Listen with backlog
-            let backlog = i32::try_from(self.backlog.unwrap_or(128)).unwrap_or(i32::MAX);
-            if let Err(e) = socket.listen(backlog) {
-                last_err = Some(e);
-                continue;
-            }
-
-            // Set non-blocking
-            if let Err(e) = socket.set_nonblocking(true) {
-                last_err = Some(e);
-                continue;
-            }
-
-            let listener: std::net::TcpListener = socket.into();
-            return super::listener::TcpListener::from_std(listener);
+            Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))
         }
-
-        Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))
     }
 }
 

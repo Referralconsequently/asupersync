@@ -591,16 +591,19 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     target_os = "netbsd",
     target_os = "dragonfly"
 ))]
+/// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Ok(Arc::new(KqueueReactor::new()?))
 }
 
 #[cfg(target_os = "windows")]
+/// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Ok(Arc::new(IocpReactor::new()?))
 }
 
 #[cfg(target_arch = "wasm32")]
+/// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Ok(Arc::new(BrowserReactor::default()))
 }
@@ -615,6 +618,7 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     target_os = "windows",
     target_arch = "wasm32"
 )))]
+/// Creates the default reactor implementation for the current target.
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

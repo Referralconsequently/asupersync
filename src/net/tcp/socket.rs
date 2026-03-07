@@ -4,7 +4,7 @@ use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
 use parking_lot::Mutex;
 use std::io;
-use std::net::{self, SocketAddr};
+use std::net::SocketAddr;
 
 /// A TCP socket used for configuring options before connect/listen.
 #[derive(Debug)]
@@ -80,72 +80,85 @@ impl TcpSocket {
     }
 
     /// Starts listening, returning a TCP listener.
-    pub fn listen(self, _backlog: u32) -> io::Result<TcpListener> {
-        let state = self.state.into_inner();
-        if state.reuseaddr || state.reuseport {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "SO_REUSEADDR/SO_REUSEPORT not supported in Phase 0",
-            ));
+    pub fn listen(self, backlog: u32) -> io::Result<TcpListener> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self;
+            let _ = backlog;
+            Err(super::browser_tcp_unsupported("TcpSocket::listen"))
         }
-        let addr = state
-            .bound
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "socket is not bound"))?;
 
-        // Use blocking bind for Phase 0
-        // We can't use async bind here because this method is synchronous.
-        // We can construct TcpListener using std::net::TcpListener directly.
-        // But TcpListener struct expects it.
-        // We'll construct TcpListener directly.
-        // But `TcpListener` field `inner` is private.
-        // So we need to use `TcpListener::bind`? But that's async.
-        // Or make `inner` pub(crate).
-        // I will update `listener.rs` to make `inner` pub(crate) if needed, or assume I can access it if in same module tree.
-        // They are in `net::tcp`.
-        // So `crate::net::tcp::listener::TcpListener` field `inner` needs to be accessible?
-        // No, `TcpSocket` is in `socket.rs`. `TcpListener` in `listener.rs`.
-        // They are siblings.
-        // So `inner` needs to be `pub(crate)`.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let state = self.state.into_inner();
+            if state.reuseaddr || state.reuseport {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "SO_REUSEADDR/SO_REUSEPORT not supported in Phase 0",
+                ));
+            }
+            let addr = state.bound.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "socket is not bound")
+            })?;
 
-        let listener = net::TcpListener::bind(addr)?;
-        listener.set_nonblocking(true)?;
+            let domain = match state.family {
+                TcpSocketFamily::V4 => socket2::Domain::IPV4,
+                TcpSocketFamily::V6 => socket2::Domain::IPV6,
+            };
+            let socket =
+                socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
 
-        TcpListener::from_std(listener)
+            socket.bind(&socket2::SockAddr::from(addr))?;
+            socket.listen(i32::try_from(backlog).unwrap_or(i32::MAX))?;
+            socket.set_nonblocking(true)?;
+
+            TcpListener::from_std(socket.into())
+        }
     }
 
     /// Connects this socket, returning a TCP stream.
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
-        let state = self.state.into_inner();
-
-        if !family_matches(state.family, addr) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "address family does not match socket",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self;
+            let _ = addr;
+            Err(super::browser_tcp_unsupported("TcpSocket::connect"))
         }
 
-        let domain = match state.family {
-            TcpSocketFamily::V4 => socket2::Domain::IPV4,
-            TcpSocketFamily::V6 => socket2::Domain::IPV6,
-        };
-        let socket =
-            socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let state = self.state.into_inner();
 
-        if state.reuseaddr {
-            socket.set_reuse_address(true)?;
+            if !family_matches(state.family, addr) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "address family does not match socket",
+                ));
+            }
+
+            let domain = match state.family {
+                TcpSocketFamily::V4 => socket2::Domain::IPV4,
+                TcpSocketFamily::V6 => socket2::Domain::IPV6,
+            };
+            let socket =
+                socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+
+            if state.reuseaddr {
+                socket.set_reuse_address(true)?;
+            }
+
+            #[cfg(unix)]
+            if state.reuseport {
+                socket.set_reuse_port(true)?;
+            }
+
+            if let Some(bound) = state.bound {
+                socket.bind(&socket2::SockAddr::from(bound))?;
+            }
+
+            // Async connect using the configured socket
+            TcpStream::connect_from_socket(socket, addr).await
         }
-
-        #[cfg(unix)]
-        if state.reuseport {
-            socket.set_reuse_port(true)?;
-        }
-
-        if let Some(bound) = state.bound {
-            socket.bind(&socket2::SockAddr::from(bound))?;
-        }
-
-        // Async connect using the configured socket
-        TcpStream::connect_from_socket(socket, addr).await
     }
 }
 
@@ -159,7 +172,7 @@ fn family_matches(family: TcpSocketFamily, addr: SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::net::{self, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::time::Duration;
 
     fn init_test(name: &str) {

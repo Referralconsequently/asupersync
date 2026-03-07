@@ -6,16 +6,34 @@
 //! ubs:ignore — OwnedWriteHalf::drop() calls shutdown(Write); read half does not
 //! need shutdown (correct half-duplex semantics).
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use parking_lot::Mutex;
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{Read, Write};
+#[cfg(target_arch = "wasm32")]
+use std::marker::PhantomData;
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::{self, Shutdown};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn browser_tcp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
+    Poll::Ready(Err(super::browser_tcp_unsupported(op)))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn browser_tcp_unsupported_result<T>(op: &str) -> io::Result<T> {
+    Err(super::browser_tcp_unsupported(op))
+}
 
 /// Borrowed read half of a split TCP stream.
 ///
@@ -24,15 +42,27 @@ use std::task::{Context, Poll, Wake, Waker};
 /// integration, use the owned split via [`TcpStream::into_split()`](super::stream::TcpStream::into_split).
 #[derive(Debug)]
 pub struct ReadHalf<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
     inner: &'a net::TcpStream,
+    #[cfg(target_arch = "wasm32")]
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a> ReadHalf<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new(inner: &'a net::TcpStream) -> Self {
         Self { inner }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn unsupported() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AsyncRead for ReadHalf<'_> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -56,6 +86,18 @@ impl AsyncRead for ReadHalf<'_> {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl AsyncRead for ReadHalf<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let _ = (self, cx, buf);
+        browser_tcp_poll_unsupported("ReadHalf::poll_read")
+    }
+}
+
 /// Borrowed write half of a split TCP stream.
 ///
 /// This half does not participate in reactor registration - it uses
@@ -63,15 +105,27 @@ impl AsyncRead for ReadHalf<'_> {
 /// integration, use the owned split via [`TcpStream::into_split()`](super::stream::TcpStream::into_split).
 #[derive(Debug)]
 pub struct WriteHalf<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
     inner: &'a net::TcpStream,
+    #[cfg(target_arch = "wasm32")]
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a> WriteHalf<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new(inner: &'a net::TcpStream) -> Self {
         Self { inner }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn unsupported() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AsyncWrite for WriteHalf<'_> {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -104,6 +158,28 @@ impl AsyncWrite for WriteHalf<'_> {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.inner.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncWrite for WriteHalf<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let _ = (self, cx, buf);
+        browser_tcp_poll_unsupported("WriteHalf::poll_write")
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = (self, cx);
+        browser_tcp_poll_unsupported("WriteHalf::poll_flush")
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = (self, cx);
+        browser_tcp_poll_unsupported("WriteHalf::poll_shutdown")
     }
 }
 
@@ -170,6 +246,14 @@ struct SplitIoState {
     write_waker: Option<Waker>,
 }
 
+fn split_io_state(registration: Option<IoRegistration>) -> SplitIoState {
+    SplitIoState {
+        registration,
+        read_waker: None,
+        write_waker: None,
+    }
+}
+
 /// Shared state for owned split halves.
 ///
 /// Both [`OwnedReadHalf`] and [`OwnedWriteHalf`] share this state via `Arc`.
@@ -178,127 +262,141 @@ struct SplitIoState {
 /// when halves are polled from different tasks.
 pub(crate) struct TcpStreamInner {
     /// The underlying TCP stream.
+    #[cfg(not(target_arch = "wasm32"))]
     stream: Arc<net::TcpStream>,
+    #[cfg(target_arch = "wasm32")]
+    unsupported: (),
     /// Per-direction wakers and shared reactor registration.
     state: Mutex<SplitIoState>,
 }
 
 impl std::fmt::Debug for TcpStreamInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TcpStreamInner")
-            .field("stream", &self.stream)
-            .field("state", &"...")
-            .finish()
+        let mut debug = f.debug_struct("TcpStreamInner");
+        #[cfg(not(target_arch = "wasm32"))]
+        debug.field("stream", &self.stream);
+        #[cfg(target_arch = "wasm32")]
+        debug.field("stream", &"unsupported");
+        debug.field("state", &"...").finish()
     }
 }
 
 impl TcpStreamInner {
     #[allow(clippy::significant_drop_tightening)] // Lock held across register() to prevent ADD race
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut guard = self.state.lock();
-
-        // Store this direction's waker for combined dispatch.
-        // Use independent checks (not else-if) so that callers passing
-        // combined interest (READABLE | WRITABLE) update both wakers.
-        if interest.is_readable()
-            && !guard
-                .read_waker
-                .as_ref()
-                .is_some_and(|w| w.will_wake(cx.waker()))
+        #[cfg(target_arch = "wasm32")]
         {
-            guard.read_waker = Some(cx.waker().clone());
-        }
-        if interest.is_writable()
-            && !guard
-                .write_waker
-                .as_ref()
-                .is_some_and(|w| w.will_wake(cx.waker()))
-        {
-            guard.write_waker = Some(cx.waker().clone());
+            let _ = (cx, interest);
+            browser_tcp_unsupported_result("OwnedTcpStream::register_interest")
         }
 
-        let mut dropped_reg = None;
-        let mut early_return = None;
-        let mut wakers_to_wake = None;
-
-        // Destructure to enable independent field borrows through the MutexGuard.
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            let SplitIoState {
-                registration,
-                read_waker,
-                write_waker,
-            } = &mut *guard;
-            if let Some(reg) = registration.as_mut() {
-                let combined_interest = reg.interest() | interest;
-                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
-                // Single lock in io_driver: re-arm interest + refresh waker.
-                match reg.rearm(combined_interest, &waker) {
-                    Ok(true) => early_return = Some(Ok(())),
-                    Ok(false) => {
-                        dropped_reg = registration.take();
+            let mut guard = self.state.lock();
+
+            // Store this direction's waker for combined dispatch.
+            // Use independent checks (not else-if) so that callers passing
+            // combined interest (READABLE | WRITABLE) update both wakers.
+            if interest.is_readable()
+                && !guard
+                    .read_waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                guard.read_waker = Some(cx.waker().clone());
+            }
+            if interest.is_writable()
+                && !guard
+                    .write_waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                guard.write_waker = Some(cx.waker().clone());
+            }
+
+            let mut dropped_reg = None;
+            let mut early_return = None;
+            let mut wakers_to_wake = None;
+
+            // Destructure to enable independent field borrows through the MutexGuard.
+            {
+                let SplitIoState {
+                    registration,
+                    read_waker,
+                    write_waker,
+                } = &mut *guard;
+                if let Some(reg) = registration.as_mut() {
+                    let combined_interest = reg.interest() | interest;
+                    let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
+                    // Single lock in io_driver: re-arm interest + refresh waker.
+                    match reg.rearm(combined_interest, &waker) {
+                        Ok(true) => early_return = Some(Ok(())),
+                        Ok(false) => {
+                            dropped_reg = registration.take();
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                            dropped_reg = registration.take();
+                            wakers_to_wake = Some((read_waker.clone(), write_waker.clone()));
+                            early_return = Some(Ok(()));
+                        }
+                        Err(err) => early_return = Some(Err(err)),
                     }
-                    Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                        dropped_reg = registration.take();
-                        wakers_to_wake = Some((read_waker.clone(), write_waker.clone()));
-                        early_return = Some(Ok(()));
+                }
+            }
+
+            if let Some(res) = early_return {
+                drop(guard);
+                drop(dropped_reg);
+                if let Some((rw, ww)) = wakers_to_wake {
+                    if let Some(w) = rw {
+                        w.wake();
                     }
-                    Err(err) => early_return = Some(Err(err)),
+                    if let Some(w) = ww {
+                        w.wake();
+                    }
                 }
+                return res;
             }
-        }
 
-        if let Some(res) = early_return {
-            drop(guard);
-            drop(dropped_reg);
-            if let Some((rw, ww)) = wakers_to_wake {
-                if let Some(w) = rw {
-                    w.wake();
-                }
-                if let Some(w) = ww {
-                    w.wake();
-                }
-            }
-            return res;
-        }
+            // Build combined waker while still holding the lock. We keep the lock
+            // held across `driver.register()` to prevent a race where both halves
+            // concurrently attempt to create a fresh registration for the same fd,
+            // causing one to fail with EEXIST from epoll_ctl(ADD).
+            let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+            let register_interest = registration_interest(
+                guard.read_waker.is_some(),
+                guard.write_waker.is_some(),
+                interest,
+            );
 
-        // Build combined waker while still holding the lock. We keep the lock
-        // held across `driver.register()` to prevent a race where both halves
-        // concurrently attempt to create a fresh registration for the same fd,
-        // causing one to fail with EEXIST from epoll_ctl(ADD).
-        let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
-        let register_interest = registration_interest(
-            guard.read_waker.is_some(),
-            guard.write_waker.is_some(),
-            interest,
-        );
-
-        let Some(current) = Cx::current() else {
-            cx.waker().wake_by_ref();
-            drop(guard);
-            drop(dropped_reg);
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            cx.waker().wake_by_ref();
-            drop(guard);
-            drop(dropped_reg);
-            return Ok(());
-        };
-
-        let result = match driver.register(&*self.stream, register_interest, waker) {
-            Ok(registration) => {
-                guard.registration = Some(registration);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            let Some(current) = Cx::current() else {
                 cx.waker().wake_by_ref();
-                Ok(())
-            }
-            Err(err) => Err(err),
-        };
-        drop(guard);
-        drop(dropped_reg);
-        result
+                drop(guard);
+                drop(dropped_reg);
+                return Ok(());
+            };
+            let Some(driver) = current.io_driver_handle() else {
+                cx.waker().wake_by_ref();
+                drop(guard);
+                drop(dropped_reg);
+                return Ok(());
+            };
+
+            let result = match driver.register(&*self.stream, register_interest, waker) {
+                Ok(registration) => {
+                    guard.registration = Some(registration);
+                    Ok(())
+                }
+                Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                    cx.waker().wake_by_ref();
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            };
+            drop(guard);
+            drop(dropped_reg);
+            result
+        }
     }
 
     fn clear_waiter_on_drop(&self, interest: Interest) {
@@ -371,31 +469,25 @@ pub struct OwnedReadHalf {
 }
 
 impl OwnedReadHalf {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new(stream: Arc<net::TcpStream>, registration: Option<IoRegistration>) -> Self {
         Self {
             inner: Arc::new(TcpStreamInner {
                 stream,
-                state: Mutex::new(SplitIoState {
-                    registration,
-                    read_waker: None,
-                    write_waker: None,
-                }),
+                state: Mutex::new(split_io_state(registration)),
             }),
         }
     }
 
     /// Create a paired read and write half sharing the same inner state.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new_pair(
         stream: Arc<net::TcpStream>,
         registration: Option<IoRegistration>,
     ) -> (Self, OwnedWriteHalf) {
         let inner = Arc::new(TcpStreamInner {
             stream,
-            state: Mutex::new(SplitIoState {
-                registration,
-                read_waker: None,
-                write_waker: None,
-            }),
+            state: Mutex::new(split_io_state(registration)),
         });
         (
             Self {
@@ -408,13 +500,42 @@ impl OwnedReadHalf {
         )
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn unsupported_pair() -> (Self, OwnedWriteHalf) {
+        let inner = Arc::new(TcpStreamInner {
+            unsupported: (),
+            state: Mutex::new(split_io_state(None)),
+        });
+        (
+            Self {
+                inner: inner.clone(),
+            },
+            OwnedWriteHalf {
+                inner,
+                shutdown_on_drop: false,
+            },
+        )
+    }
+
     /// Returns the local address of the stream.
     pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("OwnedReadHalf::local_addr");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.stream.local_addr()
     }
 
     /// Returns the peer address of the stream.
     pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("OwnedReadHalf::peer_addr");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.stream.peer_addr()
     }
 
@@ -425,6 +546,13 @@ impl OwnedReadHalf {
     /// Returns an error containing both halves if they don't belong to the
     /// same original stream.
     pub fn reunite(self, write: OwnedWriteHalf) -> Result<super::stream::TcpStream, ReuniteError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = Arc::ptr_eq(&self.inner, &write.inner);
+            return Err(ReuniteError { read: self, write });
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         if Arc::ptr_eq(&self.inner, &write.inner) {
             // Don't shutdown on drop since we're reuniting
             let mut write = write;
@@ -443,6 +571,7 @@ impl OwnedReadHalf {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AsyncRead for OwnedReadHalf {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -463,6 +592,18 @@ impl AsyncRead for OwnedReadHalf {
             }
             Err(e) => Poll::Ready(Err(e)),
         }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncRead for OwnedReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let _ = (self, cx, buf);
+        browser_tcp_poll_unsupported("OwnedReadHalf::poll_read")
     }
 }
 
@@ -491,11 +632,23 @@ impl OwnedWriteHalf {
 
     /// Returns the local address of the stream.
     pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("OwnedWriteHalf::local_addr");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.stream.local_addr()
     }
 
     /// Returns the peer address of the stream.
     pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("OwnedWriteHalf::peer_addr");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.stream.peer_addr()
     }
 
@@ -507,6 +660,7 @@ impl OwnedWriteHalf {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AsyncWrite for OwnedWriteHalf {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -546,9 +700,32 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl AsyncWrite for OwnedWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let _ = (self, cx, buf);
+        browser_tcp_poll_unsupported("OwnedWriteHalf::poll_write")
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = (self, cx);
+        browser_tcp_poll_unsupported("OwnedWriteHalf::poll_flush")
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = (self, cx);
+        browser_tcp_poll_unsupported("OwnedWriteHalf::poll_shutdown")
+    }
+}
+
 impl Drop for OwnedWriteHalf {
     fn drop(&mut self) {
         self.inner.clear_waiter_on_drop(Interest::WRITABLE);
+        #[cfg(not(target_arch = "wasm32"))]
         if self.shutdown_on_drop {
             let _ = self.inner.stream.shutdown(Shutdown::Write);
         }

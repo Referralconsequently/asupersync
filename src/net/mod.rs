@@ -41,6 +41,9 @@ pub mod quic_compat;
 mod resolve;
 pub mod sys;
 /// TCP networking primitives.
+///
+/// Browser/wasm builds keep the type surface available for API compatibility,
+/// but native socket entry points fail fast with `io::ErrorKind::Unsupported`.
 pub mod tcp;
 mod udp;
 /// Unix domain socket networking primitives (includes `UnixListener`, `UnixStream`).

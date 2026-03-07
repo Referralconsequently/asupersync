@@ -8,7 +8,9 @@
 //! - `recv_from`/`recv`: cancel discards the datagram (UDP is unreliable).
 //! - `connect`: cancel-safe (stateless).
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::cx::Cx;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::net::lookup_all;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
@@ -18,6 +20,27 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket as StdUd
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn browser_udp_unsupported(op: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("{op} is unavailable in wasm-browser profiles; use browser transport bindings"),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn browser_udp_unsupported_result<T>(op: &str) -> io::Result<T> {
+    Err(browser_udp_unsupported(op))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn browser_udp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
+    Poll::Ready(Err(browser_udp_unsupported(op)))
+}
 
 /// A UDP socket.
 #[derive(Debug)]
@@ -29,50 +52,68 @@ pub struct UdpSocket {
 impl UdpSocket {
     /// Bind to the given address.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
-        let addrs = lookup_all(addr).await?;
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no socket addresses found",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = addr;
+            return browser_udp_unsupported_result("UdpSocket::bind");
         }
 
-        let mut last_err = None;
-        for addr in addrs {
-            match StdUdpSocket::bind(addr) {
-                Ok(socket) => {
-                    socket.set_nonblocking(true)?;
-                    return Ok(Self {
-                        inner: Arc::new(socket),
-                        registration: None,
-                    });
-                }
-                Err(err) => last_err = Some(err),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let addrs = lookup_all(addr).await?;
+            if addrs.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no socket addresses found",
+                ));
             }
-        }
 
-        Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))
+            let mut last_err = None;
+            for addr in addrs {
+                match StdUdpSocket::bind(addr) {
+                    Ok(socket) => {
+                        socket.set_nonblocking(true)?;
+                        return Ok(Self {
+                            inner: Arc::new(socket),
+                            registration: None,
+                        });
+                    }
+                    Err(err) => last_err = Some(err),
+                }
+            }
+
+            Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))
+        }
     }
 
     /// Connect to a remote address (for send/recv).
     pub async fn connect<A: ToSocketAddrs + Send + 'static>(&self, addr: A) -> io::Result<()> {
-        let addrs = lookup_all(addr).await?;
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no socket addresses found",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = addr;
+            return browser_udp_unsupported_result("UdpSocket::connect");
         }
 
-        let mut last_err = None;
-        for addr in addrs {
-            match self.inner.connect(addr) {
-                Ok(()) => return Ok(()),
-                Err(err) => last_err = Some(err),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let addrs = lookup_all(addr).await?;
+            if addrs.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no socket addresses found",
+                ));
             }
-        }
 
-        Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+            let mut last_err = None;
+            for addr in addrs {
+                match self.inner.connect(addr) {
+                    Ok(()) => return Ok(()),
+                    Err(err) => last_err = Some(err),
+                }
+            }
+
+            Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+        }
     }
 
     /// Send a datagram to the specified target.
@@ -81,15 +122,24 @@ impl UdpSocket {
         buf: &[u8],
         target: A,
     ) -> io::Result<usize> {
-        let addrs = lookup_all(target).await?;
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no socket addresses found",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (buf, target);
+            return browser_udp_unsupported_result("UdpSocket::send_to");
         }
 
-        std::future::poll_fn(|cx| self.poll_send_to(cx, buf, &addrs)).await
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let addrs = lookup_all(target).await?;
+            if addrs.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no socket addresses found",
+                ));
+            }
+
+            std::future::poll_fn(|cx| self.poll_send_to(cx, buf, &addrs)).await
+        }
     }
 
     /// Poll for send_to readiness.
@@ -99,28 +149,44 @@ impl UdpSocket {
         buf: &[u8],
         addrs: &[SocketAddr],
     ) -> Poll<io::Result<usize>> {
-        let mut last_err = None;
-        for addr in addrs {
-            match self.inner.send_to(buf, addr) {
-                Ok(n) => return Poll::Ready(Ok(n)),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Socket not ready; register and wait.
-                    if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
-                        return Poll::Ready(Err(err));
-                    }
-                    return Poll::Pending;
-                }
-                Err(e) => last_err = Some(e),
-            }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self, cx, buf, addrs);
+            return browser_udp_poll_unsupported("UdpSocket::poll_send_to");
         }
-        // All addresses failed with non-WouldBlock errors; return last error.
-        Poll::Ready(Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no addresses to send to")
-        })))
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut last_err = None;
+            for addr in addrs {
+                match self.inner.send_to(buf, addr) {
+                    Ok(n) => return Poll::Ready(Ok(n)),
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // Socket not ready; register and wait.
+                        if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                            return Poll::Ready(Err(err));
+                        }
+                        return Poll::Pending;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            // All addresses failed with non-WouldBlock errors; return last error.
+            Poll::Ready(Err(last_err.unwrap_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "no addresses to send to")
+            })))
+        }
     }
 
     /// Receive a datagram and its source address.
     pub async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = buf;
+            return browser_udp_unsupported_result("UdpSocket::recv_from");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         std::future::poll_fn(|cx| self.poll_recv_from(cx, buf)).await
     }
 
@@ -130,6 +196,13 @@ impl UdpSocket {
         cx: &Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self, cx, buf);
+            return browser_udp_poll_unsupported("UdpSocket::poll_recv_from");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         match self.inner.recv_from(buf) {
             Ok(res) => Poll::Ready(Ok(res)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -144,11 +217,25 @@ impl UdpSocket {
 
     /// Send a datagram to the connected peer.
     pub async fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = buf;
+            return browser_udp_unsupported_result("UdpSocket::send");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         std::future::poll_fn(|cx| self.poll_send(cx, buf)).await
     }
 
     /// Poll for send readiness.
     pub fn poll_send(&mut self, cx: &Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self, cx, buf);
+            return browser_udp_poll_unsupported("UdpSocket::poll_send");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         match self.inner.send(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -163,11 +250,25 @@ impl UdpSocket {
 
     /// Receive a datagram from the connected peer.
     pub async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = buf;
+            return browser_udp_unsupported_result("UdpSocket::recv");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         std::future::poll_fn(|cx| self.poll_recv(cx, buf)).await
     }
 
     /// Poll for recv readiness.
     pub fn poll_recv(&mut self, cx: &Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self, cx, buf);
+            return browser_udp_poll_unsupported("UdpSocket::poll_recv");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         match self.inner.recv(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -182,6 +283,13 @@ impl UdpSocket {
 
     /// Peek at the next datagram without consuming it.
     pub async fn peek_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = buf;
+            return browser_udp_unsupported_result("UdpSocket::peek_from");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         std::future::poll_fn(|cx| self.poll_peek_from(cx, buf)).await
     }
 
@@ -191,6 +299,13 @@ impl UdpSocket {
         cx: &Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self, cx, buf);
+            return browser_udp_poll_unsupported("UdpSocket::poll_peek_from");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         match self.inner.peek_from(buf) {
             Ok(res) => Poll::Ready(Ok(res)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -292,14 +407,30 @@ impl UdpSocket {
     ///
     /// Returns an error if setting non-blocking mode fails.
     pub fn from_std(socket: StdUdpSocket) -> io::Result<Self> {
-        socket.set_nonblocking(true)?;
-        Ok(Self {
-            inner: Arc::new(socket),
-            registration: None,
-        })
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = socket;
+            return browser_udp_unsupported_result("UdpSocket::from_std");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            socket.set_nonblocking(true)?;
+            Ok(Self {
+                inner: Arc::new(socket),
+                registration: None,
+            })
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let _ = (cx, interest);
+        browser_udp_unsupported_result("UdpSocket::register_interest")
     }
 
     /// Register interest with the reactor.
+    #[cfg(not(target_arch = "wasm32"))]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let mut target_interest = interest;
         if let Some(registration) = &mut self.registration {

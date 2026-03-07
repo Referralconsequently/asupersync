@@ -125,6 +125,8 @@ pub mod deadline_monitor;
 pub mod env_config;
 pub mod io_driver;
 pub mod io_op;
+/// Proof-carrying decision-plane kernel for runtime controllers.
+pub mod kernel;
 pub mod obligation_table;
 pub mod reactor;
 pub mod region_heap;

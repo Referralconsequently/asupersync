@@ -5,13 +5,17 @@
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::net::lookup_all;
 use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::net::tcp::traits::TcpStreamApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::time::timeout;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::types::Time;
+#[cfg(not(target_arch = "wasm32"))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
@@ -21,6 +25,18 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 const FALLBACK_IO_BACKOFF: Duration = Duration::from_millis(1);
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn browser_tcp_unsupported_result<T>(op: &str) -> io::Result<T> {
+    Err(super::browser_tcp_unsupported(op))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn browser_tcp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
+    Poll::Ready(Err(super::browser_tcp_unsupported(op)))
+}
 
 /// A TCP stream.
 #[derive(Debug)]
@@ -114,13 +130,22 @@ impl TcpStream {
     /// This is used for testing to wrap a synchronous stream into an async one.
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn from_std(stream: net::TcpStream) -> io::Result<Self> {
-        // Ensure async poll paths do not inherit blocking sockets.
-        stream.set_nonblocking(true)?;
-        Ok(Self {
-            inner: Arc::new(stream),
-            registration: None,
-            shutdown_on_drop: true,
-        })
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = stream;
+            return browser_tcp_unsupported_result("TcpStream::from_std");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Ensure async poll paths do not inherit blocking sockets.
+            stream.set_nonblocking(true)?;
+            Ok(Self {
+                inner: Arc::new(stream),
+                registration: None,
+                shutdown_on_drop: true,
+            })
+        }
     }
 
     /// Reconstruct a TcpStream from its parts (used by reunite).
@@ -137,42 +162,52 @@ impl TcpStream {
 
     /// Connect to address.
     pub async fn connect<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
-        let addrs = lookup_all(addr).await?;
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no socket addresses found",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = addr;
+            Err(super::browser_tcp_unsupported("TcpStream::connect"))
         }
 
-        let mut last_err = None;
-        for addr in addrs {
-            let domain = if addr.is_ipv4() {
-                Domain::IPV4
-            } else {
-                Domain::IPV6
-            };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let addrs = lookup_all(addr).await?;
+            if addrs.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no socket addresses found",
+                ));
+            }
 
-            let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
-                Ok(s) => s,
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
-                }
-            };
+            let mut last_err = None;
+            for addr in addrs {
+                let domain = if addr.is_ipv4() {
+                    Domain::IPV4
+                } else {
+                    Domain::IPV6
+                };
 
-            match Self::connect_from_socket(socket, addr).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) => {
-                    last_err = Some(e);
+                let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        last_err = Some(e);
+                        continue;
+                    }
+                };
+
+                match Self::connect_from_socket(socket, addr).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(e) => {
+                        last_err = Some(e);
+                    }
                 }
             }
-        }
 
-        Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+            Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
+        }
     }
 
     /// Connects using an existing configured socket.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn connect_from_socket(socket: Socket, addr: SocketAddr) -> io::Result<Self> {
         socket.set_nonblocking(true)?;
 
@@ -194,37 +229,72 @@ impl TcpStream {
         addr: A,
         timeout_duration: Duration,
     ) -> io::Result<Self> {
-        let connect_future = std::pin::pin!(Self::connect(addr));
-        match timeout(timeout_now(), timeout_duration, connect_future).await {
-            Ok(Ok(stream)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "tcp connect timeout",
-            )),
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = timeout_duration;
+            Self::connect(addr).await
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let connect_future = std::pin::pin!(Self::connect(addr));
+            match timeout(timeout_now(), timeout_duration, connect_future).await {
+                Ok(Ok(stream)) => Ok(stream),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "tcp connect timeout",
+                )),
+            }
         }
     }
 
     /// Get peer address.
     #[inline]
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("TcpStream::peer_addr");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.peer_addr()
     }
 
     /// Get local address.
     #[inline]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("TcpStream::local_addr");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.local_addr()
     }
 
     /// Shutdown.
     #[inline]
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = how;
+            return browser_tcp_unsupported_result("TcpStream::shutdown");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.shutdown(how)
     }
 
     /// Set TCP_NODELAY.
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = nodelay;
+            return browser_tcp_unsupported_result("TcpStream::set_nodelay");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.set_nodelay(nodelay)
     }
 
@@ -233,23 +303,40 @@ impl TcpStream {
     /// Uses `socket2` to configure `SO_KEEPALIVE` and platform-specific
     /// keepalive idle time. Pass `None` to disable keepalive.
     pub fn set_keepalive(&self, keepalive: Option<Duration>) -> io::Result<()> {
-        let socket = socket2::SockRef::from(&*self.inner);
-        match keepalive {
-            Some(interval) => {
-                let params = socket2::TcpKeepalive::new().with_time(interval);
-                socket.set_tcp_keepalive(&params)?;
-            }
-            None => {
-                socket.set_keepalive(false)?;
-            }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = keepalive;
+            Err(super::browser_tcp_unsupported("TcpStream::set_keepalive"))
         }
-        Ok(())
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let socket = socket2::SockRef::from(&*self.inner);
+            match keepalive {
+                Some(interval) => {
+                    let params = socket2::TcpKeepalive::new().with_time(interval);
+                    socket.set_tcp_keepalive(&params)?;
+                }
+                None => {
+                    socket.set_keepalive(false)?;
+                }
+            }
+            Ok(())
+        }
     }
 
     /// Split into borrowed halves.
     #[must_use]
     pub fn split(&self) -> (ReadHalf<'_>, WriteHalf<'_>) {
-        (ReadHalf::new(&self.inner), WriteHalf::new(&self.inner))
+        #[cfg(target_arch = "wasm32")]
+        {
+            (ReadHalf::unsupported(), WriteHalf::unsupported())
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            (ReadHalf::new(&self.inner), WriteHalf::new(&self.inner))
+        }
     }
 
     /// Split into owned halves.
@@ -261,13 +348,30 @@ impl TcpStream {
     /// [`reunite`]: OwnedReadHalf::reunite
     #[must_use]
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        let mut this = self;
-        this.shutdown_on_drop = false;
-        let registration = this.registration.take();
-        let inner = this.inner.clone();
-        OwnedReadHalf::new_pair(inner, registration)
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self;
+            OwnedReadHalf::unsupported_pair()
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut this = self;
+            this.shutdown_on_drop = false;
+            let registration = this.registration.take();
+            let inner = this.inner.clone();
+            OwnedReadHalf::new_pair(inner, registration)
+        }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    #[inline]
+    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let _ = (cx, interest);
+        browser_tcp_unsupported_result("TcpStream::register_interest")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let mut target_interest = interest;
@@ -324,11 +428,14 @@ fn fallback_rewake(cx: &Context<'_>) {
         let deadline = timer.now() + FALLBACK_IO_BACKOFF;
         let _ = timer.register(deadline, cx.waker().clone());
     } else {
-        std::thread::sleep(FALLBACK_IO_BACKOFF);
+        // `poll_read`/`poll_write` must never block the executor thread.
+        // Mirror the Unix stream fallback and request an immediate retry when
+        // no timer driver is available.
         cx.waker().wake_by_ref();
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn timeout_now() -> Time {
     Cx::current()
         .and_then(|current| current.timer_driver())
@@ -340,6 +447,7 @@ fn timeout_now() -> Time {
         .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn connect_in_progress(err: &io::Error) -> bool {
     matches!(
         err.kind(),
@@ -347,6 +455,7 @@ fn connect_in_progress(err: &io::Error) -> bool {
     ) || err.raw_os_error() == Some(libc::EINPROGRESS)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
     let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
         wait_for_connect_fallback(socket).await?;
@@ -403,6 +512,7 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
 /// when the interest flags are unchanged (`WRITABLE` during connect), we must
 /// call `set_interest` again to ensure subsequent connect progress events are
 /// delivered.
+#[cfg(not(target_arch = "wasm32"))]
 fn rearm_connect_registration(
     registration: &mut Option<IoRegistration>,
     cx: &Context<'_>,
@@ -426,6 +536,7 @@ fn rearm_connect_registration(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     loop {
         if let Some(err) = socket.take_error()? {
@@ -447,6 +558,7 @@ async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AsyncRead for TcpStream {
     #[inline]
     fn poll_read(
@@ -474,6 +586,20 @@ impl AsyncRead for TcpStream {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl AsyncRead for TcpStream {
+    #[inline]
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let _ = (self, cx, buf);
+        browser_tcp_poll_unsupported("TcpStream::poll_read")
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl AsyncReadVectored for TcpStream {
     #[inline]
     fn poll_read_vectored(
@@ -498,6 +624,20 @@ impl AsyncReadVectored for TcpStream {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl AsyncReadVectored for TcpStream {
+    #[inline]
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let _ = (self, cx, bufs);
+        browser_tcp_poll_unsupported("TcpStream::poll_read_vectored")
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl AsyncWrite for TcpStream {
     #[inline]
     fn poll_write(
@@ -571,12 +711,53 @@ impl AsyncWrite for TcpStream {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl AsyncWrite for TcpStream {
+    #[inline]
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let _ = (self, cx, buf);
+        browser_tcp_poll_unsupported("TcpStream::poll_write")
+    }
+
+    #[inline]
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let _ = (self, cx, bufs);
+        browser_tcp_poll_unsupported("TcpStream::poll_write_vectored")
+    }
+
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        false
+    }
+
+    #[inline]
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = (self, cx);
+        browser_tcp_poll_unsupported("TcpStream::poll_flush")
+    }
+
+    #[inline]
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = (self, cx);
+        browser_tcp_poll_unsupported("TcpStream::poll_shutdown")
+    }
+}
+
 // ubs:ignore — TcpStream performs a best-effort shutdown on drop for deterministic teardown.
 // into_split() disables shutdown_on_drop to avoid closing the shared stream; callers should
 // still prefer explicit shutdown() for protocol-aware half-close behavior.
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         if self.shutdown_on_drop {
             let _ = self.inner.shutdown(Shutdown::Both);
         }
@@ -611,14 +792,33 @@ impl TcpStreamApi for TcpStream {
     }
 
     fn nodelay(&self) -> io::Result<bool> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("TcpStream::nodelay");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.nodelay()
     }
 
     fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = ttl;
+            return browser_tcp_unsupported_result("TcpStream::set_ttl");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.set_ttl(ttl)
     }
 
     fn ttl(&self) -> io::Result<u32> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return browser_tcp_unsupported_result("TcpStream::ttl");
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.inner.ttl()
     }
 }
@@ -645,6 +845,20 @@ mod tests {
 
     impl Wake for NoopWaker {
         fn wake(self: Arc<Self>) {}
+    }
+
+    struct CountingWaker {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     fn noop_waker() -> Waker {
@@ -962,6 +1176,33 @@ mod tests {
         assert!(
             registration.is_none(),
             "stale connect registration should be cleared when driver is gone"
+        );
+    }
+
+    #[test]
+    fn fallback_rewake_without_timer_is_immediate() {
+        assert!(
+            Cx::current().is_none(),
+            "test must run without an active Cx"
+        );
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        let cx = Context::from_waker(&waker);
+        let started = std::time::Instant::now();
+
+        fallback_rewake(&cx);
+
+        assert!(
+            started.elapsed() < Duration::from_millis(10),
+            "fallback re-wake must not sleep inline when no timer driver exists"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "fallback re-wake should immediately schedule another poll without a timer driver"
         );
     }
 }

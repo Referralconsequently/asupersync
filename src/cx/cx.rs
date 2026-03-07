@@ -61,7 +61,10 @@ use crate::observability::{
 };
 use crate::remote::RemoteCap;
 use crate::runtime::blocking_pool::BlockingPoolHandle;
-use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
+use crate::runtime::io_driver::IoDriverHandle;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::runtime::io_driver::IoRegistration;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::task_handle::JoinError;
 use crate::time::{TimerDriverHandle, timeout};

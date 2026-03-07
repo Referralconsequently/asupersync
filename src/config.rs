@@ -8,12 +8,16 @@
 //!
 //! Note: File parsing is intentionally minimal and deterministic.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::listener::Http1ListenerConfig;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::server::Http1Config;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::http::pool::PoolConfig;
 use crate::observability::{LogLevel, ObservabilityConfig};
 use crate::security::AuthMode;
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -85,6 +89,7 @@ impl RaptorQConfig {
 /// let config = ServerConfig::from_profile(ServerProfile::Development);
 /// assert!(config.validate().is_ok());
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Bind address for the HTTP listener.
@@ -101,6 +106,7 @@ pub struct ServerConfig {
     pub worker_threads: Option<usize>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -114,6 +120,7 @@ impl Default for ServerConfig {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ServerConfig {
     /// Create a server config from a deployment profile.
     #[must_use]
@@ -217,6 +224,7 @@ impl ServerConfig {
 }
 
 /// Pre-defined server deployment profiles.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerProfile {
     /// Development: localhost only, relaxed limits, fast shutdown.
@@ -1012,6 +1020,93 @@ fn parse_path_strategy(value: &str, key: &str) -> Result<PathSelectionStrategy, 
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native_server_config_tests {
+        use super::*;
+        use std::net::SocketAddr;
+
+        #[test]
+        fn server_config_default_valid() {
+            let config = ServerConfig::default();
+            assert!(config.validate().is_ok());
+        }
+
+        #[test]
+        fn server_config_profiles_valid() {
+            for profile in [
+                ServerProfile::Development,
+                ServerProfile::Testing,
+                ServerProfile::Production,
+            ] {
+                let config = ServerConfig::from_profile(profile);
+                assert!(config.validate().is_ok(), "Profile {profile:?} invalid");
+            }
+        }
+
+        #[test]
+        fn server_config_builder() {
+            let config = ServerConfig::default()
+                .bind_addr(SocketAddr::from(([127, 0, 0, 1], 9090)))
+                .shutdown_timeout(Duration::from_mins(1))
+                .worker_threads(Some(4));
+
+            assert_eq!(config.bind_addr.port(), 9090);
+            assert_eq!(config.shutdown_timeout, Duration::from_mins(1));
+            assert_eq!(config.worker_threads, Some(4));
+            assert!(config.validate().is_ok());
+        }
+
+        #[test]
+        fn server_config_validation_errors() {
+            let config = ServerConfig::default().shutdown_timeout(Duration::from_millis(10));
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::TimeoutTooShort)
+            ));
+
+            let config = ServerConfig::default().worker_threads(Some(0));
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidParallelism)
+            ));
+        }
+
+        #[test]
+        fn server_config_testing_profile() {
+            let config = ServerConfig::from_profile(ServerProfile::Testing);
+            assert_eq!(config.bind_addr.port(), 0); // OS-assigned port
+            assert_eq!(config.worker_threads, Some(1));
+            assert_eq!(config.listener.max_connections, Some(10));
+        }
+
+        #[test]
+        fn server_config_production_profile() {
+            let config = ServerConfig::from_profile(ServerProfile::Production);
+            assert_eq!(config.bind_addr.port(), 8080);
+            assert_eq!(config.listener.max_connections, Some(50_000));
+            assert_eq!(config.http.max_body_size, 8 * 1024 * 1024);
+        }
+
+        #[test]
+        fn server_profile_debug_clone_copy_eq() {
+            let p = ServerProfile::Development;
+            let cloned = p;
+            let copied = p;
+            assert_eq!(cloned, copied);
+            assert_ne!(p, ServerProfile::Production);
+        }
+
+        #[test]
+        fn server_config_debug_clone() {
+            let config = ServerConfig::default();
+            let dbg = format!("{config:?}");
+            assert!(dbg.contains("ServerConfig"));
+
+            let cloned = config.clone();
+            assert_eq!(cloned.bind_addr, config.bind_addr);
+        }
+    }
+
     #[test]
     fn default_config_valid() {
         let config = RaptorQConfig::default();
@@ -1059,68 +1154,6 @@ default_timeout_ms = 5000
         assert_eq!(config.encoding.symbol_size, 512);
         assert!((config.encoding.repair_overhead - 1.2).abs() < f64::EPSILON);
         assert_eq!(config.timeouts.default_timeout, Duration::from_secs(5));
-    }
-
-    #[test]
-    fn server_config_default_valid() {
-        let config = ServerConfig::default();
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn server_config_profiles_valid() {
-        for profile in [
-            ServerProfile::Development,
-            ServerProfile::Testing,
-            ServerProfile::Production,
-        ] {
-            let config = ServerConfig::from_profile(profile);
-            assert!(config.validate().is_ok(), "Profile {profile:?} invalid");
-        }
-    }
-
-    #[test]
-    fn server_config_builder() {
-        let config = ServerConfig::default()
-            .bind_addr(SocketAddr::from(([127, 0, 0, 1], 9090)))
-            .shutdown_timeout(Duration::from_mins(1))
-            .worker_threads(Some(4));
-
-        assert_eq!(config.bind_addr.port(), 9090);
-        assert_eq!(config.shutdown_timeout, Duration::from_mins(1));
-        assert_eq!(config.worker_threads, Some(4));
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn server_config_validation_errors() {
-        let config = ServerConfig::default().shutdown_timeout(Duration::from_millis(10));
-        assert!(matches!(
-            config.validate(),
-            Err(ConfigError::TimeoutTooShort)
-        ));
-
-        let config = ServerConfig::default().worker_threads(Some(0));
-        assert!(matches!(
-            config.validate(),
-            Err(ConfigError::InvalidParallelism)
-        ));
-    }
-
-    #[test]
-    fn server_config_testing_profile() {
-        let config = ServerConfig::from_profile(ServerProfile::Testing);
-        assert_eq!(config.bind_addr.port(), 0); // OS-assigned port
-        assert_eq!(config.worker_threads, Some(1));
-        assert_eq!(config.listener.max_connections, Some(10));
-    }
-
-    #[test]
-    fn server_config_production_profile() {
-        let config = ServerConfig::from_profile(ServerProfile::Production);
-        assert_eq!(config.bind_addr.port(), 8080);
-        assert_eq!(config.listener.max_connections, Some(50_000));
-        assert_eq!(config.http.max_body_size, 8 * 1024 * 1024);
     }
 
     #[test]
@@ -1375,15 +1408,6 @@ default_timeout_ms = 5000
     }
 
     #[test]
-    fn server_profile_debug_clone_copy_eq() {
-        let p = ServerProfile::Development;
-        let cloned = p;
-        let copied = p;
-        assert_eq!(cloned, copied);
-        assert_ne!(p, ServerProfile::Production);
-    }
-
-    #[test]
     fn runtime_profile_custom() {
         let config = RaptorQConfig::default();
         let profile = RuntimeProfile::Custom(Box::new(config.clone()));
@@ -1425,15 +1449,5 @@ default_timeout_ms = 5000
 
         let dbg = format!("{loader:?}");
         assert!(dbg.contains("Testing"));
-    }
-
-    #[test]
-    fn server_config_debug_clone() {
-        let config = ServerConfig::default();
-        let dbg = format!("{config:?}");
-        assert!(dbg.contains("ServerConfig"));
-
-        let cloned = config.clone();
-        assert_eq!(cloned.bind_addr, config.bind_addr);
     }
 }

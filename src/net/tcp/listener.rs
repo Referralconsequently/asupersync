@@ -4,6 +4,7 @@
 //! The listener implements [`TcpListenerApi`] for use with generic code and frameworks.
 
 use crate::cx::Cx;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::net::lookup_all;
 use crate::net::tcp::stream::TcpStream;
 use crate::net::tcp::traits::TcpListenerApi;
@@ -57,26 +58,35 @@ impl TcpListener {
 
     /// Bind to address.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A) -> io::Result<Self> {
-        let addrs = lookup_all(addr).await?;
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no socket addresses found",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = addr;
+            Err(super::browser_tcp_unsupported("TcpListener::bind"))
         }
 
-        let mut last_err = None;
-        for addr in addrs {
-            match net::TcpListener::bind(addr) {
-                Ok(inner) => {
-                    inner.set_nonblocking(true)?;
-                    return Self::from_std(inner);
-                }
-                Err(err) => last_err = Some(err),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let addrs = lookup_all(addr).await?;
+            if addrs.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no socket addresses found",
+                ));
             }
-        }
 
-        Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))
+            let mut last_err = None;
+            for addr in addrs {
+                match net::TcpListener::bind(addr) {
+                    Ok(inner) => {
+                        inner.set_nonblocking(true)?;
+                        return Self::from_std(inner);
+                    }
+                    Err(err) => last_err = Some(err),
+                }
+            }
+
+            Err(last_err.unwrap_or_else(|| io::Error::other("failed to bind any address")))
+        }
     }
 
     /// Accept connection.
@@ -106,16 +116,7 @@ impl TcpListener {
                     Duration::ZERO
                 };
 
-                if delay > Duration::ZERO {
-                    if let Some(timer) = Cx::current().and_then(|c| c.timer_driver()) {
-                        let deadline = timer.now() + delay;
-                        let _ = timer.register(deadline, cx.waker().clone());
-                    } else {
-                        // Sleep inline if no timer driver is present to avoid unbounded thread explosion.
-                        std::thread::sleep(delay);
-                        cx.waker().wake_by_ref();
-                    }
-                }
+                schedule_accept_retry(cx, mode, delay);
                 // ReactorArmed: the reactor is re-armed and will wake us on
                 // actual readiness; no sleep needed (unless an accept storm triggered a delay).
                 Poll::Pending
@@ -225,6 +226,24 @@ impl TcpListener {
     }
 }
 
+fn schedule_accept_retry(cx: &Context<'_>, mode: InterestRegistrationMode, delay: Duration) {
+    if delay == Duration::ZERO {
+        return;
+    }
+
+    if let Some(timer) = Cx::current().and_then(|current| current.timer_driver()) {
+        let deadline = timer.now() + delay;
+        let _ = timer.register(deadline, cx.waker().clone());
+        return;
+    }
+
+    if mode == InterestRegistrationMode::FallbackPoll {
+        // `poll_accept` must never block the executor thread. Without a timer
+        // driver, fall back to an immediate retry just like the Unix listener.
+        cx.waker().wake_by_ref();
+    }
+}
+
 /// Stream of incoming connections.
 #[derive(Debug)]
 pub struct Incoming<'a> {
@@ -284,6 +303,7 @@ mod tests {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
 
     #[test]
@@ -306,6 +326,20 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct CountingWaker {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -345,6 +379,68 @@ mod tests {
         assert!(
             is_nonblocking,
             "TcpListener::from_std should force nonblocking mode"
+        );
+    }
+
+    #[test]
+    fn fallback_accept_retry_without_timer_wakes_immediately() {
+        assert!(
+            Cx::current().is_none(),
+            "test must run without an active Cx"
+        );
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        let cx = Context::from_waker(&waker);
+        let started = Instant::now();
+
+        schedule_accept_retry(
+            &cx,
+            InterestRegistrationMode::FallbackPoll,
+            Duration::from_millis(20),
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_millis(10),
+            "fallback accept retry must not sleep inline when no timer driver exists"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "fallback accept retry should self-wake when no timer driver exists"
+        );
+    }
+
+    #[test]
+    fn reactor_armed_accept_retry_without_timer_does_not_self_wake() {
+        assert!(
+            Cx::current().is_none(),
+            "test must run without an active Cx"
+        );
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        let cx = Context::from_waker(&waker);
+        let started = Instant::now();
+
+        schedule_accept_retry(
+            &cx,
+            InterestRegistrationMode::ReactorArmed,
+            Duration::from_millis(20),
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_millis(10),
+            "reactor-armed accept retry must not sleep inline when no timer driver exists"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "reactor-armed accept retry should rely on the reactor instead of self-waking"
         );
     }
 }
