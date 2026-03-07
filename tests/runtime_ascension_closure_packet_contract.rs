@@ -27,6 +27,7 @@ fn packet_doc_exists_and_has_required_sections() {
     for section in &[
         "## Purpose",
         "## Contract Artifacts",
+        "## Execution State",
         "## Current Decision Snapshot",
         "## Comparative Demo Matrix",
         "## Evidence Citation Registry",
@@ -46,16 +47,16 @@ fn packet_doc_exists_and_has_required_sections() {
 fn packet_doc_references_bead_and_parent() {
     let doc = load_doc();
     assert!(
-        doc.contains("asupersync-1508v.10.6.1"),
-        "doc must reference prep bead id"
+        doc.contains("asupersync-1508v.10.6"),
+        "doc must reference active owner bead id"
     );
     assert!(
         doc.contains("asupersync-1508v.10.6.2"),
-        "doc must reference follow-on prep bead id"
+        "doc must reference prep lineage bead id"
     );
     assert!(
-        doc.contains("asupersync-1508v.10.6"),
-        "doc must reference parent bead id"
+        doc.contains("asupersync-1508v.10"),
+        "doc must reference parent epic id"
     );
 }
 
@@ -80,6 +81,7 @@ fn packet_doc_mentions_registry_command_ids() {
         "RACP-VERIFY-STATIC-SAFETY-COMPILE-FAIL",
         "RACP-VERIFY-TRACE-INTELLIGENCE",
         "RACP-VERIFY-WORKLOAD-CORPUS",
+        "RACP-RUN-SMOKE-BUNDLE",
     ] {
         assert!(
             doc.contains(marker),
@@ -97,14 +99,46 @@ fn packet_artifact_has_contract_version() {
         art["contract_version"].as_str().unwrap(),
         "runtime-ascension-closure-packet-v1"
     );
-    let follow_on_beads = art["follow_on_bead_ids"]
+    assert_eq!(
+        art["bead_id"].as_str().unwrap(),
+        "asupersync-1508v.10.6",
+        "artifact bead_id must point to active owner bead"
+    );
+    let prep_beads = art["prep_bead_ids"]
         .as_array()
-        .expect("follow_on_bead_ids must be an array");
+        .expect("prep_bead_ids must be an array");
     assert!(
-        follow_on_beads
+        prep_beads
             .iter()
             .any(|bead| bead.as_str().unwrap() == "asupersync-1508v.10.6.2"),
-        "artifact must reference follow-on prep bead id"
+        "artifact must reference prep lineage bead id"
+    );
+}
+
+#[test]
+fn packet_artifact_declares_execution_state() {
+    let art = load_artifact();
+    let state = &art["execution_state"];
+    assert_eq!(
+        state["phase"].as_str().unwrap(),
+        "active_closure_execution",
+        "execution_state.phase must reflect active closure execution"
+    );
+    assert_eq!(
+        state["verdict"].as_str().unwrap(),
+        "no_go",
+        "execution_state.verdict must remain no_go while blockers are open"
+    );
+    let blockers = state["remaining_blockers"]
+        .as_array()
+        .expect("execution_state.remaining_blockers must be an array");
+    let blocker_ids: HashSet<&str> = blockers
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(
+        blocker_ids.contains("asupersync-1508v.8.6"),
+        "execution_state must track the open transport blocker"
     );
 }
 
@@ -130,10 +164,6 @@ fn packet_decision_snapshot_is_no_go_preparatory() {
     assert_eq!(snapshot["packet_mode"].as_str().unwrap(), "preparatory");
     let blockers = snapshot["blocking_beads"].as_array().unwrap();
     let blocker_ids: HashSet<&str> = blockers.iter().map(|b| b.as_str().unwrap()).collect();
-    assert!(
-        blocker_ids.contains("asupersync-1508v.10.6"),
-        "snapshot must include parent closure bead as blocker"
-    );
     assert!(
         blocker_ids.contains("asupersync-1508v.8.6"),
         "snapshot must include transport validation blocker"

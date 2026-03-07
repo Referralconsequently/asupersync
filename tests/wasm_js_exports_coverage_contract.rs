@@ -1,5 +1,6 @@
-//! Contract tests for JS/TS exports, type declarations, and module-resolution
-//! entrypoints (asupersync-3qv04.8.3.1).
+//! Contract tests for JS/TS exports, type declarations, module-resolution
+//! entrypoints, and diagnostics semantics
+//! (asupersync-3qv04.8.3.1, asupersync-3qv04.8.3.2).
 //!
 //! Validates that the published package entrypoints look correct from the
 //! perspective of JavaScript and TypeScript consumers before heavier
@@ -16,6 +17,11 @@ fn read_pkg(pkg: &str) -> serde_json::Value {
     let content =
         std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     serde_json::from_str(&content).expect("invalid JSON")
+}
+
+fn read_source(path: &str) -> String {
+    let path = repo_root().join(path);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()))
 }
 
 // ── Export Map Structure ─────────────────────────────────────────────
@@ -183,6 +189,129 @@ fn browser_src_index_exports_from_browser_core() {
 }
 
 #[test]
+fn browser_src_index_defines_high_level_sdk_wrappers() {
+    let path = repo_root().join("packages/browser/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    for marker in [
+        "export class BrowserRuntime",
+        "export class RegionHandle",
+        "export class TaskHandle",
+        "export class CancellationToken",
+        "export function createCancellationToken",
+        "export async function createBrowserRuntime",
+        "export async function createBrowserScope",
+        "export function createBrowserSdkDiagnostics",
+        "export function unwrapOutcome",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must define marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_preserves_low_level_aliases_for_core_surface() {
+    let path = repo_root().join("packages/browser/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    for marker in [
+        "CoreRuntimeHandle",
+        "CoreRegionHandle",
+        "CoreTaskHandle",
+        "CoreCancellationToken",
+        "@asupersync/browser-core/abi-metadata.json",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve core alias marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_threads_runtime_reference_through_scope_handles() {
+    let path = repo_root().join("packages/browser/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    for marker in [
+        "readonly runtime: BrowserRuntime | null = null",
+        "new RegionHandle(handle, consumerVersion, this)",
+        "new RegionHandle(handle, consumerVersion, this.runtime)",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve runtime-threading marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_defines_unsupported_runtime_diagnostics() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "export interface BrowserRuntimeSupportDiagnostics",
+        "export function detectBrowserRuntimeSupport",
+        "export function createUnsupportedRuntimeError",
+        "export function assertBrowserRuntimeSupport",
+        "ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME",
+        "client-hydrated browser boundaries",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must define unsupported-runtime marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_pins_runtime_support_reason_taxonomy_and_capabilities() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "\"missing_global_this\"",
+        "\"missing_browser_dom\"",
+        "\"missing_webassembly\"",
+        "\"supported\"",
+        "hasAbortController",
+        "hasDocument",
+        "hasFetch",
+        "hasWebAssembly",
+        "hasWebSocket",
+        "hasWindow",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must pin runtime-support taxonomy/capability marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_requires_actionable_guidance_and_structured_error_payloads() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "Load @asupersync/browser only in client-hydrated browser boundaries.",
+        "prefer @asupersync/next bridge-only adapters instead of direct BrowserRuntime creation.",
+        "Move BrowserRuntime creation behind a browser-only entrypoint.",
+        "Use a browser/runtime with WebAssembly enabled before initializing Browser Edition.",
+        "error.code = BROWSER_UNSUPPORTED_RUNTIME_CODE;",
+        "error.diagnostics = diagnostics;",
+        "`${diagnostics.packageName}: ${diagnostics.message} ${diagnostics.guidance.join(\" \")}`",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve actionable diagnostic marker: {marker}"
+        );
+    }
+    assert_eq!(
+        content.matches("assertBrowserRuntimeSupport();").count(),
+        2,
+        "browser runtime creation and scope entry must both guard unsupported runtimes"
+    );
+}
+
+#[test]
 fn react_src_index_exports_from_browser() {
     let path = repo_root().join("packages/react/src/index.ts");
     let content =
@@ -190,6 +319,46 @@ fn react_src_index_exports_from_browser() {
     assert!(
         content.contains("@asupersync/browser"),
         "react src/index.ts must import from @asupersync/browser"
+    );
+}
+
+#[test]
+fn react_src_index_defines_runtime_support_helpers() {
+    let path = repo_root().join("packages/react/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    for marker in [
+        "export interface ReactRuntimeSupportDiagnostics",
+        "export function detectReactRuntimeSupport",
+        "export function createReactUnsupportedRuntimeError",
+        "export function assertReactRuntimeSupport",
+        "ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME",
+    ] {
+        assert!(
+            content.contains(marker),
+            "react src/index.ts must define runtime-support marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn react_src_index_keeps_package_specific_guidance_and_error_identity() {
+    let content = read_source("packages/react/src/index.ts");
+    for marker in [
+        "packageName: \"@asupersync/react\"",
+        "Use @asupersync/react from client-rendered React trees only.",
+        "error.code = REACT_UNSUPPORTED_RUNTIME_CODE;",
+        "error.diagnostics = diagnostics;",
+        "throw createReactUnsupportedRuntimeError(diagnostics);",
+    ] {
+        assert!(
+            content.contains(marker),
+            "react src/index.ts must preserve package-specific diagnostic marker: {marker}"
+        );
+    }
+    assert!(
+        !content.contains("assertBrowserRuntimeSupport(diagnostics);"),
+        "react runtime-support assertion must throw the react-specific error, not defer to browser assertion"
     );
 }
 
@@ -202,6 +371,46 @@ fn next_src_index_exports_from_browser() {
         content.contains("@asupersync/browser"),
         "next src/index.ts must import from @asupersync/browser"
     );
+}
+
+#[test]
+fn next_src_index_defines_runtime_support_helpers() {
+    let path = repo_root().join("packages/next/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    for marker in [
+        "export type NextRuntimeTarget",
+        "export interface NextRuntimeSupportDiagnostics",
+        "export function detectNextRuntimeSupport",
+        "export function createNextUnsupportedRuntimeError",
+        "export function assertNextRuntimeSupport",
+        "ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must define runtime-support marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn next_src_index_pins_client_server_and_edge_runtime_guidance() {
+    let content = read_source("packages/next/src/index.ts");
+    for marker in [
+        "export type NextRuntimeTarget = \"client\" | \"server\" | \"edge\";",
+        "target !== \"client\"",
+        "Direct Browser Edition runtime execution is unsupported in Next ${target} runtimes.",
+        "Move BrowserRuntime creation into a client component or browser-only module.",
+        "Use bridge-only adapters rather than direct @asupersync/browser runtime calls in Next ${target} code.",
+        "Import @asupersync/next from client components only.",
+        "error.code = NEXT_UNSUPPORTED_RUNTIME_CODE;",
+        "error.diagnostics = diagnostics;",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must preserve runtime-target diagnostic marker: {marker}"
+        );
+    }
 }
 
 // ── TypeScript Config for Resolution ─────────────────────────────────
