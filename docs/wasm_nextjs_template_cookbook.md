@@ -15,6 +15,19 @@ Cross-framework canonical example index:
 2. Keep runtime invalidation/re-init behavior deterministic across route, cache, and hot-reload events.
 3. Provide deployment guidance with explicit failure signatures and repro commands.
 
+## Maintained Example Source
+
+The maintained Next App Router example source lives in:
+
+- `tests/fixtures/next-turbopack-consumer`
+- validation harness: `scripts/validate_next_turbopack_consumer.sh`
+
+It makes the boundary visible in code:
+
+- `app/client-runtime-panel.jsx` owns the direct client runtime path
+- `app/api/server-bridge/route.js` stays on the serialized node/server bridge path
+- `app/api/edge-bridge/route.js` keeps edge code on explicit diagnostics/bridge-only behavior
+
 ## Reference Scenarios
 
 | Scenario ID | Focus | Invariant Checks |

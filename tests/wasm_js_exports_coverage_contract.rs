@@ -503,6 +503,26 @@ fn next_src_index_defines_server_bridge_adapter_surface() {
 }
 
 #[test]
+fn next_src_index_defines_edge_bridge_adapter_surface() {
+    let content = read_source("packages/next/src/index.ts");
+    for marker in [
+        "export type NextEdgeBridgeEnvironment",
+        "export interface NextEdgeBridgeDiagnostics",
+        "export interface NextEdgeBridgeRequest",
+        "export interface NextEdgeBridgeResponse",
+        "export interface NextEdgeBridgeAdapterOptions",
+        "export function createNextEdgeBridgeDiagnostics",
+        "export class NextEdgeBridgeAdapter",
+        "export function createNextEdgeBridgeAdapter",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must define edge-bridge marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn next_src_index_pins_server_bridge_policy_and_diagnostics_markers() {
     let content = read_source("packages/next/src/index.ts");
     for marker in [
@@ -522,6 +542,31 @@ fn next_src_index_pins_server_bridge_policy_and_diagnostics_markers() {
         assert!(
             content.contains(marker),
             "next src/index.ts must preserve server-bridge marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn next_src_index_pins_edge_bridge_policy_and_diagnostics_markers() {
+    let content = read_source("packages/next/src/index.ts");
+    for marker in [
+        "\"edge_runtime\"",
+        "\"use_edge_bridge\"",
+        "runtime unavailable in edge boundary: route through serialized edge bridge",
+        "target: \"edge\"",
+        "boundaryMode: \"edge\"",
+        "renderEnvironment: NextEdgeBridgeEnvironment",
+        "runtimeFallback: \"use_edge_bridge\"",
+        "const runtimeSupport = detectNextRuntimeSupport(\"edge\");",
+        "boundary_mode: diagnostics.boundaryMode",
+        "render_environment: diagnostics.renderEnvironment",
+        "runtime_fallback: diagnostics.runtimeFallback",
+        "repro_command: diagnostics.reproCommand",
+        "bridgeDiagnostics",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must preserve edge-bridge marker: {marker}"
         );
     }
 }

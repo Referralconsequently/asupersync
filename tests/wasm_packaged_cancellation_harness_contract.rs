@@ -53,6 +53,7 @@ fn doc_references_runner_artifact_and_tests() {
         "scripts/test_wasm_packaged_cancellation_e2e.sh",
         "tests/wasm_packaged_cancellation_harness_contract.rs",
         "artifacts/wasm_e2e_log_schema_v1.json",
+        "artifacts/wasm_packaged_cancellation_perf_summary.json",
         "tests/nextjs_bootstrap_harness.rs",
         "tests/react_wasm_strictmode_harness.rs",
         "tests/close_quiescence_regression.rs",
@@ -82,6 +83,10 @@ fn artifact_schema_versions_are_stable() {
         artifact["suite_summary_schema_version"].as_str(),
         Some("e2e-suite-summary-v3")
     );
+    assert_eq!(
+        artifact["perf_summary_schema_version"].as_str(),
+        Some("wasm-budget-summary-v1")
+    );
 }
 
 #[test]
@@ -98,6 +103,7 @@ fn artifact_declares_required_bundle_layout_files() {
     for token in [
         "run-metadata.json",
         "log.jsonl",
+        "perf-summary.json",
         "summary.json",
         "steps.ndjson",
     ] {
@@ -106,6 +112,27 @@ fn artifact_declares_required_bundle_layout_files() {
             "bundle layout must include {token}"
         );
     }
+}
+
+#[test]
+fn artifact_declares_cancellation_budget_metric_and_model() {
+    let artifact = load_artifact();
+    let empty = Vec::new();
+    let metrics: BTreeSet<&str> = artifact["cancellation_response_metrics"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(metrics.contains("M-PERF-03B"));
+    assert_eq!(
+        artifact["cancellation_response_model"]["model_id"].as_str(),
+        Some("cancellation-step-budget-model-v1")
+    );
+    assert_eq!(
+        artifact["perf_summary_export_path"].as_str(),
+        Some("artifacts/wasm_packaged_cancellation_perf_summary.json")
+    );
 }
 
 #[test]
@@ -159,8 +186,12 @@ fn runner_script_exists_and_declares_schema_and_step_tokens() {
         "\"schema_version\": \"e2e-suite-summary-v3\"",
         "run-metadata.json",
         "log.jsonl",
+        "perf-summary.json",
         "summary.json",
         "steps.ndjson",
+        "artifacts/wasm_packaged_cancellation_perf_summary.json",
+        "cancellation-step-budget-model-v1",
+        "M-PERF-03B",
         "cancelled_bootstrap_retry_recovery",
         "render_restart_loser_drain",
         "nested_cancel_cascade_quiescence",

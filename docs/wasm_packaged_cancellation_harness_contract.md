@@ -66,6 +66,7 @@ Required files:
 
 - `run-metadata.json`
 - `log.jsonl`
+- `perf-summary.json`
 - `summary.json`
 - `steps.ndjson`
 
@@ -74,6 +75,20 @@ include package version and wasm artifact identifier extensions:
 
 - `package_versions`
 - `wasm_artifact_identifiers`
+
+`perf-summary.json` MUST use schema version `wasm-budget-summary-v1` and emit:
+
+- `M-PERF-03B` (cancel response p95)
+
+When direct browser timing breakdown is unavailable in CI, the harness emits an
+artifact-derived estimate using `cancellation-step-budget-model-v1`. That model
+records separate `request_to_abort_ms`, `loser_drain_ms`, and
+`shutdown_cleanup_ms` components derived from the packaged wasm artifact size
+budget envelope and the fixed cancellation-step catalog.
+
+The harness MUST also export a stable copy of that summary to:
+
+- `artifacts/wasm_packaged_cancellation_perf_summary.json`
 
 ## Usage
 
@@ -89,6 +104,10 @@ Dry-run:
 WASM_PACKAGED_CANCELLATION_DRY_RUN=1 bash ./scripts/test_wasm_packaged_cancellation_e2e.sh
 ```
 
+Dry-run mode MUST still emit `perf-summary.json` and
+`artifacts/wasm_packaged_cancellation_perf_summary.json` from the packaged wasm
+artifact without executing the step commands.
+
 ## Validation
 
 Contract tests:
@@ -101,6 +120,11 @@ Targeted runner contract:
 
 ```bash
 WASM_PACKAGED_CANCELLATION_DRY_RUN=1 bash ./scripts/test_wasm_packaged_cancellation_e2e.sh
+python3 scripts/check_perf_regression.py \
+  --budgets .github/wasm_perf_budgets.json \
+  --profile core-min \
+  --measurements artifacts/wasm_packaged_cancellation_perf_summary.json \
+  --require-metric M-PERF-03B
 ```
 
 ## Cross-References

@@ -1,5 +1,5 @@
 export const metadata = {
-  title: "Asupersync Next Turbopack Fixture",
+  title: "Asupersync Next Client + Bridge Example",
 };
 
 export default function RootLayout({ children }) {

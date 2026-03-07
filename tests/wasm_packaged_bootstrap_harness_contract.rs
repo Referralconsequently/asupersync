@@ -48,6 +48,7 @@ fn doc_references_runner_artifact_and_tests() {
         "scripts/test_wasm_packaged_bootstrap_e2e.sh",
         "tests/wasm_packaged_bootstrap_harness_contract.rs",
         "artifacts/wasm_e2e_log_schema_v1.json",
+        "artifacts/wasm_packaged_bootstrap_perf_summary.json",
     ] {
         assert!(doc.contains(token), "doc missing reference: {token}");
     }
@@ -73,6 +74,10 @@ fn artifact_schema_versions_are_stable() {
         artifact["suite_summary_schema_version"].as_str(),
         Some("e2e-suite-summary-v3")
     );
+    assert_eq!(
+        artifact["perf_summary_schema_version"].as_str(),
+        Some("wasm-budget-summary-v1")
+    );
 }
 
 #[test]
@@ -91,6 +96,7 @@ fn artifact_declares_required_bundle_layout_files() {
     for token in [
         "run-metadata.json",
         "log.jsonl",
+        "perf-summary.json",
         "summary.json",
         "steps.ndjson",
     ] {
@@ -99,6 +105,46 @@ fn artifact_declares_required_bundle_layout_files() {
             "bundle layout must include {token}"
         );
     }
+}
+
+#[test]
+fn artifact_declares_perf_metrics_and_models() {
+    let artifact = load_artifact();
+    let startup_metrics: BTreeSet<&str> = artifact["startup_latency_metrics"]
+        .as_array()
+        .expect("startup_latency_metrics must be array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("startup_latency_metrics entry must be string")
+        })
+        .collect();
+    assert!(startup_metrics.contains("M-PERF-02A"));
+    assert!(startup_metrics.contains("M-PERF-02B"));
+    let memory_metrics: BTreeSet<&str> = artifact["steady_state_memory_metrics"]
+        .as_array()
+        .expect("steady_state_memory_metrics must be array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("steady_state_memory_metrics entry must be string")
+        })
+        .collect();
+    assert!(memory_metrics.contains("M-PERF-03A"));
+    assert_eq!(
+        artifact["startup_latency_model"]["model_id"].as_str(),
+        Some("artifact-budget-model-v1")
+    );
+    assert_eq!(
+        artifact["steady_state_memory_model"]["model_id"].as_str(),
+        Some("artifact-memory-envelope-v1")
+    );
+    assert_eq!(
+        artifact["perf_summary_export_path"].as_str(),
+        Some("artifacts/wasm_packaged_bootstrap_perf_summary.json")
+    );
 }
 
 #[test]
@@ -150,8 +196,15 @@ fn runner_script_exists_and_declares_schema_and_bundle_files() {
         "\"schema_version\": \"e2e-suite-summary-v3\"",
         "run-metadata.json",
         "log.jsonl",
+        "perf-summary.json",
         "summary.json",
         "steps.ndjson",
+        "artifacts/wasm_packaged_bootstrap_perf_summary.json",
+        "artifact-budget-model-v1",
+        "artifact-memory-envelope-v1",
+        "M-PERF-02A",
+        "M-PERF-02B",
+        "M-PERF-03A",
         "packaged_module_load",
         "bootstrap_to_runtime_ready",
         "reload_remount_cycle",

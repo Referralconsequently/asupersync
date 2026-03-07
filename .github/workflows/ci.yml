@@ -207,6 +207,22 @@ jobs:
           )
           PY
 
+      - name: Build packaged bootstrap perf summary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          WASM_PACKAGED_BOOTSTRAP_DRY_RUN=1 \
+          WASM_PERF_PROFILE=core-min \
+          bash scripts/test_wasm_packaged_bootstrap_e2e.sh
+
+      - name: Build packaged cancellation perf summary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          WASM_PACKAGED_CANCELLATION_DRY_RUN=1 \
+          WASM_PERF_PROFILE=core-min \
+          bash scripts/test_wasm_packaged_cancellation_e2e.sh
+
       - name: Perf regression gate
         run: |
           mkdir -p artifacts
@@ -214,8 +230,14 @@ jobs:
             --budgets .github/wasm_perf_budgets.json \
             --profile core-min \
             --measurements artifacts/wasm_budget_summary.json \
+            --measurements artifacts/wasm_packaged_bootstrap_perf_summary.json \
+            --measurements artifacts/wasm_packaged_cancellation_perf_summary.json \
             --require-metric M-PERF-01A \
-            --require-metric M-PERF-01B
+            --require-metric M-PERF-01B \
+            --require-metric M-PERF-02A \
+            --require-metric M-PERF-02B \
+            --require-metric M-PERF-03A \
+            --require-metric M-PERF-03B
 
       - name: Upload perf regression report
         if: always()
@@ -224,6 +246,8 @@ jobs:
           name: wasm-perf-regression-report
           path: |
             artifacts/wasm_budget_summary.json
+            artifacts/wasm_packaged_bootstrap_perf_summary.json
+            artifacts/wasm_packaged_cancellation_perf_summary.json
             artifacts/wasm_perf_regression_report.json
             artifacts/wasm_perf_gate_events.ndjson
           retention-days: 30

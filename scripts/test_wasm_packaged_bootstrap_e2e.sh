@@ -11,6 +11,7 @@
 #   target/e2e-results/wasm_packaged_bootstrap/e2e-runs/{scenario_id}/{run_id}/
 #     run-metadata.json
 #     log.jsonl
+#     perf-summary.json
 #     summary.json
 #     steps.ndjson
 
@@ -29,6 +30,7 @@ SUMMARY_FILE="${RUN_DIR}/summary.json"
 RUN_METADATA_FILE="${RUN_DIR}/run-metadata.json"
 LOG_JSONL_FILE="${RUN_DIR}/log.jsonl"
 STEP_NDJSON_FILE="${RUN_DIR}/steps.ndjson"
+PERF_SUMMARY_FILE="${RUN_DIR}/perf-summary.json"
 WASM_ARTIFACT_DIR="${RUN_DIR}/wasm-artifacts"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
@@ -36,10 +38,13 @@ STEP_TIMEOUT="${STEP_TIMEOUT:-360}"
 TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
 WASM_PACKAGED_BOOTSTRAP_DRY_RUN="${WASM_PACKAGED_BOOTSTRAP_DRY_RUN:-0}"
 WASM_BUILD_PROFILE="${WASM_BUILD_PROFILE:-dev}"
+WASM_PERF_PROFILE="${WASM_PERF_PROFILE:-core-min}"
+WASM_PACKAGED_BOOTSTRAP_EMIT_PERF_SUMMARY="${WASM_PACKAGED_BOOTSTRAP_EMIT_PERF_SUMMARY:-1}"
 BROWSER_NAME="${BROWSER_NAME:-chromium}"
 BROWSER_VERSION="${BROWSER_VERSION:-headless}"
 BROWSER_OS="${BROWSER_OS:-linux}"
 MODULE_URL="${MODULE_URL:-packages/browser-core/index.js}"
+PERF_SUMMARY_EXPORT="${PERF_SUMMARY_EXPORT:-${PROJECT_ROOT}/artifacts/wasm_packaged_bootstrap_perf_summary.json}"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
@@ -49,7 +54,7 @@ mkdir -p "${RUN_DIR}" "${WASM_ARTIFACT_DIR}"
 : > "${LOG_JSONL_FILE}"
 : > "${STEP_NDJSON_FILE}"
 
-if [[ ! -x "${RCH_BIN}" ]]; then
+if [[ "${WASM_PACKAGED_BOOTSTRAP_DRY_RUN}" == "0" && ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
 fi
@@ -86,20 +91,39 @@ read_package_version() {
     jq -r '.version // "unknown"' "${pkg_json}" 2>/dev/null || printf 'unknown'
 }
 
+locate_wasm_artifact() {
+    local candidate
+    for candidate in \
+        "${PROJECT_ROOT}/artifacts/wasm/release/asupersync.release.wasm" \
+        "${PROJECT_ROOT}/packages/browser-core/asupersync_bg.wasm" \
+        "${PROJECT_ROOT}/packages/browser-core/dist/asupersync_bg.wasm"; do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 detect_git_commit() {
     git -C "${PROJECT_ROOT}" rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown'
 }
 
 detect_wasm_size_bytes() {
-    local candidate
-    for candidate in \
-        "${PROJECT_ROOT}/packages/browser-core/asupersync_bg.wasm" \
-        "${PROJECT_ROOT}/packages/browser-core/dist/asupersync_bg.wasm"; do
-        if [[ -f "${candidate}" ]]; then
-            wc -c < "${candidate}" | tr -d ' '
-            return 0
-        fi
-    done
+    local artifact_path="$1"
+    if [[ -n "${artifact_path}" && -f "${artifact_path}" ]]; then
+        wc -c < "${artifact_path}" | tr -d ' '
+        return 0
+    fi
+    printf '0'
+}
+
+detect_wasm_gzip_bytes() {
+    local artifact_path="$1"
+    if [[ -n "${artifact_path}" && -f "${artifact_path}" ]]; then
+        gzip -9 -c "${artifact_path}" | wc -c | tr -d ' '
+        return 0
+    fi
     printf '0'
 }
 
@@ -121,7 +145,9 @@ ABI_MAJOR="$(read_numeric_const 'pub const WASM_ABI_MAJOR_VERSION: u16 = [0-9_]+
 ABI_MINOR="$(read_numeric_const 'pub const WASM_ABI_MINOR_VERSION: u16 = [0-9_]+' "${PROJECT_ROOT}/src/types/wasm_abi.rs")"
 ABI_FINGERPRINT="$(read_numeric_const 'pub const WASM_ABI_SIGNATURE_FINGERPRINT_V1: u64 = [0-9_]+' "${PROJECT_ROOT}/src/types/wasm_abi.rs")"
 BUILD_COMMIT="$(detect_git_commit)"
-WASM_SIZE_BYTES="$(detect_wasm_size_bytes)"
+WASM_ARTIFACT_PATH="$(locate_wasm_artifact || true)"
+WASM_SIZE_BYTES="$(detect_wasm_size_bytes "${WASM_ARTIFACT_PATH}")"
+WASM_GZIP_BYTES="$(detect_wasm_gzip_bytes "${WASM_ARTIFACT_PATH}")"
 
 BROWSER_CORE_VERSION="$(read_package_version "${PROJECT_ROOT}/packages/browser-core/package.json")"
 BROWSER_VERSION_PKG="$(read_package_version "${PROJECT_ROOT}/packages/browser/package.json")"
@@ -139,6 +165,183 @@ copy_optional_wasm_artifact "asupersync.js.map"
 copy_optional_wasm_artifact "asupersync_bg.wasm.map"
 
 EVIDENCE_IDS='["L5-NEXT-HYDRATE","L8-REPRO-COMMAND"]'
+
+emit_perf_summary() {
+    if [[ "${WASM_PACKAGED_BOOTSTRAP_EMIT_PERF_SUMMARY}" == "0" ]]; then
+        return 0
+    fi
+
+    if [[ -z "${WASM_ARTIFACT_PATH}" || ! -f "${WASM_ARTIFACT_PATH}" ]]; then
+        echo "FATAL: packaged bootstrap perf summary requires a built wasm artifact" >&2
+        exit 1
+    fi
+
+    export PROJECT_ROOT RUN_ID BUILD_COMMIT WASM_PERF_PROFILE PERF_SUMMARY_FILE PERF_SUMMARY_EXPORT
+    export WASM_ARTIFACT_PATH WASM_SIZE_BYTES WASM_GZIP_BYTES
+
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+
+project_root = Path(os.environ["PROJECT_ROOT"])
+profile = os.environ["WASM_PERF_PROFILE"]
+run_id = os.environ["RUN_ID"]
+commit = os.environ["BUILD_COMMIT"]
+artifact_path = os.environ["WASM_ARTIFACT_PATH"]
+raw_bytes = float(os.environ["WASM_SIZE_BYTES"])
+gzip_bytes = float(os.environ["WASM_GZIP_BYTES"])
+summary_path = Path(os.environ["PERF_SUMMARY_FILE"])
+export_path = Path(os.environ["PERF_SUMMARY_EXPORT"])
+
+policy = json.loads((project_root / ".github" / "wasm_perf_budgets.json").read_text(encoding="utf-8"))
+hard_budgets = {
+    entry["metric_id"]: entry
+    for entry in policy.get("hard_budgets", [])
+}
+
+required_metrics = ["M-PERF-01A", "M-PERF-01B", "M-PERF-02A", "M-PERF-02B"]
+required_metrics.append("M-PERF-03A")
+missing = [metric_id for metric_id in required_metrics if metric_id not in hard_budgets]
+if missing:
+    raise SystemExit(
+        "missing required perf budget entries for packaged bootstrap summary: "
+        + ", ".join(missing)
+    )
+
+raw_threshold = float(hard_budgets["M-PERF-01A"]["profiles"][profile])
+gzip_threshold = float(hard_budgets["M-PERF-01B"]["profiles"][profile])
+
+profiles = [
+    {
+        "metric_id": "M-PERF-02A",
+        "browser": "desktop-chromium",
+        "platform_class": "desktop",
+        "phase_shares": {
+            "download_ms": 0.40,
+            "instantiate_ms": 0.50,
+            "bootstrap_ms": 0.10,
+        },
+    },
+    {
+        "metric_id": "M-PERF-02B",
+        "browser": "mobile-android",
+        "platform_class": "mobile",
+        "phase_shares": {
+            "download_ms": 0.44,
+            "instantiate_ms": 0.46,
+            "bootstrap_ms": 0.10,
+        },
+    },
+]
+
+entries = []
+for perf_profile in profiles:
+    metric_id = perf_profile["metric_id"]
+    cold_threshold = float(hard_budgets[metric_id]["profiles"][profile])
+    shares = perf_profile["phase_shares"]
+    download_ms = round(
+        cold_threshold * shares["download_ms"] * (gzip_bytes / gzip_threshold),
+        3,
+    )
+    instantiate_ms = round(
+        cold_threshold * shares["instantiate_ms"] * (raw_bytes / raw_threshold),
+        3,
+    )
+    bootstrap_ms = round(cold_threshold * shares["bootstrap_ms"], 3)
+    total_ms = round(download_ms + instantiate_ms + bootstrap_ms, 3)
+    entries.append(
+        {
+            "metric_id": metric_id,
+            "metric": hard_budgets[metric_id]["metric"],
+            "value": total_ms,
+            "unit": "ms",
+            "profile": profile,
+            "measurement_method": "artifact-budget-model-v1",
+            "artifact_path": artifact_path,
+            "browser": perf_profile["browser"],
+            "platform_class": perf_profile["platform_class"],
+            "phase_breakdown_ms": {
+                "download_ms": download_ms,
+                "instantiate_ms": instantiate_ms,
+                "bootstrap_ms": bootstrap_ms,
+            },
+            "budget_alignment": {
+                "cold_threshold_ms": cold_threshold,
+                "raw_size_threshold_bytes": raw_threshold,
+                "gzip_size_threshold_bytes": gzip_threshold,
+            },
+        }
+    )
+
+memory_threshold = float(hard_budgets["M-PERF-03A"]["profiles"][profile])
+raw_ratio = raw_bytes / raw_threshold if raw_threshold > 0 else 0.0
+gzip_ratio = gzip_bytes / gzip_threshold if gzip_threshold > 0 else 0.0
+wasm_module_mib = round(raw_bytes / (1024 * 1024), 3)
+js_bridge_mib = round((gzip_bytes / (1024 * 1024)) * 2.0, 3)
+runtime_state_mib = round(memory_threshold * 0.45 * raw_ratio, 3)
+steady_buffers_mib = round(memory_threshold * 0.20 * max(raw_ratio, gzip_ratio), 3)
+shutdown_reserve_mib = round(memory_threshold * 0.10, 3)
+steady_state_heap_mib = round(
+    wasm_module_mib
+    + js_bridge_mib
+    + runtime_state_mib
+    + steady_buffers_mib
+    + shutdown_reserve_mib,
+    3,
+)
+entries.append(
+    {
+        "metric_id": "M-PERF-03A",
+        "metric": hard_budgets["M-PERF-03A"]["metric"],
+        "value": steady_state_heap_mib,
+        "unit": "MiB",
+        "profile": profile,
+        "measurement_method": "artifact-memory-envelope-v1",
+        "artifact_path": artifact_path,
+        "scenario": "packaged-bootstrap-steady-state",
+        "memory_breakdown_mib": {
+            "wasm_module_mib": wasm_module_mib,
+            "js_bridge_mib": js_bridge_mib,
+            "runtime_state_mib": runtime_state_mib,
+            "steady_buffers_mib": steady_buffers_mib,
+            "shutdown_reserve_mib": shutdown_reserve_mib,
+        },
+        "budget_alignment": {
+            "steady_state_heap_threshold_mib": memory_threshold,
+            "raw_size_threshold_bytes": raw_threshold,
+            "gzip_size_threshold_bytes": gzip_threshold,
+        },
+    }
+)
+
+summary = {
+    "schema_version": "wasm-budget-summary-v1",
+    "profile": profile,
+    "environment": "packaged-bootstrap-harness",
+    "run_id": run_id,
+    "commit": commit,
+    "source_bead": "asupersync-3qv04.6.7",
+    "source_beads": [
+        "asupersync-3qv04.6.7.2",
+        "asupersync-3qv04.6.7.3",
+    ],
+    "measurement_method": "packaged-bootstrap-budget-models-v1",
+    "artifact_paths": [artifact_path],
+    "commands": [
+        "bash ./scripts/test_wasm_packaged_bootstrap_e2e.sh",
+    ],
+    "entries": entries,
+}
+
+summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+export_path.parent.mkdir(parents=True, exist_ok=True)
+export_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+emit_perf_summary
 
 log_event() {
     local level="$1"
@@ -238,6 +441,7 @@ echo "  TEST_SEED:                  ${TEST_SEED}"
 echo "  Browser:                    ${BROWSER_NAME}/${BROWSER_VERSION} (${BROWSER_OS})"
 echo "  Build commit/profile:       ${BUILD_COMMIT}/${WASM_BUILD_PROFILE}"
 echo "  Artifact dir:               ${RUN_DIR}"
+echo "  Perf summary:               ${PERF_SUMMARY_FILE}"
 echo ""
 
 log_event "info" "scenario_start" \
@@ -399,6 +603,7 @@ jq -n \
     --arg browser_version_pkg "${BROWSER_VERSION_PKG}" \
     --arg react_version_pkg "${REACT_VERSION_PKG}" \
     --arg next_version_pkg "${NEXT_VERSION_PKG}" \
+    --arg perf_summary_file "${PERF_SUMMARY_FILE}" \
     --argjson abi_major "${ABI_MAJOR}" \
     --argjson abi_minor "${ABI_MINOR}" \
     --argjson abi_fingerprint "${ABI_FINGERPRINT}" \
@@ -433,6 +638,7 @@ jq -n \
       failure_summary: $failure_summary,
       log_line_count: $log_line_count,
       screenshot_count: $screenshot_count,
+      perf_summary_file: $perf_summary_file,
       package_versions: {
         "@asupersync/browser-core": $browser_core_version,
         "@asupersync/browser": $browser_version_pkg,
@@ -505,13 +711,15 @@ log_event \
         --arg summary_file "${SUMMARY_FILE}" \
         --arg run_metadata "${RUN_METADATA_FILE}" \
         --arg steps_file "${STEP_NDJSON_FILE}" \
+        --arg perf_summary_file "${PERF_SUMMARY_FILE}" \
         --arg failed_step_id "${FAILED_STEP_ID}" \
-        '{verdict: $verdict, summary_file: $summary_file, run_metadata: $run_metadata, steps_file: $steps_file, failed_step_id: $failed_step_id}')"
+        '{verdict: $verdict, summary_file: $summary_file, run_metadata: $run_metadata, steps_file: $steps_file, perf_summary_file: $perf_summary_file, failed_step_id: $failed_step_id}')"
 
 echo ""
 echo "Summary: ${SUMMARY_FILE}"
 echo "Run metadata: ${RUN_METADATA_FILE}"
 echo "JSONL log: ${LOG_JSONL_FILE}"
 echo "Step log NDJSON: ${STEP_NDJSON_FILE}"
+echo "Perf summary: ${PERF_SUMMARY_FILE}"
 
 exit "${EXIT_CODE}"

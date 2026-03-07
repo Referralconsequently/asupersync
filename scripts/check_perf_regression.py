@@ -23,8 +23,14 @@ Usage:
       --budgets .github/wasm_perf_budgets.json \\
       --profile core-min \\
       --measurements artifacts/wasm_budget_summary.json \\
+      --measurements artifacts/wasm_packaged_bootstrap_perf_summary.json \\
+      --measurements artifacts/wasm_packaged_cancellation_perf_summary.json \\
       --require-metric M-PERF-01A \\
-      --require-metric M-PERF-01B
+      --require-metric M-PERF-01B \\
+      --require-metric M-PERF-02A \\
+      --require-metric M-PERF-02B \\
+      --require-metric M-PERF-03A \\
+      --require-metric M-PERF-03B
 
 Bead: asupersync-umelq.13.5
 """
@@ -238,6 +244,21 @@ def load_measurements(
             "measurements file must be a metric->number mapping or a structured wasm budget summary"
         )
     return {metric_id: float(value) for metric_id, value in raw.items()}
+
+
+def load_measurement_files(
+    paths: list[pathlib.Path],
+    expected_profile: str = "",
+) -> dict[str, float]:
+    merged: dict[str, float] = {}
+    for path in paths:
+        for metric_id, value in load_measurements(path, expected_profile=expected_profile).items():
+            if metric_id in merged:
+                raise PolicyError(
+                    f"duplicate metric_id {metric_id} across measurements inputs"
+                )
+            merged[metric_id] = value
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +638,56 @@ def run_self_test() -> None:
         else:
             raise AssertionError("expected PolicyError for measurements profile mismatch")
 
-    print("all 16 self-tests passed")
+    # Test 17: Multiple measurement files merge distinct metrics
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as mf_a:
+        json.dump({
+            "schema_version": "wasm-budget-summary-v1",
+            "profile": "core-min",
+            "entries": [{"metric_id": "M-PERF-01A", "value": 123456}],
+        }, mf_a)
+        mf_a.flush()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as mf_b:
+            json.dump({
+                "schema_version": "wasm-budget-summary-v1",
+                "profile": "core-min",
+                "entries": [{"metric_id": "M-PERF-02A", "value": 58.5}],
+            }, mf_b)
+            mf_b.flush()
+            merged = load_measurement_files(
+                [pathlib.Path(mf_a.name), pathlib.Path(mf_b.name)],
+                expected_profile="core-min",
+            )
+    assert merged["M-PERF-01A"] == 123456.0
+    assert merged["M-PERF-02A"] == 58.5
+
+    # Test 18: Duplicate metrics across measurement files are rejected
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as mf_a:
+        json.dump({
+            "schema_version": "wasm-budget-summary-v1",
+            "profile": "core-min",
+            "entries": [{"metric_id": "M-PERF-01A", "value": 123456}],
+        }, mf_a)
+        mf_a.flush()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as mf_b:
+            json.dump({
+                "schema_version": "wasm-budget-summary-v1",
+                "profile": "core-min",
+                "entries": [{"metric_id": "M-PERF-01A", "value": 654321}],
+            }, mf_b)
+            mf_b.flush()
+            try:
+                load_measurement_files(
+                    [pathlib.Path(mf_a.name), pathlib.Path(mf_b.name)],
+                    expected_profile="core-min",
+                )
+            except PolicyError:
+                pass
+            else:
+                raise AssertionError(
+                    "expected PolicyError for duplicate metric_ids across measurements files"
+                )
+
+    print("all 18 self-tests passed")
 
 
 # ---------------------------------------------------------------------------
@@ -655,8 +725,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--measurements",
-        default="",
-        help="Path to measurements JSON (metric->value mapping or structured budget summary).",
+        action="append",
+        default=[],
+        help=(
+            "Path to measurements JSON (metric->value mapping or structured budget "
+            "summary). Repeat to merge multiple non-overlapping summaries."
+        ),
     )
     parser.add_argument(
         "--require-metric",
@@ -691,10 +765,14 @@ def main() -> int:
     # Load measurements if provided
     measurements: dict[str, float] = {}
     if args.measurements:
-        meas_path = pathlib.Path(args.measurements)
-        if not meas_path.exists():
-            raise PolicyError(f"measurements file not found: {meas_path}")
-        measurements = load_measurements(meas_path, expected_profile=args.profile)
+        measurement_paths = [pathlib.Path(path) for path in args.measurements]
+        for meas_path in measurement_paths:
+            if not meas_path.exists():
+                raise PolicyError(f"measurements file not found: {meas_path}")
+        measurements = load_measurement_files(
+            measurement_paths,
+            expected_profile=args.profile,
+        )
 
     # Load warn history for consecutive escalation
     warn_history: dict[str, int] = {}
@@ -801,6 +879,7 @@ def main() -> int:
         "baseline_path": str(baseline_path),
         "current_path": str(current_path) if current_path else None,
         "profile": profile,
+        "measurement_paths": args.measurements,
         "required_metrics": required_metrics,
         "comparison_metric": comparison_metric,
         "max_regression_pct": max_regression_pct,

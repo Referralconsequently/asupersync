@@ -68,6 +68,26 @@ Primary deterministic validation command:
 PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh
 ```
 
+## Maintained Next.js Example
+
+Maintained Next App Router example source:
+
+- `tests/fixtures/next-turbopack-consumer`
+- validation harness: `scripts/validate_next_turbopack_consumer.sh`
+
+This fixture is the canonical Next.js example for:
+
+- `@asupersync/next` import resolution through a real consumer build
+- explicit client direct-runtime ownership via `createNextBootstrapAdapter(...)`
+- explicit node/server bridge-only handling via `createNextServerBridgeAdapter(...)`
+- explicit edge diagnostics that keep direct runtime execution out of edge code
+
+Primary deterministic validation command:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh
+```
+
 ## Canonical Repro Commands
 
 Run all example lanes (preferred CI/replay bundle):
@@ -88,6 +108,12 @@ Run the maintained vanilla Vite fixture directly:
 
 ```bash
 PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh
+```
+
+Run the maintained Next fixture directly:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh
 ```
 
 Run focused TypeScript contract checks:

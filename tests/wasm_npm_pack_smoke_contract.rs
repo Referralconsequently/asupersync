@@ -569,6 +569,9 @@ fn next_turbopack_consumer_fixture_exists() {
         "next.config.mjs",
         "app/layout.jsx",
         "app/page.jsx",
+        "app/client-runtime-panel.jsx",
+        "app/api/server-bridge/route.js",
+        "app/api/edge-bridge/route.js",
         "scripts/check-bundle.mjs",
     ] {
         let path = fixture.join(rel);
