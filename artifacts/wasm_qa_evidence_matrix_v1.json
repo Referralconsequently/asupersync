@@ -3,6 +3,28 @@
   "bead_id": "asupersync-3qv04.8.1",
   "runner_bundle_schema_version": "wasm-qa-evidence-smoke-bundle-v1",
   "runner_report_schema_version": "wasm-qa-evidence-smoke-run-report-v1",
+  "artifact_bundle_schema_version": "wasm-qa-artifact-bundle-v1",
+  "e2e_log_schema_version": "wasm-qa-e2e-log-v1",
+  "retention_policy": {
+    "schema_version": "wasm-qa-artifact-retention-v1",
+    "classes": [
+      {
+        "class": "hot",
+        "min_days": 30,
+        "description": "Failing runs and incident forensics"
+      },
+      {
+        "class": "warm",
+        "min_days": 14,
+        "description": "Passing execute-mode runs"
+      },
+      {
+        "class": "cold",
+        "min_days": 7,
+        "description": "Dry-run and low-signal bundles"
+      }
+    ]
+  },
   "runner_script": "scripts/run_wasm_qa_evidence_smoke.sh",
   "evidence_layers": [
     {
@@ -108,16 +130,32 @@
     "src/trace/file.rs"
   ],
   "structured_log_fields_required": [
+    "schema_version",
+    "event_kind",
+    "scenario_id",
+    "run_id",
+    "timestamp_utc",
     "evidence_id",
     "layer",
     "tool",
     "wasm_profile",
     "browser",
     "package_name",
+    "module_fingerprint",
     "verdict",
+    "command_exit_code",
     "failure_reason",
     "repro_command",
-    "artifact_path"
+    "bundle_manifest_path",
+    "artifact_path",
+    "retention_class",
+    "retention_until_utc"
+  ],
+  "artifact_bundle_layout_required": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log",
+    "events.ndjson"
   ],
   "smoke_scenarios": [
     {
