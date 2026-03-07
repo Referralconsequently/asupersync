@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import pathlib
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -286,6 +287,194 @@ def validate_type_surface(
     return findings
 
 
+def validate_package_manifests(
+    policy: dict[str, Any],
+    package_map: dict[str, dict[str, Any]],
+    workspace_root: pathlib.Path,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    topology = policy.get("topology")
+    if not isinstance(topology, dict):
+        raise PolicyError("topology must be an object")
+
+    forbidden_prefixes = ensure_list_of_nonempty_strings(
+        topology.get("forbidden_public_subpath_prefixes"),
+        "topology.forbidden_public_subpath_prefixes",
+    )
+
+    for package_name, package_cfg in package_map.items():
+        if "/" not in package_name:
+            append_error(
+                findings,
+                category="manifest_package_name",
+                message="package name must be scoped (e.g., @asupersync/browser)",
+                package=package_name,
+                package_entrypoint=package_name,
+                diagnostic_category="manifest_validation",
+            )
+            continue
+
+        package_dir_name = package_name.split("/", 1)[1]
+        manifest_path = workspace_root / "packages" / package_dir_name / "package.json"
+        if not manifest_path.exists():
+            append_error(
+                findings,
+                category="manifest_missing",
+                message=f"package manifest missing: {manifest_path}",
+                package=package_name,
+                package_entrypoint=package_name,
+                diagnostic_category="manifest_validation",
+            )
+            continue
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            append_error(
+                findings,
+                category="manifest_invalid_json",
+                message=f"invalid JSON in {manifest_path}: {exc}",
+                package=package_name,
+                package_entrypoint=package_name,
+                diagnostic_category="manifest_validation",
+            )
+            continue
+
+        if not isinstance(manifest, dict):
+            append_error(
+                findings,
+                category="manifest_shape",
+                message="manifest root must be an object",
+                package=package_name,
+                package_entrypoint=package_name,
+                diagnostic_category="manifest_validation",
+            )
+            continue
+
+        policy_exports = package_cfg.get("exports")
+        if not isinstance(policy_exports, list):
+            raise PolicyError(f"package {package_name}: topology exports must be list")
+
+        exports_map = manifest.get("exports")
+        if not isinstance(exports_map, dict):
+            append_error(
+                findings,
+                category="manifest_exports_missing",
+                message="manifest.exports must be an object",
+                package=package_name,
+                package_entrypoint=package_name,
+                diagnostic_category="manifest_validation",
+            )
+            continue
+
+        for manifest_subpath in exports_map:
+            if not isinstance(manifest_subpath, str):
+                append_error(
+                    findings,
+                    category="manifest_exports_invalid_subpath",
+                    message="manifest export subpath key must be string",
+                    package=package_name,
+                    package_entrypoint=package_name,
+                    diagnostic_category="manifest_validation",
+                )
+                continue
+            for prefix in forbidden_prefixes:
+                if manifest_subpath.startswith(prefix):
+                    append_error(
+                        findings,
+                        category="manifest_forbidden_subpath",
+                        message=f"manifest export uses forbidden subpath prefix {prefix}",
+                        package=package_name,
+                        package_entrypoint=f"{package_name}{manifest_subpath if manifest_subpath != '.' else ''}",
+                        diagnostic_category="surface_expansion",
+                    )
+
+        requires_tree_shake = False
+        for export_cfg in policy_exports:
+            if not isinstance(export_cfg, dict):
+                raise PolicyError(f"package {package_name}: topology export entry must be object")
+
+            subpath = export_cfg.get("subpath")
+            module_modes = export_cfg.get("module_modes")
+            tree_shake_safe = export_cfg.get("tree_shake_safe")
+
+            if not isinstance(subpath, str) or not subpath:
+                raise PolicyError(f"package {package_name}: topology export subpath must be non-empty string")
+            if not isinstance(module_modes, list) or not all(isinstance(mode, str) for mode in module_modes):
+                raise PolicyError(f"package {package_name}: topology export module_modes must be list[str]")
+            if not isinstance(tree_shake_safe, bool):
+                raise PolicyError(f"package {package_name}: topology export tree_shake_safe must be bool")
+
+            if tree_shake_safe:
+                requires_tree_shake = True
+
+            if subpath not in exports_map:
+                append_error(
+                    findings,
+                    category="manifest_exports_missing_subpath",
+                    message=f"manifest.exports missing required policy subpath {subpath}",
+                    package=package_name,
+                    package_entrypoint=f"{package_name}{subpath if subpath != '.' else ''}",
+                    diagnostic_category="manifest_validation",
+                )
+                continue
+
+            manifest_entry = exports_map[subpath]
+            if isinstance(manifest_entry, str):
+                continue
+
+            if not isinstance(manifest_entry, dict):
+                append_error(
+                    findings,
+                    category="manifest_exports_entry_type",
+                    message=f"manifest export for {subpath} must be string or object",
+                    package=package_name,
+                    package_entrypoint=f"{package_name}{subpath if subpath != '.' else ''}",
+                    diagnostic_category="manifest_validation",
+                )
+                continue
+
+            if "esm" in module_modes and not any(key in manifest_entry for key in ("import", "default")):
+                append_error(
+                    findings,
+                    category="manifest_exports_esm",
+                    message=f"manifest export for {subpath} must define import/default for esm mode",
+                    package=package_name,
+                    package_entrypoint=f"{package_name}{subpath if subpath != '.' else ''}",
+                    diagnostic_category="module_resolution",
+                )
+            if "cjs" in module_modes and not any(key in manifest_entry for key in ("require", "default")):
+                append_error(
+                    findings,
+                    category="manifest_exports_cjs",
+                    message=f"manifest export for {subpath} must define require/default for cjs mode",
+                    package=package_name,
+                    package_entrypoint=f"{package_name}{subpath if subpath != '.' else ''}",
+                    diagnostic_category="module_resolution",
+                )
+            if subpath == "." and "types" not in manifest_entry:
+                append_error(
+                    findings,
+                    category="manifest_exports_types",
+                    message="manifest root export must define types field",
+                    package=package_name,
+                    package_entrypoint=package_name,
+                    diagnostic_category="type_surface_contract",
+                )
+
+        if requires_tree_shake and manifest.get("sideEffects") is not False:
+            append_error(
+                findings,
+                category="manifest_side_effects",
+                message="tree-shake-safe package must set sideEffects=false",
+                package=package_name,
+                package_entrypoint=package_name,
+                diagnostic_category="tree_shake_regression",
+            )
+
+    return findings
+
+
 def validate_resolution_matrix(
     policy: dict[str, Any],
     package_map: dict[str, dict[str, Any]],
@@ -508,15 +697,17 @@ def run_policy(
     policy: dict[str, Any],
     only_scenarios: set[str],
     policy_path: str,
+    workspace_root: pathlib.Path,
     summary_path: pathlib.Path,
     log_path: pathlib.Path,
 ) -> bool:
     topology_findings, package_map = validate_topology(policy)
     type_findings = validate_type_surface(policy, package_map)
+    manifest_findings = validate_package_manifests(policy, package_map, workspace_root)
     matrix_findings, selected_scenarios = validate_resolution_matrix(policy, package_map, only_scenarios)
     logging_findings = validate_logging_contract(policy)
 
-    findings = topology_findings + type_findings + matrix_findings + logging_findings
+    findings = topology_findings + type_findings + manifest_findings + matrix_findings + logging_findings
     findings = sorted(
         findings,
         key=lambda finding: (
@@ -746,6 +937,46 @@ def run_self_tests() -> int:
 
     assert not validate_logging_contract(base_policy)
 
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        workspace_root = pathlib.Path(tmp_dir)
+        manifest_payload = {
+            "type": "module",
+            "sideEffects": False,
+            "exports": {
+                ".": {
+                    "types": "./dist/index.d.ts",
+                    "import": "./dist/index.js",
+                    "default": "./dist/index.js",
+                }
+            },
+        }
+        for package_name in (
+            "@asupersync/browser-core",
+            "@asupersync/browser",
+            "@asupersync/react",
+            "@asupersync/next",
+        ):
+            package_dir_name = package_name.split("/", 1)[1]
+            package_dir = workspace_root / "packages" / package_dir_name
+            package_dir.mkdir(parents=True, exist_ok=True)
+            (package_dir / "package.json").write_text(
+                json.dumps(manifest_payload, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        manifest_findings = validate_package_manifests(base_policy, package_map, workspace_root)
+        assert not manifest_findings
+
+        broken_manifest_path = workspace_root / "packages" / "browser" / "package.json"
+        broken_manifest = json.loads(broken_manifest_path.read_text(encoding="utf-8"))
+        broken_manifest["exports"] = {}
+        broken_manifest_path.write_text(
+            json.dumps(broken_manifest, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        broken_findings = validate_package_manifests(base_policy, package_map, workspace_root)
+        assert any(f.category == "manifest_exports_missing_subpath" for f in broken_findings)
+
     bad_policy = json.loads(json.dumps(base_policy))
     bad_policy["required_packages"] = [
         "@asupersync/browser-core",
@@ -792,6 +1023,7 @@ def main() -> int:
         policy=policy,
         only_scenarios=set(args.only_scenario),
         policy_path=str(policy_path),
+        workspace_root=pathlib.Path.cwd(),
         summary_path=summary_path,
         log_path=log_path,
     )

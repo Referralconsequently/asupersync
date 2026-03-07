@@ -19,6 +19,12 @@ Usage:
   python3 scripts/check_perf_regression.py --budgets .github/wasm_perf_budgets.json \\
       --baseline baselines/baseline_latest.json \\
       --current baselines/baseline_current.json
+  python3 scripts/check_perf_regression.py \\
+      --budgets .github/wasm_perf_budgets.json \\
+      --profile core-min \\
+      --measurements artifacts/wasm_budget_summary.json \\
+      --require-metric M-PERF-01A \\
+      --require-metric M-PERF-01B
 
 Bead: asupersync-umelq.13.5
 """
@@ -161,6 +167,77 @@ def load_budgets(path: pathlib.Path) -> tuple[
     baseline_cfg = policy.get("baseline_regression", {})
     output_cfg = policy.get("output", {})
     return hard, operational, baseline_cfg, output_cfg
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def load_measurements(
+    path: pathlib.Path,
+    expected_profile: str = "",
+) -> dict[str, float]:
+    raw = load_json(path)
+
+    root_profile = raw.get("profile")
+    if (
+        expected_profile
+        and isinstance(root_profile, str)
+        and root_profile
+        and root_profile != expected_profile
+    ):
+        raise PolicyError(
+            f"measurements profile mismatch: expected {expected_profile}, got {root_profile}"
+        )
+
+    entries = raw.get("entries")
+    if entries is None:
+        entries = raw.get("measurements")
+    if entries is not None:
+        if not isinstance(entries, list) or not entries:
+            raise PolicyError("measurements summary entries must be a non-empty list")
+        measurements: dict[str, float] = {}
+        for idx, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise PolicyError(f"measurements entry {idx} must be an object")
+            metric_id = entry.get("metric_id")
+            if not isinstance(metric_id, str) or not metric_id:
+                raise PolicyError(f"measurements entry {idx} missing non-empty metric_id")
+
+            entry_profile = entry.get("profile")
+            if (
+                expected_profile
+                and isinstance(entry_profile, str)
+                and entry_profile
+                and entry_profile != expected_profile
+            ):
+                continue
+
+            value = entry.get("value")
+            if not _is_finite_number(value):
+                raise PolicyError(
+                    f"measurements entry {metric_id} must provide a finite numeric value"
+                )
+            if metric_id in measurements:
+                raise PolicyError(f"duplicate measurements entry for metric_id {metric_id}")
+            measurements[metric_id] = float(value)
+
+        if not measurements:
+            raise PolicyError("measurements summary did not yield any metrics for selected profile")
+        return measurements
+
+    if not raw or not all(
+        isinstance(metric_id, str) and metric_id and _is_finite_number(value)
+        for metric_id, value in raw.items()
+    ):
+        raise PolicyError(
+            "measurements file must be a metric->number mapping or a structured wasm budget summary"
+        )
+    return {metric_id: float(value) for metric_id, value in raw.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +587,37 @@ def run_self_test() -> None:
     assert reg_map["bench/slow"].status == "regression"
     assert reg_map["bench/slow"].delta_pct == 20.0
 
-    print("all 14 self-tests passed")
+    # Test 15: Structured measurements summary parsing
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as mf:
+        json.dump({
+            "schema_version": "wasm-budget-summary-v1",
+            "profile": "core-min",
+            "entries": [
+                {"metric_id": "M-PERF-01A", "value": 123456, "unit": "bytes"},
+                {"metric_id": "M-PERF-01B", "value": 45678, "unit": "bytes"},
+            ],
+        }, mf)
+        mf.flush()
+        measurements = load_measurements(pathlib.Path(mf.name), expected_profile="core-min")
+    assert measurements["M-PERF-01A"] == 123456.0
+    assert measurements["M-PERF-01B"] == 45678.0
+
+    # Test 16: Structured measurements summary rejects profile mismatch
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as mf:
+        json.dump({
+            "schema_version": "wasm-budget-summary-v1",
+            "profile": "full-dev",
+            "entries": [{"metric_id": "M-PERF-01A", "value": 123456}],
+        }, mf)
+        mf.flush()
+        try:
+            load_measurements(pathlib.Path(mf.name), expected_profile="core-min")
+        except PolicyError:
+            pass
+        else:
+            raise AssertionError("expected PolicyError for measurements profile mismatch")
+
+    print("all 16 self-tests passed")
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +656,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--measurements",
         default="",
-        help="Path to measurements JSON with metric_id -> value mapping.",
+        help="Path to measurements JSON (metric->value mapping or structured budget summary).",
+    )
+    parser.add_argument(
+        "--require-metric",
+        action="append",
+        default=[],
+        help="Metric ID that must be present in the measurements payload. Repeat as needed.",
     )
     parser.add_argument(
         "--warn-history",
@@ -579,8 +692,9 @@ def main() -> int:
     measurements: dict[str, float] = {}
     if args.measurements:
         meas_path = pathlib.Path(args.measurements)
-        if meas_path.exists():
-            measurements = load_json(meas_path)
+        if not meas_path.exists():
+            raise PolicyError(f"measurements file not found: {meas_path}")
+        measurements = load_measurements(meas_path, expected_profile=args.profile)
 
     # Load warn history for consecutive escalation
     warn_history: dict[str, int] = {}
@@ -608,6 +722,21 @@ def main() -> int:
         "budgets_path": str(budgets_path),
         "profile": args.profile,
     })
+
+    required_metrics = sorted(set(args.require_metric))
+    missing_required_metrics = sorted(
+        metric_id for metric_id in required_metrics if metric_id not in measurements
+    )
+    if missing_required_metrics:
+        emit_event(event_log_path, {
+            "event": "missing_required_metrics",
+            "required_metrics": required_metrics,
+            "missing_metrics": missing_required_metrics,
+        })
+        raise PolicyError(
+            "required metrics missing from measurements: "
+            + ", ".join(missing_required_metrics)
+        )
 
     profile = args.profile
     budget_results: list[MetricResult] = []
@@ -672,6 +801,7 @@ def main() -> int:
         "baseline_path": str(baseline_path),
         "current_path": str(current_path) if current_path else None,
         "profile": profile,
+        "required_metrics": required_metrics,
         "comparison_metric": comparison_metric,
         "max_regression_pct": max_regression_pct,
     }

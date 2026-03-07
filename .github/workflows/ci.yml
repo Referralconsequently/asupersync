@@ -141,12 +141,81 @@ jobs:
       - name: Perf regression gate self-test
         run: python3 scripts/check_perf_regression.py --self-test
 
+      - name: Build WASM size-budget artifact
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/wasm/release
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-wasm-size-gate cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
+          else
+            cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
+          fi
+          cp target/wasm32-unknown-unknown/release/asupersync.wasm artifacts/wasm/release/asupersync.release.wasm
+          python3 - <<'PY'
+          import gzip
+          import json
+          import subprocess
+          from pathlib import Path
+
+          artifact = Path("artifacts/wasm/release/asupersync.release.wasm")
+          data = artifact.read_bytes()
+          try:
+              commit = subprocess.check_output(
+                  ["git", "rev-parse", "HEAD"],
+                  text=True,
+                  stderr=subprocess.DEVNULL,
+              ).strip()
+          except Exception:
+              commit = ""
+
+          summary = {
+              "schema_version": "wasm-budget-summary-v1",
+              "profile": "core-min",
+              "environment": "ci-check",
+              "commit": commit,
+              "entries": [
+                  {
+                      "metric_id": "M-PERF-01A",
+                      "metric": "wasm size (raw bytes)",
+                      "value": len(data),
+                      "unit": "bytes",
+                      "profile": "core-min",
+                      "artifact_path": str(artifact),
+                  },
+                  {
+                      "metric_id": "M-PERF-01B",
+                      "metric": "wasm size (gzip bytes)",
+                      "value": len(gzip.compress(data, compresslevel=9)),
+                      "unit": "bytes",
+                      "profile": "core-min",
+                      "artifact_path": str(artifact),
+                  },
+              ],
+              "commands": [
+                  "cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod",
+                  "gzip -9 -c artifacts/wasm/release/asupersync.release.wasm | wc -c",
+              ],
+              "artifact_paths": [
+                  str(artifact),
+              ],
+          }
+
+          Path("artifacts/wasm_budget_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Perf regression gate
         run: |
           mkdir -p artifacts
           python3 scripts/check_perf_regression.py \
             --budgets .github/wasm_perf_budgets.json \
-            --profile core-min
+            --profile core-min \
+            --measurements artifacts/wasm_budget_summary.json \
+            --require-metric M-PERF-01A \
+            --require-metric M-PERF-01B
 
       - name: Upload perf regression report
         if: always()
@@ -154,6 +223,7 @@ jobs:
         with:
           name: wasm-perf-regression-report
           path: |
+            artifacts/wasm_budget_summary.json
             artifacts/wasm_perf_regression_report.json
             artifacts/wasm_perf_gate_events.ndjson
           retention-days: 30

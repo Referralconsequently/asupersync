@@ -234,10 +234,21 @@ Gate logic:
    `baselines/baseline_latest.json`. Any benchmark regressing beyond
    `max_regression_pct` (default 10%) triggers CI failure.
 
-The gate runs in the `check` CI job after benchmark corpus validation. When no
-measurements are available (e.g., before WASM compilation is green), all budget
-checks report `skip` and the gate passes. This ensures the gate infrastructure
-is validated even while the measurement pipeline is being built.
+The gate runs in the `check` CI job after benchmark corpus validation. The
+bundle-size slice is now fail-closed, while non-size metrics may still report
+`skip` until the broader measurement pipeline is wired.
+
+`asupersync-3qv04.6.7.1` tightens the bundle-size slice of this gate. The `check`
+job must build the `wasm-browser-prod` release artifact, emit
+`artifacts/wasm_budget_summary.json`, and require both bundle-size metrics
+before evaluating thresholds.
+
+Fail-closed size rule:
+
+1. `M-PERF-01A` and `M-PERF-01B` must be present in the measurements payload.
+2. Missing raw/gzip size metrics is a policy error, not a silent `skip`.
+3. Other non-size metrics may still report `skip` until the broader browser
+   latency/memory measurement pipeline is wired.
 
 Deterministic validator commands:
 
@@ -245,7 +256,10 @@ Deterministic validator commands:
 python3 scripts/check_perf_regression.py --self-test
 python3 scripts/check_perf_regression.py \
   --budgets .github/wasm_perf_budgets.json \
-  --profile core-min
+  --profile core-min \
+  --measurements artifacts/wasm_budget_summary.json \
+  --require-metric M-PERF-01A \
+  --require-metric M-PERF-01B
 ```
 
 With baseline comparison:

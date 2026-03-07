@@ -35,6 +35,58 @@ check_json() {
 echo "=== npm Pack/Install Smoke Validation ==="
 echo ""
 
+# ── Phase 0: Workspace Manager and Resolver Contract ─────────────────
+
+echo "[Phase 0: Workspace Manager and Resolver Contract]"
+
+ROOT_MANIFEST="${REPO_ROOT}/package.json"
+BASE_TSCONFIG="${REPO_ROOT}/tsconfig.base.json"
+WORKSPACE_YAML="${REPO_ROOT}/pnpm-workspace.yaml"
+NPMRC="${REPO_ROOT}/.npmrc"
+
+if [[ -f "$ROOT_MANIFEST" ]]; then
+  ok "root package.json present"
+else
+  err "root package.json missing"
+fi
+
+if python3 -c "import json; d=json.load(open('$ROOT_MANIFEST')); assert d.get('packageManager','').startswith('pnpm@')" 2>/dev/null; then
+  ok "root packageManager pins pnpm"
+else
+  err "root packageManager must pin pnpm"
+fi
+
+if python3 -c "import json; d=json.load(open('$ROOT_MANIFEST')); assert 'node' in d.get('engines',{}) and 'pnpm' in d.get('engines',{})" 2>/dev/null; then
+  ok "root engines declare node and pnpm"
+else
+  err "root package.json must declare node and pnpm engines"
+fi
+
+if python3 -c "import json; d=json.load(open('$ROOT_MANIFEST')); s=d.get('scripts',{}); assert 'pnpm' in s.get('build:packages','') and 'pnpm' in s.get('build','') and 'pnpm' in s.get('typecheck','')" 2>/dev/null; then
+  ok "workspace build scripts use pnpm"
+else
+  err "workspace build scripts must use pnpm"
+fi
+
+if [[ -f "$WORKSPACE_YAML" ]] && grep -q 'packages/\*' "$WORKSPACE_YAML"; then
+  ok "pnpm-workspace.yaml enumerates packages/*"
+else
+  err "pnpm-workspace.yaml missing or incomplete"
+fi
+
+if [[ -f "$NPMRC" ]] && grep -q 'enable-pre-post-scripts=true' "$NPMRC"; then
+  ok ".npmrc present with deterministic script policy"
+else
+  err ".npmrc missing deterministic script policy"
+fi
+
+if python3 -c "import json; d=json.load(open('$BASE_TSCONFIG')); c=d.get('compilerOptions',{}); assert c.get('moduleResolution')=='bundler' and c.get('module')=='ES2020'" 2>/dev/null; then
+  ok "tsconfig.base.json pins moduleResolution=bundler and module=ES2020"
+else
+  err "tsconfig.base.json must pin moduleResolution=bundler and module=ES2020"
+fi
+echo ""
+
 # ── Phase 1: Manifest Integrity ──────────────────────────────────────
 
 echo "[Phase 1: Manifest Integrity]"
@@ -102,6 +154,12 @@ for entry in "${REQUIRED_PACKAGES[@]}"; do
     ok "${pkg_name}: exports has root entry"
   else
     err "${pkg_name}: exports missing root entry"
+  fi
+
+  if python3 -c "import json; root=json.load(open('$manifest'))['exports']['.']; assert isinstance(root, dict) and 'types' in root and ('import' in root or 'default' in root)" 2>/dev/null; then
+    ok "${pkg_name}: exports root carries types and import/default"
+  else
+    err "${pkg_name}: exports root must carry types and import/default"
   fi
 
   echo ""
@@ -206,9 +264,30 @@ for pkg_dir in browser react next; do
 done
 echo ""
 
-# ── Phase 5: npm pack Dry Run (if npm available) ─────────────────────
+# ── Phase 5: Package Resolver Contract ───────────────────────────────
 
-echo "[Phase 5: npm pack Dry Run]"
+echo "[Phase 5: Package Resolver Contract]"
+
+for pkg_dir in browser react next; do
+  tsconfig="${REPO_ROOT}/packages/${pkg_dir}/tsconfig.json"
+
+  if python3 -c "import json; d=json.load(open('$tsconfig')); assert d.get('extends')=='../../tsconfig.base.json'" 2>/dev/null; then
+    ok "@asupersync/${pkg_dir}: extends root tsconfig baseline"
+  else
+    err "@asupersync/${pkg_dir}: must extend ../../tsconfig.base.json"
+  fi
+
+  if python3 -c "import json; d=json.load(open('$tsconfig')); assert 'moduleResolution' not in d.get('compilerOptions',{})" 2>/dev/null; then
+    ok "@asupersync/${pkg_dir}: does not override moduleResolution"
+  else
+    err "@asupersync/${pkg_dir}: must not override moduleResolution"
+  fi
+done
+echo ""
+
+# ── Phase 6: npm pack Dry Run (if npm available) ─────────────────────
+
+echo "[Phase 6: npm pack Dry Run]"
 
 if command -v npm >/dev/null 2>&1; then
   for pkg_dir in browser-core browser react next; do
@@ -223,6 +302,19 @@ if command -v npm >/dev/null 2>&1; then
 else
   echo "  skip: npm not installed (install to enable pack validation)"
 fi
+echo ""
+
+# ── Phase 7: Optional Consumer Manager Presence ───────────────────────
+
+echo "[Phase 7: Optional Consumer Manager Presence]"
+
+for manager in npm pnpm yarn bun; do
+  if command -v "$manager" >/dev/null 2>&1; then
+    ok "${manager}: available for downstream compatibility checks"
+  else
+    warn "${manager}: not installed (consumer-matrix execution skipped)"
+  fi
+done
 echo ""
 
 # ── Summary ──────────────────────────────────────────────────────────
