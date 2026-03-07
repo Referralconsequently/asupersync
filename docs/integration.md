@@ -258,6 +258,24 @@ Navigation top-level (required):
 | `Security + Performance` | Validate production-readiness gates | Threat model, policy checks, budgets, CI gates, waiver/escalation rules | Reader can execute gate checks and interpret failures |
 | `Troubleshooting` | Recover from known failure patterns | Symptom -> cause -> command -> expected evidence mapping | Reader can resolve common failures without ad-hoc guesswork |
 
+### Browser Runtime Support Boundary (DX Contract)
+
+Browser Edition is **direct-runtime** only for browser execution contexts. All
+server/edge/node environments are **bridge-only** unless explicitly promoted by
+validation beads.
+
+Support posture:
+
+- direct runtime: browser main thread and validated browser-worker contexts
+- bridge-only: Node.js, Next.js server components/route handlers, edge/serverless
+  runtime contexts with incomplete browser APIs
+- non-goals for browser runtime closure: native-only modules (`fs`, `process`,
+  `signal`, `server`), native DB clients, and native transport surfaces
+
+Documentation updates for Browser Edition should keep this boundary explicit and
+must not imply automatic fallback from unsupported runtimes into partially
+functional direct execution.
+
 Browser Edition doc map (current canonical locations):
 
 1. Concepts and architecture:

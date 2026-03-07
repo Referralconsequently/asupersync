@@ -240,9 +240,61 @@ A release is rollback-safe when:
 
 ---
 
-## 10. CI and Harness Integration
+## 10. Packaged Browser-Core Upgrade / Downgrade Matrix
 
-### 10.1 Automated Gates
+Package-level compatibility validation was extended by
+`asupersync-3qv04.6.5` so consumers can reason about ABI upgrades and
+downgrades from the shipped JS/WASM surface, not only from the Rust-side
+contract tables.
+
+### 10.1 Packaged Observability Surfaces
+
+Packaged Browser Edition consumers must be able to inspect ABI compatibility
+without reading Rust source:
+
+1. `scripts/build_browser_core_artifacts.sh` emits
+   `packages/browser-core/abi-metadata.json`.
+2. `packages/browser-core/package.json` publishes `./abi-metadata.json`.
+3. The packaged browser-core runtime exposes `abi_version()` and
+   `abi_fingerprint()` for runtime introspection.
+4. `scripts/validate_package_build.sh` checks that the packaged metadata
+   sidecar contains both `abi_version` and
+   `abi_signature_fingerprint_v1`.
+5. Higher-level packages such as `@asupersync/browser` consume the
+   browser-core ABI surface; they must not invent divergent ABI-version state.
+
+### 10.2 Upgrade / Downgrade Decision Matrix
+
+The packaged upgrade/downgrade matrix mirrors
+`classify_wasm_abi_compatibility(producer, consumer)`:
+
+| Producer package ABI | Consumer expectation | Decision | Packaged check | Required behavior |
+|----------------------|----------------------|----------|----------------|-------------------|
+| `1.0` | `1.0` | `Exact` | `abi-metadata.json` and runtime helpers agree on version/fingerprint | Proceed |
+| `1.0` | `1.1` | `BackwardCompatible` | Same major, consumer minor newer than producer | Proceed and record negotiated downgrade in diagnostics |
+| `1.1` | `1.0` | `ConsumerTooOld` | Consumer minor older than packaged producer | Reject negotiated call with `compatibility_rejected` and migration guidance |
+| `2.0` | `1.x` | `MajorMismatch` | Major mismatch detected from metadata or first negotiated call | Fail closed before operation continues |
+| `1.x` | omitted consumer version | no negotiated decision | Producer metadata and runtime helpers still expose actual ABI | Allowed only for bootstrap/introspection; consumers should negotiate before version-sensitive calls |
+
+### 10.3 Packaged Validation Gates
+
+The package-level matrix is enforced by:
+
+| Gate | Script/Test | Frequency |
+|------|-------------|-----------|
+| Packaged ABI metadata sidecar | `scripts/build_browser_core_artifacts.sh` | Every packaging run |
+| Packaged ABI metadata key presence | `scripts/validate_package_build.sh` | Every packaging run |
+| Packaged ABI policy + manifest contract | `tests/wasm_packaged_abi_compatibility_matrix.rs` | Every PR |
+| Core compatibility semantics | `tests/wasm_abi_compatibility_harness.rs` | Every PR |
+
+The package-layer contract intentionally complements, rather than replaces,
+the Rust-native compatibility harness.
+
+---
+
+## 11. CI and Harness Integration
+
+### 11.1 Automated Gates
 
 | Gate | Script/Test | Frequency |
 |------|------------|-----------|
@@ -252,18 +304,23 @@ A release is rollback-safe when:
 | Handle lifecycle | `tests/wasm_abi_compatibility_harness.rs` | Every PR |
 | Cancel/abort interop | `tests/wasm_abi_compatibility_harness.rs` | Every PR |
 | Outcome mapping | `tests/wasm_abi_compatibility_harness.rs` | Every PR |
+| Packaged ABI matrix | `tests/wasm_packaged_abi_compatibility_matrix.rs` | Every PR |
 
-### 10.2 Evidence Artifacts
+### 11.2 Evidence Artifacts
 
 - `artifacts/wasm_abi_contract_summary.json` — version, fingerprint, symbol count.
 - `artifacts/wasm_abi_contract_events.ndjson` — boundary event log.
 - Compatibility harness test output — deterministic, replayable.
+- Packaged ABI matrix test output — deterministic manifest/doc/script contract log.
 
-### 10.3 Reproduction
+### 11.3 Reproduction
 
 ```bash
 # Run compatibility harness
 cargo test --test wasm_abi_compatibility_harness -- --nocapture
+
+# Run packaged ABI matrix contract
+cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
 
 # Run existing contract tests
 cargo test --test wasm_abi_contract -- --nocapture
@@ -274,12 +331,13 @@ python3 scripts/check_wasm_abi_policy.py --policy .github/wasm_abi_policy.json
 
 ---
 
-## 11. Cross-References
+## 12. Cross-References
 
 - ABI contract: `docs/wasm_abi_contract.md`
 - Cancel/abort interop: `docs/wasm_cancellation_abortsignal_contract.md`
 - Implementation: `src/types/wasm_abi.rs`
 - Existing contract tests: `tests/wasm_abi_contract.rs`
 - Compatibility harness: `tests/wasm_abi_compatibility_harness.rs`
+- Packaged ABI matrix contract: `tests/wasm_packaged_abi_compatibility_matrix.rs`
 - CI policy: `.github/wasm_abi_policy.json`
 - CI gate: `scripts/check_wasm_abi_policy.py`

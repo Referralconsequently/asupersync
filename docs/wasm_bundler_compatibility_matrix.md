@@ -205,7 +205,83 @@ Server-side runtimes are bridge-only contexts per the Next.js boundary strategy 
 
 ---
 
-## 5. Module Format Compatibility
+## 5. Package Manager Compatibility Matrix
+
+The repository itself is authored as a **pnpm workspace**. That authoring
+choice is intentionally distinct from downstream consumer support: end users may
+install published packages with other package managers as long as they consume
+registry/tarball artifacts rather than the source workspace protocol directly.
+
+| Package manager | Role | Status | Notes |
+|-----------------|------|--------|-------|
+| `pnpm` 9.x | Authoring workspace, CI baseline, local package graph | Primary | Root `packageManager` is pinned to pnpm; `pnpm-workspace.yaml` is authoritative for source-tree development. |
+| `npm` 10.x | Downstream consumer install and `npm pack` validation | Supported consumer | Use published packages or tarballs; source `workspace:*` links are not the consumer contract. |
+| `yarn` 4.x | Downstream consumer install and resolver parity | Supported consumer | Validate against published package metadata and ESM export maps; do not treat Yarn as the workspace authority for this repo. |
+| `bun` 1.x | Downstream consumer install/build lane and fast resolver checks | Supported consumer | Bun is a consumer/runtime lane, not the authoring workspace manager. |
+
+### 5.1 Package-Manager Contract
+
+- `package.json` pins `packageManager: "pnpm@..."` so contributor tooling and CI
+  use a single authoritative workspace manager.
+- `pnpm-workspace.yaml` is required for local authoring and release assembly.
+- `.npmrc` carries the repo-level npm/pnpm policy knobs that keep package
+  assembly deterministic.
+- Consumer compatibility is validated against the **published package shape**:
+  `package.json` exports map, `files` array, `main`, `types`, and tarball-ready
+  manifest fields.
+- Any package-manager-specific workaround must be documented as a consumer note,
+  not silently encoded as tribal knowledge.
+
+---
+
+## 6. TypeScript Module Resolution Compatibility
+
+Asupersync Browser Edition must be explicit about which TypeScript resolver
+modes are expected to work, because many downstream failures surface before the
+runtime even executes.
+
+| `moduleResolution` mode | Status | Expected usage | Notes |
+|-------------------------|--------|----------------|-------|
+| `bundler` | Primary | Repo-authoring and canonical examples | `tsconfig.base.json` pins this mode for package source builds. |
+| `NodeNext` | Supported consumer | Real downstream apps using Node-style ESM package resolution | Package `exports`, `types`, and `default`/`import` entries must stay compatible with NodeNext consumers. |
+| `node16` / `node` / `classic` | Unsupported for Browser Edition source authoring | Legacy consumers only with explicit local adaptation | These modes are not the contract we optimize for; treat failures here as unsupported unless explicitly promoted later. |
+
+### 6.1 Resolver Guidance
+
+Canonical bundler-oriented workspace baseline:
+
+```json
+{
+  "compilerOptions": {
+    "module": "ES2020",
+    "moduleResolution": "bundler"
+  }
+}
+```
+
+Supported consumer-mode NodeNext example:
+
+```json
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  }
+}
+```
+
+Resolver invariants:
+
+- Published package entrypoints must expose explicit `types` and `import` or
+  `default` branches under `exports["."]`.
+- Package-local `tsconfig.json` files should inherit the root resolver policy
+  instead of drifting per package.
+- NodeNext support depends on stable ESM entrypoints and no hidden CommonJS-only
+  escape hatches.
+
+---
+
+## 7. Module Format Compatibility
 
 | Format | Bundlers | Notes |
 |--------|----------|-------|
@@ -228,9 +304,9 @@ Server-side runtimes are bridge-only contexts per the Next.js boundary strategy 
 
 ---
 
-## 6. Packaging Pipeline
+## 8. Packaging Pipeline
 
-### 6.1 Build Stages
+### 8.1 Build Stages
 
 ```
 Stage 1: Profile Selection
@@ -251,7 +327,7 @@ Stage 8: Publishing
   ↓ npm publish per package (@asupersync/browser-core, etc.)
 ```
 
-### 6.2 Profile-to-Package Mapping
+### 8.2 Profile-to-Package Mapping
 
 | Profile | Optimization | Package channel |
 |---------|-------------|-----------------|
@@ -260,7 +336,7 @@ Stage 8: Publishing
 | `wasm-browser-deterministic` | Release; deterministic trace | `nightly` (replay validation) |
 | `wasm-browser-minimal` | Release; minimal surface | Contract-only checks |
 
-### 6.3 Validation Commands
+### 8.3 Validation Commands
 
 ```bash
 # Profile compilation gates (via rch)
@@ -280,13 +356,16 @@ rch exec -- cargo check --target wasm32-unknown-unknown \
 python3 scripts/check_wasm_typescript_package_policy.py \
   --policy .github/wasm_typescript_package_policy.json
 
+# Workspace/package-manager and resolver contract gate
+bash scripts/validate_npm_pack_smoke.sh
+
 # Bundler compatibility checks
 cargo test --test wasm_bundler_compatibility -- --nocapture
 ```
 
 ---
 
-## 7. Packaging Invariants
+## 9. Packaging Invariants
 
 1. **Single profile per build**: exactly one `wasm-browser-*` profile is active per artifact set; multi-profile builds are compile-error rejected.
 2. **Tree-shake safe**: all packages declare `"sideEffects": false`; no hidden global state in module scope.
@@ -298,7 +377,7 @@ cargo test --test wasm_bundler_compatibility -- --nocapture
 
 ---
 
-## 8. Known Issues and Workarounds
+## 10. Known Issues and Workarounds
 
 | Issue | Bundler | Workaround |
 |-------|---------|------------|
@@ -308,10 +387,12 @@ cargo test --test wasm_bundler_compatibility -- --nocapture
 | esbuild lacks native WASM experiment | esbuild | Use `esbuild-plugin-wasm` or manual instantiation |
 | Safari has occasional WASM compilation timeout | Safari | Use streaming compilation; avoid synchronous instantiation |
 | Turbopack config differs from Webpack | Next.js | Use `next.config.js` webpack callback; Turbopack support is automatic |
+| Source workspace uses `pnpm` while consumers may use other managers | npm / yarn / bun | Treat pnpm as the authoring source of truth; validate other managers against packed or published artifacts |
+| TypeScript resolver drift can break consumers before runtime | NodeNext / bundler | Keep `exports`, `types`, and root `tsconfig.base.json` aligned; validate NodeNext and bundler assumptions explicitly |
 
 ---
 
-## 9. CI Matrix
+## 11. CI Matrix
 
 The compatibility matrix is validated by `tests/wasm_bundler_compatibility.rs` which checks:
 
@@ -319,7 +400,8 @@ The compatibility matrix is validated by `tests/wasm_bundler_compatibility.rs` w
 2. Packaging invariants are documented and testable.
 3. Profile-to-channel mapping is consistent.
 4. Bundler configuration requirements are specified for all Tier 1 targets.
-5. Known constraints are documented for each bundler.
+5. Package-manager and TypeScript resolver expectations are documented explicitly.
+6. Known constraints are documented for each bundler.
 
 The CI `check` job includes a dedicated certification step:
 
@@ -342,7 +424,7 @@ cargo test --test wasm_bundler_compatibility -- --nocapture
 
 ---
 
-## 10. Cross-References
+## 12. Cross-References
 
 - Package topology: `docs/wasm_typescript_package_topology.md`
 - Release channels: `docs/wasm_release_channel_strategy.md`
@@ -350,5 +432,8 @@ cargo test --test wasm_bundler_compatibility -- --nocapture
 - ABI contract: `docs/wasm_abi_contract.md`
 - ABI compatibility policy: `docs/wasm_abi_compatibility_policy.md`
 - Dependency audit: `docs/wasm_dependency_audit_policy.md`
+- Workspace manager contract: `package.json`, `pnpm-workspace.yaml`, `.npmrc`
+- Resolver baseline: `tsconfig.base.json`
+- Consumer smoke gate: `scripts/validate_npm_pack_smoke.sh`
 - Feature profiles: `Cargo.toml` (`[features]` section)
 - Compile-time guardrails: `src/lib.rs` (wasm32 compile_error gates)

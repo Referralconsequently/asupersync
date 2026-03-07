@@ -1,6 +1,6 @@
 # WASM QA Evidence Matrix Contract
 
-Bead: `asupersync-3qv04.8.1`
+Beads: `asupersync-3qv04.8.1`, `asupersync-3qv04.8.4.4`
 
 ## Purpose
 
@@ -123,6 +123,59 @@ QA evidence logs MUST include:
 - `repro_command`: Exact command to reproduce
 - `artifact_path`: Path to failure artifacts
 
+## E2E Log Schema
+
+Schema version: `wasm-qa-e2e-log-v1`
+
+Every emitted line in `events.ndjson` must include:
+
+- `schema_version`
+- `event_kind`
+- `scenario_id`
+- `run_id`
+- `timestamp_utc`
+- `wasm_profile`
+- `browser`
+- `package_name`
+- `module_fingerprint`
+- `verdict`
+- `command_exit_code`
+- `repro_command`
+- `bundle_manifest_path`
+- `artifact_path`
+- `retention_class`
+- `retention_until_utc`
+
+## Artifact Bundle Layout
+
+Bundle schema version: `wasm-qa-artifact-bundle-v1`
+
+Each scenario bundle under `target/wasm-qa-evidence-smoke/<run>/<scenario>/` must contain:
+
+- `bundle_manifest.json`
+- `run_report.json`
+- `run.log`
+- `events.ndjson`
+
+`bundle_manifest.json` and `run_report.json` must continue emitting compatibility fields for the legacy schemas:
+
+- `schema = wasm-qa-evidence-smoke-bundle-v1`
+- `schema = wasm-qa-evidence-smoke-run-report-v1`
+
+## Retention Policy
+
+Retention schema version: `wasm-qa-artifact-retention-v1`
+
+Required retention classes:
+
+| Class | Minimum retention | Intended use |
+|-------|--------------------|--------------|
+| `hot` | 30 days | failing runs and incident investigations |
+| `warm` | 14 days | successful execute runs |
+| `cold` | 7 days | dry-run and low-signal bundles |
+
+Bundle manifests and run reports must both include `retention_class` and `retention_until_utc`.
+
 ## Comparator-Smoke Runner
 
 Canonical runner: `scripts/run_wasm_qa_evidence_smoke.sh`
@@ -131,6 +184,8 @@ The runner reads `artifacts/wasm_qa_evidence_matrix_v1.json`, supports determini
 
 1. Per-scenario manifests with schema `wasm-qa-evidence-smoke-bundle-v1`
 2. Aggregate run report with schema `wasm-qa-evidence-smoke-run-report-v1`
+3. Structured event logs (`events.ndjson`) with schema `wasm-qa-e2e-log-v1`
+4. Retention metadata following `wasm-qa-artifact-retention-v1`
 
 ## Validation
 

@@ -50,6 +50,29 @@ Guardrails:
 Reference: `docs/integration.md` ("wasm32 Guardrails"), `src/lib.rs` compile
 error gates.
 
+## Supported Runtime Envelope (DX Snapshot)
+
+Use this table to decide whether Browser Edition runs directly in the current
+environment or must be used through a bridge-only boundary.
+
+| Runtime context | Direct Browser Edition runtime | Guidance |
+|---|---|---|
+| Browser main thread (client-hydrated app) | Supported | Use one canonical browser profile and capability-scoped APIs |
+| Browser worker context (when required Web APIs are present) | Supported with feature parity checks | Run profile checks and keep deterministic evidence artifacts |
+| Node.js server runtime | Bridge-only | Keep runtime execution in browser boundary; call server logic over explicit RPC/API seams |
+| Next.js server components / route handlers | Bridge-only | Do not run browser runtime core in server contexts |
+| Edge/serverless runtimes (non-browser Web API subsets) | Bridge-only unless explicitly validated | Treat missing APIs as unsupported-runtime diagnostics, not partial support |
+
+Non-goals for Browser Edition v1:
+
+- native-only surfaces (`fs`, `process`, `signal`, `server`)
+- native DB clients (`sqlite`, `postgres`, `mysql`) inside browser runtime
+- native transport stacks (`kafka`, native QUIC/HTTP3 lanes) in browser closure
+
+When a runtime is outside the supported envelope, route through the bridge-only
+pattern and keep capability boundaries explicit instead of adding ambient
+runtime fallbacks.
+
 ## Release Channel Workflow (WASM-14 / `asupersync-umelq.15.3`)
 
 Browser onboarding and migration should flow through the release-channel
@@ -346,6 +369,20 @@ Minimum artifact set:
 - `artifacts/onboarding/*.summary.json`
 - `artifacts/wasm_dependency_audit_summary.json`
 - `artifacts/wasm_optimization_pipeline_summary.json`
+
+## Troubleshooting Fast Path
+
+Use this quick triage table before deep debugging:
+
+| Symptom | First command | Expected artifact |
+|---|---|---|
+| wasm profile compile failure | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | `artifacts/onboarding/*-wasm-check.log` |
+| profile/policy mismatch | `python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json` | `artifacts/wasm_dependency_audit_summary.json` |
+| onboarding scenario drift | `python3 scripts/run_browser_onboarding_checks.py --scenario all` | `artifacts/onboarding/*.summary.json` + `*.ndjson` |
+| unclear capability/authority failure | `rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture` | `artifacts/onboarding/vanilla-security.log` |
+
+Escalate only after capturing command output + artifact pointers. Treat missing
+artifacts as a workflow failure that must be fixed before filing runtime bugs.
 
 ## CI and Drift Checks
 
