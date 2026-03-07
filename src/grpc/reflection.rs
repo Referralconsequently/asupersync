@@ -189,7 +189,7 @@ impl ServiceHandler for ReflectionService {
     }
 
     fn method_names(&self) -> Vec<&str> {
-        vec!["ServerReflectionInfo", "ListServices", "DescribeService"]
+        vec!["ServerReflectionInfo"]
     }
 }
 
@@ -324,10 +324,10 @@ mod tests {
         );
         let methods = reflection.method_names();
         crate::assert_with_log!(
-            methods.contains(&"ServerReflectionInfo"),
-            "method names includes reflection entrypoint",
-            true,
-            methods.contains(&"ServerReflectionInfo")
+            methods == vec!["ServerReflectionInfo"],
+            "method names match the descriptor-exposed RPCs",
+            vec!["ServerReflectionInfo"],
+            methods
         );
         crate::test_complete!("reflection_service_traits");
     }

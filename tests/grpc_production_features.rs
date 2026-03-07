@@ -472,9 +472,14 @@ fn reflection_service_handler_traits() {
     let desc = svc.descriptor();
     assert_eq!(desc.full_name(), "grpc.reflection.v1alpha.ServerReflection");
     let methods = svc.method_names();
-    assert!(methods.contains(&"ServerReflectionInfo"));
-    assert!(methods.contains(&"ListServices"));
-    assert!(methods.contains(&"DescribeService"));
+    assert_eq!(methods, vec!["ServerReflectionInfo"]);
+    assert_eq!(
+        methods,
+        desc.methods
+            .iter()
+            .map(|method| method.name)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

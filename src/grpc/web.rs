@@ -36,15 +36,20 @@ pub enum ContentType {
 }
 
 impl ContentType {
+    fn matches_media_type(value: &str, prefix: &str) -> bool {
+        value.starts_with(prefix)
+            && matches!(value.as_bytes().get(prefix.len()), None | Some(b'+' | b';'))
+    }
+
     /// Parse a content type from a header value.
     ///
     /// Matches the media type prefix, ignoring subtype suffixes like `+proto`.
     #[must_use]
     pub fn from_header_value(value: &str) -> Option<Self> {
         let lower = value.trim().to_ascii_lowercase();
-        if lower.starts_with("application/grpc-web-text") {
+        if Self::matches_media_type(&lower, "application/grpc-web-text") {
             Some(Self::GrpcWebText)
-        } else if lower.starts_with("application/grpc-web") {
+        } else if Self::matches_media_type(&lower, "application/grpc-web") {
             Some(Self::GrpcWeb)
         } else {
             None
@@ -398,6 +403,39 @@ mod tests {
             ct
         );
         crate::test_complete!("test_content_type_case_insensitive");
+    }
+
+    #[test]
+    fn test_content_type_parse_with_parameters() {
+        init_test("test_content_type_parse_with_parameters");
+        let ct = ContentType::from_header_value("application/grpc-web; charset=utf-8");
+        crate::assert_with_log!(
+            ct == Some(ContentType::GrpcWeb),
+            "parameterized grpc-web content type",
+            Some(ContentType::GrpcWeb),
+            ct
+        );
+        crate::test_complete!("test_content_type_parse_with_parameters");
+    }
+
+    #[test]
+    fn test_content_type_rejects_similar_prefixes() {
+        init_test("test_content_type_rejects_similar_prefixes");
+        let bogus_binary = ContentType::from_header_value("application/grpc-websocket");
+        crate::assert_with_log!(
+            bogus_binary.is_none(),
+            "grpc-websocket is not grpc-web",
+            true,
+            bogus_binary.is_none()
+        );
+        let bogus_text = ContentType::from_header_value("application/grpc-web-textplain");
+        crate::assert_with_log!(
+            bogus_text.is_none(),
+            "grpc-web-textplain is not grpc-web-text",
+            true,
+            bogus_text.is_none()
+        );
+        crate::test_complete!("test_content_type_rejects_similar_prefixes");
     }
 
     // ── Trailer Encoding/Decoding Tests ──────────────────────────────

@@ -216,8 +216,12 @@ impl HealthService {
     /// Get all registered services.
     #[must_use]
     pub fn services(&self) -> Vec<String> {
-        let statuses = self.statuses.read();
-        statuses.keys().cloned().collect()
+        let mut services: Vec<_> = {
+            let statuses = self.statuses.read();
+            statuses.keys().cloned().collect()
+        };
+        services.sort();
+        services
     }
 
     fn watched_status(&self, service: &str) -> ServingStatus {
@@ -768,14 +772,16 @@ mod tests {
     fn health_service_services() {
         init_test("health_service_services");
         let service = HealthService::new();
-        service.set_status("a", ServingStatus::Serving);
         service.set_status("b", ServingStatus::NotServing);
+        service.set_status("a", ServingStatus::Serving);
 
         let services = service.services();
-        let has_a = services.contains(&"a".to_string());
-        crate::assert_with_log!(has_a, "has a", true, has_a);
-        let has_b = services.contains(&"b".to_string());
-        crate::assert_with_log!(has_b, "has b", true, has_b);
+        crate::assert_with_log!(
+            services == vec!["a".to_string(), "b".to_string()],
+            "services are returned in deterministic sorted order",
+            vec!["a".to_string(), "b".to_string()],
+            services
+        );
         crate::test_complete!("health_service_services");
     }
 
