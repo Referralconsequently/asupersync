@@ -57,12 +57,17 @@ impl<A, B> Either<A, B> {
 pub struct Select<A, B> {
     a: A,
     b: B,
+    poll_a_first: bool,
 }
 
 impl<A, B> Select<A, B> {
     /// Creates a new select combinator.
     pub fn new(a: A, b: B) -> Self {
-        Self { a, b }
+        Self {
+            a,
+            b,
+            poll_a_first: true,
+        }
     }
 }
 
@@ -72,14 +77,23 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
-        if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
-            return Poll::Ready(Either::Left(val));
+        if this.poll_a_first {
+            if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
+                return Poll::Ready(Either::Left(val));
+            }
+            if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
+                return Poll::Ready(Either::Right(val));
+            }
+        } else {
+            if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
+                return Poll::Ready(Either::Right(val));
+            }
+            if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
+                return Poll::Ready(Either::Left(val));
+            }
         }
 
-        if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
-            return Poll::Ready(Either::Right(val));
-        }
-
+        this.poll_a_first = !this.poll_a_first;
         Poll::Pending
     }
 }
@@ -92,13 +106,17 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
 /// MUST drain losers themselves. See module-level docs.
 pub struct SelectAll<F> {
     futures: Vec<F>,
+    start_idx: usize,
 }
 
 impl<F> SelectAll<F> {
     /// Creates a new select_all combinator.
     #[must_use]
     pub fn new(futures: Vec<F>) -> Self {
-        Self { futures }
+        Self {
+            futures,
+            start_idx: 0,
+        }
     }
 }
 
@@ -106,12 +124,20 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
     type Output = (F::Output, usize);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        for (i, f) in self.futures.iter_mut().enumerate() {
-            if let Poll::Ready(v) = Pin::new(f).poll(cx) {
-                return Poll::Ready((v, i));
+        let len = self.futures.len();
+        if len == 0 {
+            return Poll::Pending;
+        }
+
+        let start = self.start_idx % len;
+        for i in 0..len {
+            let idx = (start + i) % len;
+            if let Poll::Ready(v) = Pin::new(&mut self.futures[idx]).poll(cx) {
+                return Poll::Ready((v, idx));
             }
         }
 
+        self.start_idx = self.start_idx.wrapping_add(1);
         Poll::Pending
     }
 }
@@ -123,6 +149,7 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
 /// must be enforced, as it makes it impossible to forget the losers.
 pub struct SelectAllDrain<F> {
     futures: Option<Vec<F>>,
+    start_idx: usize,
 }
 
 impl<F> SelectAllDrain<F> {
@@ -131,6 +158,7 @@ impl<F> SelectAllDrain<F> {
     pub fn new(futures: Vec<F>) -> Self {
         Self {
             futures: Some(futures),
+            start_idx: 0,
         }
     }
 }
@@ -149,20 +177,38 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
     type Output = SelectAllDrainResult<F::Output, F>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let futures = self.futures.as_mut().expect("polled after completion");
+        let this = &mut *self;
+        let start_idx = this.start_idx;
+        let mut ready = None;
 
-        for (i, f) in futures.iter_mut().enumerate() {
-            if let Poll::Ready(value) = Pin::new(f).poll(cx) {
-                let mut all = self.futures.take().unwrap();
-                all.remove(i);
-                return Poll::Ready(SelectAllDrainResult {
-                    value,
-                    winner_index: i,
-                    losers: all,
-                });
+        {
+            let futures = this.futures.as_mut().expect("polled after completion");
+            let len = futures.len();
+            if len == 0 {
+                return Poll::Pending;
+            }
+
+            let start = start_idx % len;
+            for i in 0..len {
+                let idx = (start + i) % len;
+                if let Poll::Ready(value) = Pin::new(&mut futures[idx]).poll(cx) {
+                    ready = Some((idx, value));
+                    break;
+                }
             }
         }
 
+        if let Some((idx, value)) = ready {
+            let mut all = this.futures.take().unwrap();
+            all.remove(idx);
+            return Poll::Ready(SelectAllDrainResult {
+                value,
+                winner_index: idx,
+                losers: all,
+            });
+        }
+
+        this.start_idx = this.start_idx.wrapping_add(1);
         Poll::Pending
     }
 }
@@ -615,6 +661,52 @@ mod tests {
                 assert_eq!(pending_count.load(Ordering::SeqCst), 1);
                 assert_eq!(ready1_count.load(Ordering::SeqCst), 1);
                 assert_eq!(ready2_count.load(Ordering::SeqCst), 0);
+            }
+            Poll::Pending => unreachable!("expected Ready"),
+        }
+    }
+
+    #[test]
+    fn test_select_all_drain_rotates_start_index_after_pending_poll() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct ReadyOnSecondPoll {
+            polls: Arc<AtomicU32>,
+        }
+
+        impl Future for ReadyOnSecondPoll {
+            type Output = u32;
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<u32> {
+                let polls = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+                if polls >= 2 {
+                    Poll::Ready(polls)
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        let first_polls = Arc::new(AtomicU32::new(0));
+        let second_polls = Arc::new(AtomicU32::new(0));
+        let futures = vec![
+            ReadyOnSecondPoll {
+                polls: Arc::clone(&first_polls),
+            },
+            ReadyOnSecondPoll {
+                polls: Arc::clone(&second_polls),
+            },
+        ];
+        let mut sel = SelectAllDrain::new(futures);
+
+        assert!(poll_once(&mut sel).is_pending());
+        match poll_once(&mut sel) {
+            Poll::Ready(r) => {
+                assert_eq!(r.winner_index, 1);
+                assert_eq!(r.value, 2);
+                assert_eq!(r.losers.len(), 1);
+                assert_eq!(first_polls.load(Ordering::SeqCst), 1);
+                assert_eq!(second_polls.load(Ordering::SeqCst), 2);
             }
             Poll::Pending => unreachable!("expected Ready"),
         }

@@ -808,7 +808,10 @@ mod imp {
             reactor
                 .poll(&mut events, Some(Duration::ZERO))
                 .expect("poll should consume stale wake completion");
-            assert!(events.is_empty(), "wake completions must not surface as readiness");
+            assert!(
+                events.is_empty(),
+                "wake completions must not surface as readiness"
+            );
 
             reactor.wake().expect("wake after drain should succeed");
             let n = unsafe {
@@ -823,7 +826,10 @@ mod imp {
                 i32::try_from(std::mem::size_of::<u64>()).expect("u64 size fits in i32") as isize,
                 "eventfd read should still succeed after drain"
             );
-            assert_eq!(counter, 1, "reactor must remain wakeable after clearing the pending flag");
+            assert_eq!(
+                counter, 1,
+                "reactor must remain wakeable after clearing the pending flag"
+            );
         }
     }
 }

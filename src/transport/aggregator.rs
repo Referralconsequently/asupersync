@@ -1342,7 +1342,7 @@ mod tests {
         init_test("test_path_set_best_quality_tie_breaks_by_path_id");
         let set = PathSet::new(PathSelectionPolicy::BestQuality { count: 2 });
 
-        let tied = PathCharacteristics {
+        let tied = || PathCharacteristics {
             latency_ms: 25,
             bandwidth_bps: 2_000_000,
             loss_rate: 0.01,
@@ -1350,8 +1350,8 @@ mod tests {
             is_primary: false,
             priority: 100,
         };
-        set.register(test_path(9).with_characteristics(tied.clone()));
-        set.register(test_path(2).with_characteristics(tied));
+        set.register(test_path(9).with_characteristics(tied()));
+        set.register(test_path(2).with_characteristics(tied()));
         set.register(test_path(5).with_characteristics(PathCharacteristics::backup()));
 
         let selected = set.select_paths();

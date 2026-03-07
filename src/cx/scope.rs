@@ -1173,19 +1173,30 @@ impl<P: Policy> Scope<'_, P> {
         // outcomes. This prevents losing loser panic outcomes when multiple
         // tasks become ready in the same poll.
         let winner_idx = std::future::poll_fn(|poll_cx| {
+            let mut newly_ready = Vec::new();
+
             for (i, future) in futures.iter_mut().enumerate() {
                 if ready_results[i].is_some() {
                     continue;
                 }
                 if let std::task::Poll::Ready(res) = future.as_mut().poll(poll_cx) {
                     ready_results[i] = Some(res);
-                    if winner_idx.is_none() {
-                        winner_idx = Some(i);
-                    }
+                    newly_ready.push(i);
                 }
             }
 
-            winner_idx.map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+            if let Some(existing) = winner_idx {
+                return std::task::Poll::Ready(existing);
+            }
+
+            if newly_ready.is_empty() {
+                std::task::Poll::Pending
+            } else {
+                // Fairly select a winner among all that became ready in this round
+                let chosen = newly_ready[cx.random_usize(newly_ready.len())];
+                winner_idx = Some(chosen);
+                std::task::Poll::Ready(chosen)
+            }
         })
         .await;
 

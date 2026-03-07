@@ -66,5 +66,12 @@ fn dropping_blocked_writer_wakes_queued_reader() {
         "queued reader should be woken when the blocked writer is dropped"
     );
 
+    // Releasing the active reader should let the queued reader complete.
     drop(guard);
+
+    match Pin::new(&mut queued_reader).poll(&mut task_cx) {
+        Poll::Ready(Ok(_second_guard)) => {}
+        Poll::Ready(Err(err)) => panic!("queued reader should acquire after wake: {err:?}"),
+        Poll::Pending => panic!("queued reader remained pending after wake + reader release"),
+    }
 }

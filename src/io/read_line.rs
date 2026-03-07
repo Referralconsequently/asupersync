@@ -121,13 +121,13 @@ fn process_fresh_chunk(
                     return ChunkAction::Finish(Err(err));
                 }
                 if found_newline {
-                    ChunkAction::Finish(invalid_data_result(e))
+                    ChunkAction::ConsumeAndFinish(invalid_data_result(e))
                 } else {
                     pending.extend_from_slice(&chunk[valid_len..]);
                     ChunkAction::Consume
                 }
             } else if e.error_len().is_some() || found_newline {
-                ChunkAction::Finish(invalid_data_result(e))
+                ChunkAction::ConsumeAndFinish(invalid_data_result(e))
             } else {
                 pending.extend_from_slice(chunk);
                 ChunkAction::Consume
@@ -169,7 +169,7 @@ fn process_pending_chunk(
                     ChunkAction::Consume
                 }
             } else if e.error_len().is_some() {
-                ChunkAction::Finish(invalid_data_result(e))
+                ChunkAction::ConsumeAndFinish(invalid_data_result(e))
             } else {
                 ChunkAction::Consume
             }

@@ -2191,14 +2191,24 @@ unsafe fn gf256_mul_slices2_x86_avx2_impl_tables(
     }
 
     if i < dst_a.len() {
-        unsafe {
-            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_a[i..], low_tbl_arr, high_tbl_arr, table);
-        };
+        let rem_a = &mut dst_a[i..];
+        if rem_a.len() >= 32 {
+            unsafe {
+                gf256_mul_slice_x86_avx2_impl_tables(rem_a, low_tbl_arr, high_tbl_arr, table);
+            };
+        } else {
+            mul_with_table_scalar(rem_a, table);
+        }
     }
     if i < dst_b.len() {
-        unsafe {
-            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_b[i..], low_tbl_arr, high_tbl_arr, table);
-        };
+        let rem_b = &mut dst_b[i..];
+        if rem_b.len() >= 32 {
+            unsafe {
+                gf256_mul_slice_x86_avx2_impl_tables(rem_b, low_tbl_arr, high_tbl_arr, table);
+            };
+        } else {
+            mul_with_table_scalar(rem_b, table);
+        }
     }
 }
 
@@ -2324,26 +2334,38 @@ unsafe fn gf256_addmul_slices2_x86_avx2_impl_tables(
     }
 
     if i < src_a.len() {
-        unsafe {
-            gf256_addmul_slice_x86_avx2_impl_tables(
-                &mut dst_a[i..],
-                &src_a[i..],
-                low_tbl_arr,
-                high_tbl_arr,
-                table,
-            );
-        };
+        let rem_dst_a = &mut dst_a[i..];
+        let rem_src_a = &src_a[i..];
+        if rem_src_a.len() >= 32 {
+            unsafe {
+                gf256_addmul_slice_x86_avx2_impl_tables(
+                    rem_dst_a,
+                    rem_src_a,
+                    low_tbl_arr,
+                    high_tbl_arr,
+                    table,
+                );
+            };
+        } else {
+            addmul_with_table_scalar(rem_dst_a, rem_src_a, table);
+        }
     }
     if i < src_b.len() {
-        unsafe {
-            gf256_addmul_slice_x86_avx2_impl_tables(
-                &mut dst_b[i..],
-                &src_b[i..],
-                low_tbl_arr,
-                high_tbl_arr,
-                table,
-            );
-        };
+        let rem_dst_b = &mut dst_b[i..];
+        let rem_src_b = &src_b[i..];
+        if rem_src_b.len() >= 32 {
+            unsafe {
+                gf256_addmul_slice_x86_avx2_impl_tables(
+                    rem_dst_b,
+                    rem_src_b,
+                    low_tbl_arr,
+                    high_tbl_arr,
+                    table,
+                );
+            };
+        } else {
+            addmul_with_table_scalar(rem_dst_b, rem_src_b, table);
+        }
     }
 }
 

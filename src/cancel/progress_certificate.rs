@@ -1418,19 +1418,24 @@ mod tests {
         };
         let mut cert = ProgressCertificate::new(config);
 
-        // Constant decrease of 10 per step from 1000.
-        // To get a tight bound on reaching 0, we must evaluate at a step where E[V_t] < 0.
-        // At step 115, expected potential is 1000 - 114*10 = -140.
-        for i in 0..115 {
-            #[allow(clippy::cast_precision_loss)]
-            let v = 1000.0 - 10.0 * i as f64;
-            cert.observe(v.max(0.0));
+        // To get a tight bound on the current step, we need total_credit > initial_potential.
+        // We create an oscillatory sequence: start at 100.0, repeatedly jump to 110.0 and drop to 100.0.
+        cert.observe(100.0);
+        for _ in 0..200 {
+            cert.observe(110.0); // increase: delta = +10, credit = 0
+            cert.observe(100.0); // decrease: delta = -10, credit = 10
         }
+        // initial = 100.0.
+        // total_credit = 200 * 10.0 = 2000.0.
+        // t = 400.
+        // mean_credit = 5.0.
+        // expected_remaining = 100.0 - 400 * 5.0 = -1900.0.
+        // lambda = 1900.0.
 
         let verdict = cert.verdict();
         assert!(
             verdict.azuma_bound < 0.01,
-            "azuma bound should be small with consistent progress and tight c, got {:.6}",
+            "azuma bound should be small with accumulated credit > initial potential, got {:.6}",
             verdict.azuma_bound,
         );
     }
@@ -2250,21 +2255,32 @@ mod tests {
 
     #[test]
     fn freedman_much_tighter_constant_decrease() {
-        // Constant decrease: variance = 0, so Freedman has massive advantage.
+        // We want a sequence where variance is small compared to max_step_bound^2,
+        // but total_credit > initial_potential so that lambda > 0.
         let config = ProgressConfig {
+            max_step_bound: 100.0, // Deliberately loose bound.
             min_observations: 3,
             ..ProgressConfig::default()
         };
         let mut cert = ProgressCertificate::new(config);
 
-        for i in 0..25 {
-            #[allow(clippy::cast_precision_loss)]
-            let v = 200.0 - 10.0 * i as f64;
-            cert.observe(v.max(0.0));
+        // initial = 100.0
+        cert.observe(100.0);
+        // We drop by 1.0 twice, then increase by 1.0 once.
+        // Net change: -1.0 per 3 steps. Total credit: 2.0 per 3 steps.
+        // We do this 200 times.
+        let mut v = 100.0;
+        for _ in 0..200 {
+            v -= 1.0;
+            cert.observe(v);
+            v -= 1.0;
+            cert.observe(v);
+            v += 1.0;
+            cert.observe(v);
         }
 
         let verdict = cert.verdict();
-        // With zero variance, Freedman should be much tighter.
+        // With empirical variance much smaller than 100.0^2, Freedman should be much tighter.
         if verdict.azuma_bound > 1e-10 {
             let ratio = verdict.freedman_bound / verdict.azuma_bound;
             assert!(
@@ -2301,16 +2317,21 @@ mod tests {
     #[test]
     fn freedman_evidence_entry_present() {
         let config = ProgressConfig {
+            max_step_bound: 100.0,
             min_observations: 3,
             ..ProgressConfig::default()
         };
         let mut cert = ProgressCertificate::new(config);
 
-        // Create a scenario where Freedman differs from Azuma.
-        for i in 0..20 {
-            #[allow(clippy::cast_precision_loss)]
-            let v = 150.0 - 10.0 * i as f64;
-            cert.observe(v.max(0.0));
+        cert.observe(100.0);
+        let mut v = 100.0;
+        for _ in 0..200 {
+            v -= 1.0;
+            cert.observe(v);
+            v -= 1.0;
+            cert.observe(v);
+            v += 1.0;
+            cert.observe(v);
         }
 
         let verdict = cert.verdict();

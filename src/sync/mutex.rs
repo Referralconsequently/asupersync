@@ -106,6 +106,30 @@ struct Waiter {
     id: u64,
 }
 
+fn front_waiter_waker(state: &MutexState) -> Option<Waker> {
+    state.waiters.front().map(|waiter| waiter.waker.clone())
+}
+
+fn remove_waiter_and_take_next_waker(state: &mut MutexState, waiter_id: u64) -> Option<Waker> {
+    if state
+        .waiters
+        .front()
+        .is_some_and(|waiter| waiter.id == waiter_id)
+    {
+        state.waiters.pop_front();
+        if state.locked {
+            None
+        } else {
+            front_waiter_waker(state)
+        }
+    } else {
+        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+            state.waiters.remove(pos);
+        }
+        None
+    }
+}
+
 impl<T> Mutex<T> {
     /// Creates a new mutex in an unlocked state.
     #[must_use]
@@ -219,12 +243,32 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         // Check cancellation
         if let Err(_e) = self.cx.checkpoint() {
+            if let Some(waiter_id) = self.waiter_id {
+                let next_waker = {
+                    let mut state = self.mutex.state.lock();
+                    remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                };
+                self.waiter_id = None;
+                if let Some(next) = next_waker {
+                    next.wake();
+                }
+            }
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
         let mut state = self.mutex.state.lock();
 
         if self.mutex.is_poisoned() {
+            let next_waker = if let Some(waiter_id) = self.waiter_id {
+                self.waiter_id = None;
+                remove_waiter_and_take_next_waker(&mut state, waiter_id)
+            } else {
+                None
+            };
+            drop(state);
+            if let Some(next) = next_waker {
+                next.wake();
+            }
             return Poll::Ready(Err(LockError::Poisoned));
         }
 
@@ -243,10 +287,11 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             // Acquire lock
             state.locked = true;
 
-            // Remove ourselves from the queue if we were still in it,
-            // to prevent our stale record from eating future wakeups.
+            // Remove ourselves from the queue if we were still in it
             if let Some(id) = self.waiter_id {
-                if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
+                if state.waiters.front().is_some_and(|w| w.id == id) {
+                    state.waiters.pop_front();
+                } else if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
                     state.waiters.remove(pos);
                 }
             }
@@ -266,31 +311,19 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
                     existing.waker.clone_from(context.waker());
                 }
             } else {
-                // Was dequeued by unlock() but someone stole the lock.
-                // Re-register at the FRONT to preserve FIFO fairness.
-                let new_id = state.next_waiter_id;
-                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                state.waiters.push_front(Waiter {
-                    waker: context.waker().clone(),
-                    id: new_id,
-                });
-                drop(state);
-                self.waiter_id = Some(new_id);
-                return Poll::Pending;
+                unreachable!("waiter removed from queue without acquiring lock");
             }
-        } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-            state.waiters.push_back(Waiter {
-                waker: context.waker().clone(),
-                id,
-            });
-            drop(state);
-            self.waiter_id = Some(id);
             return Poll::Pending;
         }
-        drop(state);
 
+        let id = state.next_waiter_id;
+        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+        state.waiters.push_back(Waiter {
+            waker: context.waker().clone(),
+            id,
+        });
+        self.waiter_id = Some(id);
+        drop(state);
         Poll::Pending
     }
 }
@@ -298,28 +331,12 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 impl<T> Drop for LockFuture<'_, '_, T> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            let waker_to_wake = {
+            let next_waker = {
                 let mut state = self.mutex.state.lock();
-
-                // Try to remove from queue
-                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                    state.waiters.remove(pos);
-                }
-
-                // If the lock is free, pass the baton to the next waiter.
-                // This is safe even if we were not the designated heir, as spurious
-                // wakeups are harmless. We do this unconditionally (without checking
-                // if we were in the queue) because a chain of dropped waiters might
-                // include some that were still in the queue when they dropped.
-                if state.locked {
-                    None
-                } else {
-                    state.waiters.front().map(|next| next.waker.clone())
-                }
+                remove_waiter_and_take_next_waker(&mut state, waiter_id)
             };
-
-            if let Some(waker) = waker_to_wake {
-                waker.wake();
+            if let Some(next) = next_waker {
+                next.wake();
             }
         }
     }
@@ -376,6 +393,7 @@ unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}
 
 impl<T> OwnedMutexGuard<T> {
     /// Acquires the mutex asynchronously (owned).
+    #[allow(clippy::too_many_lines)]
     pub async fn lock(mutex: Arc<Mutex<T>>, cx: &Cx) -> Result<Self, LockError> {
         // Reuse the logic from LockFuture or reimplement?
         // Since we need to return OwnedMutexGuard, we can't use LockFuture directly
@@ -391,23 +409,12 @@ impl<T> OwnedMutexGuard<T> {
         impl<T> Drop for OwnedLockFuture<T> {
             fn drop(&mut self) {
                 if let Some(waiter_id) = self.waiter_id {
-                    let waker_to_wake = {
+                    let next_waker = {
                         let mut state = self.mutex.state.lock();
-
-                        // Try to remove from queue
-                        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                            state.waiters.remove(pos);
-                        }
-
-                        if state.locked {
-                            None
-                        } else {
-                            state.waiters.front().map(|next| next.waker.clone())
-                        }
+                        remove_waiter_and_take_next_waker(&mut state, waiter_id)
                     };
-
-                    if let Some(waker) = waker_to_wake {
-                        waker.wake();
+                    if let Some(next) = next_waker {
+                        next.wake();
                     }
                 }
             }
@@ -419,12 +426,35 @@ impl<T> OwnedMutexGuard<T> {
             fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
                 if this.cx.checkpoint().is_err() {
+                    if let Some(waiter_id) = this.waiter_id {
+                        let next_waker = {
+                            let mut state = this.mutex.state.lock();
+                            remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                        };
+                        this.waiter_id = None;
+                        if let Some(next) = next_waker {
+                            next.wake();
+                        }
+                    }
                     return Poll::Ready(Err(LockError::Cancelled));
                 }
+
                 let mut state = this.mutex.state.lock();
+
                 if this.mutex.is_poisoned() {
+                    let next_waker = if let Some(waiter_id) = this.waiter_id {
+                        this.waiter_id = None;
+                        remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                    } else {
+                        None
+                    };
+                    drop(state);
+                    if let Some(next) = next_waker {
+                        next.wake();
+                    }
                     return Poll::Ready(Err(LockError::Poisoned));
                 }
+
                 // A free lock is not enough to acquire if older waiters are still queued.
                 let queued_ahead = this.waiter_id.map_or_else(
                     || !state.waiters.is_empty(),
@@ -435,13 +465,15 @@ impl<T> OwnedMutexGuard<T> {
                             .is_some_and(|front| front.id != waiter_id)
                     },
                 );
+
                 if !state.locked && !queued_ahead {
                     state.locked = true;
 
-                    // Remove ourselves from the queue if we were still in it,
-                    // to prevent our stale record from eating future wakeups.
+                    // Remove ourselves from the queue if we were still in it
                     if let Some(id) = this.waiter_id {
-                        if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
+                        if state.waiters.front().is_some_and(|w| w.id == id) {
+                            state.waiters.pop_front();
+                        } else if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
                             state.waiters.remove(pos);
                         }
                     }
@@ -453,35 +485,25 @@ impl<T> OwnedMutexGuard<T> {
                         mutex: this.mutex.clone(),
                     }));
                 }
+
                 if let Some(waiter_id) = this.waiter_id {
                     if let Some(existing) = state.waiters.iter_mut().find(|w| w.id == waiter_id) {
                         if !existing.waker.will_wake(context.waker()) {
                             existing.waker.clone_from(context.waker());
                         }
                     } else {
-                        // Was dequeued by unlock() but someone stole the lock.
-                        // Re-register at the FRONT to preserve FIFO fairness.
-                        let new_id = state.next_waiter_id;
-                        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                        state.waiters.push_front(Waiter {
-                            waker: context.waker().clone(),
-                            id: new_id,
-                        });
-                        drop(state);
-                        this.waiter_id = Some(new_id);
-                        return Poll::Pending;
+                        unreachable!("waiter removed from queue without acquiring lock");
                     }
-                } else {
-                    let id = state.next_waiter_id;
-                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                    state.waiters.push_back(Waiter {
-                        waker: context.waker().clone(),
-                        id,
-                    });
-                    drop(state);
-                    this.waiter_id = Some(id);
                     return Poll::Pending;
                 }
+
+                let id = state.next_waiter_id;
+                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                state.waiters.push_back(Waiter {
+                    waker: context.waker().clone(),
+                    id,
+                });
+                this.waiter_id = Some(id);
                 drop(state);
                 Poll::Pending
             }
