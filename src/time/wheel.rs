@@ -449,9 +449,8 @@ impl TimerWheel {
         let current = self.current_time();
         if deadline > current {
             let duration_ns = deadline.as_nanos().saturating_sub(current.as_nanos());
-            if duration_ns > self.config.max_timer_duration.as_nanos() as u64 {
-                deadline =
-                    current.saturating_add_nanos(self.config.max_timer_duration.as_nanos() as u64);
+            if duration_ns > self.max_timer_duration_ns {
+                deadline = current.saturating_add_nanos(self.max_timer_duration_ns);
             }
         }
         self.try_register(deadline, waker)

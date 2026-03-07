@@ -146,7 +146,7 @@ impl SporkAppHarness {
     ///
     /// After this call, `app_handle()` returns `None`.
     pub fn stop_app(&mut self) -> Result<(), HarnessError> {
-        if let Some(handle) = self.app_handle.take() {
+        if let Some(mut handle) = self.app_handle.take() {
             handle
                 .stop(&mut self.runtime.state)
                 .map_err(HarnessError::Stop)?;
@@ -165,7 +165,7 @@ impl SporkAppHarness {
         self.runtime.run_until_idle();
 
         // Phase 2: Stop the app (cancel-correct shutdown).
-        let stop_result = if let Some(handle) = self.app_handle.take() {
+        let stop_result = if let Some(mut handle) = self.app_handle.take() {
             handle
                 .stop(&mut self.runtime.state)
                 .map(|_| ())

@@ -39,12 +39,15 @@ use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
+
+static NEXT_RUNTIME_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Errors that can occur when spawning a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,6 +297,8 @@ impl RuntimeObservability {
 /// This is the "Σ" from the formal semantics:
 /// `Σ = ⟨R, T, O, τ_now⟩`
 pub struct RuntimeState {
+    /// Stable identity for this runtime state instance.
+    instance_id: u64,
     /// All region records.
     pub regions: RegionTable,
     /// Task table for hot-path task state + stored futures.
@@ -345,6 +350,14 @@ pub struct RuntimeState {
     /// Allows `drain_ready_async_finalizers` to skip a full region-arena scan
     /// on every poll.
     finalizing_regions: Vec<RegionId>,
+    /// Recently closed region ids that have been removed from the arena.
+    ///
+    /// External handles such as `AppHandle` may legitimately outlive the
+    /// underlying region record because `advance_region_state` removes closed
+    /// regions eagerly. Keep a bounded tombstone set so those handles can still
+    /// distinguish "closed and cleaned up" from "never existed in this state".
+    recently_closed_regions: HashSet<RegionId>,
+    recently_closed_region_order: VecDeque<RegionId>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -354,6 +367,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("tasks", &self.tasks)
             .field("obligations", &self.obligations)
             .field("now", &self.now)
+            .field("instance_id", &self.instance_id)
             .field("root_region", &self.root_region)
             .field("trace", &self.trace)
             .field("metrics", &"<dyn MetricsProvider>")
@@ -369,11 +383,21 @@ impl std::fmt::Debug for RuntimeState {
             .field("leak_count", &self.leak_count)
             .field("handling_leaks", &self.handling_leaks)
             .field("finalizing_region_count", &self.finalizing_regions.len())
+            .field(
+                "recently_closed_region_count",
+                &self.recently_closed_regions.len(),
+            )
+            .field(
+                "recently_closed_region_order_count",
+                &self.recently_closed_region_order.len(),
+            )
             .finish()
     }
 }
 
 impl RuntimeState {
+    const RECENTLY_CLOSED_REGION_CAPACITY: usize = 4096;
+
     /// Creates a new empty runtime state without a reactor.
     ///
     /// This is equivalent to [`without_reactor()`](Self::without_reactor) and creates
@@ -387,6 +411,7 @@ impl RuntimeState {
     #[must_use]
     pub fn new_with_metrics(metrics: Arc<dyn MetricsProvider>) -> Self {
         Self {
+            instance_id: NEXT_RUNTIME_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             regions: RegionTable::new(),
             tasks: TaskTable::new(),
             obligations: ObligationTable::new(),
@@ -406,6 +431,8 @@ impl RuntimeState {
             leak_count: 0,
             handling_leaks: false,
             finalizing_regions: Vec::new(),
+            recently_closed_regions: HashSet::new(),
+            recently_closed_region_order: VecDeque::new(),
         }
     }
 
@@ -592,6 +619,13 @@ impl RuntimeState {
         self.trace.clone()
     }
 
+    /// Returns the stable identity of this runtime state instance.
+    #[inline]
+    #[must_use]
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
     /// Returns the metrics provider for this runtime.
     #[inline]
     #[must_use]
@@ -677,6 +711,14 @@ impl RuntimeState {
     #[must_use]
     pub fn region(&self, region_id: RegionId) -> Option<&RegionRecord> {
         self.regions.get(region_id.arena_index())
+    }
+
+    /// Returns `true` if the region has already completed close and been
+    /// removed from the live region table.
+    #[inline]
+    #[must_use]
+    pub fn region_was_closed(&self, region_id: RegionId) -> bool {
+        self.recently_closed_regions.contains(&region_id)
     }
 
     /// Returns a mutable reference to a region record by ID.
@@ -2331,12 +2373,26 @@ impl RuntimeState {
                                 current = Some(parent_id);
                             }
 
+                            self.remember_closed_region(region_id);
                             // Cleanup: Remove the closed region from the arena to prevent memory leaks
                             self.regions.remove(region_id.arena_index());
                         }
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn remember_closed_region(&mut self, region_id: RegionId) {
+        if !self.recently_closed_regions.insert(region_id) {
+            return;
+        }
+
+        self.recently_closed_region_order.push_back(region_id);
+        while self.recently_closed_region_order.len() > Self::RECENTLY_CLOSED_REGION_CAPACITY {
+            if let Some(evicted) = self.recently_closed_region_order.pop_front() {
+                self.recently_closed_regions.remove(&evicted);
             }
         }
     }

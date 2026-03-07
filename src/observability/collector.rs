@@ -48,6 +48,9 @@ impl LogCollector {
         }
 
         let mut inner = self.inner.lock();
+        if inner.capacity == 0 {
+            return;
+        }
         if inner.entries.len() >= inner.capacity {
             inner.entries.pop_front();
         }
@@ -139,6 +142,16 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].message(), "2");
         assert_eq!(entries[1].message(), "3");
+    }
+
+    #[test]
+    fn test_collector_zero_capacity_drops_logs() {
+        let collector = LogCollector::new(0);
+        collector.log(LogEntry::info("dropped"));
+
+        assert_eq!(collector.capacity(), 0);
+        assert!(collector.is_empty());
+        assert!(collector.peek().is_empty());
     }
 
     #[test]

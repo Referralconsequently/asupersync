@@ -947,10 +947,13 @@ impl Lease {
             LeaseState::Expired => return Err(LeaseError::Expired),
             LeaseState::Active => {}
         }
+        if now >= self.expires_at {
+            self.state = LeaseState::Expired;
+            return Err(LeaseError::Expired);
+        }
         self.state = LeaseState::Released;
         // The caller is responsible for committing the obligation in RuntimeState.
         // This method just updates the lease state.
-        let _ = now; // used by caller for obligation commit timestamp
         Ok(())
     }
 
@@ -3481,6 +3484,26 @@ mod tests {
         assert_eq!(result2, Err(LeaseError::Expired));
     }
 
+    /// Invariant: releasing a lease at or after `expires_at` must fail with
+    /// `LeaseError::Expired` and transition the lease into `Expired`.
+    #[test]
+    fn lease_release_at_exact_expiry_boundary_fails() {
+        let now = Time::from_secs(10);
+        let mut lease = Lease::new(
+            test_obligation_id(),
+            test_region_id(),
+            test_task_id(),
+            Duration::from_secs(30),
+            now,
+        );
+
+        let result = lease.release(Time::from_secs(40));
+        assert_eq!(result, Err(LeaseError::Expired));
+        assert_eq!(lease.state(), LeaseState::Expired);
+        assert!(lease.is_expired(Time::from_secs(40)));
+        assert!(!lease.is_released());
+    }
+
     /// Invariant: a zero-duration lease is immediately expired at its creation time,
     /// since `expires_at = now + Duration::ZERO = now` and `is_expired` uses `>=`.
     #[test]
@@ -3586,15 +3609,20 @@ mod tests {
         store.complete(&key, RemoteOutcome::Failed("disk full".into()));
 
         let decision = store.check(&key, &comp);
-        match decision {
-            DedupDecision::Duplicate(record) => {
-                assert!(record.outcome.is_some());
-                let outcome = record.outcome.unwrap();
-                assert!(!outcome.is_success());
-                assert!(matches!(outcome, RemoteOutcome::Failed(msg) if msg.contains("disk full")));
-            }
-            other => panic!("expected Duplicate, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                decision,
+                DedupDecision::Duplicate(record)
+                    if record.outcome.as_ref().is_some_and(|outcome| {
+                        !outcome.is_success()
+                            && matches!(
+                                outcome,
+                                RemoteOutcome::Failed(msg) if msg.contains("disk full")
+                            )
+                    })
+            ),
+            "expected Duplicate with failed outcome recorded"
+        );
     }
 
     /// Invariant: completing the same key twice overwrites the outcome.
@@ -3613,13 +3641,17 @@ mod tests {
         store.complete(&key, RemoteOutcome::Success(vec![1, 2, 3]));
 
         let decision = store.check(&key, &comp);
-        match decision {
-            DedupDecision::Duplicate(record) => {
-                let outcome = record.outcome.expect("outcome should be set");
-                assert!(outcome.is_success(), "latest complete should win");
-            }
-            other => panic!("expected Duplicate, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                decision,
+                DedupDecision::Duplicate(record)
+                    if record
+                        .outcome
+                        .as_ref()
+                        .is_some_and(RemoteOutcome::is_success)
+            ),
+            "expected Duplicate with the latest successful outcome"
+        );
     }
 
     // -----------------------------------------------------------------------

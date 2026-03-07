@@ -635,7 +635,9 @@ mod tests {
             warnings_ref.lock().push(warning.reason);
         });
 
-        let stale = Instant::now().checked_sub(Duration::from_secs(30)).unwrap_or_else(Instant::now);
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .unwrap_or_else(Instant::now);
         let task = make_task(
             TaskId::new_for_test(2, 0),
             RegionId::new_for_test(1, 0),
@@ -853,7 +855,9 @@ mod tests {
             warnings_ref.lock().push(warning.reason);
         });
 
-        let stale = Instant::now().checked_sub(Duration::from_secs(20)).unwrap_or_else(Instant::now);
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(20))
+            .unwrap_or_else(Instant::now);
         let task = make_task(
             TaskId::new_for_test(4, 0),
             RegionId::new_for_test(1, 0),
@@ -1149,7 +1153,9 @@ mod tests {
         let metrics = Arc::new(TestMetrics::default());
         monitor.set_metrics_provider(metrics.clone());
 
-        let stale = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .unwrap_or_else(Instant::now);
         let task = make_task(
             TaskId::new_for_test(9, 0),
             RegionId::new_for_test(1, 0),
@@ -1197,7 +1203,9 @@ mod tests {
         let metrics = Arc::new(TestMetrics::default());
         monitor.set_metrics_provider(metrics.clone());
 
-        let first = Instant::now().checked_sub(Duration::from_secs(5)).unwrap_or_else(Instant::now);
+        let first = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap_or_else(Instant::now);
         let second = Instant::now();
         let task = make_task(
             TaskId::new_for_test(10, 0),

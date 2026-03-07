@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parent_region = runtime.state.create_root_region(Budget::INFINITE);
     let cx = Cx::new(parent_region, TaskId::testing_default(), Budget::INFINITE);
 
-    let app = AppSpec::new("counter_app")
+    let mut app = AppSpec::new("counter_app")
         .with_registry(registry_cap)
         .child(counter_child(&registry, &named_handle_slot))
         .start(&mut runtime.state, &cx, parent_region)?;

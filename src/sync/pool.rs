@@ -1285,7 +1285,10 @@ where
             }
         }
 
-        let is_next_in_line = state.waiters.front().is_none_or(|w| Some(w.id) == waiter_id);
+        let is_next_in_line = state
+            .waiters
+            .front()
+            .is_none_or(|w| Some(w.id) == waiter_id);
 
         let result = if is_next_in_line {
             if let Some(idle) = state.idle.pop_front() {
@@ -1320,7 +1323,10 @@ where
             return false;
         }
 
-        let is_next_in_line = state.waiters.front().is_none_or(|w| Some(w.id) == waiter_id);
+        let is_next_in_line = state
+            .waiters
+            .front()
+            .is_none_or(|w| Some(w.id) == waiter_id);
         if !is_next_in_line {
             return false;
         }

@@ -68,6 +68,66 @@ impl std::fmt::Debug for CompiledApp {
 }
 
 impl CompiledApp {
+    fn collect_region_tree(state: &RuntimeState, root_region: RegionId) -> Vec<(RegionId, usize)> {
+        let mut regions = Vec::new();
+        let mut pending = vec![(root_region, 0_usize)];
+
+        while let Some((region_id, depth)) = pending.pop() {
+            let Some(record) = state.region(region_id) else {
+                continue;
+            };
+            let children = record.child_ids();
+            regions.push((region_id, depth));
+            for child in children {
+                pending.push((child, depth + 1));
+            }
+        }
+
+        regions
+    }
+
+    fn cleanup_failed_start(state: &mut RuntimeState, root_region: RegionId) {
+        let _ = state.cancel_request(root_region, &CancelReason::shutdown(), None);
+
+        // Startup may already have registered tasks into the freshly created
+        // region tree even though no scheduler ever got a chance to poll them.
+        // Complete those records explicitly so region close can reach quiescence.
+        let startup_tasks: Vec<_> = Self::collect_region_tree(state, root_region)
+            .into_iter()
+            .flat_map(|(region_id, _)| {
+                state
+                    .region(region_id)
+                    .map(crate::record::RegionRecord::task_ids)
+                    .unwrap_or_default()
+            })
+            .collect();
+        for task_id in startup_tasks {
+            if let Some(task) = state.task_mut(task_id) {
+                let reason = task
+                    .cancel_reason()
+                    .cloned()
+                    .unwrap_or_else(CancelReason::shutdown);
+                let _ = task.complete(crate::types::Outcome::Cancelled(reason));
+            }
+            let _ = state.task_completed(task_id);
+        }
+
+        let mut previous_region_count = usize::MAX;
+        while state.region(root_region).is_some() {
+            let current_region_count = state.regions_len();
+            if current_region_count == previous_region_count {
+                break;
+            }
+            previous_region_count = current_region_count;
+
+            let mut regions = Self::collect_region_tree(state, root_region);
+            regions.sort_by_key(|(_, depth)| std::cmp::Reverse(*depth));
+            for (region_id, _) in regions {
+                state.advance_region_state(region_id);
+            }
+        }
+    }
+
     /// Application name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -118,11 +178,7 @@ impl CompiledApp {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    // Clean up the root region we allocated to prevent a region leak.
-                    if let Some(record) = state.region(root_region) {
-                        record.begin_close(None);
-                        record.begin_drain();
-                    }
+                    Self::cleanup_failed_start(state, root_region);
                     return Err(AppSpawnError::SpawnFailed(e));
                 }
             };
@@ -132,6 +188,7 @@ impl CompiledApp {
         Ok(AppHandle {
             name: self.name,
             root_region,
+            runtime_instance_id: state.instance_id(),
             supervisor,
             registry: registry_for_handle,
             resolved: false,
@@ -279,6 +336,8 @@ pub struct AppHandle {
     name: String,
     /// Root region allocated by `AppSpec::start`.
     root_region: RegionId,
+    /// Runtime state instance that owns the root region.
+    runtime_instance_id: u64,
     /// Supervisor state from spawn.
     supervisor: SupervisorHandle,
     /// Registry capability handle, if the app was started with one.
@@ -292,6 +351,7 @@ impl std::fmt::Debug for AppHandle {
         f.debug_struct("AppHandle")
             .field("name", &self.name)
             .field("root_region", &self.root_region)
+            .field("runtime_instance_id", &self.runtime_instance_id)
             .field("resolved", &self.resolved)
             .finish_non_exhaustive()
     }
@@ -309,6 +369,10 @@ impl Drop for AppHandle {
 }
 
 impl AppHandle {
+    fn runtime_matches(&self, state: &RuntimeState) -> bool {
+        state.instance_id() == self.runtime_instance_id
+    }
+
     /// Application name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -341,10 +405,23 @@ impl AppHandle {
     /// After calling `stop`, the region will transition through its lifecycle
     /// states. Use [`AppHandle::is_stopped`] or poll the region state to
     /// determine when quiescence is reached.
-    pub fn stop(mut self, state: &mut RuntimeState) -> Result<StoppedApp, AppStopError> {
+    pub fn stop(&mut self, state: &mut RuntimeState) -> Result<StoppedApp, AppStopError> {
         let reason = CancelReason::new(CancelKind::Shutdown);
 
+        if !self.runtime_matches(state) {
+            return Err(AppStopError::WrongRuntime {
+                region: self.root_region,
+            });
+        }
+
         let Some(region_record) = state.region(self.root_region) else {
+            if state.region_was_closed(self.root_region) {
+                self.resolved = true;
+                return Ok(StoppedApp {
+                    name: self.name.clone(),
+                    root_region: self.root_region,
+                });
+            }
             // Defuse drop bomb — caller has no recourse if the region is gone.
             self.resolved = true;
             return Err(AppStopError::RegionNotFound(self.root_region));
@@ -355,7 +432,7 @@ impl AppHandle {
             // Already stopped.
             self.resolved = true;
             return Ok(StoppedApp {
-                name: std::mem::take(&mut self.name),
+                name: self.name.clone(),
                 root_region: self.root_region,
             });
         }
@@ -365,7 +442,7 @@ impl AppHandle {
 
         self.resolved = true;
         Ok(StoppedApp {
-            name: std::mem::take(&mut self.name),
+            name: self.name.clone(),
             root_region: self.root_region,
         })
     }
@@ -373,26 +450,53 @@ impl AppHandle {
     /// Check whether the app's root region has reached terminal (Closed) state.
     #[must_use]
     pub fn is_stopped(&self, state: &RuntimeState) -> bool {
-        state
-            .region(self.root_region)
-            .is_some_and(|r| r.state() == RegionState::Closed)
+        if !self.runtime_matches(state) {
+            return false;
+        }
+
+        state.region(self.root_region).map_or_else(
+            || state.region_was_closed(self.root_region),
+            |r| r.state() == RegionState::Closed,
+        )
     }
 
     /// Check whether the app's root region is quiescent (no live tasks,
     /// no pending obligations, no finalizers).
     pub fn is_quiescent(&self, state: &RuntimeState) -> bool {
-        state
-            .region(self.root_region)
-            .is_some_and(crate::record::RegionRecord::is_quiescent)
+        if !self.runtime_matches(state) {
+            return false;
+        }
+
+        state.region(self.root_region).map_or_else(
+            || state.region_was_closed(self.root_region),
+            crate::record::RegionRecord::is_quiescent,
+        )
     }
 
     /// Wait for the application's root region to reach a terminal state.
     ///
-    /// Returns the terminal region state. In Phase 0 (synchronous runtime),
-    /// this polls the region state; in async runtimes, this would await
-    /// region completion.
-    pub fn join(mut self, state: &RuntimeState) -> Result<StoppedApp, AppStopError> {
+    /// Returns the terminal region state once the app has fully stopped.
+    ///
+    /// In the current synchronous Phase 0 implementation, this does not drive
+    /// the runtime forward on its own. Callers must first drive shutdown to
+    /// completion; otherwise this returns [`AppStopError::RegionNotStopped`]
+    /// instead of falsely reporting success. In that case, the handle remains
+    /// usable so the caller can keep polling or call [`AppHandle::stop`].
+    pub fn join(&mut self, state: &RuntimeState) -> Result<StoppedApp, AppStopError> {
+        if !self.runtime_matches(state) {
+            return Err(AppStopError::WrongRuntime {
+                region: self.root_region,
+            });
+        }
+
         let Some(region_record) = state.region(self.root_region) else {
+            if state.region_was_closed(self.root_region) {
+                self.resolved = true;
+                return Ok(StoppedApp {
+                    name: self.name.clone(),
+                    root_region: self.root_region,
+                });
+            }
             // Defuse drop bomb — caller has no recourse if the region is gone.
             self.resolved = true;
             return Err(AppStopError::RegionNotFound(self.root_region));
@@ -404,17 +508,14 @@ impl AppHandle {
         if region_state == RegionState::Closed {
             self.resolved = true;
             return Ok(StoppedApp {
-                name: std::mem::take(&mut self.name),
+                name: self.name.clone(),
                 root_region: self.root_region,
             });
         }
 
-        // If the region is draining/finalizing, it's on its way to closed.
-        // Mark resolved so we don't panic on drop — the caller is observing.
-        self.resolved = true;
-        Ok(StoppedApp {
-            name: std::mem::take(&mut self.name),
-            root_region: self.root_region,
+        Err(AppStopError::RegionNotStopped {
+            region: self.root_region,
+            state: region_state,
         })
     }
 
@@ -540,14 +641,39 @@ impl std::error::Error for AppStartError {
 /// Error stopping an application.
 #[derive(Debug)]
 pub enum AppStopError {
+    /// The handle was used with a different runtime state than the one that
+    /// created the app root region.
+    WrongRuntime {
+        /// The app root region stored on the handle.
+        region: RegionId,
+    },
     /// The root region no longer exists in the runtime state.
     RegionNotFound(RegionId),
+    /// The root region exists, but has not yet reached `Closed`.
+    RegionNotStopped {
+        /// The app root region that was queried.
+        region: RegionId,
+        /// The current lifecycle state observed for that region.
+        state: RegionState,
+    },
 }
 
 impl std::fmt::Display for AppStopError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::WrongRuntime { region } => {
+                write!(
+                    f,
+                    "app root region {region:?} belongs to a different runtime state"
+                )
+            }
             Self::RegionNotFound(id) => write!(f, "app root region {id:?} not found"),
+            Self::RegionNotStopped { region, state } => {
+                write!(
+                    f,
+                    "app root region {region:?} is not stopped yet (state: {state:?})"
+                )
+            }
         }
     }
 }
@@ -561,6 +687,7 @@ impl std::error::Error for AppStopError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::SpawnError;
     use crate::runtime::state::RuntimeState;
     use crate::supervision::{ChildSpec, NameRegistrationPolicy, SupervisionStrategy};
     use crate::types::Budget;
@@ -591,6 +718,19 @@ mod tests {
             registration: NameRegistrationPolicy::None,
             start_immediately: true,
             required: true,
+        }
+    }
+
+    fn close_app_region_and_remove_records(state: &mut RuntimeState, app_region: RegionId) {
+        let _ = state.cancel_request(app_region, &CancelReason::shutdown(), None);
+
+        let mut previous_region_count = usize::MAX;
+        while state.region(app_region).is_some() && state.regions_len() != previous_region_count {
+            previous_region_count = state.regions_len();
+            let region_ids: Vec<_> = state.regions_iter().map(|(_, region)| region.id).collect();
+            for region_id in region_ids {
+                state.advance_region_state(region_id);
+            }
         }
     }
 
@@ -672,7 +812,7 @@ mod tests {
         );
 
         let spec = AppSpec::new("stoppable").child(make_child("w"));
-        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
         let app_region = handle.root_region();
 
         let stopped = handle.stop(&mut state).expect("stop ok");
@@ -703,7 +843,7 @@ mod tests {
 
         // Start app with no children (empty supervisor).
         let spec = AppSpec::new("empty_app");
-        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
         let app_region = handle.root_region();
 
         // Force-close the region for testing purposes.
@@ -730,6 +870,39 @@ mod tests {
         let stopped = handle.join(&state).expect("join ok");
         assert_eq!(stopped.name, "empty_app");
         crate::test_complete!("app_join_on_closed_region_succeeds");
+    }
+
+    #[test]
+    fn app_join_on_open_region_preserves_handle() {
+        init_test("app_join_on_open_region_preserves_handle");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let spec = AppSpec::new("still_running").child(make_child("worker"));
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let app_region = handle.root_region();
+
+        let result = handle.join(&state);
+        assert!(
+            matches!(
+                result,
+                Err(AppStopError::RegionNotStopped { region, state })
+                    if region == app_region && state == RegionState::Open
+            ),
+            "expected RegionNotStopped(Open) for the running app region"
+        );
+
+        let stopped = handle
+            .stop(&mut state)
+            .expect("handle should remain usable after join miss");
+        assert_eq!(stopped.root_region, app_region);
+
+        crate::test_complete!("app_join_on_open_region_preserves_handle");
     }
 
     #[test]
@@ -796,6 +969,104 @@ mod tests {
             "expected DuplicateChildName, got {err:?}"
         );
         crate::test_complete!("app_start_compile_error_on_duplicate_children");
+    }
+
+    #[test]
+    fn app_start_spawn_failure_cleans_up_allocated_region() {
+        init_test("app_start_spawn_failure_cleans_up_allocated_region");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let failing_child = ChildSpec {
+            name: "broken".into(),
+            start: Box::new(
+                |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                 _state: &mut RuntimeState,
+                 _cx: &Cx| Err(SpawnError::RegionClosed(scope.region_id())),
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: Vec::new(),
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let spec = AppSpec::new("broken_app").child(failing_child);
+        let result = spec.start(&mut state, &cx, root);
+        assert!(matches!(result, Err(AppStartError::SpawnFailed(_))));
+        assert_eq!(
+            state.regions_len(),
+            1,
+            "failed app start should not leak an extra region"
+        );
+        assert_eq!(
+            state
+                .region(root)
+                .map(crate::record::RegionRecord::child_count),
+            Some(0),
+            "parent root should not retain a leaked child region"
+        );
+
+        crate::test_complete!("app_start_spawn_failure_cleans_up_allocated_region");
+    }
+
+    #[test]
+    fn app_start_spawn_failure_cleans_up_started_tasks() {
+        init_test("app_start_spawn_failure_cleans_up_started_tasks");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let failing_child = ChildSpec {
+            name: "broken".into(),
+            start: Box::new(
+                |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                 _state: &mut RuntimeState,
+                 _cx: &Cx| Err(SpawnError::RegionClosed(scope.region_id())),
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec!["started".into()],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let spec = AppSpec::new("partially_started_app")
+            .child(make_child("started"))
+            .child(failing_child);
+        let result = spec.start(&mut state, &cx, root);
+
+        assert!(matches!(result, Err(AppStartError::SpawnFailed(_))));
+        assert_eq!(
+            state.live_task_count(),
+            0,
+            "failed app start should not leave unscheduled tasks behind"
+        );
+        assert_eq!(
+            state.regions_len(),
+            1,
+            "failed app start should remove the temporary app region tree"
+        );
+        assert_eq!(
+            state
+                .region(root)
+                .map(crate::record::RegionRecord::child_count),
+            Some(0),
+            "parent root should not retain leaked app descendants"
+        );
+
+        crate::test_complete!("app_start_spawn_failure_cleans_up_started_tasks");
     }
 
     #[test]
@@ -985,7 +1256,7 @@ mod tests {
 
         // Start → stop → region transitions correctly.
         let spec = AppSpec::new("lifecycle").child(make_child("w1"));
-        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
         let app_region = handle.root_region();
 
         // Region starts open.
@@ -1058,7 +1329,7 @@ mod tests {
         );
 
         let spec = AppSpec::new("cancel_correct").child(make_child("w"));
-        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
         let app_region = handle.root_region();
 
         let _stopped = handle.stop(&mut state).expect("stop ok");
@@ -1174,7 +1445,7 @@ mod tests {
             .child(make_child("w1"))
             .compile()
             .expect("compile ok");
-        let handle = compiled.start(&mut state, &cx, root).expect("start ok");
+        let mut handle = compiled.start(&mut state, &cx, root).expect("start ok");
         let app_region = handle.root_region();
         let _stopped = handle.stop(&mut state).expect("stop ok");
 
@@ -1497,7 +1768,7 @@ mod tests {
         let spec = AppSpec::new("stoppable_reg")
             .with_registry(handle)
             .child(make_child("w"));
-        let app_handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let mut app_handle = spec.start(&mut state, &cx, root).expect("start ok");
 
         // Stop should work without panic.
         let _stopped = app_handle.stop(&mut state).expect("stop ok");
@@ -1933,7 +2204,7 @@ mod tests {
     #[test]
     fn stop_region_not_found_does_not_panic() {
         // BUG: stop() returned Err without defusing the drop bomb, causing
-        // a panic ("APP HANDLE LEAKED") when the consumed AppHandle was dropped.
+        // a panic ("APP HANDLE LEAKED") when the handle was later dropped.
         init_test("stop_region_not_found_does_not_panic");
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
@@ -1944,14 +2215,18 @@ mod tests {
         );
 
         let spec = AppSpec::new("phantom").child(make_child("w"));
-        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let app_region = handle.root_region();
 
-        // Use a fresh RuntimeState where the handle's root region doesn't exist.
-        let mut empty_state = RuntimeState::new();
+        // Simulate corruption/removal inside the originating runtime.
+        let _ = state.regions.remove(app_region.arena_index());
 
         // This must NOT panic — the drop bomb should be defused on the error path.
-        let result = handle.stop(&mut empty_state);
-        assert!(result.is_err(), "expected RegionNotFound error");
+        let result = handle.stop(&mut state);
+        assert!(
+            matches!(result, Err(AppStopError::RegionNotFound(region)) if region == app_region),
+            "expected RegionNotFound for a missing root region in the originating runtime"
+        );
         crate::test_complete!("stop_region_not_found_does_not_panic");
     }
 
@@ -1968,13 +2243,132 @@ mod tests {
         );
 
         let spec = AppSpec::new("phantom_join").child(make_child("w"));
-        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
 
-        // Use a fresh RuntimeState where the handle's root region doesn't exist.
-        let empty_state = RuntimeState::new();
+        let app_region = handle.root_region();
 
-        let result = handle.join(&empty_state);
-        assert!(result.is_err(), "expected RegionNotFound error");
+        // Simulate corruption/removal inside the originating runtime.
+        let _ = state.regions.remove(app_region.arena_index());
+
+        let result = handle.join(&state);
+        assert!(
+            matches!(result, Err(AppStopError::RegionNotFound(region)) if region == app_region),
+            "expected RegionNotFound for a missing root region in the originating runtime"
+        );
         crate::test_complete!("join_region_not_found_does_not_panic");
+    }
+
+    #[test]
+    fn app_join_succeeds_after_runtime_removes_closed_region() {
+        init_test("app_join_succeeds_after_runtime_removes_closed_region");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let spec = AppSpec::new("removed_root");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let app_region = handle.root_region();
+
+        close_app_region_and_remove_records(&mut state, app_region);
+
+        assert!(
+            state.region(app_region).is_none(),
+            "normal shutdown should remove the closed app region record"
+        );
+        assert!(handle.is_stopped(&state));
+        assert!(handle.is_quiescent(&state));
+
+        let stopped = handle
+            .join(&state)
+            .expect("join should succeed after removal");
+        assert_eq!(stopped.name, "removed_root");
+        assert_eq!(stopped.root_region, app_region);
+
+        crate::test_complete!("app_join_succeeds_after_runtime_removes_closed_region");
+    }
+
+    #[test]
+    fn app_stop_is_idempotent_after_runtime_removes_closed_region() {
+        init_test("app_stop_is_idempotent_after_runtime_removes_closed_region");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let spec = AppSpec::new("removed_then_stop");
+        let mut handle = spec.start(&mut state, &cx, root).expect("start ok");
+        let app_region = handle.root_region();
+
+        close_app_region_and_remove_records(&mut state, app_region);
+
+        let stopped = handle
+            .stop(&mut state)
+            .expect("stop should treat an already removed closed region as stopped");
+        assert_eq!(stopped.name, "removed_then_stop");
+        assert_eq!(stopped.root_region, app_region);
+
+        crate::test_complete!("app_stop_is_idempotent_after_runtime_removes_closed_region");
+    }
+
+    #[test]
+    fn app_join_wrong_runtime_preserves_handle_even_with_tombstone_collision() {
+        init_test("app_join_wrong_runtime_preserves_handle_even_with_tombstone_collision");
+
+        let mut state_a = RuntimeState::new();
+        let root_a = state_a.create_root_region(Budget::INFINITE);
+        let cx_a = Cx::new(
+            root_a,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let mut state_b = RuntimeState::new();
+        let root_b = state_b.create_root_region(Budget::INFINITE);
+        let cx_b = Cx::new(
+            root_b,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let mut handle_a = AppSpec::new("state_a_app")
+            .start(&mut state_a, &cx_a, root_a)
+            .expect("start ok");
+        let mut handle_b = AppSpec::new("state_b_app")
+            .start(&mut state_b, &cx_b, root_b)
+            .expect("start ok");
+
+        assert_eq!(
+            handle_a.root_region(),
+            handle_b.root_region(),
+            "fresh runtimes currently allocate the same test root/app region ids"
+        );
+
+        close_app_region_and_remove_records(&mut state_b, handle_b.root_region());
+        let _ = handle_b.join(&state_b).expect("join state_b app");
+
+        let result = handle_a.join(&state_b);
+        assert!(
+            matches!(
+                result,
+                Err(AppStopError::WrongRuntime { region }) if region == handle_a.root_region()
+            ),
+            "wrong-runtime joins must fail even if a colliding tombstone exists"
+        );
+
+        let stopped = handle_a
+            .stop(&mut state_a)
+            .expect("wrong-runtime join must preserve the original handle");
+        assert_eq!(stopped.name, "state_a_app");
+
+        crate::test_complete!(
+            "app_join_wrong_runtime_preserves_handle_even_with_tombstone_collision"
+        );
     }
 }

@@ -1456,13 +1456,15 @@ impl CompiledSupervisor {
                 Err(err) => {
                     cx.trace("supervisor_child_start_failed");
                     if child.required {
-                        // Close the region to avoid orphaning previously-started
-                        // children. begin_close + begin_drain initiates the
-                        // cancellation cascade; the region cannot leak.
-                        if let Some(record) = state.region(region) {
-                            record.begin_close(None);
-                            record.begin_drain();
-                        }
+                        // Drive the full cancel cascade so any already-started
+                        // children transition into cancellation instead of
+                        // remaining live under a failed supervisor boot.
+                        let _ = state.cancel_request(
+                            region,
+                            &crate::types::CancelReason::shutdown(),
+                            None,
+                        );
+                        state.advance_region_state(region);
                         return Err(SupervisorSpawnError::ChildStartFailed {
                             child: child.name.clone(),
                             err,
@@ -3537,6 +3539,15 @@ mod tests {
         Ok(test_task_id())
     }
 
+    fn spawn_registered_child(
+        scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+        state: &mut RuntimeState,
+        cx: &crate::cx::Cx,
+    ) -> Result<TaskId, SpawnError> {
+        let handle = scope.spawn_registered(state, cx, |_cx| async move { 0u8 })?;
+        Ok(handle.task_id())
+    }
+
     use parking_lot::Mutex;
     use std::sync::Arc;
 
@@ -4435,38 +4446,38 @@ mod tests {
         let ops = compiled.compile_restart_ops(&plan);
 
         // Cancel ops carry per-child budget
-        match &ops.ops[0] {
-            RegionOp::CancelChild {
-                name,
-                shutdown_budget,
-            } => {
-                assert_eq!(name, "b");
-                assert_eq!(*shutdown_budget, budget_b);
-            }
-            other => panic!("expected CancelChild, got {other:?}"),
-        }
-        match &ops.ops[1] {
-            RegionOp::CancelChild {
-                name,
-                shutdown_budget,
-            } => {
-                assert_eq!(name, "a");
-                assert_eq!(*shutdown_budget, budget_a);
-            }
-            other => panic!("expected CancelChild, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &ops.ops[0],
+                RegionOp::CancelChild {
+                    name,
+                    shutdown_budget,
+                } if name == "b" && *shutdown_budget == budget_b
+            ),
+            "expected first op to cancel child b with its shutdown budget"
+        );
+        assert!(
+            matches!(
+                &ops.ops[1],
+                RegionOp::CancelChild {
+                    name,
+                    shutdown_budget,
+                } if name == "a" && *shutdown_budget == budget_a
+            ),
+            "expected second op to cancel child a with its shutdown budget"
+        );
 
         // Drain ops also carry per-child budget
-        match &ops.ops[2] {
-            RegionOp::DrainChild {
-                name,
-                shutdown_budget,
-            } => {
-                assert_eq!(name, "b");
-                assert_eq!(*shutdown_budget, budget_b);
-            }
-            other => panic!("expected DrainChild, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &ops.ops[2],
+                RegionOp::DrainChild {
+                    name,
+                    shutdown_budget,
+                } if name == "b" && *shutdown_budget == budget_b
+            ),
+            "expected third op to drain child b with its shutdown budget"
+        );
 
         crate::test_complete!("compile_restart_ops_preserves_per_child_budgets");
     }
@@ -6370,18 +6381,19 @@ mod tests {
                 SupervisorSpawnError::ChildStartFailed { child, region, .. } => {
                     assert_eq!(child, "required_fail");
                     // Verify the region was closed (not leaked).
-                    let record = state.region(region).expect("region should exist");
-                    let rs = record.state();
-                    assert!(
-                        matches!(
-                            rs,
-                            crate::record::region::RegionState::Closing
-                                | crate::record::region::RegionState::Draining
-                                | crate::record::region::RegionState::Finalizing
-                                | crate::record::region::RegionState::Closed
-                        ),
-                        "region should not be Open after partial spawn failure, got {rs:?}"
-                    );
+                    if let Some(record) = state.region(region) {
+                        let rs = record.state();
+                        assert!(
+                            matches!(
+                                rs,
+                                crate::record::region::RegionState::Closing
+                                    | crate::record::region::RegionState::Draining
+                                    | crate::record::region::RegionState::Finalizing
+                                    | crate::record::region::RegionState::Closed
+                            ),
+                            "region should not be Open after partial spawn failure, got {rs:?}"
+                        );
+                    }
                 }
                 other @ SupervisorSpawnError::RegionCreate(_) => {
                     unreachable!("expected ChildStartFailed, got {other:?}");
@@ -6390,6 +6402,66 @@ mod tests {
         }
 
         crate::test_complete!("conformance_spawn_required_vs_optional_child_failure");
+    }
+
+    #[test]
+    fn required_child_failure_requests_cancel_for_started_task() {
+        fn failing_start(
+            scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            _state: &mut RuntimeState,
+            _cx: &crate::cx::Cx,
+        ) -> Result<TaskId, SpawnError> {
+            Err(SpawnError::RegionClosed(scope.region_id()))
+        }
+
+        init_test("required_child_failure_requests_cancel_for_started_task");
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("started", spawn_registered_child))
+            .child(
+                ChildSpec::new("required_fail", failing_start)
+                    .with_required(true)
+                    .depends_on("started"),
+            );
+
+        let compiled = builder.compile().expect("compile");
+        let mut state = RuntimeState::new();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+        let err = compiled
+            .spawn(&mut state, &cx, parent, Budget::INFINITE)
+            .expect_err("required child failure should fail supervisor");
+
+        let (region, started_task) = match err {
+            SupervisorSpawnError::ChildStartFailed { region, .. } => {
+                let record = state
+                    .region(region)
+                    .expect("supervisor region should exist");
+                let started_task = *record
+                    .task_ids()
+                    .first()
+                    .expect("started task should remain tracked");
+                (region, started_task)
+            }
+            other @ SupervisorSpawnError::RegionCreate(_) => {
+                panic!("expected ChildStartFailed, got {other:?}")
+            }
+        };
+
+        let task = state.task(started_task).expect("started task should exist");
+        assert!(
+            task.state.is_cancelling(),
+            "started child task should enter cancellation after supervisor boot failure"
+        );
+        assert!(
+            state
+                .region(region)
+                .and_then(crate::record::RegionRecord::cancel_reason)
+                .is_some(),
+            "failed supervisor region should retain a cancel reason"
+        );
+
+        crate::test_complete!("required_child_failure_requests_cancel_for_started_task");
     }
 
     /// Conformance: CompiledSupervisor::restart_plan_for_failure returns
