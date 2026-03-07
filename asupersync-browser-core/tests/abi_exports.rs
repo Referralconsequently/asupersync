@@ -408,11 +408,8 @@ fn websocket_binary_message_round_trip() {
     ));
 
     // Close and teardown
-    websocket_close(
-        serde_json::json!({"socket": socket}).to_string(),
-        None,
-    )
-    .expect("websocket_close succeeds");
+    websocket_close(serde_json::json!({"socket": socket}).to_string(), None)
+        .expect("websocket_close succeeds");
     scope_close(scope_json, None).expect("scope_close succeeds");
     runtime_close(runtime_json, None).expect("runtime_close succeeds");
 }
