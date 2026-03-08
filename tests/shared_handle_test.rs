@@ -42,7 +42,7 @@ enum LabJoinState {
 }
 
 struct SharedLabInner {
-    handle: TaskHandle<BTreeSet<String>>,
+    handle: Mutex<TaskHandle<BTreeSet<String>>>,
     state: Mutex<LabJoinState>,
 }
 
@@ -55,7 +55,7 @@ impl SharedLabHandle {
     fn new(handle: TaskHandle<BTreeSet<String>>) -> Self {
         Self {
             inner: std::sync::Arc::new(SharedLabInner {
-                handle,
+                handle: Mutex::new(handle),
                 state: Mutex::new(LabJoinState::Empty),
             }),
         }
@@ -70,20 +70,26 @@ impl SharedLabHandle {
                 Some(out)
             }
             LabJoinState::InFlight => None,
-            LabJoinState::Empty => match self.inner.handle.try_join() {
-                Ok(Some(result)) => {
-                    let output = result.clone();
-                    *state = LabJoinState::Ready(result);
-                    drop(state);
-                    Some(output)
+            LabJoinState::Empty => {
+                let join_result = {
+                    let mut handle = self.inner.handle.lock();
+                    handle.try_join()
+                };
+                match join_result {
+                    Ok(Some(result)) => {
+                        let output = result.clone();
+                        *state = LabJoinState::Ready(result);
+                        drop(state);
+                        Some(output)
+                    }
+                    Ok(None) => None,
+                    Err(_) => {
+                        *state = LabJoinState::Ready(BTreeSet::new());
+                        drop(state);
+                        Some(BTreeSet::new())
+                    }
                 }
-                Ok(None) => None,
-                Err(_) => {
-                    *state = LabJoinState::Ready(BTreeSet::new());
-                    drop(state);
-                    Some(BTreeSet::new())
-                }
-            },
+            }
         }
     }
 }
@@ -153,7 +159,7 @@ fn shared_handle_polling_from_task() {
         let shared = SharedLabHandle::new(leaf_handle);
 
         // Create a "race driver" task that polls the shared handle.
-        let (driver_tid, driver_handle) = {
+        let (driver_tid, mut driver_handle) = {
             let future = async move {
                 let mut iters = 0u32;
                 loop {

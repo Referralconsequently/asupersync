@@ -540,8 +540,8 @@ impl<T> SharedHandle<T> {
         drop(state);
 
         let try_join_result = {
-            let handle_guard = self.inner.handle.lock();
-            let handle = handle_guard.as_ref()?;
+            let mut handle_guard = self.inner.handle.lock();
+            let handle = handle_guard.as_mut()?;
             let result = handle.try_join();
             drop(handle_guard);
             result

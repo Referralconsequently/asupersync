@@ -502,7 +502,7 @@ fn channel_reserve_send_receive() {
     init_test_logging();
 
     harness.enter_phase("setup");
-    let (tx, rx) = mpsc::channel::<u64>(4);
+    let (tx, mut rx) = mpsc::channel::<u64>(4);
     let cx = Cx::for_testing();
     harness.exit_phase();
 
@@ -574,7 +574,7 @@ fn channel_permit_drop_implicit_abort() {
     harness.exit_phase();
 
     harness.enter_phase("implicit_abort_via_drop");
-    run_test(|| async {
+    run_test(move || async move {
         {
             let _permit = tx.reserve(&cx).await.expect("reserve");
             tracing::info!("permit acquired, will be dropped");

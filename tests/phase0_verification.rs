@@ -909,7 +909,7 @@ impl<T> SharedHandle<T> {
             .inner
             .handle
             .lock()
-            .as_ref()
+            .as_mut()
             .expect("shared handle missing task handle")
             .try_join();
         let result = match join_result {
