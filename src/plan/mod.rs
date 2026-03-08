@@ -970,7 +970,7 @@ mod tests {
         crate::lab::runtime::test(seed, |runtime| {
             let region = runtime.state.create_root_region(Budget::INFINITE);
 
-            let (_driver_id, driver_handle, scheduled) = match kind {
+            let (_driver_id, mut driver_handle, scheduled) = match kind {
                 ProgramKind::Original => {
                     let (a1_id, mut a1_handle) = runtime
                         .state

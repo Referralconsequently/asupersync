@@ -1650,7 +1650,7 @@ impl LabRuntime {
             &mut self.replay_recorder,
             &mut self.seen_io_tokens,
         );
-        if let Err(_error) = handle.turn_with(Some(Duration::ZERO), |event, interest| {
+        if let Err(error) = handle.turn_with(Some(Duration::ZERO), |event, interest| {
             let token = event.token.0;
             let interest = interest.unwrap_or(event.ready);
             if seen.insert(token) {
@@ -1677,8 +1677,9 @@ impl LabRuntime {
                 event.is_hangup(),
             );
         }) {
+            let _ = &error;
             crate::tracing_compat::warn!(
-                error = ?_error,
+                error = ?error,
                 "lab runtime io_driver poll failed"
             );
         }

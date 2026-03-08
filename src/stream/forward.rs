@@ -107,7 +107,7 @@ mod tests {
     fn forward_sends_all_items() {
         init_test("forward_sends_all_items");
         let cx: Cx = Cx::for_testing();
-        let (tx, rx) = mpsc::channel::<i32>(8);
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
         let stream = iter(vec![10, 20, 30]);
 
         let mut future = std::pin::pin!(forward(&cx, stream, tx));

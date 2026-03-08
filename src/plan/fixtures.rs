@@ -667,7 +667,7 @@ impl SharedLabHandle {
             LabJoinState::Ready(result) => Some(result.clone()),
             LabJoinState::InFlight => None,
             LabJoinState::Empty => {
-                let handle = self
+                let mut handle = self
                     .inner
                     .handle
                     .lock()

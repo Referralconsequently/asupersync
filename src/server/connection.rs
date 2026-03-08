@@ -403,7 +403,7 @@ mod tests {
     fn rejects_during_shutdown() {
         init_test("rejects_during_shutdown");
         let signal = ShutdownSignal::new();
-        let manager = ConnectionManager::new(None, signal.clone());
+        let manager = ConnectionManager::new(None, signal);
 
         let g1 = manager.register(test_addr(1));
         let has_g1 = g1.is_some();
@@ -620,7 +620,7 @@ mod tests {
         init_test("drain_rejects_then_wait_for_inflight");
         crate::test_utils::run_test(|| async {
             let signal = ShutdownSignal::new();
-            let manager = ConnectionManager::new(None, signal.clone());
+            let manager = ConnectionManager::new(None, signal);
 
             // Register a connection before shutdown
             let g1 = manager.register(test_addr(1)).expect("register");

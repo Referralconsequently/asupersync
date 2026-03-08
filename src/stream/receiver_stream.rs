@@ -243,7 +243,7 @@ mod tests {
         let _cx_ref = stream.cx();
 
         // into_inner consumes stream and returns the receiver.
-        let recovered = stream.into_inner();
+        let mut recovered = stream.into_inner();
         // The message should still be in the channel.
         let msg = recovered.try_recv();
         let got_99 = matches!(msg, Ok(99));

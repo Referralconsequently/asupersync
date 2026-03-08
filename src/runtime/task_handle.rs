@@ -162,7 +162,7 @@ impl<T> TaskHandle<T> {
     /// - `Ok(Some(result))` if the task has completed
     /// - `Ok(None)` if the task is still running
     /// - `Err(JoinError)` if the task was cancelled or panicked
-    pub fn try_join(&self) -> Result<Option<T>, JoinError> {
+    pub fn try_join(&mut self) -> Result<Option<T>, JoinError> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(Some(result?)),
             Err(oneshot::TryRecvError::Empty) => Ok(None),
@@ -624,7 +624,7 @@ mod tests {
     fn try_join_not_ready() {
         let task_id = TaskId::from_arena(ArenaIndex::new(20, 0));
         let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         let result = handle.try_join();
         assert!(matches!(result, Ok(None)));
     }
@@ -635,7 +635,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(21, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
         tx.send(&cx, Ok(99)).expect("send");
-        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         let result = handle.try_join();
         assert_eq!(result.unwrap(), Some(99));
     }
@@ -645,7 +645,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(22, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
         drop(tx);
-        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         let result = handle.try_join();
         assert!(matches!(result, Err(JoinError::Cancelled(_))));
     }

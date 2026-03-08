@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn from_io_error() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
-        let err = QuicError::from(io_err);
+        let err = QuicError::Io(io_err);
         assert!(matches!(err, QuicError::Io(_)));
     }
 

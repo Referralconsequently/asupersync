@@ -390,7 +390,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
             }
 
-            Err(DbPoolError::Full)
+            return Err(DbPoolError::Full);
         }
     }
 
