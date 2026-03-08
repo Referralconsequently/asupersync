@@ -18,6 +18,11 @@ is not ready.
 2. Smoke runner: `scripts/run_runtime_ascension_closure_smoke.sh`
 3. Invariant suite: `tests/runtime_ascension_closure_packet_contract.rs`
 
+Runner behavior is part of the contract: smoke scenarios execute from the
+repository root even when the script is invoked from another caller CWD, and
+the emitted manifests/report retain command provenance (`invoked_from`,
+`command`, `command_workdir`, `log_file`, `summary_file`).
+
 ## Execution State
 
 | Field | Value |
@@ -201,6 +206,10 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa106 cargo 
 # Smoke bundle runner (writes run_report.json + per-scenario manifests)
 ./scripts/run_runtime_ascension_closure_smoke.sh --execute
 ```
+
+The smoke runner handles repo-root command execution internally, so the
+invocation directory can differ from the execution directory without changing
+the deterministic cargo/test surface.
 
 Operator troubleshooting recipe:
 

@@ -5,6 +5,7 @@
 #[macro_use]
 mod common;
 
+use asupersync::Cx;
 use asupersync::http::h1::{Http1Client, Method, Request, Version};
 use asupersync::http::h1::{Http1Server, HttpClient, Response};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,7 +13,6 @@ use asupersync::net::TcpListener as AsyncTcpListener;
 use asupersync::net::TcpStream;
 use asupersync::time::timeout;
 use asupersync::types::Time;
-use asupersync::Cx;
 use common::*;
 use futures_lite::future::block_on;
 use std::io::{Read, Write};

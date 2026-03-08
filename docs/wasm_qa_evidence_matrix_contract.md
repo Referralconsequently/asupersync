@@ -199,6 +199,12 @@ Host-bridge fetch/streams/websocket/storage baseline harness (bead `asupersync-3
 rch exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh
 ```
 
+Cross-browser compatibility + forensics baseline harness (bead `asupersync-3qv04.8.5`) is tracked as smoke scenario `WASM-QA-SMOKE-CROSS-BROWSER`, which invokes:
+
+```bash
+rch exec -- env HARNESS_PROFILE=full HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless bash scripts/test_wasm_cross_framework_e2e.sh
+```
+
 ## Validation
 
 Focused invariant test command (routed through `rch`):

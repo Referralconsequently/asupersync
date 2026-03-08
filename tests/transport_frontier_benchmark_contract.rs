@@ -310,6 +310,47 @@ fn structured_log_fields_are_unique_and_nonempty() {
     }
 }
 
+#[test]
+fn structured_log_contract_mentions_transport_decision_metadata() {
+    let doc = load_doc();
+    for field in [
+        "path_policy_id",
+        "requested_path_count",
+        "selected_path_count",
+        "fallback_policy_id",
+        "downgrade_reason",
+    ] {
+        assert!(
+            doc.contains(field),
+            "doc must mention structured log field {field}"
+        );
+    }
+}
+
+#[test]
+fn structured_log_fields_include_transport_decision_metadata() {
+    let artifact = load_artifact();
+    let fields: BTreeSet<String> = artifact["structured_log_fields_required"]
+        .as_array()
+        .expect("structured_log_fields_required must be array")
+        .iter()
+        .map(|field| field.as_str().expect("field must be string").to_string())
+        .collect();
+
+    for field in [
+        "path_policy_id",
+        "requested_path_count",
+        "selected_path_count",
+        "fallback_policy_id",
+        "downgrade_reason",
+    ] {
+        assert!(
+            fields.contains(field),
+            "structured log field must exist: {field}"
+        );
+    }
+}
+
 // ── Smoke runner and scenarios ───────────────────────────────────────
 
 #[test]

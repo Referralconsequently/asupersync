@@ -4,19 +4,25 @@
 
 use serde_json::Value;
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::process::Command;
 
 const DOC_PATH: &str = "docs/runtime_ascension_closure_packet.md";
 const ARTIFACT_PATH: &str = "artifacts/runtime_ascension_closure_packet_v1.json";
 const RUNNER_PATH: &str = "scripts/run_runtime_ascension_closure_smoke.sh";
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
 fn load_artifact() -> Value {
-    let content =
-        std::fs::read_to_string(ARTIFACT_PATH).expect("artifact must exist at expected path");
+    let content = std::fs::read_to_string(repo_root().join(ARTIFACT_PATH))
+        .expect("artifact must exist at expected path");
     serde_json::from_str(&content).expect("artifact must be valid JSON")
 }
 
 fn load_doc() -> String {
-    std::fs::read_to_string(DOC_PATH).expect("contract doc must exist")
+    std::fs::read_to_string(repo_root().join(DOC_PATH)).expect("contract doc must exist")
 }
 
 // ── Packet document ────────────────────────────────────────────────
@@ -90,6 +96,26 @@ fn packet_doc_mentions_registry_command_ids() {
     }
 }
 
+#[test]
+fn packet_doc_mentions_runner_repo_root_determinism() {
+    let doc = load_doc();
+    assert!(
+        doc.contains("repository root even when the script is invoked from another caller CWD"),
+        "doc must explain repo-root execution behavior"
+    );
+    for required in &[
+        "invoked_from",
+        "command_workdir",
+        "summary_file",
+        "log_file",
+    ] {
+        assert!(
+            doc.contains(required),
+            "doc must mention provenance field {required}"
+        );
+    }
+}
+
 // ── Packet artifact ────────────────────────────────────────────────
 
 #[test]
@@ -151,9 +177,44 @@ fn packet_artifact_has_runner_script() {
         "artifact must point at canonical runner"
     );
     assert!(
-        std::path::Path::new(runner).exists(),
+        repo_root().join(runner).exists(),
         "runner script must exist at {runner}"
     );
+}
+
+#[test]
+fn packet_artifact_declares_runner_behavior_and_provenance_fields() {
+    let art = load_artifact();
+    let runner_behavior = &art["runner_behavior"];
+    assert_eq!(
+        runner_behavior["execution_root"].as_str().unwrap(),
+        "project_root"
+    );
+    assert!(
+        runner_behavior["caller_cwd_policy"]
+            .as_str()
+            .unwrap()
+            .contains("caller CWD")
+    );
+    let fields: HashSet<&str> = runner_behavior["provenance_fields_required"]
+        .as_array()
+        .expect("runner provenance fields must be an array")
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    for required in &[
+        "project_root",
+        "invoked_from",
+        "command",
+        "command_workdir",
+        "log_file",
+        "summary_file",
+    ] {
+        assert!(
+            fields.contains(required),
+            "runner provenance fields must include {required}"
+        );
+    }
 }
 
 #[test]
@@ -341,6 +402,96 @@ fn operator_recipe_ids_are_unique() {
     recipe_ids.sort_unstable();
     recipe_ids.dedup();
     assert_eq!(recipe_ids.len(), original_len, "recipe_ids must be unique");
+}
+
+#[test]
+fn smoke_runner_dry_run_records_repo_root_execution_and_provenance() {
+    let repo = repo_root();
+    let runner = repo.join(RUNNER_PATH);
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let invoked_from = scratch.path().join("invoke-from");
+    let output_root = scratch.path().join("out");
+    std::fs::create_dir_all(&invoked_from).expect("invoke dir");
+
+    let status = Command::new(&runner)
+        .arg("--scenario")
+        .arg("RACP-SMOKE-PACKET")
+        .arg("--dry-run")
+        .arg("--output-root")
+        .arg(&output_root)
+        .current_dir(&invoked_from)
+        .status()
+        .expect("failed to execute smoke runner");
+    assert!(status.success(), "smoke runner dry-run must succeed");
+
+    let run_dir = std::fs::read_dir(&output_root)
+        .expect("output root must exist")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("runner must emit a run directory");
+    let run_report_path = run_dir.join("run_report.json");
+    let bundle_manifest_path = run_dir
+        .join("RACP-SMOKE-PACKET")
+        .join("bundle_manifest.json");
+
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(&run_report_path).expect("run report must exist"),
+    )
+    .expect("run report must be valid JSON");
+    let bundle: Value = serde_json::from_str(
+        &std::fs::read_to_string(&bundle_manifest_path).expect("bundle manifest must exist"),
+    )
+    .expect("bundle manifest must be valid JSON");
+
+    let repo_str = repo.to_string_lossy().into_owned();
+    let invoked_from_str = invoked_from.to_string_lossy().into_owned();
+
+    assert_eq!(report["project_root"].as_str().unwrap(), repo_str);
+    assert_eq!(report["invoked_from"].as_str().unwrap(), invoked_from_str);
+    assert_eq!(report["command_workdir"].as_str().unwrap(), repo_str);
+
+    let results = report["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1, "expected one selected scenario");
+    let scenario_result = &results[0];
+    assert_eq!(
+        scenario_result["scenario_id"].as_str().unwrap(),
+        "RACP-SMOKE-PACKET"
+    );
+    assert_eq!(scenario_result["project_root"].as_str().unwrap(), repo_str);
+    assert_eq!(
+        scenario_result["invoked_from"].as_str().unwrap(),
+        invoked_from_str
+    );
+    assert_eq!(
+        scenario_result["command_workdir"].as_str().unwrap(),
+        repo_str
+    );
+    let scenario_command = scenario_result["command"].as_str().unwrap();
+    assert!(
+        scenario_command.contains("runtime_ascension_closure_packet_contract packet"),
+        "scenario command must be captured in results"
+    );
+
+    let log_file = PathBuf::from(scenario_result["log_file"].as_str().unwrap());
+    let summary_file = PathBuf::from(scenario_result["summary_file"].as_str().unwrap());
+    assert!(log_file.exists(), "log file path must exist");
+    assert!(summary_file.exists(), "summary file path must exist");
+
+    assert_eq!(bundle["project_root"].as_str().unwrap(), repo_str);
+    assert_eq!(bundle["invoked_from"].as_str().unwrap(), invoked_from_str);
+    assert_eq!(bundle["command_workdir"].as_str().unwrap(), repo_str);
+    assert_eq!(bundle["command"].as_str().unwrap(), scenario_command);
+    assert_eq!(
+        PathBuf::from(bundle["log_file"].as_str().unwrap()),
+        log_file,
+        "bundle must capture the same log file path as the aggregate report"
+    );
+    assert_eq!(
+        PathBuf::from(bundle["summary_file"].as_str().unwrap()),
+        summary_file,
+        "bundle must capture the same summary file path as the aggregate report"
+    );
 }
 
 // ── Launch doctrine ────────────────────────────────────────────────

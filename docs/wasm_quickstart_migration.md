@@ -149,6 +149,38 @@ Expected outcomes:
 - no native-only module leaks into wasm32 compilation closure,
 - profile guardrails reject invalid multi-profile feature combinations.
 
+## Package Install and First-Success Paths (`asupersync-3qv04.9.1`)
+
+Use this as the canonical package-selection and install flow for Browser
+Edition. Start with the highest layer that matches your runtime boundary; only
+drop down to lower-level packages when you need that surface explicitly.
+
+Package layering:
+
+1. `@asupersync/browser-core` (low-level ABI/types)
+2. `@asupersync/browser` (recommended default app-facing browser SDK)
+3. `@asupersync/react` (React client-boundary adapter over browser SDK)
+4. `@asupersync/next` (Next boundary adapter over browser SDK)
+
+Install/quickstart decision table:
+
+| Package | Use when | Install | First-success checkpoint |
+|---|---|---|---|
+| `@asupersync/browser-core` | You need raw ABI handles/types or metadata-driven compatibility checks | `npm install @asupersync/browser-core` | Run `rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture` |
+| `@asupersync/browser` | You need direct browser runtime APIs without framework adapters (recommended starting point) | `npm install @asupersync/browser` | Run `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture` |
+| `@asupersync/react` | You are running Browser Edition inside a client-rendered React tree | `npm install @asupersync/react react react-dom` | Run `python3 scripts/run_browser_onboarding_checks.py --scenario react` |
+| `@asupersync/next` | You need Next-specific client/server/edge boundary guidance | `npm install @asupersync/next next react react-dom` | Run `python3 scripts/run_browser_onboarding_checks.py --scenario next` |
+
+Selection rules:
+
+- choose `@asupersync/browser` first unless you have an explicit low-level ABI
+  need (`browser-core`) or framework boundary need (`react`/`next`)
+- keep direct runtime creation in browser/client boundaries only
+- treat Next server/edge paths as bridge-only lanes; do not run direct Browser
+  Edition runtime APIs there
+- keep package versions aligned across `browser-core`, `browser`, `react`, and
+  `next`
+
 ## Quickstart Flows
 
 Each flow has:

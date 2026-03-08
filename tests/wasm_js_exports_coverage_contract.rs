@@ -487,12 +487,17 @@ fn next_src_index_defines_server_bridge_adapter_surface() {
         "export interface NextServerBridgeRequest",
         "export interface NextServerBridgeResponse",
         "export interface NextServerBridgeAdapterOptions",
+        "export interface NextServerBridgeResponseError",
         "export function nextBoundaryModeForEnvironment",
         "export function nextRuntimeFallbackForEnvironment",
         "export function nextRuntimeFallbackReason",
         "export function createNextServerBridgeDiagnostics",
         "export function createNextBridgeLogFields",
+        "export function createNextServerBridgeResponseFromOutcome",
+        "export function unwrapNextServerBridgeResponse",
         "export class NextServerBridgeAdapter",
+        "fromOutcome(",
+        "unwrapResponse(",
         "export function createNextServerBridgeAdapter",
     ] {
         assert!(
@@ -511,8 +516,13 @@ fn next_src_index_defines_edge_bridge_adapter_surface() {
         "export interface NextEdgeBridgeRequest",
         "export interface NextEdgeBridgeResponse",
         "export interface NextEdgeBridgeAdapterOptions",
+        "export interface NextEdgeBridgeResponseError",
         "export function createNextEdgeBridgeDiagnostics",
+        "export function createNextEdgeBridgeResponseFromOutcome",
+        "export function unwrapNextEdgeBridgeResponse",
         "export class NextEdgeBridgeAdapter",
+        "fromOutcome(",
+        "unwrapResponse(",
         "export function createNextEdgeBridgeAdapter",
     ] {
         assert!(
@@ -531,11 +541,13 @@ fn next_src_index_pins_server_bridge_policy_and_diagnostics_markers() {
         "\"use_server_bridge\"",
         "\"use_edge_bridge\"",
         "\"explicit_status\"",
+        "\"panicked\"",
         "runtime unavailable in server boundary: route through serialized node/server bridge",
         "boundary_mode: diagnostics.boundaryMode",
         "render_environment: diagnostics.renderEnvironment",
         "runtime_fallback: diagnostics.runtimeFallback",
         "repro_command: diagnostics.reproCommand",
+        "NEXT_SERVER_BRIDGE_RESPONSE_ERROR_CODE",
         "createNextUnsupportedRuntimeError(",
         "bridgeDiagnostics",
     ] {
@@ -562,6 +574,7 @@ fn next_src_index_pins_edge_bridge_policy_and_diagnostics_markers() {
         "render_environment: diagnostics.renderEnvironment",
         "runtime_fallback: diagnostics.runtimeFallback",
         "repro_command: diagnostics.reproCommand",
+        "NEXT_EDGE_BRIDGE_RESPONSE_ERROR_CODE",
         "bridgeDiagnostics",
     ] {
         assert!(

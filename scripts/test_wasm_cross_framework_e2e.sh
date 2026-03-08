@@ -28,6 +28,7 @@ HARNESS_PROFILE="${HARNESS_PROFILE:-full}"
 FAULT_MATRIX_MODE="${FAULT_MATRIX_MODE:-reduced}"
 BROWSER_NAME="${BROWSER_NAME:-chromium-headless}"
 BROWSER_VERSION="${BROWSER_VERSION:-unknown}"
+BROWSER_MATRIX="${BROWSER_MATRIX:-chromium-headless,firefox-headless,webkit-headless}"
 HARNESS_DRY_RUN="${HARNESS_DRY_RUN:-0}"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
@@ -65,6 +66,20 @@ else
     SUITE_ID="wasm_cross_framework_e2e"
     SCENARIO_ID="e2e-wasm-cross-framework-suite"
     LEGACY_OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/wasm_cross_framework"
+fi
+
+BROWSER_MATRIX_JSON="$(printf '%s' "${BROWSER_MATRIX}" \
+    | tr ',' '\n' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | jq -Rsc 'split("\n") | map(select(length>0))')"
+BROWSER_MATRIX_COUNT="$(printf '%s\n' "${BROWSER_MATRIX_JSON}" | jq -r 'length')"
+if [[ "${BROWSER_MATRIX_COUNT}" -eq 0 ]]; then
+    echo "FATAL: BROWSER_MATRIX must include at least one browser target" >&2
+    exit 1
+fi
+BROWSER_MATRIX_MODE="single"
+if [[ "${BROWSER_MATRIX_COUNT}" -gt 1 ]]; then
+    BROWSER_MATRIX_MODE="matrix"
 fi
 
 if [[ ! -x "${RCH_BIN}" ]]; then
@@ -173,6 +188,8 @@ echo "  TEST_LOG_LEVEL:   ${TEST_LOG_LEVEL}"
 echo "  RUST_LOG:         ${RUST_LOG}"
 echo "  TEST_SEED:        ${TEST_SEED}"
 echo "  FAULT_MATRIX_MODE:${FAULT_MATRIX_MODE}"
+echo "  BROWSER_MATRIX:   ${BROWSER_MATRIX}"
+echo "  BROWSER_MODE:     ${BROWSER_MATRIX_MODE}"
 echo "  SUITE_TIMEOUT:    ${SUITE_TIMEOUT}s"
 echo "  STEP_TIMEOUT:     ${STEP_TIMEOUT}s"
 echo "  HARNESS_DRY_RUN:  ${HARNESS_DRY_RUN}"
@@ -367,7 +384,9 @@ emit_log_entry() {
         --arg msg "${msg}" \
         --arg browser_name "${BROWSER_NAME}" \
         --arg browser_version "${BROWSER_VERSION}" \
+        --arg browser_matrix_mode "${BROWSER_MATRIX_MODE}" \
         --arg os_name "${OS_NAME}" \
+        --argjson browser_matrix "${BROWSER_MATRIX_JSON}" \
         --arg profile "${HARNESS_PROFILE}" \
         --arg commit "${COMMIT_HASH}" \
         --arg module_url "${MODULE_RELATIVE_PATH}" \
@@ -388,7 +407,13 @@ emit_log_entry() {
             msg: $msg,
             abi_version: {major: $abi_major, minor: $abi_minor},
             abi_fingerprint: $abi_fingerprint,
-            browser: {name: $browser_name, version: $browser_version, os: $os_name},
+            browser: {
+              name: $browser_name,
+              version: $browser_version,
+              os: $os_name,
+              matrix_mode: $browser_matrix_mode,
+              matrix: $browser_matrix
+            },
             build: {profile: $profile, commit: $commit, wasm_size_bytes: $wasm_size_bytes},
             evidence_ids: $evidence_ids,
             extra: $extra
@@ -591,6 +616,8 @@ for idx in "${!STEP_IDS[@]}"; do
         --arg remediation_hint "${hint}" \
         --arg fault_profile "${fault_profile}" \
         --arg fault_matrix_mode "${FAULT_MATRIX_MODE}" \
+        --arg browser_matrix_mode "${BROWSER_MATRIX_MODE}" \
+        --argjson browser_matrix "${BROWSER_MATRIX_JSON}" \
         --arg fault_seed "${TEST_SEED}" \
         --argjson exit_code "${step_rc}" \
         --argjson duration_ms "${duration_ms}" \
@@ -615,6 +642,8 @@ for idx in "${!STEP_IDS[@]}"; do
            remediation_hint: $remediation_hint,
            fault_profile: $fault_profile,
            fault_matrix_mode: $fault_matrix_mode,
+           browser_matrix_mode: $browser_matrix_mode,
+           browser_matrix: $browser_matrix,
            fault_seed: $fault_seed,
            evidence_ids: $evidence_ids
          }')"
@@ -658,7 +687,9 @@ jq -n \
     --arg verdict "${verdict}" \
     --arg browser_name "${BROWSER_NAME}" \
     --arg browser_version "${BROWSER_VERSION}" \
+    --arg browser_matrix_mode "${BROWSER_MATRIX_MODE}" \
     --arg os_name "${OS_NAME}" \
+    --argjson browser_matrix "${BROWSER_MATRIX_JSON}" \
     --arg profile "${HARNESS_PROFILE}" \
     --arg commit "${COMMIT_HASH}" \
     --argjson wasm_size_bytes "${WASM_SIZE_BYTES}" \
@@ -678,7 +709,13 @@ jq -n \
        finished_at: $finished_at,
        duration_ms: $duration_ms,
        verdict: $verdict,
-       browser: {name: $browser_name, version: $browser_version, os: $os_name},
+       browser: {
+         name: $browser_name,
+         version: $browser_version,
+         os: $os_name,
+         matrix_mode: $browser_matrix_mode,
+         matrix: $browser_matrix
+       },
        build: {profile: $profile, commit: $commit, wasm_size_bytes: $wasm_size_bytes},
        abi_version: {major: $abi_major, minor: $abi_minor},
        abi_fingerprint: $abi_fingerprint,
@@ -705,6 +742,8 @@ jq -n \
     --arg log_jsonl "${LOG_JSONL}" \
     --arg step_log_ndjson "${STEP_NDJSON}" \
     --arg fault_matrix_mode "${FAULT_MATRIX_MODE}" \
+    --arg browser_matrix_mode "${BROWSER_MATRIX_MODE}" \
+    --argjson browser_matrix "${BROWSER_MATRIX_JSON}" \
     --arg harness_profile "${HARNESS_PROFILE}" \
     --arg module_fingerprint "${MODULE_FINGERPRINT}" \
     --argjson duration_ms "${TOTAL_DURATION_MS}" \
@@ -732,6 +771,8 @@ jq -n \
        log_jsonl: $log_jsonl,
        step_log_ndjson: $step_log_ndjson,
        fault_matrix_mode: $fault_matrix_mode,
+       browser_matrix_mode: $browser_matrix_mode,
+       browser_matrix: $browser_matrix,
        harness_profile: $harness_profile,
        module_fingerprint: $module_fingerprint,
        tests_passed: $tests_passed,

@@ -327,6 +327,24 @@ fn wasm_cross_framework_runner_keeps_replay_corpus_and_delta_steps() {
 }
 
 #[test]
+fn wasm_cross_framework_runner_emits_browser_matrix_contract_fields() {
+    let content = fs::read_to_string("scripts/test_wasm_cross_framework_e2e.sh")
+        .expect("read wasm cross-framework e2e runner script");
+
+    for token in [
+        "BROWSER_MATRIX=",
+        "BROWSER_MATRIX_MODE=",
+        "browser_matrix_mode",
+        "browser_matrix",
+    ] {
+        assert!(
+            content.contains(token),
+            "wasm cross-framework runner missing browser-matrix token: {token}"
+        );
+    }
+}
+
+#[test]
 fn wasm_packaged_bootstrap_runner_emits_required_bundle_contract_tokens() {
     let content = fs::read_to_string("scripts/test_wasm_packaged_bootstrap_e2e.sh")
         .expect("read wasm packaged bootstrap e2e runner script");

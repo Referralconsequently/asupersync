@@ -867,13 +867,16 @@ fn builder_verify_038_spawn_with_cx_multiple() {
 
     for _ in 0..5 {
         let counter2 = counter.clone();
-        runtime.handle().try_spawn_with_cx(move |cx| async move {
-            assert!(
-                !cx.is_cancel_requested(),
-                "each cx should start uncancelled"
-            );
-            counter2.fetch_add(1, Ordering::SeqCst);
-        }).expect("spawn should succeed");
+        runtime
+            .handle()
+            .try_spawn_with_cx(move |cx| async move {
+                assert!(
+                    !cx.is_cancel_requested(),
+                    "each cx should start uncancelled"
+                );
+                counter2.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("spawn should succeed");
     }
 
     // Give tasks time to complete
@@ -908,8 +911,7 @@ fn builder_verify_039_spawn_with_cx_admission_failure() {
     let result = runtime.handle().try_spawn_with_cx(|_cx| async {});
     assert!(
         matches!(result, Err(SpawnError::RegionAtCapacity { .. })),
-        "expected RegionAtCapacity, got {:?}",
-        result
+        "expected RegionAtCapacity, got {result:?}"
     );
 
     test_complete!("builder_verify_039_spawn_with_cx_admission_failure");

@@ -7,6 +7,7 @@ CONTRACT_ARTIFACT="${PROJECT_ROOT}/artifacts/runtime_ascension_closure_packet_v1
 OUTPUT_ROOT="${RACP_SMOKE_OUTPUT_DIR:-${PROJECT_ROOT}/target/runtime-ascension-closure-smoke}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
+INVOKED_FROM="$(pwd)"
 LIST_ONLY=0
 DRY_RUN=1
 
@@ -78,6 +79,7 @@ run_scenario() {
     local scenario_json
     local description
     local command
+    local command_workdir
     local scenario_dir
     local log_file
     local summary_file
@@ -94,6 +96,7 @@ run_scenario() {
 
     description="$(jq -r '.description' <<<"$scenario_json")"
     command="$(jq -r '.command' <<<"$scenario_json")"
+    command_workdir="${PROJECT_ROOT}"
     scenario_dir="${RUN_DIR}/${sid}"
     log_file="${scenario_dir}/run.log"
     summary_file="${scenario_dir}/bundle_manifest.json"
@@ -107,7 +110,10 @@ run_scenario() {
         status="dry_run"
     else
         rc=0
-        eval "$command" >"$log_file" 2>&1 || rc=$?
+        (
+            cd "$command_workdir"
+            eval "$command"
+        ) >"$log_file" 2>&1 || rc=$?
         if [[ "$rc" -eq 0 ]]; then
             status="passed"
         else
@@ -123,6 +129,12 @@ run_scenario() {
   "scenario_id": "$(json_escape "$sid")",
   "description": "$(json_escape "$description")",
   "status": "$(json_escape "$status")",
+  "project_root": "$(json_escape "$PROJECT_ROOT")",
+  "invoked_from": "$(json_escape "$INVOKED_FROM")",
+  "command": "$(json_escape "$command")",
+  "command_workdir": "$(json_escape "$command_workdir")",
+  "log_file": "$(json_escape "$log_file")",
+  "summary_file": "$(json_escape "$summary_file")",
   "exit_code": ${rc},
   "started_ts": "$(json_escape "$started_ts")",
   "ended_ts": "$(json_escape "$ended_ts")"
@@ -177,6 +189,9 @@ if [[ "${#SELECTED_SCENARIOS[@]}" -eq 0 ]]; then
     mapfile -t SELECTED_SCENARIOS < <(jq -r '.smoke_scenarios[].scenario_id' "$CONTRACT_ARTIFACT")
 fi
 
+mkdir -p "$OUTPUT_ROOT"
+OUTPUT_ROOT="$(cd "$OUTPUT_ROOT" && pwd)"
+RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 mkdir -p "$RUN_DIR"
 OVERALL_RC=0
 for sid in "${SELECTED_SCENARIOS[@]}"; do
@@ -191,6 +206,8 @@ cat >"$RUN_REPORT" <<JSON
   "contract_version": "$(json_escape "$(contract_version)")",
   "script_path": "scripts/run_runtime_ascension_closure_smoke.sh",
   "project_root": "$(json_escape "$PROJECT_ROOT")",
+  "invoked_from": "$(json_escape "$INVOKED_FROM")",
+  "command_workdir": "$(json_escape "$PROJECT_ROOT")",
   "generated_ts": "$(json_escape "$GENERATED_TS")",
   "run_dir": "$(json_escape "$RUN_DIR")",
   "dry_run": $( [[ "$DRY_RUN" -eq 1 ]] && printf 'true' || printf 'false' ),

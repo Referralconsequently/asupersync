@@ -428,6 +428,7 @@ fn smoke_scenarios_cover_cfg_compile_execution() {
         "WASM-QA-SMOKE-NATIVE-BACKSTOP",
         "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP",
         "WASM-QA-SMOKE-HOST-BRIDGE",
+        "WASM-QA-SMOKE-CROSS-BROWSER",
     ] {
         assert!(
             ids.contains(expected),
@@ -496,6 +497,30 @@ fn host_bridge_smoke_scenario_routes_through_harness_profile() {
         assert!(
             command.contains(token),
             "host bridge smoke scenario missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn cross_browser_smoke_scenario_routes_through_explicit_matrix() {
+    let artifact = load_artifact();
+    let scenarios = artifact["smoke_scenarios"].as_array().expect("array");
+    let scenario = scenarios
+        .iter()
+        .find(|entry| entry["scenario_id"] == "WASM-QA-SMOKE-CROSS-BROWSER")
+        .expect("missing cross-browser smoke scenario");
+    let command = scenario["command"]
+        .as_str()
+        .expect("cross-browser command must be string");
+    for token in [
+        "HARNESS_PROFILE=full",
+        "HARNESS_DRY_RUN=1",
+        "BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless",
+        "scripts/test_wasm_cross_framework_e2e.sh",
+    ] {
+        assert!(
+            command.contains(token),
+            "cross-browser smoke scenario missing token: {token}"
         );
     }
 }
