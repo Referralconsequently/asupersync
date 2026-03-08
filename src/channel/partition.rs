@@ -501,7 +501,7 @@ mod tests {
         let (ctrl, _) = make_controller(PartitionBehavior::Drop);
         let a = ActorId::new(1);
         let b = ActorId::new(2);
-        let (ptx, rx) = partition_channel::<u32>(16, ctrl, a, b);
+        let (ptx, mut rx) = partition_channel::<u32>(16, ctrl, a, b);
         let cx = test_cx();
 
         for i in 0..5 {
@@ -518,7 +518,7 @@ mod tests {
         let (ctrl, collector) = make_controller(PartitionBehavior::Drop);
         let a = ActorId::new(1);
         let b = ActorId::new(2);
-        let (ptx, rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let (ptx, mut rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
         let cx = test_cx();
 
         // Partition A→B.
@@ -587,7 +587,7 @@ mod tests {
         let (ctrl, _collector) = make_controller(PartitionBehavior::Drop);
         let a = ActorId::new(1);
         let b = ActorId::new(2);
-        let (ptx, rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let (ptx, mut rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
         let cx = test_cx();
         cx.set_cancel_requested(true);
 
@@ -617,7 +617,7 @@ mod tests {
         let (ctrl, _) = make_controller(PartitionBehavior::Drop);
         let a = ActorId::new(1);
         let b = ActorId::new(2);
-        let (ptx, rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let (ptx, mut rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
         let cx = test_cx();
 
         ctrl.partition(a, b);
@@ -640,8 +640,8 @@ mod tests {
         let a = ActorId::new(1);
         let b = ActorId::new(2);
         // Create channels for both directions.
-        let (ptx_ab, rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
-        let (ptx_ba, rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
+        let (ptx_ab, mut rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let (ptx_ba, mut rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
         let cx = test_cx();
 
         // Only partition A→B (asymmetric).
@@ -661,8 +661,8 @@ mod tests {
         let (ctrl, _) = make_controller(PartitionBehavior::Drop);
         let a = ActorId::new(1);
         let b = ActorId::new(2);
-        let (ptx_ab, rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
-        let (ptx_ba, rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
+        let (ptx_ab, mut rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let (ptx_ba, mut rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
         let cx = test_cx();
 
         ctrl.partition_symmetric(a, b);
@@ -687,9 +687,9 @@ mod tests {
         let a = ActorId::new(1);
         let b = ActorId::new(2);
         let c = ActorId::new(3);
-        let (tx_a2b, rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
-        let (tx_b2c, rx_c) = partition_channel::<u32>(16, ctrl.clone(), b, c);
-        let (tx_a2c, rx_c2) = partition_channel::<u32>(16, ctrl.clone(), a, c);
+        let (tx_a2b, mut rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let (tx_b2c, mut rx_c) = partition_channel::<u32>(16, ctrl.clone(), b, c);
+        let (tx_a2c, mut rx_c2) = partition_channel::<u32>(16, ctrl.clone(), a, c);
         let cx = test_cx();
 
         // Partition A→B and B→C (cascading).

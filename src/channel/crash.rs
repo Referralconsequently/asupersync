@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn passthrough_when_disabled() {
         let config = CrashConfig::new(42);
-        let (tx, rx, ctrl, _) = make_crash_channel(config);
+        let (tx, mut rx, ctrl, _) = make_crash_channel(config);
         let cx = test_cx();
 
         for i in 0..10 {
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn restart_re_enables_sends() {
         let config = CrashConfig::new(42);
-        let (tx, rx, ctrl, _) = make_crash_channel(config);
+        let (tx, mut rx, ctrl, _) = make_crash_channel(config);
         let cx = test_cx();
 
         ctrl.crash();
@@ -698,7 +698,7 @@ mod tests {
     #[test]
     fn crash_after_sends() {
         let config = CrashConfig::new(42).with_crash_after_sends(5);
-        let (tx, rx, ctrl, _) = make_crash_channel(config);
+        let (tx, mut rx, ctrl, _) = make_crash_channel(config);
         let cx = test_cx();
 
         for i in 0..5 {

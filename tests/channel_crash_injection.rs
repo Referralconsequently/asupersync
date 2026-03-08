@@ -72,7 +72,7 @@ fn make_crash_channel(
 #[test]
 fn crash_blocks_all_messages() {
     let config = CrashConfig::new(42);
-    let (tx, rx, ctrl, _) = make_crash_channel(config);
+    let (tx, mut rx, ctrl, _) = make_crash_channel(config);
     let cx = test_cx();
 
     // Send before crash — should arrive.
@@ -113,7 +113,7 @@ fn crash_returns_value_in_error() {
 #[test]
 fn restart_allows_new_messages() {
     let config = CrashConfig::new(42);
-    let (tx, rx, ctrl, _) = make_crash_channel(config);
+    let (tx, mut rx, ctrl, _) = make_crash_channel(config);
     let cx = test_cx();
 
     // Pre-crash send.
@@ -134,7 +134,7 @@ fn restart_allows_new_messages() {
 #[test]
 fn multiple_crash_restart_cycles() {
     let config = CrashConfig::new(42);
-    let (tx, rx, ctrl, _) = make_crash_channel(config);
+    let (tx, mut rx, ctrl, _) = make_crash_channel(config);
     let cx = test_cx();
 
     for cycle in 0..5 {
@@ -162,7 +162,7 @@ fn cold_restart_resets_send_counter() {
     let config = CrashConfig::new(42)
         .with_crash_after_sends(3)
         .with_restart_mode(RestartMode::Cold);
-    let (tx, rx, ctrl, _) = make_crash_channel(config);
+    let (tx, mut rx, ctrl, _) = make_crash_channel(config);
     let cx = test_cx();
 
     // 3 successful sends, then crash on 4th.
@@ -261,7 +261,7 @@ fn exhausted_controller_is_permanent() {
 #[test]
 fn deterministic_crash_at_exact_count() {
     let config = CrashConfig::new(42).with_crash_after_sends(10);
-    let (tx, rx, ctrl, _) = make_crash_channel(config);
+    let (tx, mut rx, ctrl, _) = make_crash_channel(config);
     let cx = test_cx();
 
     // Exactly 10 sends should succeed.
@@ -462,7 +462,7 @@ fn send_count_tracks_per_sender() {
 #[test]
 fn reserve_then_crash_aborts_permit() {
     // Create a normal mpsc channel and get a reserve permit.
-    let (tx, rx) = mpsc::channel::<u32>(16);
+    let (tx, mut rx) = mpsc::channel::<u32>(16);
     let cx = test_cx();
 
     // Reserve a slot (phase 1 of two-phase commit).
@@ -481,7 +481,7 @@ fn reserve_then_crash_aborts_permit() {
 #[test]
 fn crash_during_send_sequence_no_obligation_leak() {
     let config = CrashConfig::new(42).with_crash_after_sends(5);
-    let (tx, rx, ctrl, _) = make_crash_channel(config);
+    let (tx, mut rx, ctrl, _) = make_crash_channel(config);
     let cx = test_cx();
 
     // Send 5 messages successfully.
@@ -532,7 +532,7 @@ fn controller_shared_across_multiple_senders() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = CrashConfig::new(42);
 
-    let (tx1, rx) = mpsc::channel::<u32>(16);
+    let (tx1, mut rx) = mpsc::channel::<u32>(16);
     let tx2 = tx1.clone();
     let ctrl = Arc::new(asupersync::channel::crash::CrashController::new(
         &config,

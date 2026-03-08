@@ -109,7 +109,7 @@ fn recovery_after_heal_drop_mode() {
     let (ctrl, _) = make_controller(PartitionBehavior::Drop);
     let a = ActorId::new(1);
     let b = ActorId::new(2);
-    let (ptx, rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
+    let (ptx, mut rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
     let cx = test_cx();
 
     // Phase 1: partition active, messages dropped.
@@ -136,7 +136,7 @@ fn recovery_after_heal_error_mode() {
     let (ctrl, _) = make_controller(PartitionBehavior::Error);
     let a = ActorId::new(1);
     let b = ActorId::new(2);
-    let (ptx, rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
+    let (ptx, mut rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
     let cx = test_cx();
 
     ctrl.partition(a, b);
@@ -152,7 +152,7 @@ fn multiple_partition_heal_cycles() {
     let (ctrl, _) = make_controller(PartitionBehavior::Drop);
     let a = ActorId::new(1);
     let b = ActorId::new(2);
-    let (ptx, rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
+    let (ptx, mut rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
     let cx = test_cx();
 
     for cycle in 0..5 {
@@ -182,8 +182,8 @@ fn no_split_brain_under_symmetric_partition() {
     let (ctrl, _) = make_controller(PartitionBehavior::Drop);
     let a = ActorId::new(1);
     let b = ActorId::new(2);
-    let (ptx_ab, rx_b) = partition_channel::<String>(16, ctrl.clone(), a, b);
-    let (ptx_ba, rx_a) = partition_channel::<String>(16, ctrl.clone(), b, a);
+    let (ptx_ab, mut rx_b) = partition_channel::<String>(16, ctrl.clone(), a, b);
+    let (ptx_ba, mut rx_a) = partition_channel::<String>(16, ctrl.clone(), b, a);
     let cx = test_cx();
 
     ctrl.partition_symmetric(a, b);
@@ -215,7 +215,7 @@ fn asymmetric_partition_one_way_block() {
     let a = ActorId::new(1);
     let b = ActorId::new(2);
     let (ptx_ab, rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
-    let (ptx_ba, rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
+    let (ptx_ba, mut rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
     let cx = test_cx();
 
     // Only A→B partitioned.
@@ -234,7 +234,7 @@ fn asymmetric_reverse_direction_not_affected() {
     let a = ActorId::new(1);
     let b = ActorId::new(2);
     let (ptx_ab, _rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
-    let (ptx_ba, rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
+    let (ptx_ba, mut rx_a) = partition_channel::<u32>(16, ctrl.clone(), b, a);
     let cx = test_cx();
 
     ctrl.partition(a, b);
@@ -257,8 +257,8 @@ fn three_way_cascading_partition() {
     let b = ActorId::new(2);
     let c = ActorId::new(3);
 
-    let (tx_a2b, rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
-    let (tx_b2c, rx_c_from_b) = partition_channel::<u32>(16, ctrl.clone(), b, c);
+    let (tx_a2b, mut rx_b) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+    let (tx_b2c, mut rx_c_from_b) = partition_channel::<u32>(16, ctrl.clone(), b, c);
     let (tx_a2c, rx_c_from_a) = partition_channel::<u32>(16, ctrl.clone(), a, c);
     let cx = test_cx();
 
@@ -311,7 +311,7 @@ fn cancelled_context_during_partition_error_mode() {
     let (ctrl, _) = make_controller(PartitionBehavior::Error);
     let a = ActorId::new(1);
     let b = ActorId::new(2);
-    let (ptx, _rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+    let (ptx, _rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
     let cx = test_cx();
 
     // Cancel the context.
@@ -353,7 +353,7 @@ fn evidence_logged_for_all_events() {
     let (ctrl, collector) = make_controller(PartitionBehavior::Drop);
     let a = ActorId::new(1);
     let b = ActorId::new(2);
-    let (ptx, _rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+    let (ptx, _rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
     let cx = test_cx();
 
     ctrl.partition(a, b);
@@ -428,7 +428,7 @@ fn stats_track_all_operations() {
     let (ctrl, _) = make_controller(PartitionBehavior::Drop);
     let a = ActorId::new(1);
     let b = ActorId::new(2);
-    let (ptx, _rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+    let (ptx, _rx) = partition_channel::<u32>(64, ctrl.clone(), a, b);
     let cx = test_cx();
 
     ctrl.partition(a, b);

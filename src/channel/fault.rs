@@ -520,7 +520,7 @@ mod tests {
     fn passthrough_when_disabled() {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         let config = FaultChannelConfig::new(42);
-        let (fault_tx, rx) = fault_channel::<u32>(16, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(16, config, sink);
         let cx = test_cx();
 
         for i in 0..10 {
@@ -545,7 +545,7 @@ mod tests {
         let sink: Arc<dyn EvidenceSink> = collector.clone();
         // 100% duplication probability.
         let config = FaultChannelConfig::new(42).with_duplication(1.0);
-        let (fault_tx, rx) = fault_channel::<u32>(32, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(32, config, sink);
         let cx = test_cx();
 
         block_on(fault_tx.send(&cx, 42)).expect("send failed");
@@ -570,7 +570,7 @@ mod tests {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         // 100% reorder probability, buffer size 3.
         let config = FaultChannelConfig::new(42).with_reorder(1.0, 3);
-        let (fault_tx, rx) = fault_channel::<u32>(32, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(32, config, sink);
         let cx = test_cx();
 
         // Send 3 messages — should fill buffer and auto-flush.
@@ -598,7 +598,7 @@ mod tests {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         // 100% reorder, large buffer so auto-flush doesn't trigger.
         let config = FaultChannelConfig::new(42).with_reorder(1.0, 100);
-        let (fault_tx, rx) = fault_channel::<u32>(32, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(32, config, sink);
         let cx = test_cx();
 
         for i in 0..5 {
@@ -652,8 +652,8 @@ mod tests {
             .with_reorder(0.5, 4)
             .with_duplication(0.3);
 
-        let (fault_tx1, rx1) = fault_channel::<u32>(64, config.clone(), sink1);
-        let (fault_tx2, rx2) = fault_channel::<u32>(64, config, sink2);
+        let (fault_tx1, mut rx1) = fault_channel::<u32>(64, config.clone(), sink1);
+        let (fault_tx2, mut rx2) = fault_channel::<u32>(64, config, sink2);
         let cx = test_cx();
 
         for i in 0..20 {
@@ -691,7 +691,7 @@ mod tests {
         let config = FaultChannelConfig::new(77)
             .with_reorder(0.5, 5)
             .with_duplication(0.0);
-        let (fault_tx, rx) = fault_channel::<u32>(128, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(128, config, sink);
         let cx = test_cx();
 
         let count = 50;
@@ -717,7 +717,7 @@ mod tests {
         let config = FaultChannelConfig::new(42)
             .with_reorder(0.3, 4)
             .with_duplication(0.2);
-        let (fault_tx, rx) = fault_channel::<u32>(256, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(256, config, sink);
         let cx = test_cx();
 
         let count = 30;
@@ -812,7 +812,7 @@ mod tests {
     fn auto_flush_cancelled_keeps_message_buffered_without_erroring_send() {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         let config = FaultChannelConfig::new(42).with_reorder(1.0, 1);
-        let (fault_tx, rx) = fault_channel::<u32>(8, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(8, config, sink);
         let cancelled_cx = test_cx();
         cancelled_cx.set_cancel_requested(true);
         let healthy_cx = test_cx();
@@ -907,7 +907,7 @@ mod tests {
         let config = FaultChannelConfig::new(42)
             .with_reorder(0.5, 4)
             .with_duplication(0.2);
-        let (fault_tx, rx) = fault_channel::<String>(16, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<String>(16, config, sink);
         let cx = test_cx();
 
         block_on(fault_tx.send(&cx, "hello".to_string())).expect("send");

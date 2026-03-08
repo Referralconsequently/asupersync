@@ -137,7 +137,7 @@ proptest! {
         messages in arb_message_sequence(128)
     ) {
         init_test_logging();
-        let (tx, rx) = mpsc::channel::<i64>(capacity);
+        let (tx, mut rx) = mpsc::channel::<i64>(capacity);
 
         // Send all messages (capacity >= 1, so at most we queue up to capacity)
         // Use try_send to avoid blocking when channel is full; collect what succeeds.
@@ -173,7 +173,7 @@ proptest! {
         messages in arb_message_sequence(64)
     ) {
         init_test_logging();
-        let (tx, rx) = mpsc::channel::<i64>(capacity);
+        let (tx, mut rx) = mpsc::channel::<i64>(capacity);
 
         let mut sent = Vec::new();
         for &msg in &messages {
@@ -203,7 +203,7 @@ proptest! {
     #[test]
     fn mpsc_permit_abort_frees_slot(capacity in arb_capacity()) {
         init_test_logging();
-        let (tx, rx) = mpsc::channel::<i32>(capacity);
+        let (tx, mut rx) = mpsc::channel::<i32>(capacity);
 
         // Fill channel completely
         let mut permits = Vec::new();
@@ -251,7 +251,7 @@ proptest! {
         reserve_count in 0_usize..=64,
     ) {
         init_test_logging();
-        let (tx, rx) = mpsc::channel::<i32>(capacity);
+        let (tx, mut rx) = mpsc::channel::<i32>(capacity);
 
         // Send some messages
         let mut actual_sends = 0usize;
@@ -298,7 +298,7 @@ proptest! {
     #[test]
     fn mpsc_sender_drop_disconnects(capacity in arb_capacity()) {
         init_test_logging();
-        let (tx, rx) = mpsc::channel::<i32>(capacity);
+        let (tx, mut rx) = mpsc::channel::<i32>(capacity);
         drop(tx);
         let result = rx.try_recv();
         prop_assert!(
@@ -744,7 +744,7 @@ proptest! {
         ops in proptest::collection::vec(arb_channel_op(), 1..=200),
     ) {
         init_test_logging();
-        let (tx, rx) = mpsc::channel::<(u8, u32)>(capacity);
+        let (tx, mut rx) = mpsc::channel::<(u8, u32)>(capacity);
 
         // Per-producer sequence counters.
         let mut send_seq = [0u32; 4];
@@ -826,7 +826,7 @@ proptest! {
     ) {
         init_test_logging();
         let send_count = values.len().min(capacity);
-        let (tx, rx) = mpsc::channel::<i64>(capacity);
+        let (tx, mut rx) = mpsc::channel::<i64>(capacity);
 
         // Send up to capacity.
         let mut sent = Vec::new();
@@ -873,7 +873,7 @@ proptest! {
     ) {
         init_test_logging();
         let count = count.min(capacity);
-        let (tx, rx) = mpsc::channel::<usize>(capacity);
+        let (tx, mut rx) = mpsc::channel::<usize>(capacity);
 
         // Reserve `count` permits.
         let mut permits = Vec::new();

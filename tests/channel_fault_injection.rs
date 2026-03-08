@@ -46,7 +46,7 @@ fn block_on<F: Future>(f: F) -> F::Output {
     }
 }
 
-fn drain_receiver<T>(rx: &asupersync::channel::Receiver<T>) -> Vec<T> {
+fn drain_receiver<T>(rx: &mut asupersync::channel::Receiver<T>) -> Vec<T> {
     let mut received = Vec::new();
     while let Ok(val) = rx.try_recv() {
         received.push(val);
@@ -62,7 +62,7 @@ fn drain_receiver<T>(rx: &asupersync::channel::Receiver<T>) -> Vec<T> {
 fn no_obligation_leak_under_reorder() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(42).with_reorder(0.5, 4);
-    let (fault_tx, rx) = fault_channel::<u32>(64, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(64, config, sink);
     let cx = test_cx();
 
     for i in 0..20 {
@@ -70,7 +70,7 @@ fn no_obligation_leak_under_reorder() {
     }
     block_on(fault_tx.flush(&cx)).expect("flush");
 
-    let received = drain_receiver(&rx);
+    let received = drain_receiver(&mut rx);
 
     // After flush, the underlying channel should have zero reserved slots.
     // The receiver reports is_empty only if all messages are drained.
@@ -87,14 +87,14 @@ fn no_obligation_leak_under_reorder() {
 fn no_obligation_leak_under_duplication() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(42).with_duplication(0.5);
-    let (fault_tx, rx) = fault_channel::<u32>(128, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(128, config, sink);
     let cx = test_cx();
 
     for i in 0..20 {
         block_on(fault_tx.send(&cx, i)).expect("send");
     }
 
-    let received = drain_receiver(&rx);
+    let received = drain_receiver(&mut rx);
 
     // Must have at least the 20 originals.
     assert!(
@@ -113,7 +113,7 @@ fn no_obligation_leak_mixed_faults() {
     let config = FaultChannelConfig::new(42)
         .with_reorder(0.3, 5)
         .with_duplication(0.2);
-    let (fault_tx, rx) = fault_channel::<u32>(256, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(256, config, sink);
     let cx = test_cx();
 
     for i in 0..50 {
@@ -121,7 +121,7 @@ fn no_obligation_leak_mixed_faults() {
     }
     block_on(fault_tx.flush(&cx)).expect("flush");
 
-    let received = drain_receiver(&rx);
+    let received = drain_receiver(&mut rx);
     let unique: HashSet<u32> = received.iter().copied().collect();
 
     // All originals must be present.
@@ -141,14 +141,14 @@ fn no_obligation_leak_mixed_faults() {
 fn idempotent_dedup_under_duplication() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(42).with_duplication(1.0);
-    let (fault_tx, rx) = fault_channel::<u32>(64, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(64, config, sink);
     let cx = test_cx();
 
     for i in 0..10 {
         block_on(fault_tx.send(&cx, i)).expect("send");
     }
 
-    let received = drain_receiver(&rx);
+    let received = drain_receiver(&mut rx);
 
     // All messages are duplicated → 20 received.
     assert_eq!(
@@ -177,7 +177,7 @@ fn idempotent_processing_with_sequence_numbers() {
     // Simulate an idempotent processor that tracks seen sequence numbers.
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(99).with_duplication(0.5);
-    let (fault_tx, rx) = fault_channel::<u32>(128, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(128, config, sink);
     let cx = test_cx();
 
     for i in 0..30 {
@@ -187,7 +187,7 @@ fn idempotent_processing_with_sequence_numbers() {
     // Simulate idempotent consumer.
     let mut seen = HashSet::new();
     let mut processed = Vec::new();
-    let received = drain_receiver(&rx);
+    let received = drain_receiver(&mut rx);
 
     for val in received {
         if seen.insert(val) {
@@ -212,7 +212,7 @@ fn idempotent_processing_with_sequence_numbers() {
 fn eventual_delivery_reorder_only() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(42).with_reorder(1.0, 5);
-    let (fault_tx, rx) = fault_channel::<u32>(128, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(128, config, sink);
     let cx = test_cx();
 
     let count = 25;
@@ -222,7 +222,7 @@ fn eventual_delivery_reorder_only() {
     // Flush ensures all buffered messages are delivered.
     block_on(fault_tx.flush(&cx)).expect("flush");
 
-    let mut received = drain_receiver(&rx);
+    let mut received = drain_receiver(&mut rx);
     assert_eq!(
         received.len(),
         count as usize,
@@ -239,7 +239,7 @@ fn eventual_delivery_reorder_only() {
 fn eventual_delivery_large_message_count() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(42).with_reorder(0.7, 8);
-    let (fault_tx, rx) = fault_channel::<u32>(512, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(512, config, sink);
     let cx = test_cx();
 
     let count = 200;
@@ -248,7 +248,7 @@ fn eventual_delivery_large_message_count() {
     }
     block_on(fault_tx.flush(&cx)).expect("flush");
 
-    let mut received = drain_receiver(&rx);
+    let mut received = drain_receiver(&mut rx);
     received.sort_unstable();
     received.dedup();
     assert_eq!(
@@ -263,7 +263,7 @@ fn reorder_actually_reorders() {
     // Verify that reordering actually changes the order (with high probability).
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(42).with_reorder(1.0, 10);
-    let (fault_tx, rx) = fault_channel::<u32>(128, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(128, config, sink);
     let cx = test_cx();
 
     let count: u32 = 20;
@@ -272,7 +272,7 @@ fn reorder_actually_reorders() {
     }
     block_on(fault_tx.flush(&cx)).expect("flush");
 
-    let received = drain_receiver(&rx);
+    let received = drain_receiver(&mut rx);
     let in_order: Vec<u32> = (0..count).collect();
 
     // With 20 messages and buffer=10, reordering should change something.
@@ -390,14 +390,14 @@ fn deterministic_reorder_sequence() {
     let run = |seed: u64| -> Vec<u32> {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         let config = FaultChannelConfig::new(seed).with_reorder(0.5, 4);
-        let (fault_tx, rx) = fault_channel::<u32>(128, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(128, config, sink);
         let cx = test_cx();
 
         for i in 0..20 {
             block_on(fault_tx.send(&cx, i)).expect("send");
         }
         block_on(fault_tx.flush(&cx)).expect("flush");
-        drain_receiver(&rx)
+        drain_receiver(&mut rx)
     };
 
     let run1 = run(42);
@@ -417,13 +417,13 @@ fn deterministic_duplication_sequence() {
     let run = |seed: u64| -> Vec<u32> {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         let config = FaultChannelConfig::new(seed).with_duplication(0.5);
-        let (fault_tx, rx) = fault_channel::<u32>(128, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(128, config, sink);
         let cx = test_cx();
 
         for i in 0..20 {
             block_on(fault_tx.send(&cx, i)).expect("send");
         }
-        drain_receiver(&rx)
+        drain_receiver(&mut rx)
     };
 
     let run1 = run(42);
@@ -438,14 +438,14 @@ fn deterministic_mixed_faults() {
         let config = FaultChannelConfig::new(seed)
             .with_reorder(0.3, 5)
             .with_duplication(0.2);
-        let (fault_tx, rx) = fault_channel::<u32>(256, config, sink);
+        let (fault_tx, mut rx) = fault_channel::<u32>(256, config, sink);
         let cx = test_cx();
 
         for i in 0..30 {
             block_on(fault_tx.send(&cx, i)).expect("send");
         }
         block_on(fault_tx.flush(&cx)).expect("flush");
-        let received = drain_receiver(&rx);
+        let received = drain_receiver(&mut rx);
         let stats = fault_tx.stats();
         (
             received,
@@ -501,7 +501,7 @@ fn stats_track_all_operations() {
 fn partial_buffer_flush_on_manual_call() {
     let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
     let config = FaultChannelConfig::new(42).with_reorder(1.0, 10);
-    let (fault_tx, rx) = fault_channel::<u32>(64, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(64, config, sink);
     let cx = test_cx();
 
     // Send 3 messages (buffer size is 10, so no auto-flush).
@@ -514,7 +514,7 @@ fn partial_buffer_flush_on_manual_call() {
     block_on(fault_tx.flush(&cx)).expect("flush");
     assert_eq!(fault_tx.buffered_count(), 0);
 
-    let mut received = drain_receiver(&rx);
+    let mut received = drain_receiver(&mut rx);
     received.sort_unstable();
     assert_eq!(received, vec![0, 1, 2]);
 }
@@ -525,7 +525,7 @@ fn high_volume_stress_test() {
     let config = FaultChannelConfig::new(12345)
         .with_reorder(0.4, 8)
         .with_duplication(0.1);
-    let (fault_tx, rx) = fault_channel::<u32>(2048, config, sink);
+    let (fault_tx, mut rx) = fault_channel::<u32>(2048, config, sink);
     let cx = test_cx();
 
     let count: u32 = 500;
@@ -534,7 +534,7 @@ fn high_volume_stress_test() {
     }
     block_on(fault_tx.flush(&cx)).expect("flush");
 
-    let received = drain_receiver(&rx);
+    let received = drain_receiver(&mut rx);
 
     // All originals must be present (eventual delivery + no loss).
     let unique: HashSet<u32> = received.iter().copied().collect();

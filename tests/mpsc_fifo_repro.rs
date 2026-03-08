@@ -18,7 +18,7 @@ fn test_cx() -> Cx {
 #[test]
 fn test_mpsc_fifo_starvation() {
     // Capacity 1
-    let (tx, rx) = mpsc::channel::<i32>(1);
+    let (tx, mut rx) = mpsc::channel::<i32>(1);
     let cx = test_cx();
 
     // Fill the channel

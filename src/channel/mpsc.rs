@@ -728,7 +728,7 @@ impl<T> Receiver<T> {
 
     /// Attempts to receive a value without blocking.
     #[inline]
-    pub fn try_recv(&self) -> Result<T, RecvError> {
+    pub fn try_recv(&mut self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
         if let Some(value) = inner.queue.pop_front() {
             inner.recv_waker = None;
@@ -1062,7 +1062,7 @@ mod tests {
     #[test]
     fn try_recv_when_empty() {
         init_test("try_recv_when_empty");
-        let (tx, rx) = channel::<i32>(10);
+        let (tx, mut rx) = channel::<i32>(10);
 
         let empty = rx.try_recv();
         crate::assert_with_log!(
@@ -1324,7 +1324,7 @@ mod tests {
     #[test]
     fn try_recv_disconnected_when_closed_and_empty() {
         init_test("try_recv_disconnected_when_closed_and_empty");
-        let (tx, rx) = channel::<i32>(1);
+        let (tx, mut rx) = channel::<i32>(1);
         drop(tx);
         let result = rx.try_recv();
         crate::assert_with_log!(

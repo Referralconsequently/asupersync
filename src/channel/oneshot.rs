@@ -514,7 +514,7 @@ impl<T> Receiver<T> {
     ///
     /// - `TryRecvError::Empty` if no value is available yet but sender exists
     /// - `TryRecvError::Closed` if the sender was dropped without sending
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mut inner = self.inner.lock();
 
         if let Some(value) = inner.value.take() {
@@ -641,7 +641,7 @@ mod tests {
     fn reserve_then_abort() {
         init_test("reserve_then_abort");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>();
+        let (tx, mut rx) = channel::<i32>();
 
         let permit = tx.reserve(&cx);
         permit.abort();
@@ -660,7 +660,7 @@ mod tests {
     fn permit_drop_is_abort() {
         init_test("permit_drop_is_abort");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>();
+        let (tx, mut rx) = channel::<i32>();
 
         {
             let _permit = tx.reserve(&cx);
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn sender_dropped_without_send() {
         init_test("sender_dropped_without_send");
-        let (tx, rx) = channel::<i32>();
+        let (tx, mut rx) = channel::<i32>();
         // Explicitly drop sender without sending
         drop(tx);
 
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn try_recv_empty() {
         init_test("try_recv_empty");
-        let (tx, rx) = channel::<i32>();
+        let (tx, mut rx) = channel::<i32>();
 
         // Nothing sent yet
         let err = rx.try_recv();
@@ -741,7 +741,7 @@ mod tests {
     fn try_recv_ready() {
         init_test("try_recv_ready");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>();
+        let (tx, mut rx) = channel::<i32>();
 
         tx.send(&cx, 42).expect("send should succeed");
 
@@ -1267,7 +1267,7 @@ mod tests {
         // With permit outstanding but no value, try_recv should return Empty (not Closed).
         init_test("try_recv_returns_empty_while_permit_outstanding");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>();
+        let (tx, mut rx) = channel::<i32>();
 
         let permit = tx.reserve(&cx);
 
