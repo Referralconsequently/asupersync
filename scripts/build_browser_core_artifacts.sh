@@ -53,9 +53,9 @@ wasm-pack build "${CRATE_DIR}" \
   --out-name asupersync \
   "${BUILD_ARGS[@]}"
 
-major="$(rg -No 'WASM_ABI_MAJOR_VERSION[^=]*= ([0-9]+);' "${ABI_FILE}" -r '$1' -m1)"
-minor="$(rg -No 'WASM_ABI_MINOR_VERSION[^=]*= ([0-9]+);' "${ABI_FILE}" -r '$1' -m1)"
-fingerprint="$(rg -No 'WASM_ABI_SIGNATURE_FINGERPRINT_V1[^=]*= ([0-9]+);' "${ABI_FILE}" -r '$1' -m1)"
+major="$(rg -No 'WASM_ABI_MAJOR_VERSION[^=]*= ([0-9_]+);' "${ABI_FILE}" -r '$1' -m1 | tr -d '_')"
+minor="$(rg -No 'WASM_ABI_MINOR_VERSION[^=]*= ([0-9_]+);' "${ABI_FILE}" -r '$1' -m1 | tr -d '_')"
+fingerprint="$(rg -No 'WASM_ABI_SIGNATURE_FINGERPRINT_V1[^=]*= ([0-9_]+);' "${ABI_FILE}" -r '$1' -m1 | tr -d '_')"
 
 cat > "${STAGING_DIR}/abi-metadata.json" <<EOF
 {

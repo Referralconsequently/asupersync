@@ -12,11 +12,13 @@ use asupersync::types::{
     WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
     WasmAbiCancellation, WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope,
     WasmAbiRecoverability, WasmAbiValue, WasmAbiVersion, WasmDispatchError,
-    WasmDispatcherDiagnostics, WasmExportDispatcher, WasmFetchRequest, WasmHandleRef,
-    WasmScopeEnterRequest, WasmTaskCancelRequest, WasmTaskSpawnRequest,
+    WasmExportDispatcher, WasmFetchRequest, WasmHandleRef, WasmScopeEnterRequest,
+    WasmTaskCancelRequest, WasmTaskSpawnRequest,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+#[cfg(not(target_arch = "wasm32"))]
+use asupersync::types::WasmDispatcherDiagnostics;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
@@ -336,11 +338,11 @@ async fn run_browser_fetch(
     };
 
     let mut init = RequestInit::new();
-    init.method(&request.method);
-    init.signal(Some(&signal));
+    init.set_method(&request.method);
+    init.set_signal(Some(&signal));
     if let Some(body) = request.body {
         let body = js_sys::Uint8Array::from(body.as_slice());
-        init.body(Some(&body.into()));
+        init.set_body(&body.into());
     }
 
     let fetch_promise = window.fetch_with_str_and_init(&request.url, &init);
@@ -1099,7 +1101,7 @@ pub fn abi_version() -> Result<String, String> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = abi_fingerprint))]
 #[cfg(target_arch = "wasm32")]
 #[must_use]
-pub const fn abi_fingerprint() -> u64 {
+pub fn abi_fingerprint() -> u64 {
     abi_fingerprint_impl()
 }
 

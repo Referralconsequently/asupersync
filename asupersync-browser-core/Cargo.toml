@@ -55,6 +55,11 @@ dev = ["asupersync/wasm-browser-dev"]
 prod = ["asupersync/wasm-browser-prod"]
 deterministic = ["asupersync/wasm-browser-deterministic"]
 
+[package.metadata.wasm-pack.profile.release]
+# Browser-core release artifacts use bulk-memory instructions; wasm-opt must
+# validate them instead of rejecting the optimized packaging pass.
+wasm-opt = ["-Oz", "--enable-bulk-memory", "--strip-dwarf", "--strip-producers", "--vacuum"]
+
 [lints.rust]
 unsafe_code = "deny"
 
