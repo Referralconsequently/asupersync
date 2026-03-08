@@ -540,8 +540,11 @@ impl Connection {
         // Prune closed streams when the map grows large relative to the
         // configured maximum. This prevents unbounded memory growth on
         // long-lived connections where many streams are opened and closed.
+        // We cap the threshold to ensure that a default unlimited (u32::MAX)
+        // max_concurrent_streams doesn't completely disable pruning.
         let max = self.local_settings.max_concurrent_streams as usize;
-        if self.streams.len() > max.saturating_mul(2) {
+        let threshold = std::cmp::min(max, 16_384).saturating_mul(2);
+        if self.streams.len() > threshold {
             self.streams.prune_closed();
         }
 

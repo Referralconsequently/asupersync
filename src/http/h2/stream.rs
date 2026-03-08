@@ -737,15 +737,22 @@ impl StreamStore {
 
     /// Allocate a new stream ID.
     pub fn allocate_stream_id(&mut self) -> Result<u32, H2Error> {
-        let active_count = u32::try_from(
-            self.streams
-                .values()
-                .filter(|s| !s.state.is_closed())
-                .count(),
-        )
-        .unwrap_or(u32::MAX);
-        if active_count >= self.max_concurrent_streams {
-            return Err(H2Error::protocol("max concurrent streams exceeded"));
+        // Amortize the O(N) active stream count and prune operations.
+        // We only perform the O(N) scan when the total number of tracked
+        // streams reaches the max_concurrent_streams limit.
+        if self.streams.len() >= self.max_concurrent_streams as usize {
+            let mut active_count = 0;
+            self.streams.retain(|_, s| {
+                let active = !s.state.is_closed();
+                if active {
+                    active_count += 1;
+                }
+                active
+            });
+
+            if active_count >= self.max_concurrent_streams {
+                return Err(H2Error::protocol("max concurrent streams exceeded"));
+            }
         }
 
         let id = if self.is_client {
