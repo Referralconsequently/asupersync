@@ -791,12 +791,18 @@ export class NextServerBridgeAdapter {
     };
   }
 
+  fromOutcome(
+    outcome: BrowserOutcome<NextBridgeValue>,
+  ): NextServerBridgeResponse<NextBridgeValue>;
   fromOutcome<TPayload extends NextBridgeValue>(
     outcome: BrowserOutcome<TPayload>,
   ): NextServerBridgeResponse<TPayload> {
     return createNextServerBridgeResponseFromOutcome(outcome, this.options);
   }
 
+  unwrapResponse(
+    response: NextServerBridgeResponse<NextBridgeValue>,
+  ): NextBridgeValue;
   unwrapResponse<TPayload extends NextBridgeValue>(
     response: NextServerBridgeResponse<TPayload>,
   ): TPayload {
@@ -874,12 +880,18 @@ export class NextEdgeBridgeAdapter {
     };
   }
 
+  fromOutcome(
+    outcome: BrowserOutcome<NextBridgeValue>,
+  ): NextEdgeBridgeResponse<NextBridgeValue>;
   fromOutcome<TPayload extends NextBridgeValue>(
     outcome: BrowserOutcome<TPayload>,
   ): NextEdgeBridgeResponse<TPayload> {
     return createNextEdgeBridgeResponseFromOutcome(outcome, this.options);
   }
 
+  unwrapResponse(
+    response: NextEdgeBridgeResponse<NextBridgeValue>,
+  ): NextBridgeValue;
   unwrapResponse<TPayload extends NextBridgeValue>(
     response: NextEdgeBridgeResponse<TPayload>,
   ): TPayload {

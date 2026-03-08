@@ -465,34 +465,65 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Discover Browser Edition packages
+      - name: Resolve required Browser Edition packages
         id: discover
         run: |
           mkdir -p artifacts/npm
-          : > artifacts/npm/package_json_paths.txt
-          find packages -mindepth 2 -maxdepth 2 -name package.json -print 2>/dev/null | sort > artifacts/npm/package_json_paths.txt || true
-          pkg_count="$(grep -c . artifacts/npm/package_json_paths.txt || true)"
-          echo "package_count=${pkg_count}" >> "$GITHUB_OUTPUT"
-          if [ "${pkg_count}" -eq 0 ]; then
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "No npm package manifests found under packages/*; skipping npm publish."
-          else
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          fi
-
           python3 - <<'PY'
           import json
           from pathlib import Path
 
+          policy_path = Path(".github/wasm_typescript_package_policy.json")
+          policy = json.loads(policy_path.read_text(encoding="utf-8"))
+          required_packages = policy.get("required_packages", [])
+
+          package_paths = []
+          missing_packages = []
+          discovered_packages = []
+          for manifest_path in sorted(Path("packages").glob("*/package.json")):
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              discovered_packages.append(
+                  {
+                      "package": manifest.get("name", "<unknown>"),
+                      "path": str(manifest_path),
+                  }
+              )
+
+          unexpected_packages = sorted(
+              entry for entry in discovered_packages if entry["package"] not in required_packages
+          )
+
+          for package_name in required_packages:
+              dir_name = package_name.split("/")[-1]
+              manifest_path = Path("packages") / dir_name / "package.json"
+              if manifest_path.exists():
+                  package_paths.append(str(manifest_path))
+              else:
+                  missing_packages.append(
+                      {
+                          "package": package_name,
+                          "expected_path": str(manifest_path),
+                      }
+                  )
+
           pkg_path_file = Path("artifacts/npm/package_json_paths.txt")
-          paths = [line.strip() for line in pkg_path_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+          pkg_path_file.write_text(
+              "\n".join(package_paths) + ("\n" if package_paths else ""),
+              encoding="utf-8",
+          )
+
           payload = {
               "schema_version": "npm-release-assumptions-v1",
               "contract_id": "${{ env.WASM_RELEASE_CONTRACT_ID }}",
-              "bead_id": "${{ env.WASM_RELEASE_BEAD_ID }}",
+              "bead_id": "asupersync-3qv04.7.1",
+              "required_package_policy": str(policy_path),
+              "required_packages": required_packages,
               "package_discovery_glob": "packages/*/package.json",
-              "discovered_package_manifests": paths,
-              "discovered_package_count": len(paths),
+              "discovered_packages": discovered_packages,
+              "discovered_package_manifests": package_paths,
+              "discovered_package_count": len(package_paths),
+              "missing_packages": missing_packages,
+              "unexpected_packages": unexpected_packages,
               "publish_enabled": "${{ needs.plan.outputs.publish_npm }}" == "true",
               "npm_tag": "${{ needs.plan.outputs.npm_tag }}",
           }
@@ -500,10 +531,127 @@ jobs:
               json.dumps(payload, indent=2) + "\n",
               encoding="utf-8",
           )
+
+          if missing_packages or unexpected_packages:
+              print("Browser Edition package release validation failed.")
+              if missing_packages:
+                  print(f"Missing required packages: {missing_packages}")
+              if unexpected_packages:
+                  print(f"Unexpected package manifests: {unexpected_packages}")
+              raise SystemExit(1)
+
+          Path("artifacts/npm/package_count.txt").write_text(
+              str(len(package_paths)) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          echo "package_count=$(cat artifacts/npm/package_count.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Enable pnpm via corepack
+        if: ${{ needs.plan.outputs.rollback_npm_to_version == '' }}
+        run: |
+          package_manager="$(node -p "require('./package.json').packageManager")"
+          corepack enable
+          corepack prepare "${package_manager}" --activate
+
+      - name: Install Browser Edition workspace dependencies
+        if: ${{ needs.plan.outputs.rollback_npm_to_version == '' }}
+        run: corepack pnpm install --no-frozen-lockfile
+
+      - name: Build Browser Edition packages from real outputs
+        if: ${{ needs.plan.outputs.rollback_npm_to_version == '' }}
+        run: corepack pnpm run build
+
+      - name: Validate Browser Edition package outputs
+        if: ${{ needs.plan.outputs.rollback_npm_to_version == '' }}
+        run: |
+          bash scripts/validate_package_build.sh
+          bash scripts/validate_npm_pack_smoke.sh
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          required_packages = json.loads(
+              Path(".github/wasm_typescript_package_policy.json").read_text(encoding="utf-8")
+          )["required_packages"]
+          package_paths = [
+              line.strip()
+              for line in Path("artifacts/npm/package_json_paths.txt")
+              .read_text(encoding="utf-8")
+              .splitlines()
+              if line.strip()
+          ]
+
+          report = {
+              "schema_version": "npm-package-release-validation-v1",
+              "contract_id": "${{ env.WASM_RELEASE_CONTRACT_ID }}",
+              "bead_id": "asupersync-3qv04.7.1",
+              "required_package_policy": ".github/wasm_typescript_package_policy.json",
+              "required_packages": required_packages,
+              "discovered_package_manifests": package_paths,
+              "build_command": "corepack pnpm run build",
+              "validation_commands": [
+                  "bash scripts/validate_package_build.sh",
+                  "bash scripts/validate_npm_pack_smoke.sh",
+              ],
+          }
+          Path("artifacts/npm/package_release_validation.json").write_text(
+              json.dumps(report, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Capture npm pack dry-run evidence
+        if: ${{ needs.plan.outputs.rollback_npm_to_version == '' }}
+        run: |
+          mkdir -p artifacts/npm/pack
+          while IFS= read -r pkg_json; do
+            pkg_dir="$(dirname "$pkg_json")"
+            pkg_name="$(node -p "require('./${pkg_json}').name")"
+            pack_id="${pkg_name#@asupersync/}"
+            npm pack --json --dry-run --pack-destination /tmp "${pkg_dir}" \
+              > "artifacts/npm/pack/${pack_id}.json"
+          done < artifacts/npm/package_json_paths.txt
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = []
+          for pack_file in sorted(Path("artifacts/npm/pack").glob("*.json")):
+              payload = json.loads(pack_file.read_text(encoding="utf-8"))
+              if not isinstance(payload, list) or not payload:
+                  raise SystemExit(f"unexpected npm pack payload in {pack_file}")
+              pack = payload[0]
+              summary.append(
+                  {
+                      "package": pack.get("name"),
+                      "version": pack.get("version"),
+                      "filename": pack.get("filename"),
+                      "entry_count": len(pack.get("files", [])),
+                      "files": [entry.get("path") for entry in pack.get("files", [])],
+                      "evidence_path": str(pack_file),
+                  }
+              )
+
+          report = {
+              "schema_version": "npm-pack-dry-run-summary-v1",
+              "contract_id": "${{ env.WASM_RELEASE_CONTRACT_ID }}",
+              "bead_id": "asupersync-3qv04.7.1",
+              "package_count": len(summary),
+              "packages": summary,
+              "repro_command": "npm pack --json --dry-run --pack-destination /tmp <package-dir>",
+          }
+          Path("artifacts/npm/package_pack_dry_run_summary.json").write_text(
+              json.dumps(report, indent=2) + "\n",
+              encoding="utf-8",
+          )
           PY
 
       - name: Validate rollback controls
-        if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version != '' }}
+        if: ${{ needs.plan.outputs.rollback_npm_to_version != '' }}
         run: |
           if [[ -z "${{ needs.plan.outputs.rollback_reason }}" ]]; then
             echo "rollback_reason is required when rollback_npm_to_version is set."
@@ -511,7 +659,7 @@ jobs:
           fi
 
       - name: Publish packages to npm
-        if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version == '' }}
+        if: ${{ needs.plan.outputs.rollback_npm_to_version == '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -556,7 +704,7 @@ jobs:
           PY
 
       - name: Execute npm dist-tag rollback
-        if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version != '' }}
+        if: ${{ needs.plan.outputs.rollback_npm_to_version != '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
