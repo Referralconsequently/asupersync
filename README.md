@@ -1405,6 +1405,32 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`formal/lean/coverage/proof_impact_closed_loop_report_v1.json`](./formal/lean/coverage/proof_impact_closed_loop_report_v1.json) | **Proof Impact Ledger**: reproducible correctness/reliability/performance closure evidence |
 | [`TESTING.md`](./TESTING.md) | **Testing Guide**: unit, conformance, E2E, fuzzing, CI |
 | [`AGENTS.md`](./AGENTS.md) | **AI Guidelines**: Rules for AI coding agents |
+| [`skills/asupersync-mega-skill/SKILL.md`](./skills/asupersync-mega-skill/SKILL.md) | **AI Agent Skill**: full in-repo skill for Tokio migration, greenfield Asupersync design, deterministic testing, runtime diagnostics, and repo-internal agent work |
+
+### AI Agent Skill
+
+This repo ships with the full agent skill at [`skills/asupersync-mega-skill/`](./skills/asupersync-mega-skill/). It is meant for Claude Code / Codex-style agents working in this repo or using Asupersync from another Rust project.
+
+If you want to install the repo's local skills into your detected global agent-skill directories, run [`./skills/install_asupersync_skill_globally.sh`](./skills/install_asupersync_skill_globally.sh). It uses `rsync`, detects Claude Code / Codex / Gemini from their commands or home directories, and prompts for confirmation before writing anything.
+
+Use it when you want an agent to:
+
+- migrate a Tokio / axum / hyper / tonic stack to native Asupersync,
+- design a greenfield service around `Cx`, regions, `AppSpec`, supervision, and deterministic tests,
+- debug cancellation, obligation leaks, futurelock, scheduler behavior, or replay artifacts,
+- understand which Asupersync surfaces to lead with by default versus only use when the project explicitly needs them.
+
+Typical trigger prompts:
+
+- `Migrate this Tokio service to native Asupersync.`
+- `Design this service around Cx, regions, AppSpec, and deterministic tests.`
+- `Fix this cancellation / futurelock / obligation leak bug in Asupersync.`
+
+The skill is intentionally opinionated:
+
+- it pushes agents toward native Asupersync semantics rather than executor-swap thinking,
+- it leads with core runtime, service/web/gRPC, channels/sync/combinators, and deterministic testing,
+- it treats Browser Edition, QUIC/H3, messaging, remote/distributed, and RaptorQ as requirement-driven lanes rather than default starting points.
 
 ---
 
