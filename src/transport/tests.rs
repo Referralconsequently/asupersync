@@ -541,6 +541,7 @@ mod tests {
                 path_policy: PathSelectionPolicy::UseAll,
                 enable_reordering: true,
                 flush_interval: Time::from_millis(100),
+                ..AggregatorConfig::default()
             };
             let aggregator = MultipathAggregator::new(config);
 

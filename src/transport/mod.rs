@@ -12,10 +12,12 @@ pub mod stream;
 mod tests;
 
 pub use aggregator::{
-    AggregatorConfig, AggregatorStats, DeduplicatorConfig, DeduplicatorStats, MultipathAggregator,
+    AggregatorConfig, AggregatorStats, DeduplicatorConfig, DeduplicatorStats,
+    ExperimentalTransportDowngradeReason, ExperimentalTransportGate, MultipathAggregator,
     PathCharacteristics, PathId, PathSelectionDecision, PathSelectionDowngradeReason,
     PathSelectionPolicy, PathSet, PathSetStats, PathState, ProcessResult, ReordererConfig,
-    ReordererStats, SymbolDeduplicator, SymbolReorderer, TransportPath,
+    ReordererStats, SymbolDeduplicator, SymbolReorderer, TransportCodingPolicy,
+    TransportExperimentContext, TransportExperimentDecision, TransportPath,
 };
 pub use error::{SinkError, StreamError};
 pub use mock::{

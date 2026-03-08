@@ -16,6 +16,9 @@ use crate::http::h1::server::Http1Config;
 use crate::http::pool::PoolConfig;
 use crate::observability::{LogLevel, ObservabilityConfig};
 use crate::security::AuthMode;
+use crate::transport::{
+    AggregatorConfig, ExperimentalTransportGate, PathSelectionPolicy, TransportCodingPolicy,
+};
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
@@ -275,6 +278,10 @@ pub struct TransportConfig {
     pub max_symbols_in_flight: usize,
     /// Path selection strategy.
     pub path_strategy: PathSelectionStrategy,
+    /// Opt-in experimental transport gate. Defaults to fail-closed conservative behavior.
+    pub experiment_gate: ExperimentalTransportGate,
+    /// Preview-coded transport policy request. Defaults to conservative transport only.
+    pub coding_policy: TransportCodingPolicy,
 }
 
 impl Default for TransportConfig {
@@ -285,6 +292,33 @@ impl Default for TransportConfig {
             dead_path_backoff: BackoffConfig::default(),
             max_symbols_in_flight: 256,
             path_strategy: PathSelectionStrategy::RoundRobin,
+            experiment_gate: ExperimentalTransportGate::Disabled,
+            coding_policy: TransportCodingPolicy::Disabled,
+        }
+    }
+}
+
+impl TransportConfig {
+    /// Produces an aggregator configuration with deterministic conservative fallbacks.
+    #[must_use]
+    pub fn aggregator_config(&self) -> AggregatorConfig {
+        let path_policy = match self.path_strategy {
+            // Keep the transport seam deterministic even if the public config asks for
+            // ambient randomness. The preview layer can still expose the request in logs.
+            PathSelectionStrategy::RoundRobin | PathSelectionStrategy::Random => {
+                PathSelectionPolicy::RoundRobin
+            }
+            PathSelectionStrategy::LatencyWeighted
+            | PathSelectionStrategy::Adaptive(AdaptiveConfig { .. }) => {
+                PathSelectionPolicy::BestQuality { count: 1 }
+            }
+        };
+
+        AggregatorConfig {
+            path_policy,
+            experiment_gate: self.experiment_gate,
+            coding_policy: self.coding_policy,
+            ..AggregatorConfig::default()
         }
     }
 }
@@ -843,6 +877,8 @@ fn apply_transport_kv(
         }
         "max_symbols_in_flight" => transport.max_symbols_in_flight = parse_usize(value, key)?,
         "path_strategy" => transport.path_strategy = parse_path_strategy(value, key)?,
+        "experiment_gate" => transport.experiment_gate = parse_experiment_gate(value, key)?,
+        "coding_policy" => transport.coding_policy = parse_transport_coding_policy(value, key)?,
         _ => return Err(ConfigError::Parse(format!("unknown key: transport.{key}"))),
     }
     Ok(())
@@ -1011,6 +1047,30 @@ fn parse_path_strategy(value: &str, key: &str) -> Result<PathSelectionStrategy, 
         "adaptive" => Ok(PathSelectionStrategy::Adaptive(AdaptiveConfig::default())),
         _ => Err(ConfigError::Parse(format!(
             "invalid path strategy for {key}: {value}"
+        ))),
+    }
+}
+
+fn parse_experiment_gate(value: &str, key: &str) -> Result<ExperimentalTransportGate, ConfigError> {
+    match value.to_lowercase().as_str() {
+        "disabled" => Ok(ExperimentalTransportGate::Disabled),
+        "multipath_preview" => Ok(ExperimentalTransportGate::MultipathPreview),
+        _ => Err(ConfigError::Parse(format!(
+            "invalid experiment gate for {key}: {value}"
+        ))),
+    }
+}
+
+fn parse_transport_coding_policy(
+    value: &str,
+    key: &str,
+) -> Result<TransportCodingPolicy, ConfigError> {
+    match value.to_lowercase().as_str() {
+        "disabled" => Ok(TransportCodingPolicy::Disabled),
+        "raptorq_fec_preview" => Ok(TransportCodingPolicy::RaptorQFecPreview),
+        "rlnc_preview" => Ok(TransportCodingPolicy::RlncPreview),
+        _ => Err(ConfigError::Parse(format!(
+            "invalid coding policy for {key}: {value}"
         ))),
     }
 }
@@ -1341,6 +1401,8 @@ default_timeout_ms = 5000
         let tc = TransportConfig::default();
         assert_eq!(tc.max_paths, 4);
         assert_eq!(tc.max_symbols_in_flight, 256);
+        assert_eq!(tc.experiment_gate, ExperimentalTransportGate::Disabled);
+        assert_eq!(tc.coding_policy, TransportCodingPolicy::Disabled);
     }
 
     #[test]
@@ -1374,6 +1436,55 @@ default_timeout_ms = 5000
         let cloned = s;
         let dbg = format!("{cloned:?}");
         assert!(dbg.contains("Adaptive"));
+    }
+
+    #[test]
+    fn transport_config_aggregator_config_is_fail_closed_by_default() {
+        let transport = TransportConfig::default();
+        let aggregator = transport.aggregator_config();
+        assert_eq!(aggregator.path_policy, PathSelectionPolicy::RoundRobin);
+        assert_eq!(
+            aggregator.experiment_gate,
+            ExperimentalTransportGate::Disabled
+        );
+        assert_eq!(aggregator.coding_policy, TransportCodingPolicy::Disabled);
+    }
+
+    #[test]
+    fn transport_config_aggregator_config_maps_preview_fields() {
+        let transport = TransportConfig {
+            path_strategy: PathSelectionStrategy::LatencyWeighted,
+            experiment_gate: ExperimentalTransportGate::MultipathPreview,
+            coding_policy: TransportCodingPolicy::RaptorQFecPreview,
+            ..TransportConfig::default()
+        };
+
+        let aggregator = transport.aggregator_config();
+        assert_eq!(
+            aggregator.path_policy,
+            PathSelectionPolicy::BestQuality { count: 1 }
+        );
+        assert_eq!(
+            aggregator.experiment_gate,
+            ExperimentalTransportGate::MultipathPreview
+        );
+        assert_eq!(
+            aggregator.coding_policy,
+            TransportCodingPolicy::RaptorQFecPreview
+        );
+    }
+
+    #[test]
+    fn parse_transport_preview_fields() {
+        let mut transport = TransportConfig::default();
+        apply_transport_kv(&mut transport, "experiment_gate", "multipath_preview").unwrap();
+        apply_transport_kv(&mut transport, "coding_policy", "rlnc_preview").unwrap();
+
+        assert_eq!(
+            transport.experiment_gate,
+            ExperimentalTransportGate::MultipathPreview
+        );
+        assert_eq!(transport.coding_policy, TransportCodingPolicy::RlncPreview);
     }
 
     #[test]

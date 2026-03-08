@@ -314,6 +314,15 @@ impl PathSelectionPolicy {
             Self::UseAll | Self::PrimaryOnly | Self::RoundRobin => None,
         }
     }
+
+    /// Returns true when the requested policy activates preview-only multipath behavior.
+    #[must_use]
+    pub const fn is_experimental_preview(self) -> bool {
+        matches!(
+            self,
+            Self::UseAll | Self::BestQuality { .. } | Self::ByPriority { .. }
+        )
+    }
 }
 
 /// Reason why a transport policy could not be honored exactly.
@@ -342,6 +351,99 @@ impl PathSelectionDowngradeReason {
             Self::NoUsablePaths => "no-usable-paths",
             Self::NoPrimaryPath => "no-primary-path",
             Self::RequestedPathsUnavailable { .. } => "requested-paths-unavailable",
+        }
+    }
+}
+
+/// Opt-in gate for preview transport behavior above the conservative baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExperimentalTransportGate {
+    /// Disable preview behavior and keep the conservative path active.
+    #[default]
+    Disabled,
+
+    /// Allow preview multipath path selection while keeping coded transport fail-closed.
+    MultipathPreview,
+}
+
+impl ExperimentalTransportGate {
+    /// Stable identifier for structured transport decision logs.
+    #[must_use]
+    pub const fn gate_id(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::MultipathPreview => "multipath-preview",
+        }
+    }
+}
+
+/// Preview-only coding policy requests for experimental transport decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportCodingPolicy {
+    /// Keep the conservative non-coded transport path.
+    #[default]
+    Disabled,
+
+    /// Request a metadata-only RaptorQ-backed FEC preview.
+    RaptorQFecPreview,
+
+    /// Request a metadata-only RLNC preview.
+    RlncPreview,
+}
+
+impl TransportCodingPolicy {
+    /// Stable identifier for structured transport decision logs.
+    #[must_use]
+    pub const fn policy_id(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::RaptorQFecPreview => "raptorq-fec-preview",
+            Self::RlncPreview => "rlnc-preview",
+        }
+    }
+}
+
+/// Preview-specific downgrade reason emitted by the experimental transport seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperimentalTransportDowngradeReason {
+    /// Preview path selection was requested without enabling the experimental gate.
+    ExperimentalGateDisabled,
+
+    /// Coded transport remains blocked on the RaptorQ correctness-closure program.
+    RaptorQClosurePending,
+}
+
+impl ExperimentalTransportDowngradeReason {
+    /// Stable identifier for structured transport decision logs.
+    #[must_use]
+    pub const fn reason_id(self) -> &'static str {
+        match self {
+            Self::ExperimentalGateDisabled => "experimental-gate-disabled",
+            Self::RaptorQClosurePending => "raptorq-closure-pending",
+        }
+    }
+}
+
+/// Replayable metadata describing a single experimental transport decision request.
+#[derive(Debug, Clone)]
+pub struct TransportExperimentContext {
+    /// Stable workload identifier from the benchmark vocabulary.
+    pub workload_id: String,
+
+    /// Correlation identifier linking the decision to a replayable benchmark run.
+    pub benchmark_correlation_id: String,
+}
+
+impl TransportExperimentContext {
+    /// Creates a new transport experiment context.
+    #[must_use]
+    pub fn new(
+        workload_id: impl Into<String>,
+        benchmark_correlation_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            workload_id: workload_id.into(),
+            benchmark_correlation_id: benchmark_correlation_id.into(),
         }
     }
 }
@@ -428,6 +530,135 @@ impl PathSelectionDecision {
     }
 }
 
+/// Preview transport decision envelope emitted above the low-level path-selection primitives.
+#[derive(Debug, Clone)]
+pub struct TransportExperimentDecision {
+    /// Replay metadata describing where this decision came from.
+    pub context: TransportExperimentContext,
+
+    /// Gate state used for the decision.
+    pub gate: ExperimentalTransportGate,
+
+    /// Path policy the caller requested.
+    pub requested_path_policy: PathSelectionPolicy,
+
+    /// Effective path policy after conservative fallback.
+    pub effective_path_policy: PathSelectionPolicy,
+
+    /// Path-selection decision for the effective policy.
+    pub path_decision: PathSelectionDecision,
+
+    /// Coding policy the caller requested.
+    pub requested_coding_policy: TransportCodingPolicy,
+
+    /// Effective coding policy after conservative fallback.
+    pub effective_coding_policy: TransportCodingPolicy,
+
+    /// Preview downgrade reason, when the requested experimental path could not be honored.
+    pub downgrade_reason: Option<ExperimentalTransportDowngradeReason>,
+}
+
+impl TransportExperimentDecision {
+    /// Stable identifier for the preview gate.
+    #[must_use]
+    pub const fn gate_id(&self) -> &'static str {
+        self.gate.gate_id()
+    }
+
+    /// Stable identifier for the requested path policy.
+    #[must_use]
+    pub const fn path_policy_id(&self) -> &'static str {
+        self.requested_path_policy.policy_id()
+    }
+
+    /// Stable identifier for the effective path policy.
+    #[must_use]
+    pub const fn effective_path_policy_id(&self) -> &'static str {
+        self.effective_path_policy.policy_id()
+    }
+
+    /// Requested path count for bounded policies, if any.
+    #[must_use]
+    pub const fn requested_path_count(&self) -> Option<usize> {
+        self.requested_path_policy.requested_path_count()
+    }
+
+    /// Stable identifier for the requested coding policy.
+    #[must_use]
+    pub const fn coding_policy_id(&self) -> &'static str {
+        self.requested_coding_policy.policy_id()
+    }
+
+    /// Stable identifier for the effective coding policy.
+    #[must_use]
+    pub const fn effective_coding_policy_id(&self) -> &'static str {
+        self.effective_coding_policy.policy_id()
+    }
+
+    /// Stable identifier for the preview downgrade reason, if any.
+    #[must_use]
+    pub fn downgrade_reason_id(&self) -> Option<&'static str> {
+        self.downgrade_reason
+            .map(ExperimentalTransportDowngradeReason::reason_id)
+    }
+
+    /// Serializes the decision into stable key/value fields for structured logs or artifacts.
+    #[must_use]
+    pub fn log_fields(&self) -> BTreeMap<String, String> {
+        let mut fields = BTreeMap::new();
+        fields.insert("workload_id".to_owned(), self.context.workload_id.clone());
+        fields.insert(
+            "benchmark_correlation_id".to_owned(),
+            self.context.benchmark_correlation_id.clone(),
+        );
+        fields.insert("experimental_gate_id".to_owned(), self.gate_id().to_owned());
+        fields.insert(
+            "path_policy_id".to_owned(),
+            self.path_policy_id().to_owned(),
+        );
+        fields.insert(
+            "effective_path_policy_id".to_owned(),
+            self.effective_path_policy_id().to_owned(),
+        );
+        fields.insert(
+            "requested_path_count".to_owned(),
+            self.requested_path_count()
+                .map_or_else(|| "all".to_owned(), |count| count.to_string()),
+        );
+        fields.insert(
+            "selected_path_count".to_owned(),
+            self.path_decision.selected_path_count().to_string(),
+        );
+        fields.insert(
+            "fallback_policy_id".to_owned(),
+            self.path_decision
+                .fallback_policy_id()
+                .unwrap_or("")
+                .to_owned(),
+        );
+        fields.insert(
+            "path_downgrade_reason".to_owned(),
+            self.path_decision
+                .downgrade_reason_id()
+                .unwrap_or("")
+                .to_owned(),
+        );
+        fields.insert(
+            "downgrade_reason".to_owned(),
+            self.downgrade_reason_id().unwrap_or("").to_owned(),
+        );
+        fields.insert(
+            "coding_policy_id".to_owned(),
+            self.coding_policy_id().to_owned(),
+        );
+        fields.insert(
+            "effective_coding_policy_id".to_owned(),
+            self.effective_coding_policy_id().to_owned(),
+        );
+        fields
+    }
+}
+
 /// Manages a set of paths to a destination.
 #[derive(Debug)]
 pub struct PathSet {
@@ -461,6 +692,19 @@ impl PathSet {
         let id = path.id;
         let arc = Arc::new(path);
         self.paths.write().insert(id, arc);
+        let next = id.0.saturating_add(1);
+        let mut observed = self.next_id.load(Ordering::Relaxed);
+        while observed < next {
+            match self.next_id.compare_exchange_weak(
+                observed,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => observed = current,
+            }
+        }
         id
     }
 
@@ -529,10 +773,19 @@ impl PathSet {
     /// Returns path selection plus explicit downgrade/fallback metadata.
     #[must_use]
     pub fn select_paths_with_decision(&self) -> PathSelectionDecision {
-        let usable = self.usable_paths_sorted();
-        let mut decision = PathSelectionDecision::new(self.policy);
+        self.select_paths_with_decision_for(self.policy)
+    }
 
-        match self.policy {
+    /// Returns path selection plus explicit downgrade/fallback metadata for an arbitrary policy.
+    #[must_use]
+    pub fn select_paths_with_decision_for(
+        &self,
+        policy: PathSelectionPolicy,
+    ) -> PathSelectionDecision {
+        let usable = self.usable_paths_sorted();
+        let mut decision = PathSelectionDecision::new(policy);
+
+        match policy {
             PathSelectionPolicy::UseAll => {
                 if usable.is_empty() {
                     decision.downgrade_reason = Some(PathSelectionDowngradeReason::NoUsablePaths);
@@ -1155,6 +1408,12 @@ pub struct AggregatorConfig {
     /// Path selection policy.
     pub path_policy: PathSelectionPolicy,
 
+    /// Opt-in gate for preview transport behavior.
+    pub experiment_gate: ExperimentalTransportGate,
+
+    /// Preview coded-transport policy request.
+    pub coding_policy: TransportCodingPolicy,
+
     /// Whether to enable reordering.
     pub enable_reordering: bool,
 
@@ -1168,6 +1427,8 @@ impl Default for AggregatorConfig {
             dedup: DeduplicatorConfig::default(),
             reorder: ReordererConfig::default(),
             path_policy: PathSelectionPolicy::UseAll,
+            experiment_gate: ExperimentalTransportGate::Disabled,
+            coding_policy: TransportCodingPolicy::Disabled,
             enable_reordering: true,
             flush_interval: Time::from_millis(50),
         }
@@ -1229,6 +1490,51 @@ impl MultipathAggregator {
     #[must_use]
     pub fn paths(&self) -> &Arc<PathSet> {
         &self.paths
+    }
+
+    /// Plans an opt-in experimental transport decision while preserving a conservative fallback.
+    #[must_use]
+    pub fn experimental_transport_decision(
+        &self,
+        context: TransportExperimentContext,
+    ) -> TransportExperimentDecision {
+        let requested_path_policy = self.config.path_policy;
+        let requested_coding_policy = self.config.coding_policy;
+
+        let (effective_path_policy, gate_downgrade_reason) = if self.config.experiment_gate
+            == ExperimentalTransportGate::Disabled
+            && requested_path_policy.is_experimental_preview()
+        {
+            (
+                PathSelectionPolicy::RoundRobin,
+                Some(ExperimentalTransportDowngradeReason::ExperimentalGateDisabled),
+            )
+        } else {
+            (requested_path_policy, None)
+        };
+
+        let path_decision = self
+            .paths
+            .select_paths_with_decision_for(effective_path_policy);
+
+        let (effective_coding_policy, coding_downgrade_reason) = match requested_coding_policy {
+            TransportCodingPolicy::Disabled => (TransportCodingPolicy::Disabled, None),
+            TransportCodingPolicy::RaptorQFecPreview | TransportCodingPolicy::RlncPreview => (
+                TransportCodingPolicy::Disabled,
+                Some(ExperimentalTransportDowngradeReason::RaptorQClosurePending),
+            ),
+        };
+
+        TransportExperimentDecision {
+            context,
+            gate: self.config.experiment_gate,
+            requested_path_policy,
+            effective_path_policy,
+            path_decision,
+            requested_coding_policy,
+            effective_coding_policy,
+            downgrade_reason: gate_downgrade_reason.or(coding_downgrade_reason),
+        }
     }
 
     /// Processes an incoming symbol from a path.
@@ -1731,6 +2037,221 @@ mod tests {
         );
 
         crate::test_complete!("test_path_set_best_quality_reports_requested_paths_unavailable");
+    }
+
+    #[test]
+    fn test_experimental_transport_decision_gate_disabled_falls_back_to_round_robin() {
+        init_test("test_experimental_transport_decision_gate_disabled_falls_back_to_round_robin");
+
+        let aggregator = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::UseAll,
+            experiment_gate: ExperimentalTransportGate::Disabled,
+            ..AggregatorConfig::default()
+        });
+
+        aggregator
+            .paths()
+            .register(test_path(3).with_characteristics(PathCharacteristics::backup()));
+        aggregator
+            .paths()
+            .register(test_path(1).with_characteristics(PathCharacteristics::high_quality()));
+        aggregator.paths().register(test_path(2));
+
+        let decision = aggregator.experimental_transport_decision(TransportExperimentContext::new(
+            "TW-MULTIPATH",
+            "aa08-gate-disabled-001",
+        ));
+
+        crate::assert_with_log!(
+            decision.path_policy_id() == "use-all",
+            "requested policy id preserved",
+            "use-all",
+            decision.path_policy_id()
+        );
+        crate::assert_with_log!(
+            decision.effective_path_policy_id() == "round-robin",
+            "effective policy falls back to conservative round-robin",
+            "round-robin",
+            decision.effective_path_policy_id()
+        );
+        crate::assert_with_log!(
+            decision.downgrade_reason_id() == Some("experimental-gate-disabled"),
+            "preview gate downgrade emitted",
+            Some("experimental-gate-disabled"),
+            decision.downgrade_reason_id()
+        );
+        crate::assert_with_log!(
+            decision.path_decision.selected_path_count() == 1,
+            "round-robin selects one conservative path",
+            1,
+            decision.path_decision.selected_path_count()
+        );
+        let selected_ids = decision.path_decision.selected_ids();
+        let expected_ids = [PathId(1)];
+        crate::assert_with_log!(
+            selected_ids.as_slice() == expected_ids.as_slice(),
+            "conservative round-robin remains deterministic",
+            expected_ids.as_slice(),
+            selected_ids.as_slice()
+        );
+
+        crate::test_complete!(
+            "test_experimental_transport_decision_gate_disabled_falls_back_to_round_robin"
+        );
+    }
+
+    #[test]
+    fn test_experimental_transport_decision_preview_honors_multipath_policy() {
+        init_test("test_experimental_transport_decision_preview_honors_multipath_policy");
+
+        let aggregator = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::BestQuality { count: 2 },
+            experiment_gate: ExperimentalTransportGate::MultipathPreview,
+            ..AggregatorConfig::default()
+        });
+
+        aggregator
+            .paths()
+            .register(test_path(1).with_characteristics(PathCharacteristics::high_quality()));
+        aggregator
+            .paths()
+            .register(test_path(2).with_characteristics(PathCharacteristics {
+                latency_ms: 20,
+                bandwidth_bps: 5_000_000,
+                loss_rate: 0.01,
+                jitter_ms: 5,
+                is_primary: false,
+                priority: 20,
+            }));
+        aggregator
+            .paths()
+            .register(test_path(3).with_characteristics(PathCharacteristics::backup()));
+
+        let decision = aggregator.experimental_transport_decision(TransportExperimentContext::new(
+            "TW-MULTIPATH",
+            "aa08-preview-001",
+        ));
+
+        crate::assert_with_log!(
+            decision.effective_path_policy_id() == "best-quality",
+            "preview gate honors requested multipath policy",
+            "best-quality",
+            decision.effective_path_policy_id()
+        );
+        crate::assert_with_log!(
+            decision.downgrade_reason.is_none(),
+            "no gate downgrade when preview enabled",
+            true,
+            decision.downgrade_reason.is_none()
+        );
+        let selected_ids = decision.path_decision.selected_ids();
+        let expected_ids = [PathId(1), PathId(2)];
+        crate::assert_with_log!(
+            selected_ids.as_slice() == expected_ids.as_slice(),
+            "best-quality preview selects deterministic top paths",
+            expected_ids.as_slice(),
+            selected_ids.as_slice()
+        );
+
+        crate::test_complete!(
+            "test_experimental_transport_decision_preview_honors_multipath_policy"
+        );
+    }
+
+    #[test]
+    fn test_experimental_transport_decision_coding_preview_stays_fail_closed() {
+        init_test("test_experimental_transport_decision_coding_preview_stays_fail_closed");
+
+        let aggregator = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::RoundRobin,
+            experiment_gate: ExperimentalTransportGate::MultipathPreview,
+            coding_policy: TransportCodingPolicy::RaptorQFecPreview,
+            ..AggregatorConfig::default()
+        });
+
+        aggregator.paths().register(test_path(7));
+
+        let decision = aggregator.experimental_transport_decision(TransportExperimentContext::new(
+            "TW-BURST",
+            "aa08-coding-001",
+        ));
+
+        crate::assert_with_log!(
+            decision.coding_policy_id() == "raptorq-fec-preview",
+            "requested coding policy id preserved",
+            "raptorq-fec-preview",
+            decision.coding_policy_id()
+        );
+        crate::assert_with_log!(
+            decision.effective_coding_policy_id() == "disabled",
+            "coding preview falls back until RaptorQ closure completes",
+            "disabled",
+            decision.effective_coding_policy_id()
+        );
+        crate::assert_with_log!(
+            decision.downgrade_reason_id() == Some("raptorq-closure-pending"),
+            "coding downgrade reason emitted",
+            Some("raptorq-closure-pending"),
+            decision.downgrade_reason_id()
+        );
+
+        let log_fields = decision.log_fields();
+        crate::assert_with_log!(
+            log_fields.get("workload_id").map(String::as_str) == Some("TW-BURST"),
+            "workload id logged",
+            Some("TW-BURST"),
+            log_fields.get("workload_id").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields
+                .get("benchmark_correlation_id")
+                .map(String::as_str)
+                == Some("aa08-coding-001"),
+            "benchmark correlation logged",
+            Some("aa08-coding-001"),
+            log_fields
+                .get("benchmark_correlation_id")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("downgrade_reason").map(String::as_str)
+                == Some("raptorq-closure-pending"),
+            "downgrade reason logged",
+            Some("raptorq-closure-pending"),
+            log_fields.get("downgrade_reason").map(String::as_str)
+        );
+
+        crate::test_complete!(
+            "test_experimental_transport_decision_coding_preview_stays_fail_closed"
+        );
+    }
+
+    #[test]
+    fn test_path_set_register_advances_next_id() {
+        init_test("test_path_set_register_advances_next_id");
+
+        let set = PathSet::new(PathSelectionPolicy::RoundRobin);
+        set.register(test_path(0));
+
+        let created = set.create_path(
+            "generated",
+            "localhost:9000",
+            PathCharacteristics::default(),
+        );
+        crate::assert_with_log!(
+            created == PathId(1),
+            "create_path advances beyond caller-supplied ids",
+            PathId(1),
+            created
+        );
+        crate::assert_with_log!(
+            set.get(PathId(0)).is_some(),
+            "original registered path is preserved",
+            true,
+            set.get(PathId(0)).is_some()
+        );
+
+        crate::test_complete!("test_path_set_register_advances_next_id");
     }
 
     // Test 6: Deduplicator basic operation
