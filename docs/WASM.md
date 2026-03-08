@@ -12,7 +12,8 @@ Asupersync ships a Browser Edition that compiles the core runtime to
 `wasm32-unknown-unknown` and exposes it to JavaScript and TypeScript through
 `wasm-bindgen`. This is the primary supported path.
 
-The npm package stack:
+The npm package stack (sources in `packages/`; not yet published to the npm
+registry -- use workspace-local references for now):
 
 | Package | Role |
 |---|---|
@@ -161,11 +162,12 @@ The current browser runtime model (Phase 1) is:
 ### Browser environment constraints
 
 - **No raw TCP/UDP**: networking is limited to browser APIs (`fetch`,
-  `WebSocket`, `WebRTC`). Native TCP/UDP, Unix sockets, and raw I/O are
+  `WebSocket`). Native TCP/UDP, Unix sockets, and raw I/O are
   unavailable.
 - **No filesystem access**: `fs` module surfaces are `cfg`-gated out on
-  wasm32. Use `IndexedDB` or `localStorage` through explicit capability
-  boundaries.
+  wasm32. Use `localStorage` through explicit capability boundaries
+  (see `browser_storage` module). `IndexedDB` support is not yet
+  implemented.
 - **No process/signal handling**: the `process` and `signal` modules are
   native-only.
 - **No multi-threading by default**: the Phase 1 browser runtime is

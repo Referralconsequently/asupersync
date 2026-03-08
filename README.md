@@ -1334,8 +1334,8 @@ cargo check --target wasm32-unknown-unknown \
 ```
 
 ```bash
-# Install the JS/TS SDK
-npm install @asupersync/browser
+# JS/TS SDK (not yet published to npm; use workspace-local packages for now)
+# npm install @asupersync/browser
 ```
 
 See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,
