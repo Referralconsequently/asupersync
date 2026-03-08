@@ -43,12 +43,13 @@ fn upsert_channel_waiter(
 }
 
 fn pop_next_queued_waiter(wakers: &mut SmallVec<[ChannelWaiter; 2]>) -> Option<ChannelWaiter> {
-    while let Some(waiter) = wakers.pop() {
-        if waiter.queued.load(Ordering::Acquire) {
-            return Some(waiter);
-        }
+    wakers.retain(|entry| entry.queued.load(Ordering::Acquire));
+    if wakers.is_empty() {
+        None
+    } else {
+        // Preserve FIFO wake order to avoid starving earlier waiters.
+        Some(wakers.remove(0))
     }
-    None
 }
 
 /// A stream of incoming symbols.
@@ -1038,7 +1039,7 @@ mod tests {
                 waker: flagged_waker(Arc::clone(&active_flag)),
                 queued: Arc::clone(&active_queued),
             });
-            // Stale waiter is intentionally the most-recent entry (LIFO pop path).
+            // Stale waiter remains in the queue until pop-time pruning.
             send_wakers.push(ChannelWaiter {
                 waker: flagged_waker(Arc::clone(&stale_flag)),
                 queued: Arc::clone(&stale_queued),
@@ -1075,6 +1076,65 @@ mod tests {
         );
 
         crate::test_complete!("test_channel_stream_skips_stale_send_waiter_entries");
+    }
+
+    #[test]
+    fn test_channel_stream_wakes_oldest_send_waiter_first() {
+        init_test("test_channel_stream_wakes_oldest_send_waiter_first");
+        let shared = Arc::new(SharedChannel::new(2));
+        {
+            let mut queue = shared.queue.lock();
+            queue.push_back(create_symbol(1));
+        }
+        let mut stream = ChannelStream::new(Arc::clone(&shared));
+
+        let first_flag = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::new(AtomicBool::new(false));
+        let first_queued = Arc::new(AtomicBool::new(true));
+        let second_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut send_wakers = shared.send_wakers.lock();
+            send_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&first_flag)),
+                queued: Arc::clone(&first_queued),
+            });
+            send_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&second_flag)),
+                queued: Arc::clone(&second_queued),
+            });
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let recv = Pin::new(&mut stream).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(recv, Poll::Ready(Some(Ok(_)))),
+            "receive succeeds",
+            true,
+            matches!(recv, Poll::Ready(Some(Ok(_))))
+        );
+
+        let first_woke = first_flag.load(Ordering::Acquire);
+        let second_woke = second_flag.load(Ordering::Acquire);
+        crate::assert_with_log!(first_woke, "first waiter woken", true, first_woke);
+        crate::assert_with_log!(
+            !second_woke,
+            "second waiter still waiting",
+            false,
+            second_woke
+        );
+        let second_still_queued = second_queued.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            second_still_queued,
+            "second waiter remains queued",
+            true,
+            second_still_queued
+        );
+        let queued_len = shared.send_wakers.lock().len();
+        crate::assert_with_log!(queued_len == 1, "one waiter remains", 1usize, queued_len);
+
+        crate::test_complete!("test_channel_stream_wakes_oldest_send_waiter_first");
     }
 
     #[test]

@@ -13,9 +13,9 @@ mod tests;
 
 pub use aggregator::{
     AggregatorConfig, AggregatorStats, DeduplicatorConfig, DeduplicatorStats, MultipathAggregator,
-    PathCharacteristics, PathId, PathSelectionPolicy, PathSet, PathSetStats, PathState,
-    ProcessResult, ReordererConfig, ReordererStats, SymbolDeduplicator, SymbolReorderer,
-    TransportPath,
+    PathCharacteristics, PathId, PathSelectionDecision, PathSelectionDowngradeReason,
+    PathSelectionPolicy, PathSet, PathSetStats, PathState, ProcessResult, ReordererConfig,
+    ReordererStats, SymbolDeduplicator, SymbolReorderer, TransportPath,
 };
 pub use error::{SinkError, StreamError};
 pub use mock::{

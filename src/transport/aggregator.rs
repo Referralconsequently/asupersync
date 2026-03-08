@@ -11,6 +11,7 @@ use crate::error::{Error, ErrorKind};
 use crate::types::Time;
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -292,6 +293,141 @@ pub enum PathSelectionPolicy {
     RoundRobin,
 }
 
+impl PathSelectionPolicy {
+    /// Stable identifier for structured transport decision logs.
+    #[must_use]
+    pub const fn policy_id(self) -> &'static str {
+        match self {
+            Self::UseAll => "use-all",
+            Self::PrimaryOnly => "primary-only",
+            Self::BestQuality { .. } => "best-quality",
+            Self::ByPriority { .. } => "by-priority",
+            Self::RoundRobin => "round-robin",
+        }
+    }
+
+    /// Returns the requested path count for bounded policies.
+    #[must_use]
+    pub const fn requested_path_count(self) -> Option<usize> {
+        match self {
+            Self::BestQuality { count } | Self::ByPriority { count } => Some(count),
+            Self::UseAll | Self::PrimaryOnly | Self::RoundRobin => None,
+        }
+    }
+}
+
+/// Reason why a transport policy could not be honored exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathSelectionDowngradeReason {
+    /// No usable paths were available.
+    NoUsablePaths,
+
+    /// The requested primary path set was unavailable, so a conservative backup should be used.
+    NoPrimaryPath,
+
+    /// Fewer usable paths were available than the policy requested.
+    RequestedPathsUnavailable {
+        /// Number of paths requested by the policy.
+        requested: usize,
+        /// Number of usable paths actually available.
+        available: usize,
+    },
+}
+
+impl PathSelectionDowngradeReason {
+    /// Stable identifier for structured logs and artifacts.
+    #[must_use]
+    pub const fn reason_id(self) -> &'static str {
+        match self {
+            Self::NoUsablePaths => "no-usable-paths",
+            Self::NoPrimaryPath => "no-primary-path",
+            Self::RequestedPathsUnavailable { .. } => "requested-paths-unavailable",
+        }
+    }
+}
+
+/// Path-selection output with explicit downgrade/fallback metadata.
+#[derive(Debug, Clone)]
+pub struct PathSelectionDecision {
+    /// Policy that was requested by the caller.
+    pub policy: PathSelectionPolicy,
+
+    /// Paths selected under the requested policy without applying any fallback.
+    pub selected: SmallVec<[Arc<TransportPath>; 4]>,
+
+    /// Conservative fallback paths the caller may use if the requested policy cannot be honored.
+    pub fallback: SmallVec<[Arc<TransportPath>; 4]>,
+
+    /// Conservative fallback policy associated with `fallback`.
+    pub fallback_policy: Option<PathSelectionPolicy>,
+
+    /// Explicit downgrade reason when the requested policy could not be honored exactly.
+    pub downgrade_reason: Option<PathSelectionDowngradeReason>,
+}
+
+impl PathSelectionDecision {
+    /// Creates an empty decision for the requested policy.
+    #[must_use]
+    pub fn new(policy: PathSelectionPolicy) -> Self {
+        Self {
+            policy,
+            selected: SmallVec::new(),
+            fallback: SmallVec::new(),
+            fallback_policy: None,
+            downgrade_reason: None,
+        }
+    }
+
+    /// Stable identifier for the requested policy.
+    #[must_use]
+    pub const fn policy_id(&self) -> &'static str {
+        self.policy.policy_id()
+    }
+
+    /// Requested path count for bounded policies, if any.
+    #[must_use]
+    pub const fn requested_path_count(&self) -> Option<usize> {
+        self.policy.requested_path_count()
+    }
+
+    /// Number of paths selected under the requested policy.
+    #[must_use]
+    pub fn selected_path_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    /// Number of conservative fallback paths, if any.
+    #[must_use]
+    pub fn fallback_path_count(&self) -> usize {
+        self.fallback.len()
+    }
+
+    /// Stable identifier for the fallback policy, if any.
+    #[must_use]
+    pub fn fallback_policy_id(&self) -> Option<&'static str> {
+        self.fallback_policy.map(PathSelectionPolicy::policy_id)
+    }
+
+    /// Stable identifier for the downgrade reason, if any.
+    #[must_use]
+    pub fn downgrade_reason_id(&self) -> Option<&'static str> {
+        self.downgrade_reason
+            .map(PathSelectionDowngradeReason::reason_id)
+    }
+
+    /// Selected path identifiers in decision order.
+    #[must_use]
+    pub fn selected_ids(&self) -> SmallVec<[PathId; 4]> {
+        self.selected.iter().map(|path| path.id).collect()
+    }
+
+    /// Fallback path identifiers in decision order.
+    #[must_use]
+    pub fn fallback_ids(&self) -> SmallVec<[PathId; 4]> {
+        self.fallback.iter().map(|path| path.id).collect()
+    }
+}
+
 /// Manages a set of paths to a destination.
 #[derive(Debug)]
 pub struct PathSet {
@@ -351,53 +487,124 @@ impl PathSet {
         self.paths.write().remove(&id)
     }
 
-    /// Returns all usable paths based on the selection policy.
-    #[must_use]
-    pub fn select_paths(&self) -> Vec<Arc<TransportPath>> {
+    fn usable_paths_sorted(&self) -> Vec<Arc<TransportPath>> {
         // Keep transport path selection replayable by normalizing the base
         // ordering before policy-specific filtering or rotation.
         let mut usable: Vec<_> = {
             let paths = self.paths.read();
             paths
                 .values()
-                .filter(|p| p.state().is_usable())
+                .filter(|path| path.state().is_usable())
                 .cloned()
                 .collect()
         };
         usable.sort_by_key(|path| path.id);
+        usable
+    }
+
+    fn select_best_quality(
+        usable: &[Arc<TransportPath>],
+        count: usize,
+    ) -> SmallVec<[Arc<TransportPath>; 4]> {
+        let mut ranked = usable.to_vec();
+        ranked.sort_by(|a, b| {
+            b.characteristics
+                .quality_score()
+                .partial_cmp(&a.characteristics.quality_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        ranked.into_iter().take(count).collect()
+    }
+
+    fn select_by_priority(
+        usable: &[Arc<TransportPath>],
+        count: usize,
+    ) -> SmallVec<[Arc<TransportPath>; 4]> {
+        let mut ranked = usable.to_vec();
+        ranked.sort_by_key(|path| (path.characteristics.priority, path.id));
+        ranked.into_iter().take(count).collect()
+    }
+
+    /// Returns path selection plus explicit downgrade/fallback metadata.
+    #[must_use]
+    pub fn select_paths_with_decision(&self) -> PathSelectionDecision {
+        let usable = self.usable_paths_sorted();
+        let mut decision = PathSelectionDecision::new(self.policy);
 
         match self.policy {
-            PathSelectionPolicy::UseAll => usable,
+            PathSelectionPolicy::UseAll => {
+                if usable.is_empty() {
+                    decision.downgrade_reason = Some(PathSelectionDowngradeReason::NoUsablePaths);
+                } else {
+                    decision.selected = usable.into_iter().collect();
+                }
+            }
 
-            PathSelectionPolicy::PrimaryOnly => usable
-                .into_iter()
-                .filter(|p| p.characteristics.is_primary)
-                .collect(),
+            PathSelectionPolicy::PrimaryOnly => {
+                if usable.is_empty() {
+                    decision.downgrade_reason = Some(PathSelectionDowngradeReason::NoUsablePaths);
+                } else {
+                    let primaries: SmallVec<[Arc<TransportPath>; 4]> = usable
+                        .iter()
+                        .filter(|path| path.characteristics.is_primary)
+                        .cloned()
+                        .collect();
+                    if primaries.is_empty() {
+                        decision.fallback_policy =
+                            Some(PathSelectionPolicy::BestQuality { count: 1 });
+                        decision.fallback = Self::select_best_quality(&usable, 1);
+                        decision.downgrade_reason =
+                            Some(PathSelectionDowngradeReason::NoPrimaryPath);
+                    } else {
+                        decision.selected = primaries;
+                    }
+                }
+            }
 
             PathSelectionPolicy::BestQuality { count } => {
-                usable.sort_by(|a, b| {
-                    b.characteristics
-                        .quality_score()
-                        .partial_cmp(&a.characteristics.quality_score())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.id.cmp(&b.id))
-                });
-                usable.into_iter().take(count).collect()
+                decision.selected = Self::select_best_quality(&usable, count);
+                if usable.is_empty() {
+                    decision.downgrade_reason = Some(PathSelectionDowngradeReason::NoUsablePaths);
+                } else if decision.selected.len() < count {
+                    decision.downgrade_reason =
+                        Some(PathSelectionDowngradeReason::RequestedPathsUnavailable {
+                            requested: count,
+                            available: decision.selected.len(),
+                        });
+                }
             }
 
             PathSelectionPolicy::ByPriority { count } => {
-                usable.sort_by_key(|path| (path.characteristics.priority, path.id));
-                usable.into_iter().take(count).collect()
+                decision.selected = Self::select_by_priority(&usable, count);
+                if usable.is_empty() {
+                    decision.downgrade_reason = Some(PathSelectionDowngradeReason::NoUsablePaths);
+                } else if decision.selected.len() < count {
+                    decision.downgrade_reason =
+                        Some(PathSelectionDowngradeReason::RequestedPathsUnavailable {
+                            requested: count,
+                            available: decision.selected.len(),
+                        });
+                }
             }
 
             PathSelectionPolicy::RoundRobin => {
                 if usable.is_empty() {
-                    return vec![];
+                    decision.downgrade_reason = Some(PathSelectionDowngradeReason::NoUsablePaths);
+                } else {
+                    let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                    decision.selected.push(usable[idx % usable.len()].clone());
                 }
-                let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                vec![usable[idx % usable.len()].clone()]
             }
         }
+
+        decision
+    }
+
+    /// Returns all usable paths based on the selection policy.
+    #[must_use]
+    pub fn select_paths(&self) -> Vec<Arc<TransportPath>> {
+        self.select_paths_with_decision().selected.into_vec()
     }
 
     /// Updates path state.
@@ -1428,6 +1635,102 @@ mod tests {
         );
 
         crate::test_complete!("test_path_set_by_priority_tie_breaks_by_path_id");
+    }
+
+    #[test]
+    fn test_path_set_primary_only_exposes_conservative_fallback() {
+        init_test("test_path_set_primary_only_exposes_conservative_fallback");
+        let set = PathSet::new(PathSelectionPolicy::PrimaryOnly);
+
+        set.register(test_path(3).with_characteristics(PathCharacteristics::backup()));
+        set.register(test_path(1).with_characteristics(PathCharacteristics {
+            latency_ms: 15,
+            bandwidth_bps: 4_000_000,
+            loss_rate: 0.02,
+            jitter_ms: 3,
+            is_primary: false,
+            priority: 20,
+        }));
+
+        let selected = set.select_paths();
+        crate::assert_with_log!(
+            selected.is_empty(),
+            "primary_only keeps existing empty selection behavior",
+            true,
+            selected.is_empty()
+        );
+
+        let decision = set.select_paths_with_decision();
+        crate::assert_with_log!(
+            decision.selected.is_empty(),
+            "decision selected remains empty",
+            true,
+            decision.selected.is_empty()
+        );
+        crate::assert_with_log!(
+            decision.fallback_policy_id() == Some("best-quality"),
+            "fallback policy id",
+            Some("best-quality"),
+            decision.fallback_policy_id()
+        );
+        crate::assert_with_log!(
+            decision.downgrade_reason_id() == Some("no-primary-path"),
+            "downgrade reason id",
+            Some("no-primary-path"),
+            decision.downgrade_reason_id()
+        );
+        let fallback_ids = decision.fallback_ids();
+        let expected_ids = [PathId(1)];
+        crate::assert_with_log!(
+            fallback_ids.as_slice() == expected_ids.as_slice(),
+            "fallback picks best available path",
+            expected_ids.as_slice(),
+            fallback_ids.as_slice()
+        );
+
+        crate::test_complete!("test_path_set_primary_only_exposes_conservative_fallback");
+    }
+
+    #[test]
+    fn test_path_set_best_quality_reports_requested_paths_unavailable() {
+        init_test("test_path_set_best_quality_reports_requested_paths_unavailable");
+        let set = PathSet::new(PathSelectionPolicy::BestQuality { count: 2 });
+
+        set.register(test_path(1).with_characteristics(PathCharacteristics::high_quality()));
+        let unavailable = test_path(2).with_characteristics(PathCharacteristics::backup());
+        unavailable.set_state(PathState::Unavailable);
+        set.register(unavailable);
+
+        let decision = set.select_paths_with_decision();
+        let selected_ids = decision.selected_ids();
+        let expected_ids = [PathId(1)];
+        crate::assert_with_log!(
+            selected_ids.as_slice() == expected_ids.as_slice(),
+            "best-quality keeps usable selection",
+            expected_ids.as_slice(),
+            selected_ids.as_slice()
+        );
+        crate::assert_with_log!(
+            decision.fallback.is_empty(),
+            "no separate fallback paths needed",
+            true,
+            decision.fallback.is_empty()
+        );
+        crate::assert_with_log!(
+            decision.downgrade_reason
+                == Some(PathSelectionDowngradeReason::RequestedPathsUnavailable {
+                    requested: 2,
+                    available: 1,
+                }),
+            "downgrade records insufficient usable paths",
+            Some(PathSelectionDowngradeReason::RequestedPathsUnavailable {
+                requested: 2,
+                available: 1,
+            }),
+            decision.downgrade_reason
+        );
+
+        crate::test_complete!("test_path_set_best_quality_reports_requested_paths_unavailable");
     }
 
     // Test 6: Deduplicator basic operation
