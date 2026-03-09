@@ -1,3 +1,7 @@
+//! Tests for the tower bridge adapter.
+//!
+//! Verifies that Cx is correctly captured and that services run smoothly.
+
 use super::*;
 use asupersync_tokio_compat::tower_bridge::{IntoTower, BridgeError};
 use tower::Service;
