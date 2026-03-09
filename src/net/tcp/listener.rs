@@ -472,7 +472,10 @@ mod tests {
         set_test_time(0);
         let listener = TcpListener::from_std_with_time_getter(raw, test_time).expect("wrap");
 
-        assert_eq!(listener.note_accept_would_block(), REARMED_ACCEPT_BACKOFF_BASE);
+        assert_eq!(
+            listener.note_accept_would_block(),
+            REARMED_ACCEPT_BACKOFF_BASE
+        );
         assert_eq!(
             listener.accept_storm.lock().consecutive_would_block,
             1,
@@ -480,7 +483,10 @@ mod tests {
         );
 
         set_test_time(Duration::from_millis(5).as_nanos() as u64);
-        assert_eq!(listener.note_accept_would_block(), REARMED_ACCEPT_BACKOFF_BASE);
+        assert_eq!(
+            listener.note_accept_would_block(),
+            REARMED_ACCEPT_BACKOFF_BASE
+        );
         assert_eq!(
             listener.accept_storm.lock().consecutive_would_block,
             2,
@@ -488,7 +494,10 @@ mod tests {
         );
 
         set_test_time(Duration::from_millis(50).as_nanos() as u64);
-        assert_eq!(listener.note_accept_would_block(), REARMED_ACCEPT_BACKOFF_BASE);
+        assert_eq!(
+            listener.note_accept_would_block(),
+            REARMED_ACCEPT_BACKOFF_BASE
+        );
         assert_eq!(
             listener.accept_storm.lock().consecutive_would_block,
             1,
