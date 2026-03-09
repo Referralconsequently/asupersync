@@ -6,13 +6,12 @@ use crate::bytes::{Buf, BytesCursor, BytesMut};
 use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    ChunkedBodyDecoder, HttpError, parse_header_line, require_transfer_encoding_chunked,
-    unique_header_value, validate_header_field,
+    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal, parse_header_line,
+    require_transfer_encoding_chunked, unique_header_value, validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use memchr::memmem;
-use std::fmt::Write;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::task::Poll;
@@ -485,40 +484,59 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
             }
         }
 
-        // Request line
-        let mut head = String::with_capacity(256);
-        let _ = write!(head, "{} {} {}\r\n", req.method, req.uri, req.version);
-
-        // Headers
+        // Pre-validate all headers (and trailers for chunked).
         let mut has_content_length = false;
         for (name, value) in &req.headers {
             validate_header_field(name, value)?;
             if name.eq_ignore_ascii_case("content-length") {
                 has_content_length = true;
             }
-            let _ = write!(head, "{name}: {value}\r\n");
+        }
+        if chunked {
+            for (name, value) in &req.trailers {
+                validate_header_field(name, value)?;
+            }
+        }
+
+        // Pre-reserve capacity.
+        let headers_bytes: usize = req
+            .headers
+            .iter()
+            .map(|(n, v)| n.len() + v.len() + 4)
+            .sum();
+        dst.reserve(64 + req.uri.len() + headers_bytes + req.body.len());
+
+        // Request line: "GET /path HTTP/1.1\r\n"
+        dst.extend_from_slice(req.method.as_str().as_bytes());
+        dst.extend_from_slice(b" ");
+        dst.extend_from_slice(req.uri.as_bytes());
+        dst.extend_from_slice(b" ");
+        dst.extend_from_slice(req.version.as_str().as_bytes());
+        dst.extend_from_slice(b"\r\n");
+
+        // Headers
+        for (name, value) in &req.headers {
+            dst.extend_from_slice(name.as_bytes());
+            dst.extend_from_slice(b": ");
+            dst.extend_from_slice(value.as_bytes());
+            dst.extend_from_slice(b"\r\n");
         }
 
         if chunked {
-            head.push_str("\r\n");
-            dst.extend_from_slice(head.as_bytes());
+            dst.extend_from_slice(b"\r\n");
 
             if !req.body.is_empty() {
-                let mut chunk_line = String::with_capacity(16);
-                let _ = write!(chunk_line, "{:X}\r\n", req.body.len());
-                dst.extend_from_slice(chunk_line.as_bytes());
+                append_chunk_size_line(dst, req.body.len());
                 dst.extend_from_slice(&req.body);
                 dst.extend_from_slice(b"\r\n");
             }
 
             dst.extend_from_slice(b"0\r\n");
-            if !req.trailers.is_empty() {
-                let mut trailer_block = String::with_capacity(256);
-                for (name, value) in &req.trailers {
-                    validate_header_field(name, value)?;
-                    let _ = write!(trailer_block, "{name}: {value}\r\n");
-                }
-                dst.extend_from_slice(trailer_block.as_bytes());
+            for (name, value) in &req.trailers {
+                dst.extend_from_slice(name.as_bytes());
+                dst.extend_from_slice(b": ");
+                dst.extend_from_slice(value.as_bytes());
+                dst.extend_from_slice(b"\r\n");
             }
             dst.extend_from_slice(b"\r\n");
             return Ok(());
@@ -526,15 +544,15 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
 
         if !has_content_length {
             if !req.body.is_empty() {
-                let _ = write!(head, "Content-Length: {}\r\n", req.body.len());
+                dst.extend_from_slice(b"Content-Length: ");
+                append_decimal(dst, req.body.len());
+                dst.extend_from_slice(b"\r\n");
             } else if req.method == Method::Post || req.method == Method::Put {
-                let _ = write!(head, "Content-Length: 0\r\n");
+                dst.extend_from_slice(b"Content-Length: 0\r\n");
             }
         }
 
-        head.push_str("\r\n");
-
-        dst.extend_from_slice(head.as_bytes());
+        dst.extend_from_slice(b"\r\n");
         if !req.body.is_empty() {
             dst.extend_from_slice(&req.body);
         }

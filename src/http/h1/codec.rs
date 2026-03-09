@@ -423,7 +423,7 @@ pub(super) fn require_transfer_encoding_chunked(value: &str) -> Result<(), HttpE
 }
 
 /// Append a `usize` as decimal ASCII digits to `dst`.
-fn append_decimal(dst: &mut BytesMut, mut n: usize) {
+pub(super) fn append_decimal(dst: &mut BytesMut, mut n: usize) {
     // Stack buffer large enough for any usize (max 20 digits on 64-bit).
     let mut buf = [0u8; 20];
     let mut pos = buf.len();
@@ -448,7 +448,7 @@ fn upper_hex_len(mut n: usize) -> usize {
     len
 }
 
-fn append_chunk_size_line(dst: &mut BytesMut, mut size: usize) {
+pub(super) fn append_chunk_size_line(dst: &mut BytesMut, mut size: usize) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut digits = [0u8; usize::BITS as usize / 4];
     let mut written = 0usize;
