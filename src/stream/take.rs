@@ -24,6 +24,7 @@ impl<S> Take<S> {
 impl<S: Stream> Stream for Take<S> {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         if *this.remaining == 0 {
@@ -85,6 +86,7 @@ where
 {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         if *this.done {

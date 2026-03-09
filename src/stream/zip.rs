@@ -61,6 +61,7 @@ where
 {
     type Item = (S1::Item, S2::Item);
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 

@@ -62,6 +62,7 @@ where
 {
     type Item = <P::Target as Stream>::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // self is Pin<&mut Pin<P>>
         // self.get_mut() returns &mut Pin<P>
@@ -69,6 +70,7 @@ where
         self.get_mut().as_mut().poll_next(cx)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (**self).size_hint()
     }
@@ -78,10 +80,12 @@ where
 impl<S: Stream + Unpin + ?Sized> Stream for Box<S> {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut **self).poll_next(cx)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (**self).size_hint()
     }
@@ -91,10 +95,12 @@ impl<S: Stream + Unpin + ?Sized> Stream for Box<S> {
 impl<S: Stream + Unpin + ?Sized> Stream for &mut S {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut **self).poll_next(cx)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (**self).size_hint()
     }

@@ -25,6 +25,7 @@ where
 {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let next = Pin::new(&mut self.stream).poll_next(cx);
         if let Poll::Ready(Some(ref item)) = next {

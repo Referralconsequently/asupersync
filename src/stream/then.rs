@@ -36,6 +36,7 @@ where
 {
     type Item = Fut::Output;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 

@@ -24,6 +24,7 @@ impl<S> Skip<S> {
 impl<S: Stream> Stream for Skip<S> {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         while *this.remaining > 0 {
@@ -73,6 +74,7 @@ where
 {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         if *this.done {

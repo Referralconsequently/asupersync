@@ -13,6 +13,8 @@ use std::task::{Context, Poll};
 #[must_use = "streams do nothing unless polled"]
 pub struct Merge<S> {
     streams: VecDeque<S>,
+    /// Round-robin cursor for fair polling without moving elements.
+    next_index: usize,
 }
 
 impl<S> Merge<S> {
@@ -20,16 +22,19 @@ impl<S> Merge<S> {
     pub(crate) fn new(streams: impl IntoIterator<Item = S>) -> Self {
         Self {
             streams: streams.into_iter().collect(),
+            next_index: 0,
         }
     }
 
     /// Returns the number of active streams.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.streams.len()
     }
 
     /// Returns true if there are no active streams.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.streams.is_empty()
@@ -51,28 +56,49 @@ where
     type Item = S::Item;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let len = self.streams.len();
-        if len == 0 {
+        let initial_len = self.streams.len();
+        if initial_len == 0 {
             return Poll::Ready(None);
         }
 
-        for _ in 0..len {
-            let mut stream = self.streams.pop_front().expect("length checked");
+        let start = self.next_index.min(initial_len.saturating_sub(1));
+        // Track how many original streams we've visited (removals don't reduce the budget).
+        let mut remaining = initial_len;
+        let mut i = start;
 
-            match Pin::new(&mut stream).poll_next(cx) {
+        while remaining > 0 {
+            let len = self.streams.len();
+            if len == 0 {
+                return Poll::Ready(None);
+            }
+            if i >= len {
+                i = 0;
+            }
+
+            match Pin::new(&mut self.streams[i]).poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    self.streams.push_back(stream);
+                    let new_len = self.streams.len();
+                    self.next_index = if i + 1 >= new_len { 0 } else { i + 1 };
                     return Poll::Ready(Some(item));
                 }
                 Poll::Ready(None) => {
-                    // Stream exhausted; drop it.
+                    // Stream exhausted; remove it.
+                    self.streams.remove(i);
+                    remaining -= 1;
+                    // i now points at the next element (shifted into this slot), don't advance.
+                    continue;
                 }
-                Poll::Pending => {
-                    self.streams.push_back(stream);
-                }
+                Poll::Pending => {}
             }
+            remaining -= 1;
+            i += 1;
         }
 
+        self.next_index = if self.streams.is_empty() {
+            0
+        } else {
+            i % self.streams.len()
+        };
         if self.streams.is_empty() {
             Poll::Ready(None)
         } else {

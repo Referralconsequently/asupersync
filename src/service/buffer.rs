@@ -149,18 +149,21 @@ impl<S> Buffer<S> {
     ///
     /// This includes requests already in flight plus any slot reserved by a
     /// successful `poll_ready` that has not yet been consumed by `call`.
+    #[inline]
     #[must_use]
     pub fn pending(&self) -> usize {
         *self.shared.pending.lock()
     }
 
     /// Returns `true` if the buffer is full.
+    #[inline]
     #[must_use]
     pub fn is_full(&self) -> bool {
         self.pending() >= self.shared.capacity
     }
 
     /// Returns `true` if the buffer is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pending() == 0
@@ -183,6 +186,7 @@ impl<S> Buffer<S> {
     }
 
     /// Returns `true` if the buffer has been closed.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         *self.shared.closed.lock()

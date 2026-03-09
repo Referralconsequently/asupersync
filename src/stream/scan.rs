@@ -58,6 +58,7 @@ where
 {
     type Item = B;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<B>> {
         let this = self.project();
         let Some(state) = this.state else {

@@ -25,6 +25,7 @@ impl<S> Fuse<S> {
 impl<S: Stream> Stream for Fuse<S> {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         let Some(stream) = this.stream.as_mut().as_pin_mut() else {

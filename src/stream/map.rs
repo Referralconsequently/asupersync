@@ -48,6 +48,7 @@ where
 {
     type Item = T;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let this = self.project();
         match this.stream.poll_next(cx) {

@@ -193,6 +193,7 @@ impl<S> RateLimit<S> {
     }
 
     /// Returns the current number of available tokens.
+    #[inline]
     #[must_use]
     pub fn available_tokens(&self) -> u64 {
         self.tokens
@@ -218,6 +219,7 @@ impl<S> RateLimit<S> {
     }
 
     /// Refills tokens based on elapsed time.
+    #[inline]
     fn refill_state(&mut self, now: Time) {
         let last_refill = self.last_refill.unwrap_or(now);
         let elapsed_nanos = now.as_nanos().saturating_sub(last_refill.as_nanos());
@@ -253,6 +255,7 @@ impl<S> RateLimit<S> {
     }
 
     /// Tries to acquire a token.
+    #[inline]
     fn try_acquire(&mut self) -> bool {
         if self.tokens > 0 {
             self.tokens -= 1;

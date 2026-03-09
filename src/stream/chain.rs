@@ -61,6 +61,7 @@ where
 {
     type Item = S1::Item;
 
+    #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(first) = self.first.as_mut() {
             match Pin::new(first).poll_next(cx) {

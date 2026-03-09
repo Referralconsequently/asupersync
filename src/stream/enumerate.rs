@@ -24,6 +24,7 @@ impl<S> Enumerate<S> {
 impl<S: Stream> Stream for Enumerate<S> {
     type Item = (usize, S::Item);
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         match this.stream.as_mut().poll_next(cx) {
