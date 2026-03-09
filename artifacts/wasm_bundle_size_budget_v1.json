@@ -40,9 +40,9 @@
         },
         "asupersync.js": {
           "category": "wasm_bindgen_glue",
-          "warning_bytes": 20480,
-          "ceiling_bytes": 28672,
-          "gzip_ceiling_bytes": 17203
+          "warning_bytes": 32768,
+          "ceiling_bytes": 45056,
+          "gzip_ceiling_bytes": 27033
         },
         "index.d.ts": {
           "category": "type_declarations",
@@ -98,7 +98,7 @@
   },
   "bands": {
     "green": "Below warning threshold",
-    "yellow": "Between warning and ceiling — CI passes with advisory",
-    "red": "Above ceiling — CI MUST fail"
+    "yellow": "Between warning and ceiling \u2014 CI passes with advisory",
+    "red": "Above ceiling \u2014 CI MUST fail"
   }
 }

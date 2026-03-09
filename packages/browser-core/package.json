@@ -12,20 +12,21 @@
     "directory": "packages/browser-core"
   },
   "type": "module",
-  "main": "./asupersync.js",
-  "module": "./asupersync.js",
-  "types": "./asupersync.d.ts",
+  "main": "./index.js",
+  "module": "./index.js",
+  "types": "./index.d.ts",
   "exports": {
     ".": {
-      "types": "./asupersync.d.ts",
-      "import": "./asupersync.js",
-      "default": "./asupersync.js"
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "default": "./index.js"
     },
     "./types": {
       "types": "./types.d.ts",
-      "import": "./asupersync.js",
-      "default": "./asupersync.js"
+      "import": "./index.js",
+      "default": "./index.js"
     },
+    "./asupersync.js": "./asupersync.js",
     "./asupersync_bg.wasm": "./asupersync_bg.wasm",
     "./abi-metadata.json": "./abi-metadata.json",
     "./debug-metadata.json": "./debug-metadata.json",

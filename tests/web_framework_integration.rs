@@ -1174,7 +1174,10 @@ fn integration_session_basic() {
     struct SessionMutatingHandler;
     impl Handler for SessionMutatingHandler {
         fn call(&self, req: Request) -> asupersync::web::Response {
-            if let Some(session) = req.extensions.get_typed::<asupersync::web::session::Session>() {
+            if let Some(session) = req
+                .extensions
+                .get_typed::<asupersync::web::session::Session>()
+            {
                 session.insert("user_id", "123");
             }
             asupersync::web::Response::new(StatusCode::OK, b"session-ok".to_vec())
