@@ -402,18 +402,18 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct ManualCallController {
-        state: Arc<std::sync::Mutex<Option<Result<u32, ReconnectingCallError>>>>,
+        state: Arc<parking_lot::Mutex<Option<Result<u32, ReconnectingCallError>>>>,
     }
 
     impl ManualCallController {
         fn new() -> Self {
             Self {
-                state: Arc::new(std::sync::Mutex::new(None)),
+                state: Arc::new(parking_lot::Mutex::new(None)),
             }
         }
 
         fn fail(&self) {
-            *self.state.lock().expect("manual call state poisoned") =
+            *self.state.lock() =
                 Some(Err(ReconnectingCallError));
         }
 
@@ -426,14 +426,14 @@ mod tests {
 
     #[derive(Debug)]
     struct ManualCallFuture {
-        state: Arc<std::sync::Mutex<Option<Result<u32, ReconnectingCallError>>>>,
+        state: Arc<parking_lot::Mutex<Option<Result<u32, ReconnectingCallError>>>>,
     }
 
     impl Future for ManualCallFuture {
         type Output = Result<u32, ReconnectingCallError>;
 
         fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let mut state = self.state.lock().expect("manual call state poisoned");
+            let mut state = self.state.lock();
             state.take().map_or(Poll::Pending, Poll::Ready)
         }
     }

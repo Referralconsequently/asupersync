@@ -8,13 +8,13 @@
 //! - `MultipathAggregator`: Main aggregation orchestrator
 
 use crate::error::{Error, ErrorKind};
-use crate::types::Time;
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
+use crate::types::Time;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ============================================================================
 // Path Types
@@ -2343,6 +2343,267 @@ mod tests {
         );
 
         crate::test_complete!("test_experimental_transport_decision_logs_fallback_inventory");
+    }
+
+    fn assert_transport_decision_log_keyset(fields: &BTreeMap<String, String>) {
+        let actual: std::collections::BTreeSet<&str> = fields.keys().map(String::as_str).collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "workload_id",
+            "benchmark_correlation_id",
+            "experimental_gate_id",
+            "path_policy_id",
+            "effective_path_policy_id",
+            "requested_path_count",
+            "path_count",
+            "selected_path_count",
+            "fallback_path_count",
+            "selected_path_ids",
+            "fallback_path_ids",
+            "fallback_policy_id",
+            "path_downgrade_reason",
+            "downgrade_reason",
+            "coding_policy_id",
+            "effective_coding_policy_id",
+        ]
+        .into_iter()
+        .collect();
+
+        crate::assert_with_log!(
+            actual == expected,
+            "transport decision log fields stay aligned with the AA-08 contract keyset",
+            format!("{expected:?}"),
+            format!("{actual:?}")
+        );
+    }
+
+    #[test]
+    fn test_experimental_transport_decision_log_fields_cover_contract_modes() {
+        init_test("test_experimental_transport_decision_log_fields_cover_contract_modes");
+
+        let gate_disabled = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::UseAll,
+            experiment_gate: ExperimentalTransportGate::Disabled,
+            ..AggregatorConfig::default()
+        });
+        gate_disabled
+            .paths()
+            .register(test_path(3).with_characteristics(PathCharacteristics::backup()));
+        gate_disabled
+            .paths()
+            .register(test_path(1).with_characteristics(PathCharacteristics::high_quality()));
+        gate_disabled.paths().register(test_path(2));
+
+        let gate_disabled_fields = gate_disabled
+            .experimental_transport_decision(TransportExperimentContext::new(
+                "TW-MULTIPATH",
+                "aa08-gate-contract-001",
+            ))
+            .log_fields();
+        assert_transport_decision_log_keyset(&gate_disabled_fields);
+        crate::assert_with_log!(
+            gate_disabled_fields
+                .get("requested_path_count")
+                .map(String::as_str)
+                == Some("all"),
+            "unbounded policies log requested_path_count as all",
+            Some("all"),
+            gate_disabled_fields
+                .get("requested_path_count")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            gate_disabled_fields
+                .get("effective_path_policy_id")
+                .map(String::as_str)
+                == Some("round-robin"),
+            "gate-disabled preview logs conservative effective policy",
+            Some("round-robin"),
+            gate_disabled_fields
+                .get("effective_path_policy_id")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            gate_disabled_fields
+                .get("selected_path_count")
+                .map(String::as_str)
+                == Some("1"),
+            "gate-disabled preview logs the conservative selected path count",
+            Some("1"),
+            gate_disabled_fields
+                .get("selected_path_count")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            gate_disabled_fields
+                .get("path_downgrade_reason")
+                .map(String::as_str)
+                == Some(""),
+            "gate-level fallback keeps path_downgrade_reason empty",
+            Some(""),
+            gate_disabled_fields
+                .get("path_downgrade_reason")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            gate_disabled_fields
+                .get("downgrade_reason")
+                .map(String::as_str)
+                == Some("experimental-gate-disabled"),
+            "gate-level fallback logs the preview downgrade reason",
+            Some("experimental-gate-disabled"),
+            gate_disabled_fields
+                .get("downgrade_reason")
+                .map(String::as_str)
+        );
+
+        let bounded_preview = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::BestQuality { count: 2 },
+            experiment_gate: ExperimentalTransportGate::MultipathPreview,
+            ..AggregatorConfig::default()
+        });
+        bounded_preview
+            .paths()
+            .register(test_path(1).with_characteristics(PathCharacteristics::high_quality()));
+        bounded_preview
+            .paths()
+            .register(test_path(2).with_characteristics(PathCharacteristics {
+                latency_ms: 20,
+                bandwidth_bps: 5_000_000,
+                loss_rate: 0.01,
+                jitter_ms: 5,
+                is_primary: false,
+                priority: 20,
+            }));
+        bounded_preview
+            .paths()
+            .register(test_path(3).with_characteristics(PathCharacteristics::backup()));
+
+        let bounded_preview_fields = bounded_preview
+            .experimental_transport_decision(TransportExperimentContext::new(
+                "TW-MULTIPATH",
+                "aa08-bounded-contract-001",
+            ))
+            .log_fields();
+        assert_transport_decision_log_keyset(&bounded_preview_fields);
+        crate::assert_with_log!(
+            bounded_preview_fields
+                .get("requested_path_count")
+                .map(String::as_str)
+                == Some("2"),
+            "bounded multipath preview logs requested path count",
+            Some("2"),
+            bounded_preview_fields
+                .get("requested_path_count")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            bounded_preview_fields
+                .get("selected_path_ids")
+                .map(String::as_str)
+                == Some("1,2"),
+            "bounded multipath preview logs deterministic selected path ids",
+            Some("1,2"),
+            bounded_preview_fields
+                .get("selected_path_ids")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            bounded_preview_fields
+                .get("fallback_path_ids")
+                .map(String::as_str)
+                == Some(""),
+            "bounded preview leaves fallback inventory empty when the request is honored",
+            Some(""),
+            bounded_preview_fields
+                .get("fallback_path_ids")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            bounded_preview_fields
+                .get("downgrade_reason")
+                .map(String::as_str)
+                == Some(""),
+            "bounded preview leaves gate-level downgrade empty when honored",
+            Some(""),
+            bounded_preview_fields
+                .get("downgrade_reason")
+                .map(String::as_str)
+        );
+
+        let primary_fallback = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::PrimaryOnly,
+            experiment_gate: ExperimentalTransportGate::MultipathPreview,
+            ..AggregatorConfig::default()
+        });
+        primary_fallback
+            .paths()
+            .register(test_path(3).with_characteristics(PathCharacteristics::backup()));
+        primary_fallback
+            .paths()
+            .register(test_path(1).with_characteristics(PathCharacteristics {
+                latency_ms: 15,
+                bandwidth_bps: 4_000_000,
+                loss_rate: 0.02,
+                jitter_ms: 3,
+                is_primary: false,
+                priority: 20,
+            }));
+
+        let primary_fallback_fields = primary_fallback
+            .experimental_transport_decision(TransportExperimentContext::new(
+                "TW-HANDOFF",
+                "aa08-path-fallback-001",
+            ))
+            .log_fields();
+        assert_transport_decision_log_keyset(&primary_fallback_fields);
+        crate::assert_with_log!(
+            primary_fallback_fields
+                .get("fallback_policy_id")
+                .map(String::as_str)
+                == Some("best-quality"),
+            "primary-path fallback logs the conservative fallback policy",
+            Some("best-quality"),
+            primary_fallback_fields
+                .get("fallback_policy_id")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            primary_fallback_fields
+                .get("fallback_path_ids")
+                .map(String::as_str)
+                == Some("1"),
+            "primary-path fallback logs deterministic fallback path ids",
+            Some("1"),
+            primary_fallback_fields
+                .get("fallback_path_ids")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            primary_fallback_fields
+                .get("path_downgrade_reason")
+                .map(String::as_str)
+                == Some("no-primary-path"),
+            "primary-path fallback logs the path-level downgrade reason",
+            Some("no-primary-path"),
+            primary_fallback_fields
+                .get("path_downgrade_reason")
+                .map(String::as_str)
+        );
+        crate::assert_with_log!(
+            primary_fallback_fields
+                .get("downgrade_reason")
+                .map(String::as_str)
+                == Some(""),
+            "primary-path fallback keeps gate-level downgrade empty",
+            Some(""),
+            primary_fallback_fields
+                .get("downgrade_reason")
+                .map(String::as_str)
+        );
+
+        crate::test_complete!(
+            "test_experimental_transport_decision_log_fields_cover_contract_modes"
+        );
     }
 
     #[test]

@@ -195,12 +195,39 @@ pub struct DnsServiceDiscovery {
 struct DnsDiscoveryState {
     /// Currently known endpoints.
     current: HashSet<SocketAddr>,
-    /// When the last resolution was performed.
+    /// When the last resolution attempt was performed.
     last_resolve: Option<Instant>,
     /// Number of successful resolutions.
     resolve_count: u64,
     /// Number of failed resolutions.
     error_count: u64,
+}
+
+fn sorted_socket_addrs(addrs: &HashSet<SocketAddr>) -> Vec<SocketAddr> {
+    let mut sorted: Vec<SocketAddr> = addrs.iter().copied().collect();
+    sorted.sort_unstable();
+    sorted
+}
+
+fn dns_changes(
+    current: &HashSet<SocketAddr>,
+    new_addrs: &HashSet<SocketAddr>,
+) -> Vec<Change<SocketAddr>> {
+    let mut changes = Vec::new();
+
+    for addr in sorted_socket_addrs(new_addrs) {
+        if !current.contains(&addr) {
+            changes.push(Change::Insert(addr));
+        }
+    }
+
+    for addr in sorted_socket_addrs(current) {
+        if !new_addrs.contains(&addr) {
+            changes.push(Change::Remove(addr));
+        }
+    }
+
+    changes
 }
 
 impl DnsServiceDiscovery {
@@ -286,27 +313,16 @@ impl Discover for DnsServiceDiscovery {
                 addrs
             }
             Err(e) => {
+                // Failures participate in the same cooldown as successful
+                // resolutions so callers that poll frequently do not hot-loop
+                // on an unhealthy hostname.
                 state.error_count += 1;
+                state.last_resolve = Some(Instant::now());
                 return Err(DnsDiscoveryError::Resolve(e));
             }
         };
 
-        // Compute diff.
-        let mut changes = Vec::new();
-
-        // New endpoints.
-        for addr in &new_addrs {
-            if !state.current.contains(addr) {
-                changes.push(Change::Insert(*addr));
-            }
-        }
-
-        // Removed endpoints.
-        for addr in &state.current {
-            if !new_addrs.contains(addr) {
-                changes.push(Change::Remove(*addr));
-            }
-        }
+        let changes = dns_changes(&state.current, &new_addrs);
 
         state.current = new_addrs;
         drop(state);
@@ -314,7 +330,7 @@ impl Discover for DnsServiceDiscovery {
     }
 
     fn endpoints(&self) -> Vec<SocketAddr> {
-        self.state.lock().current.iter().copied().collect()
+        sorted_socket_addrs(&self.state.lock().current)
     }
 }
 
@@ -528,6 +544,53 @@ mod tests {
     }
 
     #[test]
+    fn dns_changes_are_sorted_and_grouped() {
+        let current: HashSet<SocketAddr> = [
+            "127.0.0.3:80".parse().unwrap(),
+            "127.0.0.1:80".parse().unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        let new_addrs: HashSet<SocketAddr> = [
+            "127.0.0.2:80".parse().unwrap(),
+            "127.0.0.3:80".parse().unwrap(),
+        ]
+        .into_iter()
+        .collect();
+
+        let changes = dns_changes(&current, &new_addrs);
+
+        assert_eq!(
+            changes,
+            vec![
+                Change::Insert("127.0.0.2:80".parse().unwrap()),
+                Change::Remove("127.0.0.1:80".parse().unwrap()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dns_discovery_endpoints_are_sorted() {
+        let discovery = DnsServiceDiscovery::from_host("localhost", 80);
+        discovery.state.lock().current = [
+            "127.0.0.3:80".parse().unwrap(),
+            "127.0.0.1:80".parse().unwrap(),
+            "127.0.0.2:80".parse().unwrap(),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            discovery.endpoints(),
+            vec![
+                "127.0.0.1:80".parse().unwrap(),
+                "127.0.0.2:80".parse().unwrap(),
+                "127.0.0.3:80".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
     fn dns_discovery_debug() {
         let discovery = DnsServiceDiscovery::from_host("localhost", 80);
         let dbg = format!("{discovery:?}");
@@ -544,6 +607,48 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(discovery.error_count(), 1);
         crate::test_complete!("dns_discovery_invalid_hostname");
+    }
+
+    #[test]
+    fn dns_discovery_failed_resolution_respects_poll_interval() {
+        init_test("dns_discovery_failed_resolution_respects_poll_interval");
+        let discovery = DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("this.hostname.definitely.does.not.exist.invalid", 80)
+                .poll_interval(Duration::from_mins(5)),
+        );
+
+        let result = discovery.poll_discover();
+        assert!(result.is_err());
+        assert_eq!(discovery.error_count(), 1);
+        assert!(discovery.state.lock().last_resolve.is_some());
+
+        let second = discovery.poll_discover().unwrap();
+        assert!(
+            second.is_empty(),
+            "retry should be rate-limited by poll_interval"
+        );
+        assert_eq!(discovery.error_count(), 1);
+        crate::test_complete!("dns_discovery_failed_resolution_respects_poll_interval");
+    }
+
+    #[test]
+    fn dns_discovery_invalidate_forces_retry_after_failed_resolution() {
+        init_test("dns_discovery_invalidate_forces_retry_after_failed_resolution");
+        let discovery = DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("this.hostname.definitely.does.not.exist.invalid", 80)
+                .poll_interval(Duration::from_mins(5)),
+        );
+
+        let first = discovery.poll_discover();
+        assert!(first.is_err());
+        assert_eq!(discovery.error_count(), 1);
+
+        discovery.invalidate();
+
+        let second = discovery.poll_discover();
+        assert!(second.is_err());
+        assert_eq!(discovery.error_count(), 2);
+        crate::test_complete!("dns_discovery_invalidate_forces_retry_after_failed_resolution");
     }
 
     // ================================================================

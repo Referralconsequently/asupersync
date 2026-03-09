@@ -1413,15 +1413,15 @@ mod tests {
 
     #[test]
     fn log_sink_receives_registration_event() {
-        use std::sync::Mutex;
+        use parking_lot::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = ControllerRegistry::new().with_log_sink(Arc::new(move |msg: &str| {
-            logs_clone.lock().unwrap().push(msg.to_string());
+            logs_clone.lock().push(msg.to_string());
         }));
         registry.register(test_registration("logged")).unwrap();
         {
-            let captured = logs.lock().unwrap();
+            let captured = logs.lock();
             assert_eq!(captured.len(), 1);
             assert!(captured[0].contains("controller_registered"));
             assert!(captured[0].contains("logged"));
@@ -1913,12 +1913,12 @@ mod tests {
 
     #[test]
     fn structured_log_covers_promotion_and_rollback() {
-        use std::sync::Mutex;
+        use parking_lot::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = registry_with_policy(fast_policy());
         registry = registry.with_log_sink(Arc::new(move |msg: &str| {
-            logs_clone.lock().unwrap().push(msg.to_string());
+            logs_clone.lock().push(msg.to_string());
         }));
         let id = registry.register(test_registration("log-promo")).unwrap();
         registry.update_calibration(id, 0.9);
@@ -1928,7 +1928,7 @@ mod tests {
         registry.rollback(id, RollbackReason::ManualRollback);
 
         {
-            let captured = logs.lock().unwrap();
+            let captured = logs.lock();
             assert!(captured.iter().any(|l| l.contains("controller_promoted")));
             assert!(
                 captured
@@ -1946,12 +1946,12 @@ mod tests {
 
     #[test]
     fn structured_log_covers_promotion_rejection() {
-        use std::sync::Mutex;
+        use parking_lot::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = registry_with_policy(fast_policy());
         registry = registry.with_log_sink(Arc::new(move |msg: &str| {
-            logs_clone.lock().unwrap().push(msg.to_string());
+            logs_clone.lock().push(msg.to_string());
         }));
         let id = registry.register(test_registration("log-reject")).unwrap();
         registry.update_calibration(id, 0.5);
@@ -1960,7 +1960,7 @@ mod tests {
         let _ = registry.try_promote(id, ControllerMode::Canary);
 
         {
-            let captured = logs.lock().unwrap();
+            let captured = logs.lock();
             assert!(
                 captured
                     .iter()
@@ -1972,19 +1972,19 @@ mod tests {
 
     #[test]
     fn structured_log_covers_hold_and_release() {
-        use std::sync::Mutex;
+        use parking_lot::Mutex;
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logs_clone = Arc::clone(&logs);
         let mut registry = ControllerRegistry::new();
         registry = registry.with_log_sink(Arc::new(move |msg: &str| {
-            logs_clone.lock().unwrap().push(msg.to_string());
+            logs_clone.lock().push(msg.to_string());
         }));
         let id = registry.register(test_registration("log-hold")).unwrap();
         registry.hold(id);
         registry.release_hold(id);
 
         {
-            let captured = logs.lock().unwrap();
+            let captured = logs.lock();
             assert!(captured.iter().any(|l| l.contains("controller_held")));
             assert!(captured.iter().any(|l| l.contains("controller_released")));
             drop(captured);

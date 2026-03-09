@@ -240,7 +240,12 @@ impl DnsCache {
     fn find_oldest_key(cache: &HashMap<String, CacheEntry<LookupIp>>) -> Option<String> {
         cache
             .iter()
-            .min_by_key(|(_, entry)| entry.inserted_at)
+            .min_by(|(left_key, left_entry), (right_key, right_entry)| {
+                left_entry
+                    .inserted_at
+                    .cmp(&right_entry.inserted_at)
+                    .then_with(|| left_key.cmp(right_key))
+            })
             .map(|(key, _)| key.clone())
     }
 }
@@ -523,5 +528,77 @@ mod tests {
             stats.evictions
         );
         crate::test_complete!("cache_update_existing_key_at_capacity_does_not_evict_other_entry");
+    }
+
+    #[test]
+    fn cache_capacity_eviction_breaks_equal_insert_times_deterministically() {
+        init_test("cache_capacity_eviction_breaks_equal_insert_times_deterministically");
+        let config = CacheConfig {
+            max_entries: 2,
+            ..Default::default()
+        };
+        let cache = DnsCache::with_config(config);
+        let inserted_at = Instant::now();
+        let ttl = Duration::from_mins(5);
+
+        let alpha = LookupIp::new(vec!["192.0.2.1".parse::<IpAddr>().expect("ip parse")], ttl);
+        let zeta = LookupIp::new(vec!["192.0.2.2".parse::<IpAddr>().expect("ip parse")], ttl);
+        let middle = LookupIp::new(vec!["192.0.2.3".parse::<IpAddr>().expect("ip parse")], ttl);
+
+        {
+            let mut entries = cache.ip_cache.write();
+            entries.insert(
+                "zeta.example".to_string(),
+                CacheEntry {
+                    data: zeta,
+                    inserted_at,
+                    expires_at: inserted_at + ttl,
+                },
+            );
+            entries.insert(
+                "alpha.example".to_string(),
+                CacheEntry {
+                    data: alpha,
+                    inserted_at,
+                    expires_at: inserted_at + ttl,
+                },
+            );
+        }
+
+        cache.put_ip("middle.example", &middle);
+
+        let alpha_cached = cache.get_ip("alpha.example");
+        let zeta_cached = cache.get_ip("zeta.example");
+        let middle_cached = cache.get_ip("middle.example");
+        crate::assert_with_log!(
+            alpha_cached.is_none(),
+            "lexicographically smallest equal-age key evicted first",
+            true,
+            alpha_cached.is_none()
+        );
+        crate::assert_with_log!(
+            zeta_cached.is_some(),
+            "later lexical key remains when insert times tie",
+            true,
+            zeta_cached.is_some()
+        );
+        crate::assert_with_log!(
+            middle_cached.is_some(),
+            "new entry inserted after deterministic eviction",
+            true,
+            middle_cached.is_some()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 2, "size stays at capacity", 2, stats.size);
+        crate::assert_with_log!(
+            stats.evictions == 1,
+            "single eviction recorded",
+            1,
+            stats.evictions
+        );
+        crate::test_complete!(
+            "cache_capacity_eviction_breaks_equal_insert_times_deterministically"
+        );
     }
 }

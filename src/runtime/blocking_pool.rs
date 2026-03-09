@@ -731,9 +731,13 @@ fn try_claim_idle_retirement(inner: &BlockingPoolInner) -> bool {
 /// The worker loop for blocking pool threads.
 #[allow(clippy::significant_drop_tightening)] // Condvar wait pattern intentionally holds and rechecks under mutex.
 fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
+    let mut idle_since: Option<std::time::Instant> = None;
+
     loop {
         // Try to get work from the queue
         if let Some(task) = inner.queue.pop() {
+            idle_since = None; // Reset idle timer since we got work
+
             inner.busy_threads.fetch_add(1, Ordering::Relaxed);
             inner.pending_count.fetch_sub(1, Ordering::Relaxed);
 
@@ -769,81 +773,90 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
         // Check if we should retire this thread
         let active = inner.active_threads.load(Ordering::Relaxed);
         if active > inner.min_threads {
-            let timed_out = {
-                // Park with timeout.
-                let mut guard = inner.mutex.lock();
+            let now = std::time::Instant::now();
+            let start = *idle_since.get_or_insert(now);
+            let elapsed = now.saturating_duration_since(start);
 
-                // Re-check queue under lock to prevent lost wakeup.
-                if !inner.queue.is_empty() {
-                    drop(guard);
-                    continue;
-                }
-
-                if inner.shutdown.load(Ordering::Acquire) {
-                    drop(guard);
-                    break;
-                }
-
-                let wait_result = inner.condvar.wait_for(&mut guard, inner.idle_timeout);
-                drop(guard);
-                wait_result.timed_out()
-            };
-
-            // If we timed out and there's still no work, consider retiring
-            if timed_out && inner.queue.is_empty() && try_claim_idle_retirement(inner) {
-                // We claimed the retirement slot, meaning active_threads was decremented.
-                // Re-check the queue to ensure we didn't miss a concurrent spawn that
-                // observed our pre-retirement active_threads count and decided not to spawn.
-                if inner.queue.is_empty() {
-                    // Retire this thread; active_threads was already decremented atomically.
-                    return true;
-                }
-
-                // A task was enqueued while we were retiring. Undo the retirement.
-                {
-                    let mut current = inner.active_threads.load(Ordering::Relaxed);
-                    let mut unretired = false;
-                    loop {
-                        if current >= inner.max_threads {
-                            break;
-                        }
-                        match inner.active_threads.compare_exchange_weak(
-                            current,
-                            current + 1,
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        ) {
-                            Ok(_) => {
-                                unretired = true;
-                                break;
-                            }
-                            Err(next) => current = next,
-                        }
-                    }
-                    if !unretired {
+            if elapsed >= inner.idle_timeout {
+                // If we've been idle long enough and there's still no work, consider retiring
+                if inner.queue.is_empty() && try_claim_idle_retirement(inner) {
+                    // We claimed the retirement slot, meaning active_threads was decremented.
+                    // Re-check the queue to ensure we didn't miss a concurrent spawn that
+                    // observed our pre-retirement active_threads count and decided not to spawn.
+                    if inner.queue.is_empty() {
+                        // Retire this thread; active_threads was already decremented atomically.
                         return true;
                     }
+
+                    // A task was enqueued while we were retiring. Undo the retirement.
+                    {
+                        let mut current = inner.active_threads.load(Ordering::Relaxed);
+                        let mut unretired = false;
+                        loop {
+                            if current >= inner.max_threads {
+                                break;
+                            }
+                            match inner.active_threads.compare_exchange_weak(
+                                current,
+                                current + 1,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => {
+                                    unretired = true;
+                                    break;
+                                }
+                                Err(next) => current = next,
+                            }
+                        }
+                        if !unretired {
+                            return true;
+                        }
+                    }
                 }
+                // If we couldn't retire (e.g. someone else retired and we hit min_threads),
+                // reset our idle timer so we don't spin.
+                idle_since = None;
+                continue;
             }
-        } else {
-            {
-                // We're at min_threads, park indefinitely.
-                let mut guard = inner.mutex.lock();
 
-                // Re-check queue under lock to prevent lost wakeup.
-                if !inner.queue.is_empty() {
-                    drop(guard);
-                    continue;
-                }
+            let remaining = inner.idle_timeout.saturating_sub(elapsed);
 
-                if inner.shutdown.load(Ordering::Acquire) {
-                    drop(guard);
-                    break;
-                }
+            // Park with remaining timeout.
+            let mut guard = inner.mutex.lock();
 
-                inner.condvar.wait(&mut guard);
+            // Re-check queue under lock to prevent lost wakeup.
+            if !inner.queue.is_empty() {
                 drop(guard);
+                continue;
             }
+
+            if inner.shutdown.load(Ordering::Acquire) {
+                drop(guard);
+                break;
+            }
+
+            let _wait_result = inner.condvar.wait_for(&mut guard, remaining);
+            drop(guard);
+        } else {
+            idle_since = None; // Reset idle timer since we're parked indefinitely
+
+            // We're at min_threads, park indefinitely.
+            let mut guard = inner.mutex.lock();
+
+            // Re-check queue under lock to prevent lost wakeup.
+            if !inner.queue.is_empty() {
+                drop(guard);
+                continue;
+            }
+
+            if inner.shutdown.load(Ordering::Acquire) {
+                drop(guard);
+                break;
+            }
+
+            inner.condvar.wait(&mut guard);
+            drop(guard);
         }
     }
     false

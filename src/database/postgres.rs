@@ -5354,7 +5354,7 @@ mod tests {
     fn connect_tcp_with_passes_configured_connect_timeout() {
         let opts =
             PgConnectOptions::parse("postgres://user@localhost/db?connect_timeout=30").unwrap();
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(None));
         let seen_for_connect = std::sync::Arc::clone(&seen);
 
         let result = run(PgConnection::connect_tcp_with(
@@ -5362,7 +5362,7 @@ mod tests {
             move |addr, timeout| {
                 let seen = std::sync::Arc::clone(&seen_for_connect);
                 async move {
-                    *seen.lock().expect("lock poisoned") = Some((addr, timeout));
+                    *seen.lock() = Some((addr, timeout));
                     Err(io::Error::new(io::ErrorKind::TimedOut, "synthetic timeout"))
                 }
             },
@@ -5373,7 +5373,7 @@ mod tests {
             other => panic!("expected IO timeout, got {other:?}"),
         }
 
-        let seen = seen.lock().expect("lock poisoned");
+        let seen = seen.lock();
         assert_eq!(
             seen.as_ref(),
             Some(&(
@@ -5386,7 +5386,7 @@ mod tests {
     #[test]
     fn connect_tcp_with_omits_timeout_when_not_configured() {
         let opts = PgConnectOptions::parse("postgres://user@localhost/db").unwrap();
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(None));
         let seen_for_connect = std::sync::Arc::clone(&seen);
 
         let result = run(PgConnection::connect_tcp_with(
@@ -5394,7 +5394,7 @@ mod tests {
             move |addr, timeout| {
                 let seen = std::sync::Arc::clone(&seen_for_connect);
                 async move {
-                    *seen.lock().expect("lock poisoned") = Some((addr, timeout));
+                    *seen.lock() = Some((addr, timeout));
                     Err(io::Error::new(
                         io::ErrorKind::ConnectionRefused,
                         "synthetic refusal",
@@ -5408,7 +5408,7 @@ mod tests {
             other => panic!("expected IO refusal, got {other:?}"),
         }
 
-        let seen = seen.lock().expect("lock poisoned");
+        let seen = seen.lock();
         assert_eq!(seen.as_ref(), Some(&("localhost:5432".to_string(), None)));
     }
 

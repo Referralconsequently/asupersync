@@ -70,6 +70,8 @@ enum ClientDecodeState {
         reason: String,
         headers: Vec<(String, String)>,
     },
+    /// Codec encountered a fatal error and is permanently poisoned.
+    Poisoned,
 }
 
 impl Http1ClientCodec {
@@ -187,10 +189,35 @@ impl crate::codec::Decoder for Http1ClientCodec {
     type Item = Response;
     type Error = HttpError;
 
-    #[allow(clippy::too_many_lines)]
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
+        match self.decode_inner(src) {
+            Err(e) => {
+                self.state = ClientDecodeState::Poisoned;
+                Err(e)
+            }
+            Ok(v) => Ok(v),
+        }
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
+        match self.decode_inner_eof(src) {
+            Err(e) => {
+                self.state = ClientDecodeState::Poisoned;
+                Err(e)
+            }
+            Ok(v) => Ok(v),
+        }
+    }
+}
+
+impl Http1ClientCodec {
+    #[allow(clippy::too_many_lines)]
+    fn decode_inner(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
         loop {
             match &mut self.state {
+                ClientDecodeState::Poisoned => {
+                    return Err(HttpError::BadHeader); // Generic error for poisoned state
+                }
                 state @ ClientDecodeState::Head => {
                     let Some(end) = find_headers_end(src.as_ref()) else {
                         // Check for header overflow while waiting for more data
@@ -370,7 +397,10 @@ impl crate::codec::Decoder for Http1ClientCodec {
         }
     }
 
-    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
+    fn decode_inner_eof(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
+        if matches!(&self.state, ClientDecodeState::Poisoned) {
+            return Err(HttpError::BadHeader);
+        }
         if matches!(&self.state, ClientDecodeState::Eof { .. }) {
             let old = std::mem::replace(&mut self.state, ClientDecodeState::Head);
             let ClientDecodeState::Eof {
@@ -398,7 +428,7 @@ impl crate::codec::Decoder for Http1ClientCodec {
             }));
         }
 
-        match self.decode(src)? {
+        match crate::codec::Decoder::decode(self, src)? {
             Some(frame) => Ok(Some(frame)),
             None if src.is_empty() => Ok(None),
             None => Err(std::io::Error::new(

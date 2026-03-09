@@ -20,7 +20,9 @@
 //! - `read_exact` is **not** cancel-safe (partial state is retained).
 //! - `read_to_end` is cancel-safe (collected bytes remain in the buffer).
 //! - `read_to_string` is **not** fully cancel-safe (bytes are preserved, but a partial UTF-8 sequence at the end may be lost if cancelled).
-//! - `read_line` is cancel-safe (bytes already appended to the `String` remain committed).
+//! - `read_line` is cancel-safe for bytes already appended to the `String`; a
+//!   trailing partial UTF-8 code point buffered internally is only preserved
+//!   across polls, not across drop.
 //!
 //! ## Write operations
 //! - `poll_write` is cancel-safe (partial writes are OK).

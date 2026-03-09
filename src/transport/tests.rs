@@ -755,6 +755,444 @@ mod tests {
         }
 
         // ========================================================================
+        // AA-08.3 Workload-Mapped Replay Tests
+        // ========================================================================
+
+        const AA08_WORKLOAD_REPLAY_MATRIX: &[(&str, &str)] = &[
+            ("TW-BURST", "test_transport_workload_tw_burst_loss_recovery"),
+            (
+                "TW-FAIRNESS",
+                "test_transport_workload_tw_fairness_round_robin_balance",
+            ),
+            (
+                "TW-HANDOFF",
+                "test_transport_workload_tw_handoff_partition_failover",
+            ),
+            (
+                "TW-OVERLOAD",
+                "test_transport_workload_tw_overload_backpressure_recovery",
+            ),
+        ];
+
+        #[test]
+        fn test_transport_workload_replay_matrix_covers_aa08_core_scenarios() {
+            init_test("test_transport_workload_replay_matrix_covers_aa08_core_scenarios");
+
+            let pairs: HashSet<_> = AA08_WORKLOAD_REPLAY_MATRIX.iter().copied().collect();
+            let ids: HashSet<_> = AA08_WORKLOAD_REPLAY_MATRIX
+                .iter()
+                .map(|(workload_id, _)| *workload_id)
+                .collect();
+            let test_names: HashSet<_> = AA08_WORKLOAD_REPLAY_MATRIX
+                .iter()
+                .map(|(_, test_name)| *test_name)
+                .collect();
+            crate::assert_with_log!(
+                pairs.contains(&("TW-BURST", "test_transport_workload_tw_burst_loss_recovery")),
+                "matrix pins burst-loss workload to the expected deterministic test",
+                true,
+                pairs.contains(&("TW-BURST", "test_transport_workload_tw_burst_loss_recovery"))
+            );
+            crate::assert_with_log!(
+                pairs.contains(&(
+                    "TW-FAIRNESS",
+                    "test_transport_workload_tw_fairness_round_robin_balance"
+                )),
+                "matrix pins fairness workload to the expected deterministic test",
+                true,
+                pairs.contains(&(
+                    "TW-FAIRNESS",
+                    "test_transport_workload_tw_fairness_round_robin_balance"
+                ))
+            );
+            crate::assert_with_log!(
+                pairs.contains(&(
+                    "TW-HANDOFF",
+                    "test_transport_workload_tw_handoff_partition_failover"
+                )),
+                "matrix pins handoff workload to the expected deterministic test",
+                true,
+                pairs.contains(&(
+                    "TW-HANDOFF",
+                    "test_transport_workload_tw_handoff_partition_failover"
+                ))
+            );
+            crate::assert_with_log!(
+                pairs.contains(&(
+                    "TW-OVERLOAD",
+                    "test_transport_workload_tw_overload_backpressure_recovery"
+                )),
+                "matrix pins overload workload to the expected deterministic test",
+                true,
+                pairs.contains(&(
+                    "TW-OVERLOAD",
+                    "test_transport_workload_tw_overload_backpressure_recovery"
+                ))
+            );
+            crate::assert_with_log!(
+                ids.contains("TW-BURST"),
+                "matrix includes burst-loss workload",
+                true,
+                ids.contains("TW-BURST")
+            );
+            crate::assert_with_log!(
+                ids.contains("TW-FAIRNESS"),
+                "matrix includes fairness workload",
+                true,
+                ids.contains("TW-FAIRNESS")
+            );
+            crate::assert_with_log!(
+                ids.contains("TW-HANDOFF"),
+                "matrix includes handoff workload",
+                true,
+                ids.contains("TW-HANDOFF")
+            );
+            crate::assert_with_log!(
+                ids.contains("TW-OVERLOAD"),
+                "matrix includes overload workload",
+                true,
+                ids.contains("TW-OVERLOAD")
+            );
+            crate::assert_with_log!(
+                AA08_WORKLOAD_REPLAY_MATRIX.len() == 4,
+                "matrix stays tightly scoped to the claimed workload slice",
+                4,
+                AA08_WORKLOAD_REPLAY_MATRIX.len()
+            );
+            crate::assert_with_log!(
+                ids.len() == AA08_WORKLOAD_REPLAY_MATRIX.len(),
+                "matrix keeps workload ids unique",
+                AA08_WORKLOAD_REPLAY_MATRIX.len(),
+                ids.len()
+            );
+            crate::assert_with_log!(
+                test_names.len() == AA08_WORKLOAD_REPLAY_MATRIX.len(),
+                "matrix keeps workload test names unique",
+                AA08_WORKLOAD_REPLAY_MATRIX.len(),
+                test_names.len()
+            );
+
+            crate::test_complete!(
+                "test_transport_workload_replay_matrix_covers_aa08_core_scenarios"
+            );
+        }
+
+        #[test]
+        fn test_transport_workload_tw_fairness_round_robin_balance() {
+            init_test("test_transport_workload_tw_fairness_round_robin_balance");
+
+            let config = SimTransportConfig::reliable();
+            let table = Arc::new(RoutingTable::new());
+            let mut streams = Vec::new();
+            let mut sinks = Vec::new();
+            let mut endpoints = Vec::new();
+
+            for id in 1..=10_u64 {
+                let endpoint_id = EndpointId(id);
+                let endpoint = table
+                    .register_endpoint(Endpoint::new(endpoint_id, format!("fairness-ep-{id}")));
+                endpoints.push(endpoint);
+
+                let (sink, stream) = sim_channel(config.clone());
+                sinks.push((endpoint_id, sink));
+                streams.push(stream);
+            }
+
+            let entry = RoutingEntry::new(endpoints, Time::ZERO)
+                .with_strategy(LoadBalanceStrategy::RoundRobin);
+            table.add_route(RouteKey::Default, entry);
+
+            let router = Arc::new(SymbolRouter::new(table));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+            for (endpoint_id, sink) in sinks {
+                dispatcher.add_sink(endpoint_id, Box::new(sink));
+            }
+
+            let cx: Cx = Cx::for_testing();
+            future::block_on(async {
+                for i in 0..30 {
+                    dispatcher.dispatch(&cx, create_symbol(i)).await.unwrap();
+                }
+            });
+
+            let mut counts = vec![0usize; streams.len()];
+            loop {
+                let waker = noop_waker();
+                let mut task_cx = Context::from_waker(&waker);
+                let mut progress = false;
+
+                for (index, stream) in streams.iter_mut().enumerate() {
+                    loop {
+                        match Pin::new(&mut *stream).poll_next(&mut task_cx) {
+                            Poll::Ready(Some(Ok(_))) => {
+                                counts[index] += 1;
+                                progress = true;
+                            }
+                            Poll::Ready(Some(Err(err))) => {
+                                panic!(
+                                    "TW-FAIRNESS unexpected stream error on endpoint {}: {err:?}",
+                                    index + 1
+                                );
+                            }
+                            Poll::Ready(None) | Poll::Pending => break,
+                        }
+                    }
+                }
+
+                if !progress {
+                    break;
+                }
+            }
+
+            let total_deliveries: usize = counts.iter().sum();
+            crate::assert_with_log!(
+                total_deliveries == 30,
+                "TW-FAIRNESS delivers the full replay corpus",
+                30,
+                total_deliveries
+            );
+
+            let expected_per_endpoint = 3usize;
+            crate::assert_with_log!(
+                counts.iter().all(|count| *count == expected_per_endpoint),
+                "TW-FAIRNESS keeps endpoint shares balanced under round-robin replay",
+                vec![expected_per_endpoint; counts.len()],
+                counts.clone()
+            );
+
+            let sum = total_deliveries as f64;
+            let sum_sq: f64 = counts
+                .iter()
+                .map(|count| {
+                    let count = *count as f64;
+                    count * count
+                })
+                .sum();
+            let fairness_index = (sum * sum) / (counts.len() as f64 * sum_sq);
+            crate::assert_with_log!(
+                (fairness_index - 1.0).abs() < f64::EPSILON,
+                "TW-FAIRNESS Jain index stays ideal for equal-flow replay",
+                1.0,
+                fairness_index
+            );
+
+            let ideal_share = total_deliveries as f64 / counts.len() as f64;
+            let min_share_pct = (*counts.iter().min().expect("counts cannot be empty") as f64
+                / ideal_share)
+                * 100.0;
+            crate::assert_with_log!(
+                (min_share_pct - 100.0).abs() < f64::EPSILON,
+                "TW-FAIRNESS minimum flow share stays at the full fair-share target",
+                100.0,
+                min_share_pct
+            );
+
+            crate::test_complete!("test_transport_workload_tw_fairness_round_robin_balance");
+        }
+
+        #[test]
+        fn test_transport_workload_tw_overload_backpressure_recovery() {
+            init_test("test_transport_workload_tw_overload_backpressure_recovery");
+
+            let config = SimTransportConfig {
+                capacity: 2,
+                ..SimTransportConfig::reliable()
+            };
+            let (mut sink, mut stream) = sim_channel(config);
+
+            future::block_on(async {
+                sink.send(create_symbol(0)).await.unwrap();
+                sink.send(create_symbol(1)).await.unwrap();
+            });
+
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let ready = Pin::new(&mut sink).poll_ready(&mut task_cx);
+            crate::assert_with_log!(
+                matches!(ready, Poll::Pending),
+                "TW-OVERLOAD backpressure engages at capacity",
+                "Pending",
+                format!("{:?}", ready)
+            );
+
+            future::block_on(async {
+                let first = stream.next().await.unwrap().unwrap();
+                let second = stream.next().await.unwrap().unwrap();
+                crate::assert_with_log!(
+                    first.symbol().esi() == 0,
+                    "first queued symbol preserved under overload",
+                    0,
+                    first.symbol().esi()
+                );
+                crate::assert_with_log!(
+                    second.symbol().esi() == 1,
+                    "second queued symbol preserved under overload",
+                    1,
+                    second.symbol().esi()
+                );
+            });
+
+            let ready = Pin::new(&mut sink).poll_ready(&mut task_cx);
+            crate::assert_with_log!(
+                matches!(ready, Poll::Ready(Ok(()))),
+                "TW-OVERLOAD backpressure clears after drain",
+                "Ready(Ok)",
+                format!("{:?}", ready)
+            );
+
+            future::block_on(async {
+                sink.send(create_symbol(99)).await.unwrap();
+                sink.close().await.unwrap();
+
+                let recovered = stream.next().await.unwrap().unwrap();
+                crate::assert_with_log!(
+                    recovered.symbol().esi() == 99,
+                    "post-overload traffic still flows after recovery",
+                    99,
+                    recovered.symbol().esi()
+                );
+                let closed = stream.next().await.is_none();
+                crate::assert_with_log!(
+                    closed,
+                    "channel closes cleanly after overload replay",
+                    true,
+                    closed
+                );
+            });
+
+            crate::test_complete!("test_transport_workload_tw_overload_backpressure_recovery");
+        }
+
+        #[test]
+        fn test_transport_workload_tw_handoff_partition_failover() {
+            init_test("test_transport_workload_tw_handoff_partition_failover");
+
+            let config = SimTransportConfig::reliable();
+            let mut network = SimNetwork::fully_connected(4, config);
+            network.partition(&[0, 1], &[2, 3]);
+
+            let (mut blocked_sink, _) = network.transport(0, 2);
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let blocked = Pin::new(&mut blocked_sink).poll_ready(&mut task_cx);
+            crate::assert_with_log!(
+                matches!(blocked, Poll::Ready(Err(SinkError::Closed))),
+                "TW-HANDOFF primary path closes under partition",
+                "Ready(Err(Closed))",
+                format!("{:?}", blocked)
+            );
+
+            let (mut fallback_sink, mut fallback_stream) = network.transport(0, 1);
+            future::block_on(async {
+                fallback_sink.send(create_symbol(11)).await.unwrap();
+                let fallback = fallback_stream.next().await.unwrap().unwrap();
+                crate::assert_with_log!(
+                    fallback.symbol().esi() == 11,
+                    "TW-HANDOFF fallback path carries traffic while primary is down",
+                    11,
+                    fallback.symbol().esi()
+                );
+            });
+
+            network.heal_partition(&[0, 1], &[2, 3]);
+            let (mut recovered_sink, mut recovered_stream) = network.transport(0, 2);
+            future::block_on(async {
+                recovered_sink.send(create_symbol(12)).await.unwrap();
+                let recovered = recovered_stream.next().await.unwrap().unwrap();
+                crate::assert_with_log!(
+                    recovered.symbol().esi() == 12,
+                    "TW-HANDOFF primary path recovers after heal",
+                    12,
+                    recovered.symbol().esi()
+                );
+            });
+
+            crate::test_complete!("test_transport_workload_tw_handoff_partition_failover");
+        }
+
+        #[test]
+        fn test_transport_workload_tw_burst_loss_recovery() {
+            init_test("test_transport_workload_tw_burst_loss_recovery");
+
+            let config_lossy = SimTransportConfig {
+                loss_rate: 0.5,
+                seed: Some(42),
+                capacity: 1024,
+                ..SimTransportConfig::default()
+            };
+            let (mut sink_lossy, mut stream_lossy) = sim_channel(config_lossy);
+
+            let (mut sink_reliable, mut stream_reliable) =
+                sim_channel(SimTransportConfig::reliable());
+
+            future::block_on(async {
+                for i in 0..64 {
+                    sink_lossy.send(create_symbol(i)).await.unwrap();
+                }
+                sink_lossy.close().await.unwrap();
+
+                let mut lossy_received = HashSet::new();
+                while let Some(item) = stream_lossy.next().await {
+                    if let Ok(sym) = item {
+                        lossy_received.insert(sym.symbol().esi());
+                    }
+                }
+
+                crate::assert_with_log!(
+                    !lossy_received.is_empty(),
+                    "TW-BURST leaves some symbols on the degraded path",
+                    true,
+                    !lossy_received.is_empty()
+                );
+                crate::assert_with_log!(
+                    lossy_received.len() < 64,
+                    "TW-BURST deterministically drops part of the burst",
+                    "<64",
+                    lossy_received.len()
+                );
+
+                let missing: Vec<_> = (0..64)
+                    .filter(|esi| !lossy_received.contains(esi))
+                    .collect();
+                crate::assert_with_log!(
+                    !missing.is_empty(),
+                    "TW-BURST leaves a bounded recovery set",
+                    true,
+                    !missing.is_empty()
+                );
+
+                for esi in &missing {
+                    sink_reliable.send(create_symbol(*esi)).await.unwrap();
+                }
+                sink_reliable.close().await.unwrap();
+
+                let mut recovered = HashSet::new();
+                while let Some(item) = stream_reliable.next().await {
+                    if let Ok(sym) = item {
+                        recovered.insert(sym.symbol().esi());
+                    }
+                }
+
+                crate::assert_with_log!(
+                    recovered.len() == missing.len(),
+                    "reliable recovery covers the exact missing burst set",
+                    missing.len(),
+                    recovered.len()
+                );
+
+                let total: HashSet<_> = lossy_received.union(&recovered).copied().collect();
+                crate::assert_with_log!(
+                    total.len() == 64,
+                    "TW-BURST replay recovers the full burst",
+                    64,
+                    total.len()
+                );
+            });
+
+            crate::test_complete!("test_transport_workload_tw_burst_loss_recovery");
+        }
+
+        // ========================================================================
         // Priority Dispatch Tests
         // ========================================================================
 

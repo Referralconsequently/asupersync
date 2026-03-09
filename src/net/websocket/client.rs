@@ -151,8 +151,7 @@ impl MessageAssembler {
             ));
         };
 
-        partial.data.extend_from_slice(frame.payload.as_ref());
-        let total_len = partial.data.len();
+        let total_len = partial.data.len().saturating_add(frame.payload.len());
         if total_len > self.max_message_size {
             // Clear partial state to prevent corrupt follow-up continuations
             self.partial = None;
@@ -161,6 +160,8 @@ impl MessageAssembler {
                 max: self.max_message_size,
             });
         }
+
+        partial.data.extend_from_slice(frame.payload.as_ref());
 
         if !frame.fin {
             return Ok(None);

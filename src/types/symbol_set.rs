@@ -270,7 +270,8 @@ impl SymbolSet {
     /// Returns all blocks that have reached the threshold.
     #[must_use]
     pub fn ready_blocks(&self) -> Vec<u8> {
-        self.block_counts
+        let mut ready: Vec<u8> = self
+            .block_counts
             .iter()
             .filter_map(|(sbn, progress)| {
                 if progress.threshold_reached {
@@ -279,7 +280,9 @@ impl SymbolSet {
                     None
                 }
             })
-            .collect()
+            .collect();
+        ready.sort_unstable();
+        ready
     }
 
     /// Returns the total number of symbols stored.
@@ -555,6 +558,21 @@ mod tests {
         let ready = set.ready_blocks();
         assert_eq!(ready.len(), 1);
         assert!(ready.contains(&0));
+    }
+
+    #[test]
+    fn ready_blocks_are_sorted() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        let _ = set.insert(test_symbol(2, 0, 4));
+        let _ = set.insert(test_symbol(0, 0, 4));
+        let _ = set.insert(test_symbol(1, 0, 4));
+
+        assert!(set.set_block_k(2, 1));
+        assert!(set.set_block_k(0, 1));
+        assert!(set.set_block_k(1, 1));
+
+        assert_eq!(set.ready_blocks(), vec![0, 1, 2]);
     }
 
     /// Invariant: clear resets all symbol state.

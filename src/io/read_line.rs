@@ -2,9 +2,14 @@
 //!
 //! # Cancel Safety
 //!
-//! [`ReadLine`] is cancel-safe. Bytes already appended to the output `String`
-//! remain committed. If cancelled and then restarted with a fresh `ReadLine`,
-//! the caller can observe the partial line already present in the buffer.
+//! [`ReadLine`] is cancel-safe for bytes already appended to the output
+//! `String`. If cancelled and then restarted with a fresh `ReadLine`, the
+//! caller can observe the partial line already present in the buffer.
+//!
+//! Incomplete UTF-8 bytes buffered internally are preserved across polls, but
+//! they cannot be committed to the `String` until the code point is complete.
+//! Dropping the future before that happens may still lose that trailing partial
+//! code point.
 
 use super::AsyncBufRead;
 use std::future::Future;
@@ -23,11 +28,19 @@ use std::task::{Context, Poll};
 /// `buf`, but it **is** counted in the returned byte count (matching
 /// `std::io::BufRead::read_line` semantics for the return value).
 ///
+/// If `buf` is reused after a cancelled `ReadLine`, any trailing `\r` already
+/// present in `buf` is treated as part of the in-flight line and will be
+/// normalised if the resumed read later completes with `\n`. Clear `buf`
+/// before starting an unrelated line if you do not want prior contents to
+/// participate in that normalization.
+///
 /// # Cancel Safety
 ///
-/// This future is cancel-safe. Bytes already appended to `buf` remain
-/// committed upon cancellation. The caller should be aware that `buf` may
-/// contain a partial line if the future is dropped before completion.
+/// This future is cancel-safe for bytes already appended to `buf`. The caller
+/// should be aware that `buf` may contain a partial line if the future is
+/// dropped before completion. As with `read_to_string`, a trailing partial
+/// UTF-8 code point buffered internally cannot be committed until it is
+/// complete and may be lost if the future is dropped first.
 ///
 /// # Example
 ///
@@ -316,6 +329,51 @@ mod tests {
         }
     }
 
+    struct PendingBetweenChunksReader {
+        chunks: Vec<Vec<u8>>,
+        pending_once: bool,
+    }
+
+    impl AsyncRead for PendingBetweenChunksReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            unreachable!("read_line should use poll_fill_buf for this test")
+        }
+    }
+
+    impl AsyncBufRead for PendingBetweenChunksReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if this.pending_once {
+                this.pending_once = false;
+                return Poll::Pending;
+            }
+
+            if this.chunks.is_empty() {
+                Poll::Ready(Ok(&[]))
+            } else {
+                Poll::Ready(Ok(&this.chunks[0]))
+            }
+        }
+
+        fn consume(self: Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                return;
+            }
+
+            if amt >= this.chunks[0].len() {
+                this.chunks.remove(0);
+                this.pending_once = !this.chunks.is_empty();
+            } else {
+                this.chunks[0] = this.chunks[0][amt..].to_vec();
+            }
+        }
+    }
+
     #[test]
     fn read_line_basic() {
         init_test("read_line_basic");
@@ -463,5 +521,36 @@ mod tests {
         crate::assert_with_log!(bytes == "🔥\n".len(), "bytes", "🔥\n".len(), bytes);
         crate::assert_with_log!(line == "🔥\n", "line", "🔥\n", line);
         crate::test_complete!("read_line_split_utf8_across_chunks");
+    }
+
+    #[test]
+    fn read_line_crlf_is_normalized_after_cancel_and_restart() {
+        init_test("read_line_crlf_is_normalized_after_cancel_and_restart");
+
+        let mut reader = PendingBetweenChunksReader {
+            chunks: vec![b"hello\r".to_vec(), b"\n".to_vec()],
+            pending_once: false,
+        };
+        let mut line = String::new();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        {
+            let mut first = read_line(&mut reader, &mut line);
+            let first_poll = Pin::new(&mut first).poll(&mut cx);
+            let first_pending = matches!(first_poll, Poll::Pending);
+            crate::assert_with_log!(first_pending, "first poll pending", true, first_pending);
+        }
+        crate::assert_with_log!(line == "hello\r", "partial line", "hello\r", line);
+
+        let mut resumed = read_line(&mut reader, &mut line);
+        let mut resumed = Pin::new(&mut resumed);
+        let bytes = poll_ready(&mut resumed)
+            .expect("future did not resolve")
+            .expect("resumed read_line should succeed");
+
+        crate::assert_with_log!(bytes == 1, "bytes", 1, bytes);
+        crate::assert_with_log!(line == "hello\n", "line", "hello\n", line);
+        crate::test_complete!("read_line_crlf_is_normalized_after_cancel_and_restart");
     }
 }

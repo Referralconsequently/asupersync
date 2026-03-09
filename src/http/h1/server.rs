@@ -494,18 +494,28 @@ fn should_close_connection(req: &Request, config: &Http1Config, state: &Connecti
         }
     }
 
+    let mut has_keep_alive = false;
+    let mut has_close = false;
+
     // Check explicit Connection header from client (RFC 9110 §7.6.1: comma-separated tokens)
     for (name, value) in &req.headers {
         if name.eq_ignore_ascii_case("connection") {
             for token in value.split(',').map(str::trim) {
                 if token.eq_ignore_ascii_case("close") {
-                    return true;
-                }
-                if token.eq_ignore_ascii_case("keep-alive") {
-                    return false;
+                    has_close = true;
+                } else if token.eq_ignore_ascii_case("keep-alive") {
+                    has_keep_alive = true;
                 }
             }
         }
+    }
+
+    if has_close {
+        return true;
+    }
+
+    if has_keep_alive {
+        return false;
     }
 
     // HTTP/1.0 defaults to close; HTTP/1.1 defaults to keep-alive

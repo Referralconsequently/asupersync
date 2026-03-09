@@ -116,47 +116,44 @@ impl File {
         spawn_blocking_io(move || inner.set_permissions(perm)).await
     }
 
-    // Helper methods that match std::fs::File but async
-    // Note: These require &mut self due to seek position state.
-    // Phase 0: Still blocking since we can't safely share mutable state.
+    // Helper methods that match std::fs::File but async.
+    // Note: These require &mut self because they mutate the shared file cursor.
+    // Clones and shared wrappers observe std::fs::File's shared-offset semantics,
+    // so callers must synchronize if they need deterministic ordering.
 
-    /// Reads a number of bytes starting from a given offset.
-    /// Note: using seek + read
+    /// Moves the shared file cursor and returns the new position.
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         // Phase 0: Direct blocking. Requires reactor integration for true async.
-        Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::other("file handle is shared"))?
-            .seek(pos)
+        let mut inner = &*self.inner;
+        inner.seek(pos)
     }
 
     /// Gets the current stream position.
     pub async fn stream_position(&mut self) -> io::Result<u64> {
         // Phase 0: Direct blocking. Requires reactor integration for true async.
-        Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::other("file handle is shared"))?
-            .stream_position()
+        let mut inner = &*self.inner;
+        inner.stream_position()
     }
 
     /// Rewinds the stream to the beginning.
     pub async fn rewind(&mut self) -> io::Result<()> {
         // Phase 0: Direct blocking. Requires reactor integration for true async.
-        Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::other("file handle is shared"))?
-            .rewind()
+        let mut inner = &*self.inner;
+        inner.rewind()
     }
 }
 
-// Phase 0: Poll-based traits use direct blocking I/O.
-// True async support requires reactor integration to wake on readiness.
+// Phase 0: Poll-based traits use direct blocking I/O against the underlying
+// std::fs::File. Shared handles are permitted and therefore inherit the
+// platform's shared-cursor semantics.
 
 impl AsyncRead for File {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::other("file handle is shared during poll_read"))?;
+        let mut inner = &*self.inner;
         let n = inner.read(buf.unfilled())?;
         buf.advance(n);
         Poll::Ready(Ok(()))
@@ -165,19 +162,17 @@ impl AsyncRead for File {
 
 impl AsyncWrite for File {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::other("file handle is shared during poll_write"))?;
+        let mut inner = &*self.inner;
         let n = inner.write(buf)?;
         Poll::Ready(Ok(n))
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::other("file handle is shared during poll_flush"))?;
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut inner = &*self.inner;
         inner.flush()?;
         Poll::Ready(Ok(()))
     }
@@ -189,12 +184,11 @@ impl AsyncWrite for File {
 
 impl AsyncSeek for File {
     fn poll_seek(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| io::Error::other("file handle is shared during poll_seek"))?;
+        let mut inner = &*self.inner;
         let n = inner.seek(pos)?;
         Poll::Ready(Ok(n))
     }
@@ -385,5 +379,40 @@ mod tests {
             crate::assert_with_log!(len == 0, "shared into_std len", 0u64, len);
         });
         crate::test_complete!("test_file_into_std_when_shared");
+    }
+
+    #[test]
+    fn test_shared_arc_file_handles_support_seek_and_async_read() {
+        init_test("test_shared_arc_file_handles_support_seek_and_async_read");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("shared_arc_seek_read.txt");
+            std::fs::write(&path, b"0123456789").unwrap();
+
+            let std_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let shared = Arc::new(std_file);
+
+            let mut seeker = File {
+                inner: Arc::clone(&shared),
+            };
+            let mut reader = File {
+                inner: Arc::clone(&shared),
+            };
+
+            seeker.seek(SeekFrom::Start(5)).await.unwrap();
+            let mut buf = [0u8; 5];
+            reader.read_exact(&mut buf).await.unwrap();
+            crate::assert_with_log!(
+                &buf == b"56789",
+                "shared handle seek/read contents",
+                b"56789",
+                buf
+            );
+        });
+        crate::test_complete!("test_shared_arc_file_handles_support_seek_and_async_read");
     }
 }

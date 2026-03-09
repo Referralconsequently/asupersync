@@ -1223,7 +1223,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct BlockingGate {
-        state: Arc<(Mutex<BlockingGateState>, Condvar)>,
+        state: Arc<(parking_lot::Mutex<BlockingGateState>, parking_lot::Condvar)>,
     }
 
     #[derive(Default)]
@@ -1235,26 +1235,26 @@ mod tests {
     impl BlockingGate {
         fn wait_until_entered(&self) {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().expect("gate lock poisoned");
+            let mut state = lock.lock();
             while !state.entered {
-                state = cvar.wait(state).expect("gate wait poisoned");
+                cvar.wait(&mut state);
             }
         }
 
         fn release(&self) {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().expect("gate lock poisoned");
+            let mut state = lock.lock();
             state.release = true;
             cvar.notify_all();
         }
 
         fn block_here(&self) {
             let (lock, cvar) = &*self.state;
-            let mut state = lock.lock().expect("gate lock poisoned");
+            let mut state = lock.lock();
             state.entered = true;
             cvar.notify_all();
             while !state.release {
-                state = cvar.wait(state).expect("gate wait poisoned");
+                cvar.wait(&mut state);
             }
         }
     }

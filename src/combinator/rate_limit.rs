@@ -553,16 +553,28 @@ impl RateLimiter {
         let mut queue = self.wait_queue.write();
 
         // First, timeout expired entries
-        let mut timeout_count = 0u32;
+        let mut timeout_count = 0u64;
+        let mut timeout_wait_ms = 0u64;
+        let mut max_timeout_wait_ms = 0u64;
         for entry in queue.iter_mut() {
             if entry.result.is_none() && now_millis >= entry.deadline_millis {
                 entry.result = Some(Err(RejectionReason::Timeout));
                 timeout_count += 1;
+                let wait = now_millis.saturating_sub(entry.enqueued_at_millis);
+                timeout_wait_ms += wait;
+                if wait > max_timeout_wait_ms {
+                    max_timeout_wait_ms = wait;
+                }
             }
         }
         if timeout_count > 0 {
+            #[allow(clippy::cast_possible_truncation)]
             self.pending_queue_count
-                .fetch_sub(timeout_count, Ordering::Relaxed);
+                .fetch_sub(timeout_count as u32, Ordering::Relaxed);
+            self.total_wait_time_ms
+                .fetch_add(timeout_wait_ms, Ordering::Relaxed);
+            self.max_wait_time_ms
+                .fetch_max(max_timeout_wait_ms, Ordering::Relaxed);
         }
 
         // Try to grant awaiting entries
@@ -686,6 +698,11 @@ impl RateLimiter {
                 let _ = self.process_queue(now);
             } else if previous_result.is_none() {
                 self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
+                let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
+                self.total_wait_time_ms
+                    .fetch_add(wait_ms, Ordering::Relaxed);
+                self.max_wait_time_ms
+                    .fetch_max(wait_ms, Ordering::Relaxed);
             }
         }
     }

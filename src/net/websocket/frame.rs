@@ -329,6 +329,8 @@ enum DecodeState {
         mask_key: Option<[u8; 4]>,
         payload_len: u64,
     },
+    /// Codec encountered a fatal error and is permanently poisoned.
+    Poisoned,
 }
 
 /// WebSocket frame codec.
@@ -392,10 +394,25 @@ impl Decoder for FrameCodec {
     type Item = Frame;
     type Error = WsError;
 
-    #[allow(clippy::too_many_lines)] // Single, explicit RFC 6455 decode state machine.
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode_inner(src) {
+            Err(e) => {
+                self.state = DecodeState::Poisoned;
+                Err(e)
+            }
+            Ok(v) => Ok(v),
+        }
+    }
+}
+
+impl FrameCodec {
+    #[allow(clippy::too_many_lines)] // Single, explicit RFC 6455 decode state machine.
+    fn decode_inner(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, WsError> {
         loop {
             match &self.state {
+                DecodeState::Poisoned => {
+                    return Err(WsError::ProtocolViolation("codec is poisoned after a fatal error"));
+                }
                 DecodeState::Header => {
                     if src.len() < 2 {
                         return Ok(None);
@@ -1474,9 +1491,9 @@ mod tests {
     }
 
     #[test]
-    fn codec_state_resets_after_decode_error() {
-        // After a decode error, the codec should accept valid frames
-        // (state machine must not get stuck).
+    fn codec_is_poisoned_after_decode_error() {
+        // After a decode error, the codec should enter the Poisoned state
+        // and reject all future frames.
         let mut codec = FrameCodec::client();
 
         // First: trigger a reserved-bits error.
@@ -1487,15 +1504,13 @@ mod tests {
         let err = codec.decode(&mut bad_buf);
         assert!(matches!(err, Err(WsError::ReservedBitsSet)));
 
-        // Second: feed a valid frame — codec should decode it successfully.
+        // Second: feed a valid frame — codec should reject it because it's poisoned.
         let mut good_buf = BytesMut::new();
-        // FIN=1, opcode=Text → 0x81; MASK=0, len=2 → 0x02
         good_buf.put_u8(0x81);
         good_buf.put_u8(0x02);
         good_buf.put_slice(b"OK");
-        let frame = codec.decode(&mut good_buf).unwrap().unwrap();
-        assert_eq!(frame.opcode, Opcode::Text);
-        assert_eq!(frame.payload.as_ref(), b"OK");
+        let err2 = codec.decode(&mut good_buf);
+        assert!(matches!(err2, Err(WsError::ProtocolViolation(msg)) if msg.contains("poisoned")));
     }
 
     // =========================================================================

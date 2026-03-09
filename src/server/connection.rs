@@ -177,11 +177,14 @@ impl ConnectionManager {
     /// Returns info for all active connections.
     #[must_use]
     pub fn active_connections(&self) -> Vec<(ConnectionId, ConnectionInfo)> {
-        self.state
+        let mut connections: Vec<_> = self
+            .state
             .lock()
             .iter()
             .map(|(id, info)| (*id, info.clone()))
-            .collect()
+            .collect();
+        connections.sort_by_key(|(id, _)| *id);
+        connections
     }
 
     /// Waits until all connections have been closed.
@@ -468,7 +471,63 @@ mod tests {
         let active = manager.active_connections();
         let len = active.len();
         crate::assert_with_log!(len == 2, "two connections", 2, len);
+
+        let addresses: Vec<_> = active.iter().map(|(_, info)| info.addr).collect();
+        crate::assert_with_log!(
+            addresses == vec![test_addr(8080), test_addr(8081)],
+            "active connections keep deterministic registration order",
+            format!("{:?}", vec![test_addr(8080), test_addr(8081)]),
+            format!("{addresses:?}")
+        );
         crate::test_complete!("active_connections_returns_info");
+    }
+
+    #[test]
+    fn active_connections_are_sorted_by_connection_id() {
+        init_test("active_connections_are_sorted_by_connection_id");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(None, signal);
+
+        let g1 = manager.register(test_addr(9001)).expect("register 1");
+        let g2 = manager.register(test_addr(9002)).expect("register 2");
+        let g3 = manager.register(test_addr(9003)).expect("register 3");
+
+        let g1_id = g1.id().raw();
+        let g2_id = g2.id().raw();
+        let g3_id = g3.id().raw();
+        crate::assert_with_log!(g1_id == 1, "g1 is 1", 1, g1_id);
+        crate::assert_with_log!(g2_id == 2, "g2 is 2", 2, g2_id);
+        crate::assert_with_log!(g3_id == 3, "g3 is 3", 3, g3_id);
+
+        // Drop the middle guard so the remaining snapshot must still sort by
+        // logical connection ID rather than by HashMap bucket order.
+        let middle_id = g2.id();
+        drop(g2);
+        let g4 = manager.register(test_addr(9004)).expect("register 4");
+        let g4_id = g4.id().raw();
+        crate::assert_with_log!(g4_id == 4, "g4 is 4", 4, g4_id);
+
+        let active = manager.active_connections();
+        let ids: Vec<_> = active.iter().map(|(id, _)| id.raw()).collect();
+        crate::assert_with_log!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "active connection ids are strictly ascending",
+            "strictly ascending ids",
+            format!("{ids:?}")
+        );
+        crate::assert_with_log!(
+            !ids.contains(&middle_id.raw()),
+            "dropped connections stay absent from the deterministic snapshot",
+            false,
+            ids.contains(&middle_id.raw())
+        );
+        crate::assert_with_log!(
+            ids == vec![g1_id, g3_id, g4_id],
+            "remaining snapshot keeps deterministic connection-id ordering",
+            format!("{:?}", vec![g1_id, g3_id, g4_id]),
+            format!("{ids:?}")
+        );
+        crate::test_complete!("active_connections_are_sorted_by_connection_id");
     }
 
     #[test]

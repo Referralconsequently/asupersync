@@ -8,11 +8,11 @@
 //! # Current Status
 //!
 //! This backend maintains deterministic registration bookkeeping plus a
-//! wake-driven pending-event queue:
+//! host-readiness pending-event queue:
 //!
-//! - `wake()` snapshots registered interests into a pending queue
+//! - `wake()` acts as a pure wakeup signal and never invents readiness
 //! - `poll()` drains pending events in bounded batches
-//! - repeated wake calls are coalesced when configured
+//! - repeated host readiness notifications are coalesced when configured
 //!
 //! Browser host-source wiring can enqueue readiness via [`BrowserReactor::notify_ready`]
 //! while direct listener registration remains a follow-on integration.
@@ -26,8 +26,7 @@
 //!   MessagePort, etc.)
 //! - **Poll**: Returns immediately with any pending events from the
 //!   microtask/macrotask queue (non-blocking only)
-//! - **Wake**: Schedules a microtask via `queueMicrotask()` or
-//!   `Promise.resolve().then()`
+//! - **Wake**: Nudges the non-blocking poll loop without creating I/O events
 //!
 //! # Invariants Preserved
 //!
@@ -38,10 +37,10 @@
 //!   satisfied for API compatibility
 
 use super::{Events, Interest, Reactor, Source, Token};
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Browser reactor configuration.
@@ -97,29 +96,12 @@ impl BrowserReactor {
         }
     }
 
-    fn registrations_mut(&self) -> io::Result<MutexGuard<'_, BTreeMap<Token, Interest>>> {
-        self.registrations
-            .lock()
-            .map_err(|_| io::Error::other("browser reactor registry lock poisoned"))
+    fn registrations_mut(&self) -> MutexGuard<'_, BTreeMap<Token, Interest>> {
+        self.registrations.lock()
     }
 
-    fn pending_events_mut(&self) -> io::Result<MutexGuard<'_, Vec<super::Event>>> {
-        self.pending_events
-            .lock()
-            .map_err(|_| io::Error::other("browser reactor pending queue lock poisoned"))
-    }
-
-    fn snapshot_readiness_events(&self) -> io::Result<Vec<super::Event>> {
-        let registrations = self.registrations_mut()?;
-        let mut events = Vec::with_capacity(registrations.len());
-        for (&token, &interest) in &*registrations {
-            let ready = interest & Self::readiness_mask();
-            if !ready.is_empty() {
-                events.push(super::Event::new(token, ready));
-            }
-        }
-        drop(registrations);
-        Ok(events)
+    fn pending_events_mut(&self) -> MutexGuard<'_, Vec<super::Event>> {
+        self.pending_events.lock()
     }
 
     fn readiness_mask() -> Interest {
@@ -139,7 +121,7 @@ impl BrowserReactor {
     /// when the token is unknown or the readiness does not intersect the
     /// token's registered interest.
     pub fn notify_ready(&self, token: Token, ready: Interest) -> io::Result<bool> {
-        let registrations = self.registrations_mut()?;
+        let registrations = self.registrations_mut();
         let Some(interest) = registrations.get(&token).copied() else {
             return Ok(false);
         };
@@ -152,7 +134,7 @@ impl BrowserReactor {
         // Keep registration lookup and queue insertion atomic under the same
         // lock order used by modify()/deregister() so host callbacks cannot
         // enqueue stale readiness after a concurrent interest change/remove.
-        let mut pending = self.pending_events_mut()?;
+        let mut pending = self.pending_events_mut();
         if self.config.coalesce_wakes
             && let Some(existing) = pending.iter_mut().find(|event| event.token == token)
         {
@@ -177,21 +159,21 @@ impl BrowserReactor {
         ready: Interest,
         after_interest: &std::sync::Barrier,
         continue_after_interest: &std::sync::Barrier,
-    ) -> io::Result<bool> {
-        let registrations = self.registrations_mut()?;
+    ) -> bool {
+        let registrations = self.registrations_mut();
         let Some(interest) = registrations.get(&token).copied() else {
-            return Ok(false);
+            return false;
         };
         let effective = ready & interest & Self::readiness_mask();
 
         if effective.is_empty() {
-            return Ok(false);
+            return false;
         }
 
         after_interest.wait();
         continue_after_interest.wait();
 
-        let mut pending = self.pending_events_mut()?;
+        let mut pending = self.pending_events_mut();
         if self.config.coalesce_wakes
             && let Some(existing) = pending.iter_mut().find(|event| event.token == token)
         {
@@ -199,14 +181,14 @@ impl BrowserReactor {
             drop(pending);
             drop(registrations);
             self.wake_pending.store(true, Ordering::Release);
-            return Ok(true);
+            return true;
         }
 
         pending.push(super::Event::new(token, effective));
         drop(pending);
         drop(registrations);
         self.wake_pending.store(true, Ordering::Release);
-        Ok(true)
+        true
     }
 }
 
@@ -221,7 +203,7 @@ impl Reactor for BrowserReactor {
         // TODO(umelq.7.x): Wire to browser event listener registration.
         // Current scaffold keeps deterministic token bookkeeping so runtime
         // semantics match native backends even before wasm host bindings land.
-        let mut registrations = self.registrations_mut()?;
+        let mut registrations = self.registrations_mut();
         if registrations.contains_key(&token) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -235,7 +217,7 @@ impl Reactor for BrowserReactor {
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         // TODO(umelq.7.x): Update browser event listener interest.
-        let mut registrations = self.registrations_mut()?;
+        let mut registrations = self.registrations_mut();
         let slot = registrations.get_mut(&token).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -246,7 +228,7 @@ impl Reactor for BrowserReactor {
         drop(registrations);
 
         let readiness = interest & Self::readiness_mask();
-        let mut pending = self.pending_events_mut()?;
+        let mut pending = self.pending_events_mut();
         pending.retain_mut(|event| {
             if event.token != token {
                 return true;
@@ -262,7 +244,7 @@ impl Reactor for BrowserReactor {
 
     fn deregister(&self, token: Token) -> io::Result<()> {
         // TODO(umelq.7.x): Remove browser event listener.
-        let removed = self.registrations_mut()?.remove(&token);
+        let removed = self.registrations_mut().remove(&token);
         if removed.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -270,7 +252,7 @@ impl Reactor for BrowserReactor {
             ));
         }
 
-        let mut pending = self.pending_events_mut()?;
+        let mut pending = self.pending_events_mut();
         pending.retain(|event| event.token != token);
         let queue_empty = pending.is_empty();
         drop(pending);
@@ -281,11 +263,11 @@ impl Reactor for BrowserReactor {
     }
 
     fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
-        // Browser poll is always non-blocking and drains any events that were
-        // queued by wake() and future host callback integrations.
+        // Browser poll is always non-blocking and drains events queued by
+        // notify_ready() and future host callback integrations.
         events.clear();
 
-        let mut pending = self.pending_events_mut()?;
+        let mut pending = self.pending_events_mut();
         if pending.is_empty() {
             self.wake_pending.store(false, Ordering::Release);
             return Ok(0);
@@ -308,39 +290,17 @@ impl Reactor for BrowserReactor {
     }
 
     fn wake(&self) -> io::Result<()> {
-        let snapshot = self.snapshot_readiness_events()?;
-        if snapshot.is_empty() {
-            let still_pending = !self.pending_events_mut()?.is_empty();
-            self.wake_pending.store(still_pending, Ordering::Release);
-            return Ok(());
-        }
-
-        let mut pending = self.pending_events_mut()?;
-        if self.config.coalesce_wakes {
-            for event in snapshot {
-                if let Some(existing) = pending
-                    .iter_mut()
-                    .find(|existing| existing.token == event.token)
-                {
-                    existing.ready |= event.ready;
-                } else {
-                    pending.push(event);
-                }
-            }
-        } else {
-            pending.extend(snapshot);
-        }
-
-        let still_pending = !pending.is_empty();
-        drop(pending);
+        // Browser poll is already non-blocking, so wake must never fabricate
+        // token readiness. Host integrations publish actual readiness via
+        // notify_ready(); wake only preserves the existing pending/not-pending
+        // state so runtime nudges do not turn into false I/O events.
+        let still_pending = !self.pending_events_mut().is_empty();
         self.wake_pending.store(still_pending, Ordering::Release);
         Ok(())
     }
 
     fn registration_count(&self) -> usize {
-        self.registrations
-            .lock()
-            .map_or(0, |registrations| registrations.len())
+        self.registrations.lock().len()
     }
 }
 
@@ -407,7 +367,7 @@ mod tests {
             .unwrap();
         assert!(reactor.modify(token, Interest::WRITABLE).is_ok());
 
-        reactor.wake().unwrap();
+        assert!(reactor.notify_ready(token, Interest::WRITABLE).unwrap());
         let mut events = Events::with_capacity(4);
         let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         assert_eq!(n, 1);
@@ -432,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_reactor_wake_coalesce_flag() {
+    fn browser_reactor_wake_flag_tracks_pending_host_readiness_only() {
         let reactor = BrowserReactor::default();
         let source = TestFdSource;
         assert!(
@@ -442,25 +402,37 @@ mod tests {
         );
 
         // Wake with no registrations should NOT leave wake_pending set
-        // (empty snapshot clears it to avoid coalescing away future wakes).
+        // because there is still no queued host readiness.
         reactor.wake().unwrap();
         assert!(
             !reactor
                 .wake_pending
                 .load(std::sync::atomic::Ordering::Acquire),
-            "wake with empty registry must clear wake_pending"
+            "wake with empty registry must keep wake_pending clear"
         );
 
-        // Wake with a registration should set wake_pending.
+        // Registering alone still must not mark readiness pending.
         reactor
             .register(&source, Token::new(1), Interest::READABLE)
             .unwrap();
         reactor.wake().unwrap();
         assert!(
+            !reactor
+                .wake_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            "wake must not mark readiness pending without host events"
+        );
+
+        assert!(
+            reactor
+                .notify_ready(Token::new(1), Interest::READABLE)
+                .unwrap()
+        );
+        assert!(
             reactor
                 .wake_pending
                 .load(std::sync::atomic::Ordering::Acquire),
-            "wake with registration must set wake_pending"
+            "host readiness should mark wake_pending"
         );
 
         // Poll clears the flag.
@@ -524,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_reactor_wake_enqueues_events_for_registered_tokens() {
+    fn browser_reactor_wake_does_not_emit_synthetic_readiness_for_registered_tokens() {
         let reactor = BrowserReactor::default();
         let source = TestFdSource;
         let read_token = Token::new(1);
@@ -540,20 +512,8 @@ mod tests {
         reactor.wake().unwrap();
         let mut events = Events::with_capacity(8);
         let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(events.len(), 2);
-        let mut saw_read = false;
-        let mut saw_write = false;
-        for event in &events {
-            if event.token == read_token {
-                saw_read = event.is_readable();
-            }
-            if event.token == write_token {
-                saw_write = event.is_writable();
-            }
-        }
-        assert!(saw_read);
-        assert!(saw_write);
+        assert_eq!(n, 0);
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -571,7 +531,16 @@ mod tests {
             .register(&source, Token::new(2), Interest::READABLE)
             .unwrap();
 
-        reactor.wake().unwrap();
+        assert!(
+            reactor
+                .notify_ready(Token::new(1), Interest::READABLE)
+                .unwrap()
+        );
+        assert!(
+            reactor
+                .notify_ready(Token::new(2), Interest::READABLE)
+                .unwrap()
+        );
         let mut events = Events::with_capacity(4);
         let first = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         assert_eq!(first, 1);
@@ -589,31 +558,35 @@ mod tests {
     }
 
     #[test]
-    fn browser_reactor_wake_with_empty_snapshot_clears_pending_flag() {
-        // Regression: wake() on an empty registry used to leave wake_pending
-        // as true, causing the next wake() (after a registration is added) to
-        // be incorrectly coalesced away.
+    fn browser_reactor_wake_without_host_readiness_keeps_pending_flag_clear() {
         let reactor = BrowserReactor::default();
 
-        // Wake with no registrations — snapshot is empty.
+        // Wake with no registrations.
         reactor.wake().unwrap();
         assert!(
             !reactor
                 .wake_pending
                 .load(std::sync::atomic::Ordering::Acquire),
-            "wake_pending must be cleared when snapshot is empty"
+            "wake_pending must stay clear when no host readiness exists"
         );
 
-        // Now register and wake again — must NOT be coalesced.
+        // Registering a token still must not make wake() fabricate readiness.
         let source = TestFdSource;
         reactor
             .register(&source, Token::new(1), Interest::READABLE)
             .unwrap();
         reactor.wake().unwrap();
+        assert!(
+            !reactor
+                .wake_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            "registered tokens alone must not mark readiness pending"
+        );
 
         let mut events = Events::with_capacity(4);
         let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
-        assert_eq!(n, 1, "wake after empty snapshot must not be coalesced");
+        assert_eq!(n, 0);
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -666,7 +639,7 @@ mod tests {
             "modify should discard queued readiness that no longer matches interest"
         );
 
-        reactor.wake().unwrap();
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
         let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         assert_eq!(n, 1);
         let event = events.iter().next().expect("single event");
@@ -739,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_reactor_notify_ready_does_not_suppress_following_wake_snapshot() {
+    fn browser_reactor_wake_preserves_pending_host_readiness_without_adding_more() {
         let reactor = BrowserReactor::default();
         let source = TestFdSource;
         let readable = Token::new(21);
@@ -757,21 +730,20 @@ mod tests {
 
         let mut events = Events::with_capacity(4);
         let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
-        assert_eq!(n, 2);
+        assert_eq!(n, 1);
 
         let mut saw_readable = false;
-        let mut saw_writable = false;
         for event in &events {
             if event.token == readable {
                 saw_readable = event.is_readable();
             }
-            if event.token == writable {
-                saw_writable = event.is_writable();
-            }
+            assert_ne!(
+                event.token, writable,
+                "wake must not synthesize readiness for unrelated registered tokens"
+            );
         }
 
         assert!(saw_readable);
-        assert!(saw_writable);
     }
 
     #[test]
@@ -790,14 +762,12 @@ mod tests {
         let notify_after_interest = Arc::clone(&after_interest);
         let notify_continue = Arc::clone(&continue_after_interest);
         let notify = std::thread::spawn(move || {
-            notify_reactor
-                .notify_ready_with_barriers(
-                    token,
-                    Interest::READABLE,
-                    &notify_after_interest,
-                    &notify_continue,
-                )
-                .expect("notify_ready should succeed")
+            notify_reactor.notify_ready_with_barriers(
+                token,
+                Interest::READABLE,
+                &notify_after_interest,
+                &notify_continue,
+            )
         });
 
         after_interest.wait();

@@ -143,6 +143,8 @@ enum DecodeState {
         headers: Vec<(String, String)>,
         chunked: ChunkedBodyDecoder,
     },
+    /// Codec encountered a fatal error and is permanently poisoned.
+    Poisoned,
 }
 
 /// HTTP/1.1 request decoder and response encoder.
@@ -747,7 +749,7 @@ fn take_head(state: DecodeState) -> (Method, String, Version, Vec<(String, Strin
             headers,
             ..
         } => (method, uri, version, headers),
-        DecodeState::Head => unreachable!("take_head called in Head state"),
+        DecodeState::Head | DecodeState::Poisoned => unreachable!("take_head called in invalid state"),
     }
 }
 
@@ -756,8 +758,23 @@ impl Decoder for Http1Codec {
     type Error = HttpError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
+        match self.decode_inner(src) {
+            Err(e) => {
+                self.state = DecodeState::Poisoned;
+                Err(e)
+            }
+            Ok(v) => Ok(v),
+        }
+    }
+}
+
+impl Http1Codec {
+    fn decode_inner(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
         loop {
             match &mut self.state {
+                DecodeState::Poisoned => {
+                    return Err(HttpError::BadHeader); // Generic error for poisoned state
+                }
                 state @ DecodeState::Head => {
                     let Some((method, uri, version, headers, kind)) =
                         decode_head(src, self.max_headers_size)?
