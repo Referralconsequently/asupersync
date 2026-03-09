@@ -153,6 +153,7 @@ where
     type Error = LoadShedError<S::Error>;
     type Future = LoadShedFuture<S::Future>;
 
+    #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.inner.poll_ready(cx) {
             Poll::Ready(Ok(())) => {

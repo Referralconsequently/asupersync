@@ -177,10 +177,12 @@ where
     type Error = TimeoutError<S::Error>;
     type Future = TimeoutFuture<S::Future>;
 
+    #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx).map_err(TimeoutError::Inner)
     }
 
+    #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
         let now = (self.time_getter)();
         let deadline = now.saturating_add_nanos(duration_to_nanos(self.duration));

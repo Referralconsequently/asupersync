@@ -74,6 +74,7 @@ impl<A, B> Select<A, B> {
 impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
     type Output = Either<A::Output, B::Output>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
@@ -127,6 +128,7 @@ impl<F> SelectAll<F> {
 impl<F: Future + Unpin> Future for SelectAll<F> {
     type Output = (F::Output, usize);
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let len = self.futures.len();
         if len == 0 {

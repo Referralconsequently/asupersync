@@ -870,6 +870,7 @@ where
 {
     type Output = Result<(), S::Error>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.service.poll_ready(cx)
