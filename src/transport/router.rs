@@ -308,6 +308,26 @@ impl LoadBalancer {
         (a_conn * b_weight).cmp(&(b_conn * a_weight))
     }
 
+    #[inline]
+    fn select_ranked_prefix<'a, F>(
+        available: Vec<&'a Arc<Endpoint>>,
+        n: usize,
+        mut cmp: F,
+    ) -> Vec<&'a Arc<Endpoint>>
+    where
+        F: FnMut(&(usize, &'a Arc<Endpoint>), &(usize, &'a Arc<Endpoint>)) -> std::cmp::Ordering,
+    {
+        let mut ranked: Vec<(usize, &Arc<Endpoint>)> = available.into_iter().enumerate().collect();
+
+        if n < ranked.len() {
+            ranked.select_nth_unstable_by(n, |a, b| cmp(a, b));
+            ranked.truncate(n);
+        }
+
+        ranked.sort_by(|a, b| cmp(a, b));
+        ranked.into_iter().map(|(_, endpoint)| endpoint).collect()
+    }
+
     /// Creates a new load balancer.
     #[must_use]
     pub fn new(strategy: LoadBalanceStrategy) -> Self {
@@ -463,18 +483,16 @@ impl LoadBalancer {
                 available
             }
             LoadBalanceStrategy::LeastConnections => {
-                let mut candidates = available;
-                // Sort by connection count (approximated by full sort for simplicity)
-                // In production, select_nth_unstable is better.
-                candidates.sort_by_key(|e| e.connection_count());
-                candidates.truncate(n);
-                candidates
+                Self::select_ranked_prefix(available, n, |a, b| {
+                    a.1.connection_count()
+                        .cmp(&b.1.connection_count())
+                        .then(a.0.cmp(&b.0))
+                })
             }
             LoadBalanceStrategy::WeightedLeastConnections => {
-                let mut candidates = available;
-                candidates.sort_by(|a, b| Self::compare_weighted_load(a, b));
-                candidates.truncate(n);
-                candidates
+                Self::select_ranked_prefix(available, n, |a, b| {
+                    Self::compare_weighted_load(a.1, b.1).then(a.0.cmp(&b.0))
+                })
             }
 
             // For others, fallback to first-available logic or simple selection
@@ -511,14 +529,11 @@ impl LoadBalancer {
         selected
     }
 
-    /// Small-n random selection using Floyd sampling over healthy ranks.
+    /// Small-n random selection using one-pass reservoir sampling.
     ///
-    /// We sample healthy-rank indices without replacement (uniformly) and then
-    /// map those ranks back to endpoint references in a second pass.
-    ///
-    /// Returns `None` when concurrent endpoint-state changes make the sampled
-    /// rank mapping inconsistent, letting the caller fall back to the legacy
-    /// materialize-and-shuffle path.
+    /// This avoids the previous "count healthy endpoints, sample ranks, then
+    /// scan again to map ranks back to endpoints" flow while preserving
+    /// uniform ordered selection without replacement.
     fn select_n_random_small_without_materializing<'a>(
         &self,
         endpoints: &'a [Arc<Endpoint>],
@@ -531,84 +546,41 @@ impl LoadBalancer {
             return None;
         }
 
-        let mut healthy_count = 0usize;
-        for endpoint in endpoints {
-            if endpoint.state().can_receive() {
-                healthy_count += 1;
-            }
-        }
-        if healthy_count == 0 {
-            return Some(Vec::new());
-        }
-        if healthy_count <= n {
-            let mut all_healthy = Vec::with_capacity(healthy_count);
-            for endpoint in endpoints {
-                if endpoint.state().can_receive() {
-                    all_healthy.push(endpoint);
-                }
-            }
-            return Some(all_healthy);
-        }
-
         let mut seed = self.random_seed.fetch_add(n as u64, Ordering::Relaxed);
-        let mut selected_indices = SmallVec::<[usize; Self::RANDOM_FLOYD_SMALL_N_MAX]>::new();
-        selected_indices.reserve_exact(n);
-
-        for j in (healthy_count - n)..healthy_count {
-            seed = Self::next_lcg(seed);
-            let candidate = (seed as usize) % (j + 1);
-            if selected_indices.contains(&candidate) {
-                selected_indices.push(j);
-            } else {
-                selected_indices.push(candidate);
-            }
-        }
-
-        for i in 0..n {
-            seed = Self::next_lcg(seed);
-            let swap = i + ((seed as usize) % (n - i));
-            selected_indices.swap(i, swap);
-        }
-
-        let mut selected =
-            SmallVec::<[Option<&Arc<Endpoint>>; Self::RANDOM_FLOYD_SMALL_N_MAX]>::new();
-        selected.resize(n, None);
-
-        let mut rank_to_output_pos =
-            SmallVec::<[(usize, usize); Self::RANDOM_FLOYD_SMALL_N_MAX]>::with_capacity(n);
-        for (output_pos, &rank) in selected_indices.iter().enumerate() {
-            rank_to_output_pos.push((rank, output_pos));
-        }
-        rank_to_output_pos.sort_unstable_by_key(|&(rank, _)| rank);
-
-        let mut healthy_rank = 0usize;
-        let mut rank_cursor = 0usize;
-        let mut next_target_rank = rank_to_output_pos.first().map(|&(rank, _)| rank);
+        let mut healthy_seen = 0usize;
+        let mut selected = SmallVec::<[&Arc<Endpoint>; Self::RANDOM_FLOYD_SMALL_N_MAX]>::new();
+        selected.reserve_exact(n);
 
         for endpoint in endpoints {
             if !endpoint.state().can_receive() {
                 continue;
             }
-            while next_target_rank == Some(healthy_rank) {
-                let output_pos = rank_to_output_pos[rank_cursor].1;
-                selected[output_pos] = Some(endpoint);
-                rank_cursor += 1;
-                if rank_cursor == n {
-                    break;
-                }
-                next_target_rank = Some(rank_to_output_pos[rank_cursor].0);
+
+            healthy_seen += 1;
+
+            if selected.len() < n {
+                selected.push(endpoint);
+                continue;
             }
-            if rank_cursor == n {
-                break;
+
+            seed = Self::next_lcg(seed);
+            let candidate = (seed as usize) % healthy_seen;
+            if candidate < n {
+                selected[candidate] = endpoint;
             }
-            healthy_rank += 1;
         }
 
-        if rank_cursor != n {
-            return None;
+        if healthy_seen <= n {
+            return Some(selected.into_iter().collect());
         }
 
-        Some(selected.into_iter().flatten().collect())
+        for i in 0..n {
+            seed = Self::next_lcg(seed);
+            let swap = i + ((seed as usize) % (n - i));
+            selected.swap(i, swap);
+        }
+
+        Some(selected.into_iter().collect())
     }
 }
 
@@ -2039,6 +2011,46 @@ mod tests {
         let selected = lb.select_n(&endpoints, 2, None);
         let selected_ids: Vec<_> = selected.iter().map(|endpoint| endpoint.id).collect();
         assert_eq!(selected_ids, vec![e4.id, e2.id]);
+    }
+
+    #[test]
+    fn test_load_balancer_least_connections_select_n_preserves_input_order_on_ties() {
+        let lb = LoadBalancer::new(LoadBalanceStrategy::LeastConnections);
+
+        let e1 = Arc::new(test_endpoint(1));
+        let e2 = Arc::new(test_endpoint(2));
+        let e3 = Arc::new(test_endpoint(3));
+        let e4 = Arc::new(test_endpoint(4));
+
+        e1.active_connections.store(2, Ordering::Relaxed);
+        e2.active_connections.store(2, Ordering::Relaxed);
+        e3.active_connections.store(2, Ordering::Relaxed);
+        e4.active_connections.store(5, Ordering::Relaxed);
+
+        let endpoints = vec![e1.clone(), e2.clone(), e3.clone(), e4];
+        let selected = lb.select_n(&endpoints, 3, None);
+        let selected_ids: Vec<_> = selected.iter().map(|endpoint| endpoint.id).collect();
+        assert_eq!(selected_ids, vec![e1.id, e2.id, e3.id]);
+    }
+
+    #[test]
+    fn test_load_balancer_weighted_least_connections_select_n_preserves_input_order_on_ties() {
+        let lb = LoadBalancer::new(LoadBalanceStrategy::WeightedLeastConnections);
+
+        let e1 = Arc::new(test_endpoint(1).with_weight(1));
+        let e2 = Arc::new(test_endpoint(2).with_weight(2));
+        let e3 = Arc::new(test_endpoint(3).with_weight(3));
+        let e4 = Arc::new(test_endpoint(4).with_weight(1));
+
+        e1.active_connections.store(3, Ordering::Relaxed); // 3.0
+        e2.active_connections.store(6, Ordering::Relaxed); // 3.0
+        e3.active_connections.store(9, Ordering::Relaxed); // 3.0
+        e4.active_connections.store(7, Ordering::Relaxed); // 7.0
+
+        let endpoints = vec![e1.clone(), e2.clone(), e3.clone(), e4];
+        let selected = lb.select_n(&endpoints, 3, None);
+        let selected_ids: Vec<_> = selected.iter().map(|endpoint| endpoint.id).collect();
+        assert_eq!(selected_ids, vec![e1.id, e2.id, e3.id]);
     }
 
     // Test 6: Routing table basic operations

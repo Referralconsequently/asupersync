@@ -7,7 +7,7 @@
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
 use crate::http::h1::types::{self, Method, Request, Response, Version};
-use memchr::{memchr, memmem};
+use memchr::{memchr, memchr_iter};
 use std::fmt;
 use std::io;
 
@@ -207,15 +207,26 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 /// Returns the index of `\r` when found.
 #[inline]
 fn find_crlf(buf: &[u8]) -> Option<usize> {
-    let mut start = 0usize;
-    while let Some(rel_idx) = memchr(b'\n', &buf[start..]) {
-        let idx = start + rel_idx;
+    for idx in memchr_iter(b'\n', buf) {
         if idx > 0 && buf[idx - 1] == b'\r' {
             return Some(idx - 1);
         }
-        start = idx + 1;
     }
     None
+}
+
+/// Collect all CRLF (`\r\n`) positions in `buf` into a pre-allocated vector.
+///
+/// Each returned value is the index of `\r` in a valid `\r\n` pair.
+/// Used by `decode_head` to avoid repeated per-header `find_crlf` calls.
+#[inline]
+fn collect_crlf_positions(buf: &[u8], out: &mut smallvec::SmallVec<[usize; 32]>) {
+    out.clear();
+    for idx in memchr_iter(b'\n', buf) {
+        if idx > 0 && buf[idx - 1] == b'\r' {
+            out.push(idx - 1);
+        }
+    }
 }
 
 /// Parse the request line: `METHOD SP URI SP VERSION CRLF`.
@@ -668,7 +679,14 @@ fn decode_head(
 
     let head_bytes = src.split_to(end);
     let head = head_bytes.as_ref();
-    let request_line_end = find_crlf(head).ok_or(HttpError::BadRequestLine)?;
+
+    // Single-pass: collect all CRLF positions in the header block at once.
+    // This replaces N+1 individual `find_crlf()` sub-slice calls with one
+    // `memchr_iter` pass, eliminating repeated search setup overhead.
+    let mut crlf_positions = smallvec::SmallVec::<[usize; 32]>::new();
+    collect_crlf_positions(head, &mut crlf_positions);
+
+    let request_line_end = *crlf_positions.first().ok_or(HttpError::BadRequestLine)?;
     if request_line_end > MAX_REQUEST_LINE {
         return Err(HttpError::RequestLineTooLong);
     }
@@ -678,18 +696,24 @@ fn decode_head(
     let request_line = &head[..request_line_end];
     let (method, uri, version) = parse_request_line_bytes(request_line)?;
 
-    let mut headers = Vec::with_capacity(8);
+    let header_count = crlf_positions.len().saturating_sub(2);
+    if header_count > MAX_HEADERS {
+        return Err(HttpError::TooManyHeaders);
+    }
+    let mut headers = Vec::with_capacity(header_count);
     let mut transfer_encoding_idx = None;
     let mut content_length_idx = None;
     let mut cursor = request_line_end + 2;
-    while cursor < head.len() {
-        let line_end = find_crlf(&head[cursor..]).ok_or(HttpError::BadHeader)?;
-        if line_end == 0 {
+    // Iterate pre-computed CRLF positions (skip the first which was request line)
+    for &crlf_pos in &crlf_positions[1..] {
+        if crlf_pos < cursor {
+            continue;
+        }
+        let line_len = crlf_pos - cursor;
+        if line_len == 0 {
             break;
         }
-        let line_start = cursor;
-        let line_end = cursor + line_end;
-        let header = parse_header_line_bytes(&head[line_start..line_end])?;
+        let header = parse_header_line_bytes(&head[cursor..crlf_pos])?;
         if is_transfer_encoding_name(header.0.as_str()) {
             if transfer_encoding_idx.is_some() {
                 return Err(HttpError::DuplicateTransferEncoding);
@@ -703,10 +727,7 @@ fn decode_head(
         }
 
         headers.push(header);
-        if headers.len() > MAX_HEADERS {
-            return Err(HttpError::TooManyHeaders);
-        }
-        cursor = line_end + 2;
+        cursor = crlf_pos + 2;
     }
 
     let kind = match (transfer_encoding_idx, content_length_idx) {
@@ -749,7 +770,9 @@ fn take_head(state: DecodeState) -> (Method, String, Version, Vec<(String, Strin
             headers,
             ..
         } => (method, uri, version, headers),
-        DecodeState::Head | DecodeState::Poisoned => unreachable!("take_head called in invalid state"),
+        DecodeState::Head | DecodeState::Poisoned => {
+            unreachable!("take_head called in invalid state")
+        }
     }
 }
 
@@ -1128,6 +1151,17 @@ mod tests {
     }
 
     #[test]
+    fn crlf_search_matches_only_complete_pairs() {
+        assert_eq!(find_crlf(b"GET / HTTP/1.1\r\nHost: example.com"), Some(14));
+        assert_eq!(find_crlf(b"GET / HTTP/1.1\nHost: example.com"), None);
+        assert_eq!(find_crlf(b"GET / HTTP/1.1\rHost: example.com"), None);
+
+        let mut positions = smallvec::SmallVec::<[usize; 32]>::new();
+        collect_crlf_positions(b"bad\nline\r\nnext\r\n", &mut positions);
+        assert_eq!(positions.as_slice(), &[8, 14]);
+    }
+
+    #[test]
     fn decode_request_line_too_long_without_crlf() {
         let mut codec = Http1Codec::new();
         let raw = vec![b'G'; MAX_REQUEST_LINE + 1];
@@ -1150,6 +1184,19 @@ mod tests {
             b"GET / HTTP/1.1\r\nX-Large: aaaaaaaaaaaaaaa\r\n\r\n",
         );
         assert!(matches!(result, Err(HttpError::HeadersTooLarge)));
+    }
+
+    #[test]
+    fn decode_too_many_headers() {
+        let mut request = b"GET / HTTP/1.1\r\n".to_vec();
+        for idx in 0..=MAX_HEADERS {
+            request.extend_from_slice(format!("X-{idx}: value\r\n").as_bytes());
+        }
+        request.extend_from_slice(b"\r\n");
+
+        let mut codec = Http1Codec::new();
+        let result = decode_one(&mut codec, &request);
+        assert!(matches!(result, Err(HttpError::TooManyHeaders)));
     }
 
     #[test]

@@ -645,6 +645,114 @@ impl IntrusiveStack {
             return 0;
         }
         let steal_count = (self.len / 2).max(1).min(max_steal);
+
+        if self.tag == dest.tag {
+            return self.splice_same_tag_non_local_batch(steal_count, arena, dest);
+        }
+
+        self.rebuild_non_local_batch(steal_count, arena, dest)
+    }
+
+    #[inline]
+    fn splice_same_tag_non_local_batch(
+        &mut self,
+        steal_count: usize,
+        arena: &mut Arena<TaskRecord>,
+        dest: &mut Self,
+    ) -> usize {
+        let Some(segment_bottom) = self.bottom else {
+            return 0;
+        };
+
+        // When both stacks share the same tag (the LocalQueue hot path),
+        // we can splice the validated non-local bottom segment directly
+        // into the destination instead of clearing and rebuilding each
+        // stolen node one at a time.
+        let mut segment_top = segment_bottom;
+        let mut new_src_bottom = None;
+        let mut stolen = 0usize;
+        let mut current = segment_bottom;
+
+        while stolen < steal_count {
+            let Some(record) = arena.get(current.arena_index()) else {
+                break;
+            };
+            if record.is_local() {
+                // Source queue contract was violated; repair the local-task
+                // summary and stop this fast path to avoid stealing !Send work.
+                self.local_count = self.local_count.max(1);
+                break;
+            }
+
+            segment_top = current;
+            new_src_bottom = record.prev_in_queue;
+            stolen += 1;
+
+            match record.prev_in_queue {
+                Some(next_up) => current = next_up,
+                None => break,
+            }
+        }
+
+        if stolen == 0 {
+            return 0;
+        }
+
+        if new_src_bottom.is_some_and(|task_id| arena.get(task_id.arena_index()).is_none())
+            || dest
+                .top
+                .is_some_and(|task_id| arena.get(task_id.arena_index()).is_none())
+        {
+            return 0;
+        }
+
+        self.bottom = new_src_bottom;
+        match new_src_bottom {
+            None => {
+                self.top = None;
+            }
+            Some(new_bottom) => {
+                if let Some(new_bottom_record) = arena.get_mut(new_bottom.arena_index()) {
+                    new_bottom_record.next_in_queue = None;
+                }
+            }
+        }
+        self.len -= stolen;
+
+        if let Some(segment_top_record) = arena.get_mut(segment_top.arena_index()) {
+            segment_top_record.prev_in_queue = None;
+        }
+
+        match dest.top {
+            None => {
+                if let Some(segment_bottom_record) = arena.get_mut(segment_bottom.arena_index()) {
+                    segment_bottom_record.next_in_queue = None;
+                }
+                dest.top = Some(segment_top);
+                dest.bottom = Some(segment_bottom);
+            }
+            Some(old_top) => {
+                if let Some(segment_bottom_record) = arena.get_mut(segment_bottom.arena_index()) {
+                    segment_bottom_record.next_in_queue = Some(old_top);
+                }
+                if let Some(old_top_record) = arena.get_mut(old_top.arena_index()) {
+                    old_top_record.prev_in_queue = Some(segment_bottom);
+                }
+                dest.top = Some(segment_top);
+            }
+        }
+
+        dest.len += stolen;
+        stolen
+    }
+
+    #[inline]
+    fn rebuild_non_local_batch(
+        &mut self,
+        steal_count: usize,
+        arena: &mut Arena<TaskRecord>,
+        dest: &mut Self,
+    ) -> usize {
         let mut stolen = 0;
 
         for _ in 0..steal_count {
@@ -1271,6 +1379,39 @@ mod tests {
         assert_eq!(src.pop(&mut arena), Some(task(6)));
         assert_eq!(src.pop(&mut arena), Some(task(5)));
         assert_eq!(src.pop(&mut arena), Some(task(4)));
+        assert_eq!(src.pop(&mut arena), None);
+    }
+
+    #[test]
+    fn stack_steal_batch_into_same_tag_splices_above_existing_destination() {
+        let mut arena = setup_arena(8);
+        let mut src = IntrusiveStack::new(QUEUE_TAG_READY);
+        let mut dest = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        for i in 0..6 {
+            src.push(task(i), &mut arena);
+        }
+        dest.push(task(6), &mut arena);
+        dest.push(task(7), &mut arena);
+
+        let stolen = src.steal_batch_into_non_local(3, &mut arena, &mut dest);
+        assert_eq!(stolen, 3);
+        assert!(!src.has_local_tasks());
+        assert!(!dest.has_local_tasks());
+
+        // Stolen oldest source tasks (0..2) sit above the existing destination
+        // stack while preserving thief-visible LIFO order.
+        assert_eq!(dest.pop(&mut arena), Some(task(2)));
+        assert_eq!(dest.pop(&mut arena), Some(task(1)));
+        assert_eq!(dest.pop(&mut arena), Some(task(0)));
+        assert_eq!(dest.pop(&mut arena), Some(task(7)));
+        assert_eq!(dest.pop(&mut arena), Some(task(6)));
+        assert_eq!(dest.pop(&mut arena), None);
+
+        // Source retains the newest half.
+        assert_eq!(src.pop(&mut arena), Some(task(5)));
+        assert_eq!(src.pop(&mut arena), Some(task(4)));
+        assert_eq!(src.pop(&mut arena), Some(task(3)));
         assert_eq!(src.pop(&mut arena), None);
     }
 

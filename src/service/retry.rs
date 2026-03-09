@@ -127,8 +127,12 @@ where
     type Error = S::Error;
     type Future = RetryFuture<P, S, Request>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Requests execute against a cloned service inside RetryFuture. Polling
+        // readiness on `self.inner` here can strand stateful reservations
+        // (permits/tokens/slots) on the source service while the actual request
+        // waits on its clone.
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
@@ -435,6 +439,7 @@ impl<Request, Res, E> Policy<Request, Res, E> for NoRetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::concurrency_limit::ConcurrencyLimitLayer;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -725,5 +730,45 @@ mod tests {
         let count = calls.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 3, "call count", 3, count);
         crate::test_complete!("retry_exhausts_and_returns_error");
+    }
+
+    #[test]
+    fn poll_ready_does_not_strand_concurrency_limit_reservations() {
+        init_test("poll_ready_does_not_strand_concurrency_limit_reservations");
+        let inner = ConcurrencyLimitLayer::new(1).layer(FailingService::new(0).0);
+        let mut retry_svc = Retry::new(inner, NoRetry::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = retry_svc.poll_ready(&mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "retry poll_ready ok", true, ready_ok);
+
+        let available_after_ready = retry_svc.inner().available();
+        crate::assert_with_log!(
+            available_after_ready == 1,
+            "available permits after outer poll_ready",
+            1,
+            available_after_ready
+        );
+
+        let mut future = retry_svc.call(21);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        let call_ok = matches!(result, Poll::Ready(Ok(42)));
+        crate::assert_with_log!(
+            call_ok,
+            "retry-wrapped concurrency-limited call completes",
+            true,
+            call_ok
+        );
+
+        let available_after_call = retry_svc.inner().available();
+        crate::assert_with_log!(
+            available_after_call == 1,
+            "available permits after call completion",
+            1,
+            available_after_call
+        );
+        crate::test_complete!("poll_ready_does_not_strand_concurrency_limit_reservations");
     }
 }

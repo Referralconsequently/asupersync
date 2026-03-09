@@ -597,7 +597,7 @@ impl ControllerRegistry {
         self.next_id += 1;
 
         let mode = if registration.initial_mode == ControllerMode::Active
-            && !SNAPSHOT_VERSION.is_compatible_with(&registration.max_version)
+            && !registration.max_version.is_compatible_with(&SNAPSHOT_VERSION)
         {
             // Downgrade to shadow if snapshot is newer than controller expects
             ControllerMode::Shadow
@@ -1348,13 +1348,13 @@ mod tests {
     }
 
     #[test]
-    fn active_mode_downgraded_to_shadow_when_snapshot_newer() {
+    fn active_mode_not_downgraded_when_snapshot_matches() {
         let mut registry = ControllerRegistry::new();
         let mut reg = test_registration("downgrade-test");
         reg.initial_mode = ControllerMode::Active;
-        // Controller only supports up to v0.9, but snapshot is v1.0
-        reg.min_version = SnapshotVersion { major: 1, minor: 0 };
-        reg.max_version = SnapshotVersion { major: 1, minor: 0 };
+        // Controller supports up to SNAPSHOT_VERSION
+        reg.min_version = SNAPSHOT_VERSION;
+        reg.max_version = SNAPSHOT_VERSION;
         // This should work since versions match
         let id = registry.register(reg).unwrap();
         assert_eq!(registry.mode(id), Some(ControllerMode::Active));

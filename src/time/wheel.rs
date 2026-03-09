@@ -33,6 +33,7 @@ use crate::types::Time;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, hash_map::Entry};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::task::Waker;
 use std::time::Duration;
 
@@ -238,6 +239,40 @@ struct OverflowEntry {
     entry: TimerEntry,
 }
 
+/// Identity hasher specialized for the wheel's `u64` timer IDs.
+///
+/// `TimerWheel::active` is private and keyed only by timer IDs, so we can skip
+/// the overhead of `RandomState` while preserving exact lookup semantics.
+#[derive(Default)]
+struct TimerIdHasher(u64);
+
+impl Hasher for TimerIdHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        debug_assert_eq!(
+            bytes.len(),
+            std::mem::size_of::<u64>(),
+            "TimerIdHasher is only intended for u64 keys",
+        );
+        let mut padded = [0u8; std::mem::size_of::<u64>()];
+        let copy_len = bytes.len().min(padded.len());
+        padded[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        self.0 = u64::from_le_bytes(padded);
+    }
+}
+
+type TimerActivityMap = HashMap<u64, u64, BuildHasherDefault<TimerIdHasher>>;
+
 impl PartialEq for OverflowEntry {
     fn eq(&self, other: &Self) -> bool {
         self.deadline == other.deadline
@@ -344,7 +379,7 @@ pub struct TimerWheel {
     ready: Vec<TimerEntry>,
     next_id: u64,
     next_generation: u64,
-    active: HashMap<u64, u64>,
+    active: TimerActivityMap,
     config: TimerWheelConfig,
     coalescing: CoalescingConfig,
     max_wheel_duration_ns: u64,
@@ -388,7 +423,7 @@ impl TimerWheel {
             ready: Vec::with_capacity(8),
             next_id: 0,
             next_generation: 0,
-            active: HashMap::with_capacity(64),
+            active: TimerActivityMap::with_capacity_and_hasher(64, BuildHasherDefault::default()),
             config,
             coalescing,
             max_wheel_duration_ns,
@@ -1090,6 +1125,16 @@ mod tests {
         set.insert(h2);
         set.insert(h1); // duplicate
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn timer_id_hasher_passthroughs_u64_hashes() {
+        use std::hash::Hash;
+
+        let timer_id = 0xDEAD_BEEF_CAFE_BABEu64;
+        let mut hasher = TimerIdHasher::default();
+        timer_id.hash(&mut hasher);
+        assert_eq!(hasher.finish(), timer_id);
     }
 
     #[test]
