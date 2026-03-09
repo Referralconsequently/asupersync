@@ -263,6 +263,7 @@ impl Drop for AcquireFuture<'_, '_> {
 impl<'a> Future for AcquireFuture<'a, '_> {
     type Output = Result<SemaphorePermit<'a>, AcquireError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {

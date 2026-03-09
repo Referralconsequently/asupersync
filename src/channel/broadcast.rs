@@ -396,6 +396,7 @@ impl<T> Recv<'_, T> {
 impl<T: Clone> Future for Recv<'_, T> {
     type Output = Result<T, RecvError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
         this.receiver

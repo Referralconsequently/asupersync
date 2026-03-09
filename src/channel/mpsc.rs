@@ -801,6 +801,7 @@ pub struct Recv<'a, T> {
 impl<T> Future for Recv<'_, T> {
     type Output = Result<T, RecvError>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.polled = true;

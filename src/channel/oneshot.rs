@@ -387,6 +387,7 @@ impl<T> RecvUninterruptibleFuture<'_, T> {
 impl<T> Future for RecvUninterruptibleFuture<'_, T> {
     type Output = Result<T, RecvError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
@@ -482,6 +483,7 @@ impl<T> RecvFuture<'_, T> {
 impl<T> Future for RecvFuture<'_, T> {
     type Output = Result<T, RecvError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
         let mut inner = this.receiver.inner.lock();
