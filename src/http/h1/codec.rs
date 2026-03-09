@@ -312,21 +312,12 @@ fn is_valid_header_name_byte(b: u8) -> bool {
 }
 
 fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), HttpError> {
-    let mut colon = None;
-    let mut invalid_name = false;
-    for (idx, &b) in line_bytes.iter().enumerate() {
-        if b == b':' {
-            colon = Some(idx);
-            break;
-        }
-        if !is_valid_header_name_byte(b) {
-            invalid_name = true;
-        }
-    }
-    let colon = colon.ok_or(HttpError::BadHeader)?;
+    // Use memchr for SIMD-accelerated colon search.
+    let colon = memchr(b':', line_bytes).ok_or(HttpError::BadHeader)?;
 
-    // Header field names cannot be empty.
-    if colon == 0 || invalid_name {
+    // Header field names cannot be empty, and all bytes before the colon
+    // must be valid tchar (RFC 7230).
+    if colon == 0 || !line_bytes[..colon].iter().all(|&b| is_valid_header_name_byte(b)) {
         return Err(HttpError::InvalidHeaderName);
     }
 
