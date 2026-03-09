@@ -89,6 +89,7 @@ impl<S: Stream> Peekable<S> {
 impl<S: Stream> Stream for Peekable<S> {
     type Item = S::Item;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
         match std::mem::replace(this.peeked, PeekSlot::Empty) {

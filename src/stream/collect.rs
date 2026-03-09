@@ -33,6 +33,7 @@ where
 {
     type Output = C;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<C> {
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {

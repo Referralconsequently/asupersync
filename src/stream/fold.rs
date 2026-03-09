@@ -39,6 +39,7 @@ where
 {
     type Output = Acc;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Acc> {
         let mut this = self.project();
         loop {

@@ -31,6 +31,7 @@ where
 {
     type Output = Option<S::Item>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         Pin::new(&mut *self.stream).poll_next(cx)
     }

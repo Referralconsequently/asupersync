@@ -33,6 +33,7 @@ where
 {
     type Output = usize;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
         let mut this = self.project();
         loop {
