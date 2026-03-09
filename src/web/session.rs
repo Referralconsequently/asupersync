@@ -219,15 +219,16 @@ fn get_cookie(req: &Request, name: &str) -> Option<String> {
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
         .map(|(_, v)| v)?;
+    let mut found = None;
     for pair in header.split(';') {
         let pair = pair.trim();
         if let Some((k, v)) = pair.split_once('=') {
             if k.trim() == name {
-                return Some(v.trim().to_string());
+                found = Some(v.trim().trim_matches('"').to_string());
             }
         }
     }
-    None
+    found
 }
 
 /// Build a Set-Cookie header value.
@@ -720,6 +721,12 @@ mod tests {
     }
 
     #[test]
+    fn get_cookie_last_duplicate_wins() {
+        let req = Request::new("GET", "/").with_header("cookie", "session_id=old; session_id=new");
+        assert_eq!(get_cookie(&req, "session_id"), Some("new".to_string()));
+    }
+
+    #[test]
     fn get_cookie_missing() {
         let req = Request::new("GET", "/");
         assert!(get_cookie(&req, "session_id").is_none());
@@ -842,7 +849,7 @@ mod tests {
     #[test]
     fn middleware_loads_existing_session() {
         let store = MemoryStore::new();
-        let layer = SessionLayer::new(store);
+        let layer = SessionLayer::new(store.clone());
         let handler = layer.wrap(TestHandler);
 
         // First request — creates session.
@@ -976,6 +983,32 @@ mod tests {
         );
         assert_eq!(store.len(), 1);
         assert_eq!(store.load(session_id).unwrap().get("count"), Some("41"));
+    }
+
+    #[test]
+    fn middleware_duplicate_session_cookie_last_value_wins() {
+        let store = MemoryStore::new();
+        let mut seed = SessionData::new();
+        seed.insert("count", "41");
+        let session_id = "abcdef0123456789abcdef0123456789";
+        store.save(session_id, &seed);
+
+        let layer = SessionLayer::new(store.clone());
+        let handler = layer.wrap(ReadOnlyHandler);
+
+        let fake_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0";
+        let req = Request::new("GET", "/").with_header(
+            "cookie",
+            format!("session_id={fake_id}; session_id={session_id}"),
+        );
+        let resp = handler.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(&resp.body[..], b"41");
+        assert!(
+            !resp.headers.contains_key("set-cookie"),
+            "duplicate cookies should resolve to the same session id CookieJar would expose"
+        );
     }
 
     #[test]

@@ -225,21 +225,38 @@ fn header_value(req: &Request, header_name: &str) -> Option<String> {
 }
 
 fn append_vary_header(resp: &mut Response, token: &str) {
-    let existing = resp.headers.get("vary").cloned().unwrap_or_default();
-    if existing
-        .split(',')
-        .map(str::trim)
-        .any(|value| value.eq_ignore_ascii_case(token))
-    {
+    fn push_vary_token(tokens: &mut Vec<String>, token: &str) {
+        let normalized = token.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return;
+        }
+        if tokens
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&normalized))
+        {
+            return;
+        }
+        tokens.push(normalized);
+    }
+
+    let mut tokens = Vec::new();
+    for (name, value) in &resp.headers {
+        if !name.eq_ignore_ascii_case("vary") {
+            continue;
+        }
+        for existing in value.split(',') {
+            push_vary_token(&mut tokens, existing);
+        }
+    }
+    push_vary_token(&mut tokens, token);
+
+    if tokens.is_empty() {
+        resp.remove_header("vary");
         return;
     }
 
-    let updated = if existing.is_empty() {
-        token.to_string()
-    } else {
-        format!("{existing}, {token}")
-    };
-    resp.headers.insert("vary".to_string(), updated);
+    resp.remove_header("vary");
+    resp.set_header("vary", tokens.join(", "));
 }
 
 fn normalize_header_name(name: impl Into<String>) -> String {
@@ -1955,6 +1972,31 @@ mod tests {
     }
 
     #[test]
+    fn compression_merges_mixed_case_vary_header() {
+        fn handler() -> Response {
+            let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+            resp.headers
+                .insert("Vary".to_string(), "Accept-Language".to_string());
+            resp
+        }
+
+        let mw = CompressionMiddleware::new(
+            FnHandler::new(handler),
+            CompressionConfig {
+                supported: vec![ContentEncoding::Identity],
+                min_body_size: 0,
+            },
+        );
+        let req = Request::new("GET", "/compress").with_header("accept-encoding", "identity");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-language, accept-encoding".to_string())
+        );
+        assert!(!resp.headers.contains_key("Vary"));
+    }
+
+    #[test]
     fn compression_rejects_not_acceptable_encodings() {
         let mw = CompressionMiddleware::new(
             FnHandler::new(ok_handler),
@@ -2114,6 +2156,26 @@ mod tests {
             Some(&"*".to_string())
         );
         assert_eq!(resp.headers.get("vary"), Some(&"origin".to_string()));
+    }
+
+    #[test]
+    fn cors_merges_mixed_case_vary_header_without_duplicates() {
+        fn handler() -> Response {
+            let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+            resp.headers
+                .insert("Vary".to_string(), "Accept-Language, Origin".to_string());
+            resp
+        }
+
+        let mw = CorsMiddleware::new(FnHandler::new(handler), CorsPolicy::default());
+        let req = Request::new("GET", "/cors").with_header("Origin", "https://example.com");
+
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-language, origin".to_string())
+        );
+        assert!(!resp.headers.contains_key("Vary"));
     }
 
     #[test]
