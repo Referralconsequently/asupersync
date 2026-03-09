@@ -148,43 +148,31 @@ impl<H: Handler> Handler for SecurityHeadersMiddleware<H> {
 
         // Apply each configured header, only if not already set.
         if let Some(ref val) = self.policy.content_type_options {
-            resp.headers
-                .entry("x-content-type-options".to_string())
-                .or_insert_with(|| val.clone());
+            resp.ensure_header("x-content-type-options", val.clone());
         }
 
         if let Some(ref val) = self.policy.frame_options {
-            resp.headers
-                .entry("x-frame-options".to_string())
-                .or_insert_with(|| val.clone());
+            resp.ensure_header("x-frame-options", val.clone());
         }
 
         if let Some(ref val) = self.policy.referrer_policy {
-            resp.headers
-                .entry("referrer-policy".to_string())
-                .or_insert_with(|| val.clone());
+            resp.ensure_header("referrer-policy", val.clone());
         }
 
         if let Some(ref val) = self.policy.hsts {
-            resp.headers
-                .entry("strict-transport-security".to_string())
-                .or_insert_with(|| val.clone());
+            resp.ensure_header("strict-transport-security", val.clone());
         }
 
         if let Some(ref val) = self.policy.content_security_policy {
-            resp.headers
-                .entry("content-security-policy".to_string())
-                .or_insert_with(|| val.clone());
+            resp.ensure_header("content-security-policy", val.clone());
         }
 
         if let Some(ref val) = self.policy.permissions_policy {
-            resp.headers
-                .entry("permissions-policy".to_string())
-                .or_insert_with(|| val.clone());
+            resp.ensure_header("permissions-policy", val.clone());
         }
 
         if self.policy.hide_server_header {
-            resp.headers.remove("server");
+            let _ = resp.remove_header("server");
         }
 
         resp
@@ -209,10 +197,26 @@ mod tests {
         Response::new(StatusCode::OK, b"ok".to_vec()).header("server", "asupersync/0.2.6")
     }
 
+    fn handler_with_mixed_case_server_header() -> Response {
+        let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+        resp.headers
+            .insert("Server".to_string(), "asupersync/0.2.6".to_string());
+        resp
+    }
+
     fn handler_with_existing_headers() -> Response {
         Response::new(StatusCode::OK, b"ok".to_vec())
             .header("x-frame-options", "SAMEORIGIN")
             .header("referrer-policy", "no-referrer")
+    }
+
+    fn handler_with_mixed_case_existing_headers() -> Response {
+        let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+        resp.headers
+            .insert("X-Frame-Options".to_string(), "SAMEORIGIN".to_string());
+        resp.headers
+            .insert("Referrer-Policy".to_string(), "no-referrer".to_string());
+        resp
     }
 
     // --- Default policy ---
@@ -257,6 +261,18 @@ mod tests {
         let resp = mw.call(make_request());
 
         assert!(!resp.headers.contains_key("server"));
+    }
+
+    #[test]
+    fn default_policy_removes_mixed_case_server_header() {
+        let mw = SecurityHeadersMiddleware::new(
+            FnHandler::new(handler_with_mixed_case_server_header),
+            SecurityPolicy::default(),
+        );
+        let resp = mw.call(make_request());
+
+        assert!(!resp.headers.contains_key("server"));
+        assert!(!resp.headers.contains_key("Server"));
     }
 
     // --- Custom policy ---
@@ -322,6 +338,20 @@ mod tests {
             resp.headers.get("x-content-type-options").unwrap(),
             "nosniff"
         );
+    }
+
+    #[test]
+    fn canonicalizes_existing_mixed_case_headers_without_overwriting_values() {
+        let mw = SecurityHeadersMiddleware::new(
+            FnHandler::new(handler_with_mixed_case_existing_headers),
+            SecurityPolicy::default(),
+        );
+        let resp = mw.call(make_request());
+
+        assert_eq!(resp.headers.get("x-frame-options").unwrap(), "SAMEORIGIN");
+        assert_eq!(resp.headers.get("referrer-policy").unwrap(), "no-referrer");
+        assert!(!resp.headers.contains_key("X-Frame-Options"));
+        assert!(!resp.headers.contains_key("Referrer-Policy"));
     }
 
     // --- None policy ---

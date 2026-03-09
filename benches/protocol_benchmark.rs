@@ -14,6 +14,8 @@
 #![allow(clippy::semicolon_if_nothing_returned)]
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use memchr::{memchr_iter, memmem};
+use smallvec::SmallVec;
 use std::hint::black_box;
 
 use asupersync::bytes::{Bytes, BytesMut};
@@ -60,6 +62,33 @@ fn pipelined_requests(request_count: usize) -> Vec<u8> {
         buf.extend_from_slice(SIMPLE_GET_REQUEST);
     }
     buf
+}
+
+fn legacy_find_crlf(buf: &[u8]) -> Option<usize> {
+    for idx in memchr_iter(b'\n', buf) {
+        if idx > 0 && buf[idx - 1] == b'\r' {
+            return Some(idx - 1);
+        }
+    }
+    None
+}
+
+fn optimized_find_crlf(buf: &[u8]) -> Option<usize> {
+    memmem::find(buf, b"\r\n")
+}
+
+fn legacy_collect_crlf_positions(buf: &[u8], out: &mut SmallVec<[usize; 32]>) {
+    out.clear();
+    for idx in memchr_iter(b'\n', buf) {
+        if idx > 0 && buf[idx - 1] == b'\r' {
+            out.push(idx - 1);
+        }
+    }
+}
+
+fn optimized_collect_crlf_positions(buf: &[u8], out: &mut SmallVec<[usize; 32]>) {
+    out.clear();
+    out.extend(memmem::find_iter(buf, b"\r\n"));
 }
 
 fn bench_http1_parsing(c: &mut Criterion) {
@@ -150,6 +179,44 @@ fn bench_http1_parsing(c: &mut Criterion) {
             },
         );
     }
+
+    group.finish();
+}
+
+fn bench_http1_crlf_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("http1/crlf_scan");
+    let request = request_with_many_headers(20);
+    group.throughput(Throughput::Bytes(request.len() as u64));
+
+    group.bench_function("find/legacy_scalar", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(legacy_find_crlf(black_box(request.as_slice()))))
+    });
+
+    group.bench_function("find/memmem", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(optimized_find_crlf(black_box(request.as_slice()))))
+    });
+
+    group.bench_function("collect/legacy_scalar", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            SmallVec::<[usize; 32]>::new,
+            |mut positions| {
+                legacy_collect_crlf_positions(black_box(request.as_slice()), &mut positions);
+                black_box(positions.len())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("collect/memmem", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            SmallVec::<[usize; 32]>::new,
+            |mut positions| {
+                optimized_collect_crlf_positions(black_box(request.as_slice()), &mut positions);
+                black_box(positions.len())
+            },
+            BatchSize::SmallInput,
+        )
+    });
 
     group.finish();
 }
@@ -469,6 +536,7 @@ fn bench_protocol_throughput(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_http1_parsing,
+    bench_http1_crlf_scan,
     bench_hpack_encoding,
     bench_hpack_decoding,
     bench_websocket_frame,

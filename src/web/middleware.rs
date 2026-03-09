@@ -42,15 +42,15 @@
 
 use std::convert::Infallible;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy};
 use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
-use crate::http::compress::{ContentEncoding, negotiate_encoding};
+use crate::http::compress::{negotiate_encoding, ContentEncoding};
 use crate::tracing_compat::{debug, warn};
 use crate::types::Time;
 
@@ -262,21 +262,32 @@ fn wall_clock_now() -> Time {
 pub struct TimeoutMiddleware<H> {
     inner: H,
     timeout: Duration,
+    time_getter: fn() -> Time,
 }
 
 impl<H: Handler> TimeoutMiddleware<H> {
     /// Wrap a handler with a timeout.
     #[must_use]
     pub fn new(inner: H, timeout: Duration) -> Self {
-        Self { inner, timeout }
+        Self::with_time_getter(inner, timeout, wall_clock_now)
+    }
+
+    /// Wrap a handler with a timeout using a custom time source.
+    #[must_use]
+    pub fn with_time_getter(inner: H, timeout: Duration, time_getter: fn() -> Time) -> Self {
+        Self {
+            inner,
+            timeout,
+            time_getter,
+        }
     }
 }
 
 impl<H: Handler> Handler for TimeoutMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let start = std::time::Instant::now();
+        let start = (self.time_getter)();
         let resp = self.inner.call(req);
-        let elapsed = start.elapsed();
+        let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
 
         if elapsed > self.timeout {
             Response::new(
@@ -1431,8 +1442,17 @@ mod tests {
     use super::*;
     use crate::web::handler::FnHandler;
 
+    static TIMEOUT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
     static CIRCUIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
     static RATE_LIMIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn set_timeout_test_time(ms: u64) {
+        TIMEOUT_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+    }
+
+    fn timeout_test_time() -> Time {
+        Time::from_millis(TIMEOUT_TEST_TIME_MS.load(Ordering::SeqCst))
+    }
 
     fn set_circuit_test_time(ms: u64) {
         CIRCUIT_TEST_TIME_MS.store(ms, Ordering::SeqCst);
@@ -1518,6 +1538,18 @@ mod tests {
         }
     }
 
+    struct AdvanceTimeHandler {
+        next_time_ms: u64,
+        status: StatusCode,
+    }
+
+    impl Handler for AdvanceTimeHandler {
+        fn call(&self, _req: Request) -> Response {
+            set_timeout_test_time(self.next_time_ms);
+            Response::new(self.status, b"advanced".to_vec())
+        }
+    }
+
     // --- TimeoutMiddleware ---
 
     #[test]
@@ -1532,6 +1564,39 @@ mod tests {
         let mw = TimeoutMiddleware::new(FnHandler::new(slow_handler), Duration::from_millis(1));
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn timeout_time_getter_can_trigger_without_sleep() {
+        set_timeout_test_time(0);
+        let mw = TimeoutMiddleware::with_time_getter(
+            AdvanceTimeHandler {
+                next_time_ms: 25,
+                status: StatusCode::OK,
+            },
+            Duration::from_millis(10),
+            timeout_test_time,
+        );
+
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn timeout_time_getter_preserves_fast_response() {
+        set_timeout_test_time(0);
+        let mw = TimeoutMiddleware::with_time_getter(
+            AdvanceTimeHandler {
+                next_time_ms: 5,
+                status: StatusCode::CREATED,
+            },
+            Duration::from_millis(10),
+            timeout_test_time,
+        );
+
+        let resp = mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::CREATED);
+        assert_eq!(resp.body.as_ref(), b"advanced");
     }
 
     // --- CircuitBreakerMiddleware ---

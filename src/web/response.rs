@@ -149,11 +149,87 @@ impl Response {
         Self::new(status, Bytes::new())
     }
 
+    /// Returns a header value using HTTP's case-insensitive matching rules.
+    #[must_use]
+    pub fn header_value(&self, name: &str) -> Option<&str> {
+        if let Some(value) = self.headers.get(name) {
+            return Some(value.as_str());
+        }
+
+        let mut matching_keys: Vec<&String> = self
+            .headers
+            .keys()
+            .filter(|key| key.eq_ignore_ascii_case(name))
+            .collect();
+        matching_keys.sort_unstable();
+
+        matching_keys
+            .into_iter()
+            .next()
+            .and_then(|key| self.headers.get(key))
+            .map(String::as_str)
+    }
+
+    /// Returns `true` when the response contains the named header.
+    #[must_use]
+    pub fn has_header(&self, name: &str) -> bool {
+        self.header_value(name).is_some()
+    }
+
+    /// Insert or replace a header while canonicalizing the stored name.
+    pub fn set_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        let normalized = name.into().to_ascii_lowercase();
+        let stale_keys: Vec<String> = self
+            .headers
+            .keys()
+            .filter(|key| key.eq_ignore_ascii_case(&normalized) && *key != &normalized)
+            .cloned()
+            .collect();
+
+        for key in stale_keys {
+            self.headers.remove(&key);
+        }
+
+        self.headers.insert(normalized, value.into());
+    }
+
+    /// Ensure a header exists while preserving any existing value.
+    pub fn ensure_header(&mut self, name: &str, default_value: impl Into<String>) {
+        if let Some(existing) = self.remove_header(name) {
+            self.headers.insert(name.to_ascii_lowercase(), existing);
+        } else {
+            self.headers
+                .insert(name.to_ascii_lowercase(), default_value.into());
+        }
+    }
+
+    /// Remove a header using HTTP's case-insensitive matching rules.
+    pub fn remove_header(&mut self, name: &str) -> Option<String> {
+        let normalized = name.to_ascii_lowercase();
+        let mut matching_keys: Vec<String> = self
+            .headers
+            .keys()
+            .filter(|key| key.eq_ignore_ascii_case(name))
+            .cloned()
+            .collect();
+        matching_keys.sort_by(|left, right| {
+            (left != &normalized, left.as_str()).cmp(&(right != &normalized, right.as_str()))
+        });
+        let mut removed = None;
+
+        for key in matching_keys {
+            if let Some(value) = self.headers.remove(&key) {
+                removed.get_or_insert(value);
+            }
+        }
+
+        removed
+    }
+
     /// Add a header to the response.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers
-            .insert(name.into().to_ascii_lowercase(), value.into());
+        self.set_header(name, value);
         self
     }
 }
@@ -392,6 +468,53 @@ mod tests {
     fn tuple_status_override() {
         let resp = (StatusCode::CREATED, "done").into_response();
         assert_eq!(resp.status, StatusCode::CREATED);
+    }
+
+    #[test]
+    fn response_header_helpers_are_case_insensitive() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.headers
+            .insert("Content-Type".to_string(), "text/plain".to_string());
+
+        assert_eq!(resp.header_value("content-type"), Some("text/plain"));
+        assert_eq!(resp.header_value("CONTENT-TYPE"), Some("text/plain"));
+        assert!(resp.has_header("content-type"));
+    }
+
+    #[test]
+    fn response_set_header_canonicalizes_existing_case_variant() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.headers
+            .insert("X-Trace-Id".to_string(), "old".to_string());
+
+        resp.set_header("x-trace-id", "new");
+
+        assert_eq!(resp.headers.get("x-trace-id"), Some(&"new".to_string()));
+        assert!(!resp.headers.contains_key("X-Trace-Id"));
+    }
+
+    #[test]
+    fn response_ensure_header_preserves_existing_value_and_canonicalizes_name() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.headers.insert("Server".to_string(), "custom".to_string());
+
+        resp.ensure_header("server", "fallback");
+
+        assert_eq!(resp.headers.get("server"), Some(&"custom".to_string()));
+        assert!(!resp.headers.contains_key("Server"));
+    }
+
+    #[test]
+    fn response_remove_header_clears_case_variants() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.headers.insert("Server".to_string(), "one".to_string());
+        resp.headers.insert("server".to_string(), "two".to_string());
+
+        let removed = resp.remove_header("SERVER");
+
+        assert_eq!(removed.as_deref(), Some("two"));
+        assert!(!resp.has_header("server"));
+        assert!(resp.headers.is_empty());
     }
 
     #[test]

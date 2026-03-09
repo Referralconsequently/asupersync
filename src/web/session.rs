@@ -395,14 +395,20 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         //    Unknown-but-well-formed IDs are treated as fixation attempts and
         //    do not allocate a fresh server-side session unless the handler
         //    later mutates session state.
+        let presented_session_id = get_cookie(&req, &self.config.cookie_name);
         let mut session_id = None;
-        let mut session_data = match get_cookie(&req, &self.config.cookie_name) {
-            Some(id) if is_valid_session_id(&id) => {
-                self.store.load(&id).map_or_else(SessionData::new, |data| {
-                    session_id = Some(id);
+        let mut unknown_valid_cookie = false;
+        let mut session_data = match presented_session_id.as_deref() {
+            Some(id) if is_valid_session_id(id) => self.store.load(id).map_or_else(
+                || {
+                    unknown_valid_cookie = true;
+                    SessionData::new()
+                },
+                |data| {
+                    session_id = Some(id.to_string());
                     data
-                })
-            }
+                },
+            ),
             _ => SessionData::new(),
         };
         let had_existing_session = session_id.is_some();
@@ -466,6 +472,13 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                     .expect("session id must exist before setting session cookie"),
                 &self.config,
             );
+            resp.headers.insert("set-cookie".to_string(), cookie_val);
+        } else if unknown_valid_cookie {
+            // Actively clear attacker-supplied fixation cookies even when the
+            // request was read-only and did not create a replacement session.
+            let mut expire_config = self.config.clone();
+            expire_config.max_age = Some(0);
+            let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
             resp.headers.insert("set-cookie".to_string(), cookie_val);
         }
 
@@ -891,6 +904,32 @@ mod tests {
             "must not reuse attacker-supplied ID"
         );
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn middleware_fixation_unknown_id_read_only_expires_cookie() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone());
+        let handler = layer.wrap(ReadOnlyHandler);
+
+        let fake_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0"; // valid format, not in store
+        let mut req = Request::new("GET", "/");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={fake_id}"));
+        let resp = handler.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(&resp.body[..], b"missing");
+        let cookie = resp.headers.get("set-cookie").unwrap();
+        assert!(
+            cookie.contains("session_id=;"),
+            "unknown fixation cookie must be blanked"
+        );
+        assert!(
+            cookie.contains("Max-Age=0"),
+            "unknown fixation cookie must be expired"
+        );
+        assert!(store.is_empty(), "read-only fixation requests must not persist data");
     }
 
     #[test]

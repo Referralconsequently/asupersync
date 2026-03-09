@@ -106,11 +106,7 @@ impl<H: Handler> CompressionMiddleware<H> {
 impl<H: Handler> Handler for CompressionMiddleware<H> {
     fn call(&self, req: Request) -> Response {
         // Extract accept-encoding before passing the request.
-        let accept_encoding = req
-            .headers
-            .get("accept-encoding")
-            .cloned()
-            .unwrap_or_default();
+        let accept_encoding = req.header("accept-encoding").unwrap_or_default().to_string();
 
         let mut resp = self.inner.call(req);
 
@@ -120,7 +116,8 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         }
 
         // Skip if the response already has content-encoding.
-        if resp.headers.contains_key("content-encoding") {
+        if let Some(existing_encoding) = resp.remove_header("content-encoding") {
+            resp.set_header("content-encoding", existing_encoding);
             return resp;
         }
 
@@ -163,10 +160,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
         // Apply compression.
         resp.body = compressed.into();
-        resp.headers.insert(
-            "content-encoding".to_string(),
-            encoding.as_token().to_string(),
-        );
+        resp.set_header("content-encoding", encoding.as_token().to_string());
         append_vary_token(&mut resp, "accept-encoding");
 
         resp
@@ -175,7 +169,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
 /// Appends a token to the Vary header without clobbering existing values.
 fn append_vary_token(resp: &mut Response, token: &str) {
-    let existing = resp.headers.get("vary").cloned().unwrap_or_default();
+    let existing = resp.header_value("vary").unwrap_or_default().to_string();
     if existing
         .split(',')
         .any(|v| v.trim().eq_ignore_ascii_case(token))
@@ -187,7 +181,7 @@ fn append_vary_token(resp: &mut Response, token: &str) {
     } else {
         format!("{existing}, {token}")
     };
-    resp.headers.insert("vary".to_string(), updated);
+    resp.set_header("vary", updated);
 }
 
 #[cfg(test)]
@@ -217,6 +211,20 @@ mod tests {
     fn already_compressed_handler() -> Response {
         Response::new(StatusCode::OK, b"already-compressed".to_vec())
             .header("content-encoding", "gzip")
+    }
+
+    fn mixed_case_already_compressed_handler() -> Response {
+        let mut resp = Response::new(StatusCode::OK, b"already-compressed".to_vec());
+        resp.headers
+            .insert("Content-Encoding".to_string(), "gzip".to_string());
+        resp
+    }
+
+    fn handler_with_mixed_case_vary() -> Response {
+        let body = "Hello, World! ".repeat(100);
+        let mut resp = Response::new(StatusCode::OK, body.into_bytes());
+        resp.headers.insert("Vary".to_string(), "origin".to_string());
+        resp
     }
 
     // --- Basic behavior ---
@@ -275,6 +283,49 @@ mod tests {
             "accept-encoding",
             "vary header should always be set for compressible responses"
         );
+    }
+
+    #[test]
+    fn honors_mixed_case_accept_encoding_inserted_directly() {
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let mut req = Request::new("GET", "/test");
+        req.headers
+            .insert("Accept-Encoding".to_string(), "identity".to_string());
+
+        let resp = mw.call(req);
+
+        assert_eq!(
+            resp.headers.get("vary").unwrap(),
+            "accept-encoding",
+            "mixed-case direct header insert should still negotiate"
+        );
+    }
+
+    #[test]
+    fn skips_mixed_case_existing_content_encoding_and_canonicalizes_name() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(mixed_case_already_compressed_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.headers.get("content-encoding"), Some(&"gzip".to_string()));
+        assert!(!resp.headers.contains_key("Content-Encoding"));
+        assert!(!resp.headers.contains_key("vary"));
+    }
+
+    #[test]
+    fn append_vary_token_canonicalizes_mixed_case_vary_header() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(handler_with_mixed_case_vary), policy);
+        let req = make_request_with_encoding("identity");
+        let resp = mw.call(req);
+
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"origin, accept-encoding".to_string())
+        );
+        assert!(!resp.headers.contains_key("Vary"));
     }
 
     #[test]
