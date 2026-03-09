@@ -46,10 +46,11 @@ impl Console {
         Self::with_caps(io::stdout(), caps, ColorMode::Auto)
     }
 
-    /// Create a console that writes to the provided writer with auto-detected capabilities.
+    /// Create a console that writes to the provided writer with capabilities
+    /// derived from that writer's terminal status.
     #[must_use]
-    pub fn with_writer<W: Write + Send + 'static>(writer: W) -> Self {
-        let caps = Capabilities::detect_stdout();
+    pub fn with_writer<W: Write + Send + IsTerminal + 'static>(writer: W) -> Self {
+        let caps = Capabilities::detect_terminal(writer.is_terminal());
         Self::with_caps(writer, caps, ColorMode::Auto)
     }
 
@@ -181,10 +182,7 @@ impl Capabilities {
     /// Detect capabilities for stdout using environment hints.
     #[must_use]
     pub fn detect_stdout() -> Self {
-        let is_tty = io::stdout().is_terminal();
-        let env = OsEnv;
-        let size = size_from_env(&env);
-        Self::detect_from(&env, is_tty, size)
+        Self::detect_terminal(io::stdout().is_terminal())
     }
 
     /// Detect capabilities using explicit inputs (useful for tests).
@@ -208,6 +206,13 @@ impl Capabilities {
             height,
             unicode,
         }
+    }
+
+    #[must_use]
+    fn detect_terminal(is_tty: bool) -> Self {
+        let env = OsEnv;
+        let size = size_from_env(&env);
+        Self::detect_from(&env, is_tty, size)
     }
 }
 
@@ -813,8 +818,10 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use std::collections::HashMap;
+    use std::io::{Read, Seek, SeekFrom};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::tempfile;
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -881,6 +888,35 @@ mod tests {
             caps.is_tty
         );
         crate::test_complete!("detect_tty_stdout");
+    }
+
+    #[test]
+    fn with_writer_uses_target_stream_capabilities() {
+        init_test("with_writer_uses_target_stream_capabilities");
+        let writer = tempfile().expect("tempfile");
+        let mut reader = writer.try_clone().expect("clone tempfile");
+        let console = Console::with_writer(writer);
+        crate::assert_with_log!(
+            !console.capabilities().is_tty,
+            "tempfile is non-terminal",
+            false,
+            console.capabilities().is_tty
+        );
+        crate::assert_with_log!(
+            console.capabilities().color_support == ColorSupport::None,
+            "non-terminal disables color",
+            ColorSupport::None,
+            console.capabilities().color_support
+        );
+        console
+            .print(&Text::new("ok").fg(Color::Green))
+            .expect("print");
+        drop(console);
+        reader.seek(SeekFrom::Start(0)).expect("rewind");
+        let mut output = String::new();
+        reader.read_to_string(&mut output).expect("read output");
+        crate::assert_with_log!(output == "ok", "plain output", "ok", output.as_str());
+        crate::test_complete!("with_writer_uses_target_stream_capabilities");
     }
 
     #[test]

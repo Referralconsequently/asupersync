@@ -703,11 +703,11 @@ impl TraceRecorder {
             cursor: 0,
         };
 
-        // Re-initialize with same metadata but fresh events
+        // Re-initialize with same metadata but fresh events. Keep rotation
+        // deterministic by advancing from the caller-supplied timestamp instead
+        // of consulting wall clock time again.
         let mut new_meta = metadata;
-        new_meta.recorded_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
+        new_meta.recorded_at = new_meta.recorded_at.saturating_add(1);
         self.metadata = Some(new_meta);
         self.seed_recorded = false;
         self.stopped = false;
@@ -852,6 +852,42 @@ mod tests {
         recorder.record_rng_seed(42);
         recorder.record_task_scheduled(make_task_id(2, 0), 1);
         assert_eq!(recorder.event_count(), 2);
+    }
+
+    #[test]
+    fn take_rotates_recorded_at_deterministically() {
+        let mut metadata = TraceMetadata::new(42)
+            .with_config_hash(7)
+            .with_description("deterministic take");
+        metadata.recorded_at = 123;
+        let mut recorder = TraceRecorder::new(metadata);
+
+        recorder.record_rng_seed(42);
+        let trace1 = recorder.take().expect("should have first trace");
+        assert_eq!(trace1.metadata.recorded_at, 123);
+        assert_eq!(trace1.metadata.config_hash, 7);
+        assert_eq!(
+            trace1.metadata.description.as_deref(),
+            Some("deterministic take")
+        );
+
+        recorder.record_rng_seed(42);
+        let trace2 = recorder.take().expect("should have second trace");
+        assert_eq!(trace2.metadata.recorded_at, 124);
+        assert_eq!(trace2.metadata.config_hash, 7);
+        assert_eq!(
+            trace2.metadata.description.as_deref(),
+            Some("deterministic take")
+        );
+
+        recorder.record_rng_seed(42);
+        let trace3 = recorder.finish().expect("should have third trace");
+        assert_eq!(trace3.metadata.recorded_at, 125);
+        assert_eq!(trace3.metadata.config_hash, 7);
+        assert_eq!(
+            trace3.metadata.description.as_deref(),
+            Some("deterministic take")
+        );
     }
 
     #[test]

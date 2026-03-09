@@ -99,11 +99,21 @@ impl StaticFiles {
             return None;
         }
 
-        let mut full_path = self.root.join(&decoded);
+        let root_canonical = self.root.canonicalize().ok()?;
+        let mut relative_path = PathBuf::from(&decoded);
+        if path_contains_symlink(&root_canonical, &relative_path) {
+            return None;
+        }
+
+        let mut full_path = root_canonical.join(&relative_path);
 
         // If it's a directory and we have an index file, try that.
         if full_path.is_dir() {
             if let Some(ref index) = self.index_file {
+                relative_path.push(index);
+                if path_contains_symlink(&root_canonical, &relative_path) {
+                    return None;
+                }
                 full_path = full_path.join(index);
             } else {
                 return None;
@@ -112,7 +122,6 @@ impl StaticFiles {
 
         // Canonicalize and verify it's under root.
         let canonical = full_path.canonicalize().ok()?;
-        let root_canonical = self.root.canonicalize().ok()?;
         if !canonical.starts_with(&root_canonical) {
             return None;
         }
@@ -311,6 +320,25 @@ fn has_traversal(path: &str) -> bool {
     if path.contains('\0') {
         return true;
     }
+    false
+}
+
+fn path_contains_symlink(root: &Path, relative: &Path) -> bool {
+    let mut current = root.to_path_buf();
+
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(segment) => current.push(segment),
+            std::path::Component::CurDir => continue,
+            _ => return true,
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) | Err(_) => {}
+        }
+    }
+
     false
 }
 
@@ -573,6 +601,36 @@ mod tests {
         assert!(
             sf.resolve_path("/sub%2/page.html").is_none(),
             "malformed escapes must be preserved instead of silently dropping bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_symlinked_file_blocked() {
+        let dir = setup_dir();
+        std::os::unix::fs::symlink("hello.txt", dir.path().join("hello-link.txt")).unwrap();
+
+        let sf = StaticFiles::new(dir.path());
+        assert!(
+            sf.resolve_path("/hello-link.txt").is_none(),
+            "symlinked files must not be served by default"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_symlinked_directory_blocked() {
+        let dir = setup_dir();
+        std::os::unix::fs::symlink("sub", dir.path().join("sub-link")).unwrap();
+
+        let sf = StaticFiles::new(dir.path());
+        assert!(
+            sf.resolve_path("/sub-link/page.html").is_none(),
+            "symlinked directories must not be traversed"
+        );
+        assert!(
+            sf.resolve_path("/sub-link/").is_none(),
+            "directory indexes behind symlinks must not be served"
         );
     }
 

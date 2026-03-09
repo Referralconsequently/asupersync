@@ -158,6 +158,7 @@ impl StatusCode {
     pub const UNPROCESSABLE_ENTITY: Self = Self(422);
     pub const TOO_MANY_REQUESTS: Self = Self(429);
     pub const REQUEST_HEADER_FIELDS_TOO_LARGE: Self = Self(431);
+    pub const CLIENT_CLOSED_REQUEST: Self = Self(499);
 
     // 5xx Server Error
     pub const INTERNAL_SERVER_ERROR: Self = Self(500);
@@ -1103,6 +1104,7 @@ pub fn default_reason(status: u16) -> &'static str {
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
+        499 => "Client Closed Request",
         500 => "Internal Server Error",
         501 => "Not Implemented",
         502 => "Bad Gateway",
@@ -1155,6 +1157,7 @@ mod tests {
         assert_eq!(default_reason(200), "OK");
         assert_eq!(default_reason(404), "Not Found");
         assert_eq!(default_reason(417), "Expectation Failed");
+        assert_eq!(default_reason(499), "Client Closed Request");
         assert_eq!(default_reason(500), "Internal Server Error");
         assert_eq!(default_reason(999), "Unknown");
     }
@@ -1418,6 +1421,7 @@ mod tests {
             (413, "Payload Too Large"),
             (414, "URI Too Long"),
             (431, "Request Header Fields Too Large"),
+            (499, "Client Closed Request"),
             (501, "Not Implemented"),
             (502, "Bad Gateway"),
             (503, "Service Unavailable"),
@@ -1444,6 +1448,7 @@ mod tests {
         assert!(StatusCode::BAD_REQUEST.is_client_error());
         assert!(StatusCode::NOT_FOUND.is_client_error());
         assert!(StatusCode::TOO_MANY_REQUESTS.is_client_error());
+        assert!(StatusCode::CLIENT_CLOSED_REQUEST.is_client_error());
 
         assert!(StatusCode::INTERNAL_SERVER_ERROR.is_server_error());
         assert!(StatusCode::SERVICE_UNAVAILABLE.is_server_error());

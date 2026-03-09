@@ -19,6 +19,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bytes::Bytes;
 
@@ -165,10 +166,17 @@ where
 }
 
 /// Tracing interceptor that adds request IDs to metadata.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TracingInterceptor {
     /// Whether to generate request IDs.
     generate_request_id: bool,
+    next_request_id: Arc<AtomicU64>,
+}
+
+impl Default for TracingInterceptor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TracingInterceptor {
@@ -177,6 +185,7 @@ impl TracingInterceptor {
     pub fn new() -> Self {
         Self {
             generate_request_id: true,
+            next_request_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -191,13 +200,9 @@ impl TracingInterceptor {
 impl Interceptor for TracingInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
         if self.generate_request_id && request.metadata().get("x-request-id").is_none() {
-            // Generate a simple request ID (in production, use UUID)
             let id = format!(
                 "req-{:016x}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64
+                self.next_request_id.fetch_add(1, Ordering::Relaxed)
             );
             request.metadata_mut().insert("x-request-id", id);
         }
@@ -804,5 +809,47 @@ mod tests {
         let ok = matches!(id, MetadataValue::Ascii(s) if s.starts_with("req-"));
         crate::assert_with_log!(ok, "request id", true, ok);
         crate::test_complete!("tracing_interceptor_generates_request_id");
+    }
+
+    #[test]
+    fn tracing_interceptor_uses_deterministic_sequential_ids() {
+        init_test("tracing_interceptor_uses_deterministic_sequential_ids");
+        let interceptor = trace_interceptor();
+        let cloned = interceptor.clone();
+
+        let mut first = Request::new(Bytes::new());
+        interceptor.intercept_request(&mut first).unwrap();
+        let first_id = first.metadata().get("x-request-id").unwrap();
+
+        let mut second = Request::new(Bytes::new());
+        cloned.intercept_request(&mut second).unwrap();
+        let second_id = second.metadata().get("x-request-id").unwrap();
+
+        let ok = matches!(
+            (first_id, second_id),
+            (MetadataValue::Ascii(first), MetadataValue::Ascii(second))
+                if first == "req-0000000000000001" && second == "req-0000000000000002"
+        );
+        crate::assert_with_log!(ok, "sequential request ids", true, ok);
+        crate::test_complete!("tracing_interceptor_uses_deterministic_sequential_ids");
+    }
+
+    #[test]
+    fn tracing_interceptor_preserves_existing_request_id() {
+        init_test("tracing_interceptor_preserves_existing_request_id");
+        let interceptor = trace_interceptor();
+
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert("x-request-id", "req-custom".to_string());
+        interceptor.intercept_request(&mut request).unwrap();
+
+        let ok = matches!(
+            request.metadata().get("x-request-id"),
+            Some(MetadataValue::Ascii(id)) if id == "req-custom"
+        );
+        crate::assert_with_log!(ok, "preserved request id", true, ok);
+        crate::test_complete!("tracing_interceptor_preserves_existing_request_id");
     }
 }

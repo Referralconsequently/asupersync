@@ -35,7 +35,7 @@
 
 use std::fmt;
 
-use crate::cx::{Cx, cap};
+use crate::cx::{cap, Cx};
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
@@ -267,7 +267,7 @@ impl RequestContext<'_> {
 /// |---------|-------------|---------|
 /// | `Ok` | from handler | Handler returned successfully |
 /// | `Error` | 500 | Application-level error |
-/// | `Cancelled` | 503 | Request was cancelled |
+/// | `Cancelled` | 499 | Request was cancelled by the client |
 /// | `Panicked` | 500 | Handler panicked |
 #[derive(Debug)]
 pub enum RegionOutcome {
@@ -310,7 +310,7 @@ impl RegionOutcome {
     ///
     /// - `Ok(resp)` → `resp`
     /// - `Error(e)` → generic 500 response
-    /// - `Cancelled` → 503 Service Unavailable
+    /// - `Cancelled` → 499 Client Closed Request
     /// - `Panicked(msg)` → generic 500 response
     #[inline]
     #[must_use]
@@ -322,8 +322,8 @@ impl RegionOutcome {
                 b"Internal Server Error".to_vec(),
             ),
             Self::Cancelled => Response::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                b"Service Unavailable: request cancelled".to_vec(),
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                b"Client Closed Request: request cancelled".to_vec(),
             ),
             Self::Panicked(_msg) => Response::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn run_cancelled_before_handler() {
+    fn run_cancelled_before_handler_returns_499() {
         let cx = test_cx();
         cx.set_cancel_requested(true);
 
@@ -484,7 +484,11 @@ mod tests {
 
         assert!(outcome.is_cancelled());
         let resp = outcome.into_response();
-        assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status, StatusCode::CLIENT_CLOSED_REQUEST);
+        assert_eq!(
+            resp.body.as_ref(),
+            b"Client Closed Request: request cancelled"
+        );
     }
 
     // --- RequestRegion::run_sync ---
@@ -602,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_handler_cancelled_returns_503() {
+    fn isolated_handler_cancelled_returns_499() {
         let handler = IsolatedHandler::new(|_ctx| {
             panic!("should not run");
         });
@@ -611,7 +615,11 @@ mod tests {
         cx.set_cancel_requested(true);
         let req = test_request("GET", "/");
         let resp = handler.call(&cx, req);
-        assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status, StatusCode::CLIENT_CLOSED_REQUEST);
+        assert_eq!(
+            resp.body.as_ref(),
+            b"Client Closed Request: request cancelled"
+        );
     }
 
     // --- RegionOutcome ---

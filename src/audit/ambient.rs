@@ -26,6 +26,8 @@ pub struct AmbientFinding {
     pub file: &'static str,
     /// Approximate line number.
     pub line: u32,
+    /// Exact non-test code literal proving this finding still exists.
+    pub evidence_pattern: &'static str,
     /// Category of ambient authority.
     pub category: AmbientCategory,
     /// Severity level.
@@ -71,6 +73,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "web/middleware.rs",
         line: 268,
+        evidence_pattern: "Instant::now()",
         category: AmbientCategory::Time,
         severity: Severity::Warning,
         description: "Instant::now() in TimeoutMiddleware::call()",
@@ -80,6 +83,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "time/driver.rs",
         line: 38,
+        evidence_pattern: "std::time::Instant::now()",
         category: AmbientCategory::Time,
         severity: Severity::Info,
         description: "WallClock epoch initialization",
@@ -89,6 +93,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "server/connection.rs",
         line: 125,
+        evidence_pattern: "Instant::now()",
         category: AmbientCategory::Time,
         severity: Severity::Warning,
         description: "Instant::now() in ConnectionManager::accept()",
@@ -98,6 +103,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
         line: 194,
+        evidence_pattern: "std::time::Instant::now()",
         category: AmbientCategory::Time,
         severity: Severity::Info,
         description: "Instant::now() in blocking pool timeout",
@@ -108,6 +114,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "time/sleep.rs",
         line: 524,
+        evidence_pattern: "std::thread::spawn",
         category: AmbientCategory::Spawn,
         severity: Severity::Warning,
         description: "Fallback timer thread in Sleep::poll()",
@@ -117,6 +124,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
         line: 622,
+        evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
         severity: Severity::Info,
         description: "Worker thread spawning in blocking pool",
@@ -127,6 +135,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "net/websocket/frame.rs",
         line: 768,
+        evidence_pattern: "getrandom::fill(",
         category: AmbientCategory::Entropy,
         severity: Severity::Critical,
         description: "getrandom::fill() for WebSocket mask key",
@@ -134,22 +143,14 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         exemption_reason: None,
     },
     // NOTE: net/websocket/handshake.rs was fixed — now uses EntropySource capability.
-    AmbientFinding {
-        file: "http/h1/stream.rs",
-        line: 1258,
-        category: AmbientCategory::Spawn,
-        severity: Severity::Critical,
-        description: "std::thread::spawn in HTTP/1 stream handling",
-        exempt: false,
-        exemption_reason: None,
-    },
     // ── IO ──────────────────────────────────────────────────────────────
     AmbientFinding {
         file: "web/debug.rs",
-        line: 35,
+        line: 134,
+        evidence_pattern: "TcpListener::bind",
         category: AmbientCategory::Io,
         severity: Severity::Warning,
-        description: "std::net::TcpListener in DebugServer",
+        description: "TcpListener::bind in DebugServer::start()",
         exempt: true,
         exemption_reason: Some("Debug server is intentionally outside runtime"),
     },
@@ -203,10 +204,10 @@ mod tests {
     #[test]
     fn critical_findings_exist() {
         let critical = count_by_severity(Severity::Critical);
-        // Critical: HTTP/1 stream spawn and WebSocket frame entropy.
+        // Critical: WebSocket frame masking still bypasses Cx entropy.
         assert!(
-            critical >= 2,
-            "Expected at least 2 non-exempt critical findings, got {critical}"
+            critical >= 1,
+            "Expected at least 1 non-exempt critical finding, got {critical}"
         );
     }
 
@@ -444,6 +445,18 @@ mod tests {
             .join("\n")
     }
 
+    fn has_non_test_match_near_line(
+        content: &str,
+        pattern: &str,
+        expected_line: u32,
+        max_line_distance: u32,
+    ) -> bool {
+        let literal = pattern_to_literal(pattern);
+        non_test_lines(content).into_iter().any(|(line_num, line)| {
+            expected_line.abs_diff(line_num as u32) <= max_line_distance && line.contains(&literal)
+        })
+    }
+
     #[test]
     fn pristine_modules_have_no_ambient_authority() {
         let root = src_root();
@@ -473,22 +486,14 @@ mod tests {
                 )))
             });
 
-            let has_nearby_match = GREP_PATTERNS.iter().any(|(pattern, cat)| {
-                if *cat != finding.category {
-                    return false;
-                }
-                let literal = pattern_to_literal(pattern);
-                content.lines().enumerate().any(|(i, line)| {
-                    let line_num = (i + 1) as u32;
-                    line_num.abs_diff(finding.line) <= 30 && line.contains(&literal)
-                })
-            });
+            let has_nearby_match =
+                has_non_test_match_near_line(&content, finding.evidence_pattern, finding.line, 30);
 
             assert!(
                 has_nearby_match,
                 "KNOWN_FINDINGS entry '{}' at src/{}:{} — \
-                 no matching grep pattern found within ±30 lines. Stale entry?",
-                finding.description, finding.file, finding.line,
+                 no matching non-test evidence pattern '{}' found within ±30 lines. Stale entry?",
+                finding.description, finding.file, finding.line, finding.evidence_pattern,
             );
         }
     }

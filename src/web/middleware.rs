@@ -40,6 +40,7 @@
 //! Request → Timeout → RateLimit → Handler → Response
 //! ```
 
+use std::convert::Infallible;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -245,6 +246,10 @@ fn normalize_header_name(name: impl Into<String>) -> String {
     name.into().to_ascii_lowercase()
 }
 
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
+
 // ─── TimeoutMiddleware ──────────────────────────────────────────────────────
 
 /// Middleware that enforces a request deadline.
@@ -294,15 +299,27 @@ impl<H: Handler> Handler for TimeoutMiddleware<H> {
 pub struct CircuitBreakerMiddleware<H> {
     inner: H,
     breaker: Arc<CircuitBreaker>,
+    time_getter: fn() -> Time,
 }
 
 impl<H: Handler> CircuitBreakerMiddleware<H> {
     /// Wrap a handler with a circuit breaker.
     #[must_use]
     pub fn new(inner: H, policy: CircuitBreakerPolicy) -> Self {
+        Self::with_time_getter(inner, policy, wall_clock_now)
+    }
+
+    /// Wrap a handler with a circuit breaker using a custom time source.
+    #[must_use]
+    pub fn with_time_getter(
+        inner: H,
+        policy: CircuitBreakerPolicy,
+        time_getter: fn() -> Time,
+    ) -> Self {
         Self {
             inner,
             breaker: Arc::new(CircuitBreaker::new(policy)),
+            time_getter,
         }
     }
 
@@ -311,7 +328,21 @@ impl<H: Handler> CircuitBreakerMiddleware<H> {
     /// Use this to share a breaker across multiple routes or middleware.
     #[must_use]
     pub fn shared(inner: H, breaker: Arc<CircuitBreaker>) -> Self {
-        Self { inner, breaker }
+        Self::shared_with_time_getter(inner, breaker, wall_clock_now)
+    }
+
+    /// Wrap a handler with a shared circuit breaker and custom time source.
+    #[must_use]
+    pub fn shared_with_time_getter(
+        inner: H,
+        breaker: Arc<CircuitBreaker>,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        Self {
+            inner,
+            breaker,
+            time_getter,
+        }
     }
 
     /// Returns a reference to the circuit breaker for metrics inspection.
@@ -323,12 +354,7 @@ impl<H: Handler> CircuitBreakerMiddleware<H> {
 
 impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let now = Time::from_millis(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-        );
+        let now = (self.time_getter)();
 
         // Use the circuit breaker to guard the handler call.
         // We treat the handler as a Result where 5xx = error.
@@ -373,15 +399,23 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
 pub struct RateLimitMiddleware<H> {
     inner: H,
     limiter: Arc<RateLimiter>,
+    time_getter: fn() -> Time,
 }
 
 impl<H: Handler> RateLimitMiddleware<H> {
     /// Wrap a handler with a rate limiter.
     #[must_use]
     pub fn new(inner: H, policy: RateLimitPolicy) -> Self {
+        Self::with_time_getter(inner, policy, wall_clock_now)
+    }
+
+    /// Wrap a handler with a rate limiter using a custom time source.
+    #[must_use]
+    pub fn with_time_getter(inner: H, policy: RateLimitPolicy, time_getter: fn() -> Time) -> Self {
         Self {
             inner,
             limiter: Arc::new(RateLimiter::new(policy)),
+            time_getter,
         }
     }
 
@@ -390,7 +424,21 @@ impl<H: Handler> RateLimitMiddleware<H> {
     /// Use this to share a limiter across multiple routes.
     #[must_use]
     pub fn shared(inner: H, limiter: Arc<RateLimiter>) -> Self {
-        Self { inner, limiter }
+        Self::shared_with_time_getter(inner, limiter, wall_clock_now)
+    }
+
+    /// Wrap a handler with a shared rate limiter and custom time source.
+    #[must_use]
+    pub fn shared_with_time_getter(
+        inner: H,
+        limiter: Arc<RateLimiter>,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        Self {
+            inner,
+            limiter,
+            time_getter,
+        }
     }
 
     /// Returns a reference to the rate limiter for metrics inspection.
@@ -402,23 +450,28 @@ impl<H: Handler> RateLimitMiddleware<H> {
 
 impl<H: Handler> Handler for RateLimitMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let now = Time::from_millis(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-        );
+        let now = (self.time_getter)();
 
-        if self.limiter.try_acquire(1, now) {
-            self.inner.call(req)
-        } else {
-            let retry_after = self.limiter.retry_after(1, now);
-            let secs = retry_after.as_secs().max(1);
-            Response::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                format!("Too Many Requests: rate limit exceeded, retry after {secs}s").into_bytes(),
-            )
-            .header("retry-after", format!("{secs}"))
+        match self
+            .limiter
+            .call(now, || Ok::<_, Infallible>(self.inner.call(req)))
+        {
+            Ok(resp) => resp,
+            Err(
+                crate::combinator::rate_limit::RateLimitError::RateLimitExceeded
+                | crate::combinator::rate_limit::RateLimitError::Timeout { .. }
+                | crate::combinator::rate_limit::RateLimitError::Cancelled,
+            ) => {
+                let retry_after = self.limiter.retry_after(1, now);
+                let secs = retry_after.as_secs().max(1);
+                Response::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("Too Many Requests: rate limit exceeded, retry after {secs}s")
+                        .into_bytes(),
+                )
+                .header("retry-after", format!("{secs}"))
+            }
+            Err(crate::combinator::rate_limit::RateLimitError::Inner(never)) => match never {},
         }
     }
 }
@@ -1378,6 +1431,25 @@ mod tests {
     use super::*;
     use crate::web::handler::FnHandler;
 
+    static CIRCUIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
+    static RATE_LIMIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn set_circuit_test_time(ms: u64) {
+        CIRCUIT_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+    }
+
+    fn circuit_test_time() -> Time {
+        Time::from_millis(CIRCUIT_TEST_TIME_MS.load(Ordering::SeqCst))
+    }
+
+    fn set_rate_limit_test_time(ms: u64) {
+        RATE_LIMIT_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+    }
+
+    fn rate_limit_test_time() -> Time {
+        Time::from_millis(RATE_LIMIT_TEST_TIME_MS.load(Ordering::SeqCst))
+    }
+
     fn ok_handler() -> &'static str {
         "ok"
     }
@@ -1519,6 +1591,38 @@ mod tests {
         assert!(String::from_utf8_lossy(&resp.body).contains("server error"));
     }
 
+    #[test]
+    fn circuit_breaker_time_getter_controls_open_window() {
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1,
+            success_threshold: 1,
+            open_duration: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let breaker = Arc::new(CircuitBreaker::new(policy));
+        let fail_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(error_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+        let ok_mw = CircuitBreakerMiddleware::shared_with_time_getter(
+            FnHandler::new(ok_handler),
+            Arc::clone(&breaker),
+            circuit_test_time,
+        );
+
+        set_circuit_test_time(1_000);
+        let first = fail_mw.call(make_request());
+        assert_eq!(first.status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let open = ok_mw.call(make_request());
+        assert_eq!(open.status, StatusCode::SERVICE_UNAVAILABLE);
+
+        set_circuit_test_time(11_000);
+        let recovered = ok_mw.call(make_request());
+        assert_eq!(recovered.status, StatusCode::OK);
+    }
+
     // --- RateLimitMiddleware ---
 
     #[test]
@@ -1573,6 +1677,70 @@ mod tests {
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn rate_limit_panic_restores_consumed_token() {
+        let limiter = Arc::new(RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            period: Duration::from_mins(1),
+            ..Default::default()
+        }));
+        let panic_mw = RateLimitMiddleware::shared(PanicHandler, Arc::clone(&limiter));
+        let ok_mw = RateLimitMiddleware::shared(FnHandler::new(ok_handler), Arc::clone(&limiter));
+
+        let panic = panic::catch_unwind(AssertUnwindSafe(|| {
+            let _ = panic_mw.call(make_request());
+        }));
+        assert!(panic.is_err(), "inner handler should panic");
+        assert_eq!(
+            limiter.available_tokens(),
+            1,
+            "panic path must refund the consumed token"
+        );
+
+        let resp = ok_mw.call(make_request());
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(limiter.available_tokens(), 0);
+    }
+
+    #[test]
+    fn rate_limit_time_getter_controls_retry_after_and_refill() {
+        let policy = RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            period: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let mw = RateLimitMiddleware::with_time_getter(
+            FnHandler::new(ok_handler),
+            policy,
+            rate_limit_test_time,
+        );
+
+        set_rate_limit_test_time(10_000);
+        let first = mw.call(make_request());
+        assert_eq!(first.status, StatusCode::OK);
+
+        let rejected = mw.call(make_request());
+        assert_eq!(rejected.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            rejected.headers.get("retry-after").map(String::as_str),
+            Some("60")
+        );
+
+        set_rate_limit_test_time(40_000);
+        let still_limited = mw.call(make_request());
+        assert_eq!(still_limited.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            still_limited.headers.get("retry-after").map(String::as_str),
+            Some("30")
+        );
+
+        set_rate_limit_test_time(70_000);
+        let recovered = mw.call(make_request());
+        assert_eq!(recovered.status, StatusCode::OK);
     }
 
     // --- BulkheadMiddleware ---

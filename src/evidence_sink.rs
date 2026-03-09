@@ -14,6 +14,7 @@
 use parking_lot::Mutex;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use franken_evidence::EvidenceLedger;
 use franken_evidence::export::JsonlExporter;
@@ -32,6 +33,12 @@ pub trait EvidenceSink: Send + Sync + fmt::Debug {
     /// Implementations should not panic. If writing fails (e.g., disk full),
     /// the error is logged internally and the entry is dropped.
     fn emit(&self, entry: &EvidenceLedger);
+
+    /// Return the next deterministic evidence timestamp for this sink.
+    ///
+    /// Evidence helpers use this instead of ambient wall-clock time so
+    /// repeated runs with the same event order produce replayable logs.
+    fn next_evidence_ts(&self) -> u64;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,6 +51,10 @@ pub struct NullSink;
 
 impl EvidenceSink for NullSink {
     fn emit(&self, _entry: &EvidenceLedger) {}
+
+    fn next_evidence_ts(&self) -> u64 {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +67,7 @@ impl EvidenceSink for NullSink {
 /// Flush is called after every write to ensure durability.
 pub struct JsonlSink {
     inner: Mutex<JsonlExporter>,
+    timestamp_seq: AtomicU64,
 }
 
 impl fmt::Debug for JsonlSink {
@@ -74,6 +86,7 @@ impl JsonlSink {
         let exporter = JsonlExporter::open(path)?;
         Ok(Self {
             inner: Mutex::new(exporter),
+            timestamp_seq: AtomicU64::new(0),
         })
     }
 
@@ -94,6 +107,12 @@ impl EvidenceSink for JsonlSink {
             let _ = e;
         }
     }
+
+    fn next_evidence_ts(&self) -> u64 {
+        self.timestamp_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +125,7 @@ impl EvidenceSink for JsonlSink {
 #[derive(Debug, Default)]
 pub struct CollectorSink {
     entries: Mutex<Vec<EvidenceLedger>>,
+    timestamp_seq: AtomicU64,
 }
 
 impl CollectorSink {
@@ -135,6 +155,12 @@ impl EvidenceSink for CollectorSink {
     fn emit(&self, entry: &EvidenceLedger) {
         self.entries.lock().push(entry.clone());
     }
+
+    fn next_evidence_ts(&self) -> u64 {
+        self.timestamp_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,10 +178,6 @@ pub fn emit_scheduler_evidence(
     ready_depth: u32,
     fallback: bool,
 ) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
     let total = f64::from((cancel_depth + timed_depth + ready_depth).max(1));
     let posterior = vec![
         f64::from(cancel_depth) / total,
@@ -164,7 +186,7 @@ pub fn emit_scheduler_evidence(
     ];
 
     let entry = EvidenceLedger {
-        ts_unix_ms: now_ms,
+        ts_unix_ms: sink.next_evidence_ts(),
         component: "scheduler".to_string(),
         action: suggestion.to_string(),
         posterior,
@@ -194,13 +216,9 @@ pub fn emit_cancel_evidence(
     cleanup_poll_quota: u32,
     cleanup_priority: u8,
 ) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
     let action = format!("cancel_{cancel_kind}");
     let entry = EvidenceLedger {
-        ts_unix_ms: now_ms,
+        ts_unix_ms: sink.next_evidence_ts(),
         component: "cancellation".to_string(),
         expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
         action,
@@ -228,13 +246,9 @@ pub fn emit_budget_evidence(
     polls_remaining: u32,
     deadline_remaining_ms: Option<u64>,
 ) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
     let action = format!("exhausted_{exhaustion_kind}");
     let entry = EvidenceLedger {
-        ts_unix_ms: now_ms,
+        ts_unix_ms: sink.next_evidence_ts(),
         component: "budget".to_string(),
         expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
         action,
@@ -428,6 +442,22 @@ mod tests {
         {
             assert_eq!(entry.top_features[1].1, u64::MAX as f64);
         }
+    }
+
+    #[test]
+    fn emit_helpers_use_deterministic_timestamp_sequence() {
+        let sink = CollectorSink::new();
+
+        emit_scheduler_evidence(&sink, "ready_lane", 1, 2, 3, false);
+        emit_cancel_evidence(&sink, "user", 5, 2);
+        emit_budget_evidence(&sink, "time", 10, Some(50));
+
+        let timestamps: Vec<u64> = sink
+            .entries()
+            .iter()
+            .map(|entry| entry.ts_unix_ms)
+            .collect();
+        assert_eq!(timestamps, vec![1, 2, 3]);
     }
 
     // ---- CollectorSink ----

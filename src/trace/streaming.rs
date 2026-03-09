@@ -178,7 +178,7 @@ pub struct ReplayCheckpoint {
     /// Hash of the trace metadata (for validation).
     pub metadata_hash: u64,
 
-    /// Timestamp when checkpoint was created.
+    /// Deterministic checkpoint timestamp derived from trace metadata and position.
     pub created_at: u64,
 }
 
@@ -189,9 +189,9 @@ impl ReplayCheckpoint {
             events_processed,
             seed: metadata.seed,
             metadata_hash: Self::hash_metadata(metadata),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos() as u64),
+            // Keep checkpoint artifacts stable for identical replay state instead of
+            // reintroducing ambient wall-clock time into the replay toolchain.
+            created_at: metadata.recorded_at.saturating_add(events_processed),
         }
     }
 
@@ -828,6 +828,66 @@ mod tests {
             result,
             Err(StreamingReplayError::CheckpointMismatch(_))
         ));
+    }
+
+    #[test]
+    fn checkpoint_bytes_are_stable_for_same_position() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata {
+            version: super::super::replay::REPLAY_SCHEMA_VERSION,
+            seed: 42,
+            recorded_at: 1_000,
+            config_hash: 0xCAFE,
+            description: Some("stable checkpoint".into()),
+        };
+        write_trace(path, &metadata, &sample_events(5)).unwrap();
+
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+        for _ in 0..3 {
+            replayer.next_event().unwrap();
+        }
+
+        let checkpoint_a = replayer.checkpoint();
+        let checkpoint_b = replayer.checkpoint();
+
+        assert_eq!(checkpoint_a.events_processed, 3);
+        assert_eq!(checkpoint_a.created_at, 1_003);
+        assert_eq!(checkpoint_a.created_at, checkpoint_b.created_at);
+        assert_eq!(
+            checkpoint_a.to_bytes().unwrap(),
+            checkpoint_b.to_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn checkpoint_created_at_advances_with_position() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata {
+            version: super::super::replay::REPLAY_SCHEMA_VERSION,
+            seed: 7,
+            recorded_at: 500,
+            config_hash: 0xBEEF,
+            description: None,
+        };
+        write_trace(path, &metadata, &sample_events(4)).unwrap();
+
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+
+        let first = replayer.checkpoint();
+        assert_eq!(first.created_at, 500);
+
+        replayer.next_event().unwrap();
+        let second = replayer.checkpoint();
+        assert_eq!(second.created_at, 501);
+        assert_eq!(second.created_at, first.created_at + 1);
+
+        replayer.next_event().unwrap();
+        let third = replayer.checkpoint();
+        assert_eq!(third.created_at, 502);
     }
 
     #[test]

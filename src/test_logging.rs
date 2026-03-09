@@ -611,7 +611,7 @@ impl TestLogger {
             level,
             events: Mutex::new(Vec::new()),
             start_time: Instant::now(),
-            verbose: level >= TestLogLevel::Trace,
+            verbose: false,
         }
     }
 
@@ -3326,6 +3326,19 @@ mod tests {
         let count = logger.event_count();
         crate::assert_with_log!(count == 3, "event_count", 3, count);
         crate::test_complete!("test_logger_captures_events");
+    }
+
+    #[test]
+    fn test_logger_trace_level_is_not_verbose_by_default() {
+        init_test("test_logger_trace_level_is_not_verbose_by_default");
+        let logger = TestLogger::new(TestLogLevel::Trace);
+        crate::assert_with_log!(
+            !logger.verbose,
+            "trace level should not imply immediate stderr output",
+            false,
+            logger.verbose
+        );
+        crate::test_complete!("test_logger_trace_level_is_not_verbose_by_default");
     }
 
     #[test]

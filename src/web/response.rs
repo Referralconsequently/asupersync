@@ -67,6 +67,8 @@ impl StatusCode {
     pub const UNPROCESSABLE_ENTITY: Self = Self(422);
     /// 429 Too Many Requests
     pub const TOO_MANY_REQUESTS: Self = Self(429);
+    /// 499 Client Closed Request
+    pub const CLIENT_CLOSED_REQUEST: Self = Self(499);
 
     // 5xx Server Error
     /// 500 Internal Server Error
