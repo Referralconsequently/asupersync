@@ -802,20 +802,24 @@ fn execute_plan_in_lab_core(
 
     // Schedule all tasks.
     {
-        let is_empty = {
+        let _is_empty = {
             let mut sched = runtime.scheduler.lock();
             for tid in &task_ids {
                 sched.schedule(*tid, crate::types::Budget::INFINITE.priority);
             }
             sched.is_empty()
         };
-        println!("Scheduled tasks! is_empty={is_empty}");
+        crate::tracing_compat::trace!(
+            "plan fixtures scheduled {} tasks (scheduler_empty={})",
+            task_ids.len(),
+            _is_empty
+        );
     }
 
-    let steps = runtime.run_until_quiescent();
-    println!(
-        "First run finished in {} steps. Quiescent: {}",
-        steps,
+    let _steps = runtime.run_until_quiescent();
+    crate::tracing_compat::trace!(
+        "plan fixtures first run finished in {} steps (quiescent={})",
+        _steps,
         runtime.is_quiescent()
     );
 
@@ -1469,6 +1473,17 @@ mod tests {
             fixtures.len() >= 10,
             "need >= 10 fixtures, got {}",
             fixtures.len()
+        );
+    }
+
+    #[test]
+    fn non_test_plan_fixture_paths_do_not_print_directly() {
+        init_test();
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/plan/fixtures.rs"));
+        let non_test = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !non_test.contains("println!(") && !non_test.contains("eprintln!("),
+            "non-test plan fixture paths should use tracing instead of stdout/stderr"
         );
     }
 

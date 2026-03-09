@@ -124,10 +124,10 @@ impl<T> TaskHandle<T> {
     /// }
     /// ```
     #[must_use]
-    pub fn join<'a>(&'a mut self, cx: &'a Cx) -> JoinFuture<'a, T> {
+    pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> JoinFuture<'a, T> {
         let cx_inner = self.inner.clone();
         JoinFuture {
-            inner: self.receiver.recv(cx),
+            inner: self.receiver.recv_uninterruptible(),
             cx_inner,
             completed: false,
             drop_reason: None,
@@ -143,12 +143,12 @@ impl<T> TaskHandle<T> {
     #[must_use]
     pub fn join_with_drop_reason<'a>(
         &'a mut self,
-        cx: &'a Cx,
+        _cx: &'a Cx,
         reason: CancelReason,
     ) -> JoinFuture<'a, T> {
         let cx_inner = self.inner.clone();
         JoinFuture {
-            inner: self.receiver.recv(cx),
+            inner: self.receiver.recv_uninterruptible(),
             cx_inner,
             completed: false,
             drop_reason: Some(reason),
@@ -213,7 +213,7 @@ impl<T> TaskHandle<T> {
 /// This future aborts the task if dropped before completion, ensuring correct
 /// cleanup in races and timeouts.
 pub struct JoinFuture<'a, T> {
-    inner: oneshot::RecvFuture<'a, Result<T, JoinError>>,
+    inner: oneshot::RecvUninterruptibleFuture<'a, Result<T, JoinError>>,
     cx_inner: Weak<RwLock<CxInner>>,
     completed: bool,
     drop_reason: Option<CancelReason>,
@@ -265,17 +265,13 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
                 this.completed = true;
                 std::task::Poll::Ready(res)
             }
-            std::task::Poll::Ready(Err(e)) => {
+            std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
                 this.completed = true;
-                let reason = match e {
-                    crate::channel::oneshot::RecvError::Closed => this.closed_reason(),
-                    crate::channel::oneshot::RecvError::Cancelled => {
-                        let r = CancelReason::user("join cancelled by caller");
-                        this.abort_with_reason(r.clone());
-                        r
-                    }
-                };
+                let reason = this.closed_reason();
                 std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
+            }
+            std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Cancelled)) => {
+                unreachable!("RecvUninterruptibleFuture cannot return Cancelled");
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }

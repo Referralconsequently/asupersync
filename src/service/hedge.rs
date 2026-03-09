@@ -262,8 +262,8 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        self.record_request();
         let fut = self.inner.call(req);
+        self.record_request();
         HedgeFuture { inner: fut }
     }
 }
@@ -300,6 +300,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -368,6 +369,23 @@ mod tests {
     #[derive(Clone, Debug)]
     struct MockSvc;
 
+    #[derive(Clone, Debug)]
+    struct PanicOnCallService;
+
+    impl Service<u32> for PanicOnCallService {
+        type Response = ();
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            panic!("panic during hedge call construction");
+        }
+    }
+
     #[test]
     fn hedge_new() {
         init_test("hedge_new");
@@ -394,6 +412,25 @@ mod tests {
         assert_eq!(hedge.hedge_wins(), 1);
         assert!((hedge.hedge_rate() - 0.5).abs() < f64::EPSILON);
         crate::test_complete!("hedge_stats");
+    }
+
+    #[test]
+    fn hedge_call_panic_does_not_overcount_total_requests() {
+        init_test("hedge_call_panic_does_not_overcount_total_requests");
+        let mut hedge = Hedge::new(
+            PanicOnCallService,
+            HedgeConfig::new(Duration::from_millis(100)),
+        );
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _f = hedge.call(7);
+        }));
+        let panicked = panic.is_err();
+        crate::assert_with_log!(panicked, "inner call panicked", true, panicked);
+
+        let total = hedge.total_requests();
+        crate::assert_with_log!(total == 0, "total requests", 0, total);
+        crate::test_complete!("hedge_call_panic_does_not_overcount_total_requests");
     }
 
     #[test]

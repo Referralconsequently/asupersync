@@ -146,6 +146,7 @@ struct MonitoredTask {
     region_id: RegionId,
     deadline: Time,
     last_progress: Instant,
+    last_progress_time: Time,
     last_checkpoint_seen: Option<Instant>,
     warned: bool,
     violated: bool,
@@ -391,6 +392,16 @@ impl DeadlineMonitor {
                     region_id: task.owner,
                     deadline,
                     last_progress: last_checkpoint.unwrap_or(now_instant),
+                    // A newly observed checkpoint proves progress happened at
+                    // or before this scan, but not the exact logical instant.
+                    // Recording `now` keeps the logical-time fallback
+                    // conservative while still letting later scans detect
+                    // stalls when lab time advances without wall time.
+                    last_progress_time: if last_checkpoint.is_some() {
+                        now
+                    } else {
+                        task.created_at()
+                    },
                     last_checkpoint_seen: last_checkpoint,
                     warned: false,
                     violated: false,
@@ -411,6 +422,7 @@ impl DeadlineMonitor {
                         }
                         entry.last_checkpoint_seen = Some(checkpoint);
                         entry.last_progress = checkpoint;
+                        entry.last_progress_time = now;
                     }
                 }
 
@@ -423,9 +435,8 @@ impl DeadlineMonitor {
                 if !entry.warned {
                     let wall_no_progress = now_instant.duration_since(entry.last_progress)
                         >= self.config.checkpoint_timeout;
-                    let logical_no_progress = entry.last_checkpoint_seen.is_none()
-                        && now.duration_since(task.created_at())
-                            >= duration_to_nanos(self.config.checkpoint_timeout);
+                    let logical_no_progress = now.duration_since(entry.last_progress_time)
+                        >= duration_to_nanos(self.config.checkpoint_timeout);
                     let no_progress = wall_no_progress || logical_no_progress;
 
                     let warning = match (approaching_deadline, no_progress) {
@@ -702,6 +713,55 @@ mod tests {
             recorded
         );
         crate::test_complete!("warns_on_no_progress_for_old_task_without_checkpoint_on_first_scan");
+    }
+
+    #[test]
+    fn warns_on_no_progress_after_checkpoint_when_logical_time_advances() {
+        init_test("warns_on_no_progress_after_checkpoint_when_logical_time_advances");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::from_secs(10),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().push(warning.reason);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(22, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1_000),
+            Some(Instant::now()),
+            Some("checkpointed"),
+            None,
+        );
+
+        monitor.check(Time::from_secs(10), std::iter::once(&task));
+        let first_count = warnings.lock().len();
+        crate::assert_with_log!(
+            first_count == 0,
+            "no warning immediately after observing checkpoint",
+            0usize,
+            first_count
+        );
+
+        monitor.check(Time::from_secs(25), std::iter::once(&task));
+
+        let recorded = warnings.lock().clone();
+        crate::assert_with_log!(
+            recorded.as_slice() == [WarningReason::NoProgress],
+            "logical-time fallback still warns after a checkpointed task stalls",
+            vec![WarningReason::NoProgress],
+            recorded
+        );
+        crate::test_complete!("warns_on_no_progress_after_checkpoint_when_logical_time_advances");
     }
 
     #[test]

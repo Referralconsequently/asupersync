@@ -52,6 +52,35 @@ impl LoadMetric {
     }
 }
 
+/// Ensures an in-flight load increment is rolled back if dispatch unwinds
+/// before ownership transfers to a `LoadBalancedFuture`.
+struct LoadMetricGuard {
+    load_metric: Option<Arc<LoadMetric>>,
+}
+
+impl LoadMetricGuard {
+    fn new(load_metric: Arc<LoadMetric>) -> Self {
+        load_metric.increment();
+        Self {
+            load_metric: Some(load_metric),
+        }
+    }
+
+    fn defuse(mut self) -> Arc<LoadMetric> {
+        self.load_metric
+            .take()
+            .expect("load metric guard must still hold the metric")
+    }
+}
+
+impl Drop for LoadMetricGuard {
+    fn drop(&mut self) {
+        if let Some(load_metric) = self.load_metric.take() {
+            load_metric.decrement();
+        }
+    }
+}
+
 // ─── Strategy trait ───────────────────────────────────────────────────────
 
 /// Selects which backend to dispatch a request to.
@@ -395,16 +424,16 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
             return Err(LoadBalanceError::NoBackends);
         }
 
-        backends[idx].load.increment();
-        let load_metric = Arc::clone(&backends[idx].load);
+        let load_guard = LoadMetricGuard::new(Arc::clone(&backends[idx].load));
         let mut svc = backends[idx].service.clone();
         drop(backends);
 
         let fut = svc.call(req);
+        let load_metric = load_guard.defuse();
 
         Ok(LoadBalancedFuture {
             inner: fut,
-            _service: svc,
+            service: svc,
             load_metric: Some(load_metric),
         })
     }
@@ -413,7 +442,7 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
 /// Future returned by load-balanced dispatch.
 pub struct LoadBalancedFuture<F, S> {
     inner: F,
-    _service: S,
+    service: S,
     /// Load metric to decrement when the future completes or is dropped.
     load_metric: Option<Arc<LoadMetric>>,
 }
@@ -482,6 +511,8 @@ impl<D: std::error::Error + 'static> std::error::Error for DiscoverUpdateError<D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::task::{Context, Poll};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -711,6 +742,23 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct PanicOnCallService;
+
+    impl Service<u32> for PanicOnCallService {
+        type Response = ();
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            panic!("panic during call construction");
+        }
+    }
+
     #[test]
     fn lb_new_and_len() {
         init_test("lb_new_and_len");
@@ -776,6 +824,27 @@ mod tests {
         assert!(dbg.contains("LoadBalancer"));
     }
 
+    #[test]
+    fn lb_panic_during_call_does_not_leak_load_metric() {
+        init_test("lb_panic_during_call_does_not_leak_load_metric");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![PanicOnCallService]);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = lb.call_balanced(7);
+        }));
+
+        assert!(
+            panic.is_err(),
+            "call_balanced should propagate the backend panic"
+        );
+        assert_eq!(
+            lb.loads(),
+            vec![0],
+            "panic path must roll back the in-flight increment"
+        );
+        crate::test_complete!("lb_panic_during_call_does_not_leak_load_metric");
+    }
+
     // ================================================================
     // LoadMetric
     // ================================================================
@@ -823,7 +892,7 @@ mod tests {
     fn balanced_future_debug() {
         let fut = LoadBalancedFuture {
             inner: std::future::ready(42),
-            _service: (),
+            service: (),
             load_metric: None,
         };
         let dbg = format!("{fut:?}");

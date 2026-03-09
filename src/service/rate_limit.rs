@@ -103,6 +103,9 @@ pub struct RateLimit<S> {
     inner: S,
     /// Current number of available tokens (plain field — `&mut self` is exclusive).
     tokens: u64,
+    /// Number of tokens reserved by successful `poll_ready` calls that have not
+    /// yet been consumed by `call()`.
+    reserved_tokens: u64,
     /// Last time tokens were refilled.
     last_refill: Option<Time>,
     /// Maximum tokens (bucket capacity).
@@ -119,6 +122,7 @@ impl<S: Clone> Clone for RateLimit<S> {
         Self {
             inner: self.inner.clone(),
             tokens: self.tokens,
+            reserved_tokens: self.reserved_tokens,
             last_refill: self.last_refill,
             rate: self.rate,
             period: self.period,
@@ -141,6 +145,7 @@ impl<S> RateLimit<S> {
         Self {
             inner,
             tokens: rate, // Start with full bucket
+            reserved_tokens: 0,
             last_refill: None,
             rate,
             period,
@@ -160,6 +165,7 @@ impl<S> RateLimit<S> {
         Self {
             inner,
             tokens: rate,
+            reserved_tokens: 0,
             last_refill: None,
             rate,
             period,
@@ -364,7 +370,10 @@ where
 
         // Token reserved. Check inner readiness.
         match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Ok(())) => {
+                self.reserved_tokens += 1;
+                Poll::Ready(Ok(()))
+            }
             other => {
                 // Inner not ready or errored — return the reserved token.
                 self.tokens += 1;
@@ -375,7 +384,37 @@ where
 
     #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
-        RateLimitFuture::new(self.inner.call(req))
+        let had_reserved_token = self.reserved_tokens > 0;
+        if had_reserved_token {
+            self.reserved_tokens -= 1;
+        }
+        let mut token_restore_guard = ReservedTokenGuard::new(&mut self.tokens, had_reserved_token);
+        let future = self.inner.call(req);
+        token_restore_guard.defuse();
+        RateLimitFuture::new(future)
+    }
+}
+
+struct ReservedTokenGuard<'a> {
+    tokens: &'a mut u64,
+    armed: bool,
+}
+
+impl<'a> ReservedTokenGuard<'a> {
+    fn new(tokens: &'a mut u64, armed: bool) -> Self {
+        Self { tokens, armed }
+    }
+
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReservedTokenGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.tokens = self.tokens.saturating_add(1);
+        }
     }
 }
 
@@ -485,6 +524,23 @@ mod tests {
 
         fn call(&mut self, _req: ()) -> Self::Future {
             ready(Ok(()))
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PanicOnCallService;
+
+    impl Service<()> for PanicOnCallService {
+        type Response = ();
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<(), &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            panic!("panic while constructing rate-limited future");
         }
     }
 
@@ -606,6 +662,31 @@ mod tests {
         let available = svc.available_tokens();
         crate::assert_with_log!(available == 1, "available", 1, available);
         crate::test_complete!("inner_error_does_not_consume_token");
+    }
+
+    #[test]
+    fn synchronous_inner_call_panic_restores_reserved_token() {
+        init_test("synchronous_inner_call_panic_restores_reserved_token");
+        let mut svc = RateLimit::new(PanicOnCallService, 1, Duration::from_secs(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 0, "available after reserve", 0, available);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _f = svc.call(());
+        }));
+        let panicked = panic.is_err();
+        crate::assert_with_log!(panicked, "inner call panicked", true, panicked);
+
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 1, "available after panic", 1, available);
+        crate::test_complete!("synchronous_inner_call_panic_restores_reserved_token");
     }
 
     #[test]

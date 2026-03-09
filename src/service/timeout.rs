@@ -193,6 +193,7 @@ where
 pub struct TimeoutFuture<F> {
     inner: F,
     sleep: Sleep,
+    time_getter: Option<fn() -> Time>,
 }
 
 impl<F> TimeoutFuture<F> {
@@ -202,21 +203,20 @@ impl<F> TimeoutFuture<F> {
         Self {
             inner,
             sleep: Sleep::new(deadline),
+            time_getter: None,
         }
     }
 
     /// Creates a new timeout future with a custom time source.
     ///
-    /// The `time_getter` is used by the `Timeout` service to compute the
-    /// deadline, but the sleep itself uses `Sleep::new` (without time_getter)
-    /// so that waker registration works correctly. Using
-    /// `Sleep::with_time_getter` would skip waker registration, causing the
-    /// timeout to never fire if the inner future stays pending.
+    /// The `time_getter` drives timeout decisions while the sleep itself still
+    /// uses `Sleep::new` so normal polling can register a wake source.
     #[must_use]
-    pub fn with_time_getter(inner: F, deadline: Time, _time_getter: fn() -> Time) -> Self {
+    pub fn with_time_getter(inner: F, deadline: Time, time_getter: fn() -> Time) -> Self {
         Self {
             inner,
             sleep: Sleep::new(deadline),
+            time_getter: Some(time_getter),
         }
     }
 
@@ -270,6 +270,19 @@ where
             Poll::Ready(Ok(response)) => return Poll::Ready(Ok(response)),
             Poll::Ready(Err(e)) => return Poll::Ready(Err(TimeoutError::Inner(e))),
             Poll::Pending => {}
+        }
+
+        if let Some(time_getter) = this.time_getter {
+            if this.sleep.poll_with_time(time_getter()).is_ready() {
+                return Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                    this.sleep.deadline(),
+                ))));
+            }
+
+            // Preserve wake registration even when timeout decisions use a
+            // manual or virtual clock.
+            let _ = Pin::new(&mut this.sleep).poll(cx);
+            return Poll::Pending;
         }
 
         match Pin::new(&mut this.sleep).poll(cx) {
@@ -360,6 +373,24 @@ mod tests {
         let mut svc = Timeout::with_time_getter(EchoService, Duration::from_nanos(500), test_time);
         let future = svc.call(1);
         assert_eq!(future.deadline(), Time::from_nanos(1_500));
+    }
+
+    #[test]
+    fn timeout_future_poll_honors_custom_time_getter() {
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let mut svc = Timeout::with_time_getter(NeverService, Duration::from_nanos(500), test_time);
+        let mut future = svc.call(());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first: Poll<Result<(), TimeoutError<std::convert::Infallible>>> =
+            Future::poll(Pin::new(&mut future), &mut cx);
+        assert!(first.is_pending());
+
+        TEST_NOW.store(2_000, Ordering::SeqCst);
+        let second: Poll<Result<(), TimeoutError<std::convert::Infallible>>> =
+            Future::poll(Pin::new(&mut future), &mut cx);
+        assert!(matches!(second, Poll::Ready(Err(TimeoutError::Elapsed(_)))));
     }
 
     #[test]

@@ -25,6 +25,8 @@ impl Ord for TimerEntry {
                 let diff = other.generation.wrapping_sub(self.generation).cast_signed();
                 diff.cmp(&0)
             })
+            // Fallback to task ID to satisfy Ord/Eq agreement contract
+            .then_with(|| other.task.cmp(&self.task))
     }
 }
 

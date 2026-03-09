@@ -263,7 +263,7 @@ pub fn total_delay_budget(policy: &RetryPolicy) -> Duration {
         let delay = calculate_delay(policy, attempt, None);
         // With jitter, actual delay could be up to (1 + jitter) * base
         let max_delay_nanos = clamp_nanos_f64(delay.as_nanos() as f64 * (1.0 + policy.jitter));
-        total += Duration::from_nanos(max_delay_nanos);
+        total = total.saturating_add(Duration::from_nanos(max_delay_nanos));
     }
     total
 }
@@ -456,7 +456,7 @@ impl RetryState {
 
         // Calculate delay for retry
         let delay = calculate_delay(&self.policy, self.attempt - 1, rng);
-        self.total_delay += delay;
+        self.total_delay = self.total_delay.saturating_add(delay);
         Some(delay)
     }
 

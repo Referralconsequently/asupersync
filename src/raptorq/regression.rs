@@ -371,32 +371,37 @@ impl Default for RegressionMonitor {
     }
 }
 
-/// Emit a structured NDJSON log line for a regression check.
+/// Render structured NDJSON log lines for a regression check.
 ///
-/// Outputs to stderr for CI capture, matching the benchmark logging convention.
-pub fn emit_regression_log(report: &RegressionReport) {
-    for result in &report.metrics {
-        eprintln!(
-            "{{\"schema_version\":\"{}\",\"replay_ref\":\"{}\",\
+/// Callers decide whether to write, persist, or discard the rendered lines.
+#[must_use]
+pub fn regression_log_lines(report: &RegressionReport) -> Vec<String> {
+    report
+        .metrics
+        .iter()
+        .map(|result| {
+            format!(
+                "{{\"schema_version\":\"{}\",\"replay_ref\":\"{}\",\
              \"metric\":\"{}\",\"value\":{:.3},\"threshold\":{},\
              \"e_value\":{:.6},\"exceeds_threshold\":{},\
              \"verdict\":\"{}\",\"calibration_n\":{},\
              \"total_observations\":{},\"regime_state\":\"{}\"}}",
-            report.schema_version,
-            report.replay_ref,
-            result.metric,
-            result.value,
-            result
-                .threshold
-                .map_or_else(|| "null".to_string(), |t| format!("{t:.3}")),
-            result.e_value,
-            result.exceeds_threshold,
-            result.verdict.label(),
-            result.calibration_n,
-            report.total_observations,
-            report.regime_state.as_deref().unwrap_or("unknown"),
-        );
-    }
+                report.schema_version,
+                report.replay_ref,
+                result.metric,
+                result.value,
+                result
+                    .threshold
+                    .map_or_else(|| "null".to_string(), |t| format!("{t:.3}")),
+                result.e_value,
+                result.exceeds_threshold,
+                result.verdict.label(),
+                result.calibration_n,
+                report.total_observations,
+                report.regime_state.as_deref().unwrap_or("unknown"),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -426,6 +431,35 @@ mod tests {
             RegressionVerdict::Calibrating,
             "should be calibrating before min samples"
         );
+    }
+
+    #[test]
+    fn regression_log_lines_render_one_line_per_metric() {
+        let report = RegressionReport {
+            schema_version: G8_SCHEMA_VERSION,
+            replay_ref: G8_REPLAY_REF,
+            metrics: vec![MetricRegressionResult {
+                metric: "gauss_ops".to_string(),
+                value: 12.0,
+                threshold: Some(15.0),
+                e_value: 1.25,
+                calibration_n: 10,
+                exceeds_threshold: false,
+                verdict: RegressionVerdict::Accept,
+            }],
+            overall_verdict: RegressionVerdict::Accept,
+            total_observations: 11,
+            regressed_count: 0,
+            warning_count: 0,
+            regime_state: Some("stable".to_string()),
+        };
+
+        let lines = regression_log_lines(&report);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\"metric\":\"gauss_ops\""));
+        assert!(lines[0].contains("\"verdict\":\"accept\""));
+        assert!(lines[0].contains("\"regime_state\":\"stable\""));
     }
 
     #[test]

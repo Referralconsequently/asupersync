@@ -84,15 +84,15 @@ fn dropped_notify_one_then_broadcast_waiter_restores_token() {
 
     let stored = notify.stored_notifications.load(Ordering::Acquire);
     assert_eq!(
-        stored, 1,
-        "dropping an overlapped waiter MUST recreate a notify_one token"
+        stored, 0,
+        "dropping an overlapped waiter MUST NOT recreate a notify_one token (it was covered by broadcast)"
     );
 
     let mut fut3 = notify.notified();
     let res = Pin::new(&mut fut3).poll(&mut cx);
     assert!(
-        res.is_ready(),
-        "drop after broadcast overlap MUST wake a future waiter"
+        res.is_pending(),
+        "drop after broadcast overlap MUST NOT wake a future waiter"
     );
 }
 

@@ -2377,6 +2377,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_experimental_transport_decision_log_fields_cover_contract_modes() {
         init_test("test_experimental_transport_decision_log_fields_cover_contract_modes");
 

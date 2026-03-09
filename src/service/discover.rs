@@ -83,6 +83,20 @@ pub struct StaticList<K> {
     delivered: Mutex<bool>,
 }
 
+fn dedup_preserve_order<K>(items: &[K]) -> Vec<K>
+where
+    K: Clone + Eq + std::hash::Hash,
+{
+    let mut seen = HashSet::with_capacity(items.len());
+    let mut deduped = Vec::with_capacity(items.len());
+    for item in items {
+        if seen.insert(item.clone()) {
+            deduped.push(item.clone());
+        }
+    }
+    deduped
+}
+
 impl<K: Clone> StaticList<K> {
     /// Create a new static list with the given endpoints.
     #[must_use]
@@ -107,15 +121,14 @@ impl<K: Clone + Eq + std::hash::Hash + fmt::Debug + Send + Sync + 'static> Disco
         }
         *delivered = true;
         drop(delivered);
-        Ok(self
-            .endpoints
-            .iter()
-            .map(|e| Change::Insert(e.clone()))
+        Ok(dedup_preserve_order(&self.endpoints)
+            .into_iter()
+            .map(Change::Insert)
             .collect())
     }
 
     fn endpoints(&self) -> Vec<K> {
-        self.endpoints.clone()
+        dedup_preserve_order(&self.endpoints)
     }
 }
 
@@ -421,6 +434,26 @@ mod tests {
     fn static_list_endpoints() {
         let list = StaticList::new(vec![10, 20]);
         assert_eq!(list.endpoints(), vec![10, 20]);
+    }
+
+    #[test]
+    fn static_list_first_poll_deduplicates_duplicate_endpoints() {
+        init_test("static_list_first_poll_deduplicates_duplicate_endpoints");
+        let list = StaticList::new(vec![1, 2, 1, 3, 2]);
+        let changes = list.poll_discover().unwrap();
+        assert_eq!(
+            changes,
+            vec![Change::Insert(1), Change::Insert(2), Change::Insert(3)]
+        );
+        crate::test_complete!("static_list_first_poll_deduplicates_duplicate_endpoints");
+    }
+
+    #[test]
+    fn static_list_endpoints_deduplicate_preserving_first_seen_order() {
+        init_test("static_list_endpoints_deduplicate_preserving_first_seen_order");
+        let list = StaticList::new(vec![3, 1, 3, 2, 1, 4]);
+        assert_eq!(list.endpoints(), vec![3, 1, 2, 4]);
+        crate::test_complete!("static_list_endpoints_deduplicate_preserving_first_seen_order");
     }
 
     #[test]

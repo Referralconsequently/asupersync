@@ -1404,8 +1404,8 @@ impl LabRuntime {
         self.steps += 1;
         let rng_value = self.rng.next_u64();
         if self.steps < 50 {
-            println!(
-                "rng_value = {}, worker_hint = {}",
+            crate::tracing_compat::trace!(
+                "lab runtime rng sample: rng_value={}, worker_hint={}",
                 rng_value,
                 (rng_value >> 32) as usize % self.config.worker_count.max(1)
             );
@@ -1497,7 +1497,11 @@ impl LabRuntime {
 
         // 4. Poll the task
         if self.steps < 50 {
-            println!("Executing {:?} at step {}", task_id, self.steps);
+            crate::tracing_compat::trace!(
+                "lab runtime executing task {:?} at step {}",
+                task_id,
+                self.steps
+            );
         }
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
             stored.poll(&mut cx)
@@ -2154,10 +2158,10 @@ impl LabScheduler {
     /// Schedules a task in the ready lane on its assigned worker.
     pub fn schedule(&mut self, task: TaskId, priority: u8) {
         if !self.scheduled.insert(task) {
-            println!("LabScheduler already scheduled {task:?}");
+            crate::tracing_compat::trace!("LabScheduler already scheduled {task:?}");
             return;
         }
-        println!("LabScheduler scheduling {task:?}");
+        crate::tracing_compat::trace!("LabScheduler scheduling {task:?}");
 
         let worker = self.assign_worker(task);
         self.workers[worker].schedule(task, priority);
@@ -4381,5 +4385,26 @@ mod tests {
         assert!(dbg.contains("ObligationLeak"));
         let display = format!("{leak}");
         assert!(!display.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::literal_string_with_formatting_args)]
+    fn non_test_lab_runtime_paths_do_not_use_stray_stdout_debug_prints() {
+        let source =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file!()))
+                .expect("lab runtime source must be readable");
+
+        for message in [
+            "LabScheduler already scheduled {task:?}",
+            "LabScheduler scheduling {task:?}",
+            "Executing {:?} at step {}",
+            "rng_value = {}, worker_hint = {}",
+        ] {
+            let stdout_call = format!("print{}!(\"{message}\"", "ln");
+            assert!(
+                !source.contains(&stdout_call),
+                "non-test LabRuntime debug print regressed: {message}"
+            );
+        }
     }
 }

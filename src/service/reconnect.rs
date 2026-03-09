@@ -255,16 +255,54 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
+        struct RefreshPendingGuard<'a> {
+            refresh_pending: &'a AtomicBool,
+            service_epoch: &'a AtomicU64,
+            call_epoch: u64,
+            armed: bool,
+        }
+
+        impl<'a> RefreshPendingGuard<'a> {
+            fn new(
+                refresh_pending: &'a AtomicBool,
+                service_epoch: &'a AtomicU64,
+                call_epoch: u64,
+            ) -> Self {
+                Self {
+                    refresh_pending,
+                    service_epoch,
+                    call_epoch,
+                    armed: true,
+                }
+            }
+
+            fn defuse(mut self) {
+                self.armed = false;
+            }
+        }
+
+        impl Drop for RefreshPendingGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed && self.service_epoch.load(Ordering::Acquire) == self.call_epoch {
+                    self.refresh_pending.store(true, Ordering::Release);
+                }
+            }
+        }
+
+        let call_epoch = self.service_epoch.load(Ordering::Acquire);
+        let guard =
+            RefreshPendingGuard::new(&self.refresh_pending, &self.service_epoch, call_epoch);
         let fut = self
             .inner
             .as_mut()
             .expect("poll_ready must be called before call")
             .call(req);
+        guard.defuse();
         ReconnectFuture {
             inner: fut,
             refresh_pending: Arc::clone(&self.refresh_pending),
             service_epoch: Arc::clone(&self.service_epoch),
-            call_epoch: self.service_epoch.load(Ordering::Acquire),
+            call_epoch,
             _maker_error: std::marker::PhantomData,
         }
     }
@@ -413,8 +451,7 @@ mod tests {
         }
 
         fn fail(&self) {
-            *self.state.lock() =
-                Some(Err(ReconnectingCallError));
+            *self.state.lock() = Some(Err(ReconnectingCallError));
         }
 
         fn future(&self) -> ManualCallFuture {
@@ -485,6 +522,55 @@ mod tests {
             } else {
                 std::future::ready(Ok(self.id))
             }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct PanicReconnectMaker {
+        next_id: Arc<AtomicU32>,
+    }
+
+    impl PanicReconnectMaker {
+        fn new(next_id: u32) -> Self {
+            Self {
+                next_id: Arc::new(AtomicU32::new(next_id)),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicReconnectSvc {
+        id: u32,
+        panic_on_call: bool,
+    }
+
+    impl MakeService for PanicReconnectMaker {
+        type Service = PanicReconnectSvc;
+        type Error = MockMakerError;
+
+        fn make_service(&self) -> Result<Self::Service, Self::Error> {
+            Ok(PanicReconnectSvc {
+                id: self.next_id.fetch_add(1, Ordering::SeqCst),
+                panic_on_call: false,
+            })
+        }
+    }
+
+    impl Service<()> for PanicReconnectSvc {
+        type Response = u32;
+        type Error = ReconnectingCallError;
+        type Future = std::future::Ready<Result<u32, ReconnectingCallError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            assert!(
+                !self.panic_on_call,
+                "panic during reconnect call construction"
+            );
+            std::future::ready(Ok(self.id))
         }
     }
 
@@ -670,6 +756,44 @@ mod tests {
         assert!(matches!(second_result, Poll::Ready(Ok(1))));
 
         crate::test_complete!("reconnects_after_call_error");
+    }
+
+    #[test]
+    fn reconnects_after_call_panic() {
+        init_test("reconnects_after_call_panic");
+        let maker = PanicReconnectMaker::new(1);
+        let initial = PanicReconnectSvc {
+            id: 0,
+            panic_on_call: true,
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _f = rc.call(());
+        }));
+        assert!(panic.is_err(), "inner call should panic");
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(0));
+        assert_eq!(rc.reconnect_count(), 0);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(
+            rc.inner().map(|svc| svc.id),
+            Some(1),
+            "next poll_ready should reconnect after a synchronous call panic"
+        );
+        assert_eq!(rc.reconnect_count(), 1);
+
+        let mut call = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Ok(1))
+        ));
+
+        crate::test_complete!("reconnects_after_call_panic");
     }
 
     #[test]

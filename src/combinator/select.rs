@@ -113,6 +113,10 @@ impl<F> SelectAll<F> {
     /// Creates a new select_all combinator.
     #[must_use]
     pub fn new(futures: Vec<F>) -> Self {
+        assert!(
+            !futures.is_empty(),
+            "select_all requires at least one future"
+        );
         Self {
             futures,
             start_idx: 0,
@@ -156,6 +160,10 @@ impl<F> SelectAllDrain<F> {
     /// Creates a new drain-aware select_all combinator.
     #[must_use]
     pub fn new(futures: Vec<F>) -> Self {
+        assert!(
+            !futures.is_empty(),
+            "select_all_drain requires at least one future"
+        );
         Self {
             futures: Some(futures),
             start_idx: 0,
@@ -463,13 +471,10 @@ mod tests {
     }
 
     #[test]
-    fn test_select_all_empty_vec() {
+    #[should_panic(expected = "select_all requires at least one future")]
+    fn test_select_all_empty_vec_rejected() {
         let futures: Vec<std::future::Ready<i32>> = vec![];
-        let mut sel = SelectAll::new(futures);
-
-        // Empty: should be pending forever (no future can complete)
-        let result = poll_once(&mut sel);
-        assert!(result.is_pending());
+        let _sel = SelectAll::new(futures);
     }
 
     #[test]
@@ -604,6 +609,13 @@ mod tests {
 
         let result = poll_once(&mut sel);
         assert!(result.is_pending());
+    }
+
+    #[test]
+    #[should_panic(expected = "select_all_drain requires at least one future")]
+    fn test_select_all_drain_empty_vec_rejected() {
+        let futures: Vec<std::future::Ready<i32>> = vec![];
+        let _sel = SelectAllDrain::new(futures);
     }
 
     #[test]

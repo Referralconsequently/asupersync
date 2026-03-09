@@ -925,11 +925,17 @@ where
         let this = self.get_mut();
 
         loop {
-            match &mut this.state {
-                OneshotState::Ready { service, request } => match service.poll_ready(cx) {
-                    Poll::Pending => return Poll::Pending,
+            let state = std::mem::replace(&mut this.state, OneshotState::Done);
+            match state {
+                OneshotState::Ready {
+                    mut service,
+                    mut request,
+                } => match service.poll_ready(cx) {
+                    Poll::Pending => {
+                        this.state = OneshotState::Ready { service, request };
+                        return Poll::Pending;
+                    }
                     Poll::Ready(Err(err)) => {
-                        this.state = OneshotState::Done;
                         return Poll::Ready(Err(err));
                     }
                     Poll::Ready(Ok(())) => {
@@ -938,10 +944,10 @@ where
                         this.state = OneshotState::Calling { future: fut };
                     }
                 },
-                OneshotState::Calling { future } => {
-                    let result = Pin::new(future).poll(cx);
-                    if result.is_ready() {
-                        this.state = OneshotState::Done;
+                OneshotState::Calling { mut future } => {
+                    let result = Pin::new(&mut future).poll(cx);
+                    if result.is_pending() {
+                        this.state = OneshotState::Calling { future };
                     }
                     return result;
                 }
@@ -955,8 +961,51 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{AsupersyncService, AsupersyncServiceExt};
+    use super::{AsupersyncService, AsupersyncServiceExt, OneshotState, Service, ServiceExt};
     use crate::test_utils::run_test_with_cx;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Arc::new(NoopWaker).into()
+    }
+
+    #[allow(clippy::needless_pass_by_value, clippy::option_if_let_else)]
+    fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = panic.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = panic.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "non-string panic payload".to_string()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PanicOnCallService;
+
+    impl Service<u32> for PanicOnCallService {
+        type Response = ();
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            panic!("panic during oneshot call construction");
+        }
+    }
 
     #[test]
     fn function_service_call_works() {
@@ -980,6 +1029,31 @@ mod tests {
             let err = AsupersyncService::call(&fail, &cx, 0).await.unwrap_err();
             assert_eq!(err, "err:nope");
         });
+    }
+
+    #[test]
+    fn oneshot_call_panic_leaves_terminal_state() {
+        let mut fut = PanicOnCallService.oneshot(7);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first_panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut fut).poll(&mut cx);
+        }));
+        assert!(first_panic.is_err(), "first poll should propagate panic");
+        assert!(
+            matches!(fut.state, OneshotState::Done),
+            "panic path must leave Oneshot in Done state"
+        );
+
+        let second_panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut fut).poll(&mut cx);
+        }));
+        let second_message = panic_message(second_panic.expect_err("second poll should panic"));
+        assert!(
+            second_message.contains("Oneshot polled after completion"),
+            "repoll should see the terminal-state invariant, got: {second_message}"
+        );
     }
 
     // ========================================================================

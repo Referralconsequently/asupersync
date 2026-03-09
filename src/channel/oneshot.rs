@@ -367,6 +367,134 @@ impl<T> Drop for SendPermit<T> {
     }
 }
 
+/// Future returned by `recv_uninterruptible`.
+pub(crate) struct RecvUninterruptibleFuture<'a, T> {
+    receiver: &'a mut Receiver<T>,
+    waiter_id: Option<u64>,
+}
+
+impl<T> RecvUninterruptibleFuture<'_, T> {
+    #[must_use]
+    pub(crate) fn receiver_finished(&self) -> bool {
+
+        self.receiver.is_ready() || self.receiver.is_closed()
+
+    }
+
+}
+
+
+
+impl<T> Future for RecvUninterruptibleFuture<'_, T> {
+
+    type Output = Result<T, RecvError>;
+
+
+
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+
+        let this = &mut *self;
+
+        let mut inner = this.receiver.inner.lock();
+
+
+
+        if let Some(value) = inner.value.take() {
+
+            inner.clear_waker();
+
+            this.waiter_id = None;
+
+            drop(inner);
+
+            return Poll::Ready(Ok(value));
+
+        }
+
+
+
+        if inner.is_closed() {
+
+            inner.clear_waker();
+
+            this.waiter_id = None;
+
+            drop(inner);
+
+            return Poll::Ready(Err(RecvError::Closed));
+
+        }
+
+
+
+        if let Some(my_id) = this.waiter_id {
+
+            if inner.waker_id == Some(my_id) {
+
+                if let Some(existing) = &inner.waker {
+
+                    if !existing.will_wake(ctx.waker()) {
+
+                        inner.waker = Some(ctx.waker().clone());
+
+                    }
+
+                } else {
+
+                    inner.waker = Some(ctx.waker().clone());
+
+                }
+
+            } else {
+
+                let waiter_id = inner.next_waiter_id;
+
+                inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
+
+                inner.waker = Some(ctx.waker().clone());
+
+                inner.waker_id = Some(waiter_id);
+
+                this.waiter_id = Some(waiter_id);
+
+            }
+
+        } else {
+
+            let waiter_id = inner.next_waiter_id;
+
+            inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
+
+            inner.waker = Some(ctx.waker().clone());
+
+            inner.waker_id = Some(waiter_id);
+
+            this.waiter_id = Some(waiter_id);
+
+        }
+
+        drop(inner);
+
+        Poll::Pending
+
+    }
+
+}
+
+
+
+impl<T> Drop for RecvUninterruptibleFuture<'_, T> {
+    fn drop(&mut self) {
+        {
+            let mut inner = self.receiver.inner.lock();
+            if self.waiter_id.is_some_and(|waiter_id| inner.waker_id == Some(waiter_id)) {
+                inner.clear_waker();
+            }
+        }
+        self.waiter_id = None;
+    }
+}
+
 /// Future returned by [`Receiver::recv`].
 pub struct RecvFuture<'a, T> {
     receiver: &'a mut Receiver<T>,
@@ -508,6 +636,18 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Receives a value from the channel, ignoring cancellation.
+    ///
+    /// Used internally by `TaskHandle::join` which must wait for task termination
+    /// to uphold structural guarantees, even if the caller's context is cancelled.
+    #[must_use]
+    pub(crate) fn recv_uninterruptible(&mut self) -> RecvUninterruptibleFuture<'_, T> {
+        RecvUninterruptibleFuture {
+            receiver: self,
+            waiter_id: None,
+        }
+    }
+
     /// Attempts to receive a value without blocking.
     ///
     /// # Errors
@@ -549,7 +689,11 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.inner.lock().receiver_dropped = true;
+        let mut inner = self.inner.lock();
+        inner.receiver_dropped = true;
+        // Clear any pending recv waker so a dropped receiver does not
+        // retain executor task state indefinitely.
+        inner.clear_waker();
     }
 }
 
@@ -716,6 +860,43 @@ mod tests {
             format!("{:?}", err)
         );
         crate::test_complete!("receiver_dropped_before_send");
+    }
+
+    #[test]
+    fn receiver_drop_clears_leftover_waiter_state() {
+        init_test("receiver_drop_clears_leftover_waiter_state");
+        let (_tx, rx) = channel::<i32>();
+        let inner = Arc::clone(&rx.inner);
+
+        {
+            let mut guard = inner.lock();
+            guard.waker = Some(Waker::from(Arc::new(TestNoopWaker)));
+            guard.waker_id = Some(7);
+        }
+
+        drop(rx);
+
+        let guard = inner.lock();
+        crate::assert_with_log!(
+            guard.receiver_dropped,
+            "receiver marked dropped",
+            true,
+            guard.receiver_dropped
+        );
+        crate::assert_with_log!(
+            guard.waker.is_none(),
+            "receiver drop clears leftover waker",
+            true,
+            guard.waker.is_none()
+        );
+        crate::assert_with_log!(
+            guard.waker_id.is_none(),
+            "receiver drop clears waiter identity",
+            true,
+            guard.waker_id.is_none()
+        );
+        drop(guard);
+        crate::test_complete!("receiver_drop_clears_leftover_waiter_state");
     }
 
     #[test]

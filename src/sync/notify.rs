@@ -211,13 +211,11 @@ impl Notify {
                 .iter_mut()
                 .filter_map(|entry| {
                     // Only mark active waiters as notified. Marking free slab slots
-                    // (`waker == None`) can pin tail entries and prevent shrinking.
-                    if entry.generation < new_generation {
+                    // (`waker == None` and `!notified`) can pin tail entries and prevent shrinking.
+                    if entry.generation < new_generation && (entry.waker.is_some() || entry.notified) {
+                        entry.generation = new_generation;
                         if let Some(waker) = entry.waker.take() {
                             entry.notified = true;
-                            // Mark this waiter as broadcast-notified to avoid turning
-                            // a cancelled broadcast waiter into a stored notify_one token.
-                            entry.generation = new_generation;
                             return Some(waker);
                         }
                     }

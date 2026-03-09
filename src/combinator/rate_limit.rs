@@ -34,6 +34,7 @@
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -250,6 +251,20 @@ pub struct RateLimiter {
     max_wait_time_ms: AtomicU64,
 }
 
+struct TokenRefundGuard<'a> {
+    limiter: &'a RateLimiter,
+    cost: u32,
+    refund: bool,
+}
+
+impl Drop for TokenRefundGuard<'_> {
+    fn drop(&mut self) {
+        if self.refund {
+            self.limiter.refund_tokens(self.cost);
+        }
+    }
+}
+
 impl RateLimiter {
     /// Create a new rate limiter with the given policy.
     #[must_use]
@@ -333,7 +348,8 @@ impl RateLimiter {
             let added_fractional = u128::from(elapsed_ms) * u128::from(self.policy.rate);
             let total_fractional = u128::from(state.fractional) + added_fractional;
 
-            let new_tokens = (total_fractional / u128::from(period_ms)) as u64;
+            let new_tokens =
+                (total_fractional / u128::from(period_ms)).min(u128::from(u64::MAX)) as u64;
             let new_fractional = (total_fractional % u128::from(period_ms)) as u64;
 
             state.tokens =
@@ -385,6 +401,15 @@ impl RateLimiter {
         }
     }
 
+    fn refund_tokens(&self, cost: u32) {
+        if cost == 0 {
+            return;
+        }
+
+        let mut state = self.state.lock();
+        state.tokens = state.tokens.saturating_add(cost).min(self.policy.burst);
+    }
+
     /// Try to acquire with default cost.
     #[must_use]
     pub fn try_acquire_default(&self, now: Time) -> bool {
@@ -417,9 +442,22 @@ impl RateLimiter {
             return Err(RateLimitError::RateLimitExceeded);
         }
 
-        match op() {
-            Ok(v) => Ok(v),
-            Err(e) => Err(RateLimitError::Inner(e)),
+        let mut refund_guard = TokenRefundGuard {
+            limiter: self,
+            cost,
+            refund: true,
+        };
+
+        match catch_unwind(AssertUnwindSafe(op)) {
+            Ok(Ok(v)) => {
+                refund_guard.refund = false;
+                Ok(v)
+            }
+            Ok(Err(e)) => {
+                refund_guard.refund = false;
+                Err(RateLimitError::Inner(e))
+            }
+            Err(panic) => resume_unwind(panic),
         }
     }
 
@@ -457,7 +495,9 @@ impl RateLimiter {
             fractional_needed.saturating_sub(u128::from(current_fractional));
 
         let rate = u128::from(self.policy.rate);
-        let ms_needed = additional_fractional.div_ceil(rate) as u64;
+        let ms_needed = additional_fractional
+            .div_ceil(rate)
+            .min(u128::from(u64::MAX)) as u64;
 
         Duration::from_millis(ms_needed)
     }
@@ -551,38 +591,19 @@ impl RateLimiter {
         let now_millis = now.as_millis();
 
         let mut queue = self.wait_queue.write();
-
-        // First, timeout expired entries
-        let mut timeout_count = 0u64;
-        let mut timeout_wait_ms = 0u64;
-        let mut max_timeout_wait_ms = 0u64;
-        for entry in queue.iter_mut() {
-            if entry.result.is_none() && now_millis >= entry.deadline_millis {
-                entry.result = Some(Err(RejectionReason::Timeout));
-                timeout_count += 1;
-                let wait = now_millis.saturating_sub(entry.enqueued_at_millis);
-                timeout_wait_ms += wait;
-                if wait > max_timeout_wait_ms {
-                    max_timeout_wait_ms = wait;
-                }
-            }
-        }
-        if timeout_count > 0 {
-            #[allow(clippy::cast_possible_truncation)]
-            self.pending_queue_count
-                .fetch_sub(timeout_count as u32, Ordering::Relaxed);
-            self.total_wait_time_ms
-                .fetch_add(timeout_wait_ms, Ordering::Relaxed);
-            self.max_wait_time_ms
-                .fetch_max(max_timeout_wait_ms, Ordering::Relaxed);
-        }
-
-        // Try to grant awaiting entries
-        let mut first_granted = None;
         let mut state = self.state.lock();
         self.refill_inner(&mut state, now_millis);
 
-        // Accumulate metrics on the stack, then flush once outside the loop.
+        // Apply grants/timeouts in a single pass so an entry that becomes
+        // runnable exactly at its deadline is granted instead of timing out.
+        // Later entries may still time out behind a FIFO-blocking live waiter,
+        // but they may not be granted out of order.
+        let mut timeout_count = 0u64;
+        let mut timeout_wait_ms = 0u64;
+        let mut max_timeout_wait_ms = 0u64;
+        let mut fifo_blocked = false;
+
+        let mut first_granted = None;
         let mut granted_count = 0u64;
         let mut acc_wait_time = Duration::ZERO;
         let mut max_wait_time = Duration::ZERO;
@@ -593,26 +614,75 @@ impl RateLimiter {
                 continue;
             }
 
-            if state.tokens >= entry.cost {
-                state.tokens -= entry.cost;
-                entry.result = Some(Ok(()));
-                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
-
-                if first_granted.is_none() {
-                    first_granted = Some(entry.id);
+            match now_millis.cmp(&entry.deadline_millis) {
+                std::cmp::Ordering::Greater => {
+                    entry.result = Some(Err(RejectionReason::Timeout));
+                    timeout_count += 1;
+                    let wait = now_millis.saturating_sub(entry.enqueued_at_millis);
+                    timeout_wait_ms = timeout_wait_ms.saturating_add(wait);
+                    if wait > max_timeout_wait_ms {
+                        max_timeout_wait_ms = wait;
+                    }
                 }
+                std::cmp::Ordering::Equal => {
+                    if !fifo_blocked && state.tokens >= entry.cost {
+                        state.tokens -= entry.cost;
+                        entry.result = Some(Ok(()));
+                        self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
 
-                let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
-                let wait_duration = Duration::from_millis(wait_ms);
-                acc_wait_time += wait_duration;
-                if wait_duration > max_wait_time {
-                    max_wait_time = wait_duration;
+                        if first_granted.is_none() {
+                            first_granted = Some(entry.id);
+                        }
+
+                        let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
+                        let wait_duration = Duration::from_millis(wait_ms);
+                        acc_wait_time += wait_duration;
+                        if wait_duration > max_wait_time {
+                            max_wait_time = wait_duration;
+                        }
+                        granted_count += 1;
+                    } else {
+                        entry.result = Some(Err(RejectionReason::Timeout));
+                        timeout_count += 1;
+                        let wait = now_millis.saturating_sub(entry.enqueued_at_millis);
+                        timeout_wait_ms = timeout_wait_ms.saturating_add(wait);
+                        if wait > max_timeout_wait_ms {
+                            max_timeout_wait_ms = wait;
+                        }
+                    }
                 }
-                granted_count += 1;
-            } else {
-                // Stop at first ungrantable entry to preserve FIFO order.
-                break;
+                std::cmp::Ordering::Less => {
+                    if !fifo_blocked && state.tokens >= entry.cost {
+                        state.tokens -= entry.cost;
+                        entry.result = Some(Ok(()));
+                        self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
+
+                        if first_granted.is_none() {
+                            first_granted = Some(entry.id);
+                        }
+
+                        let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
+                        let wait_duration = Duration::from_millis(wait_ms);
+                        acc_wait_time += wait_duration;
+                        if wait_duration > max_wait_time {
+                            max_wait_time = wait_duration;
+                        }
+                        granted_count += 1;
+                    } else {
+                        fifo_blocked = true;
+                    }
+                }
             }
+        }
+
+        if timeout_count > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            self.pending_queue_count
+                .fetch_sub(timeout_count as u32, Ordering::Relaxed);
+            self.total_wait_time_ms
+                .fetch_add(timeout_wait_ms, Ordering::Relaxed);
+            self.max_wait_time_ms
+                .fetch_max(max_timeout_wait_ms, Ordering::Relaxed);
         }
 
         // Flush accumulated metrics via atomics (no write lock needed).
@@ -701,8 +771,7 @@ impl RateLimiter {
                 let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
                 self.total_wait_time_ms
                     .fetch_add(wait_ms, Ordering::Relaxed);
-                self.max_wait_time_ms
-                    .fetch_max(wait_ms, Ordering::Relaxed);
+                self.max_wait_time_ms.fetch_max(wait_ms, Ordering::Relaxed);
             }
         }
     }
@@ -1352,6 +1421,32 @@ mod tests {
         assert!(!rl.try_acquire(1, now));
     }
 
+    #[test]
+    fn call_panic_restores_consumed_tokens() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            burst: 1,
+            period: Duration::from_mins(1),
+            ..Default::default()
+        });
+        let now = Time::from_millis(0);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = rl.call(now, || -> Result<(), &'static str> {
+                panic!("intentional rate-limit call panic")
+            });
+        }));
+        assert!(panic.is_err(), "inner operation should panic");
+        assert_eq!(
+            rl.available_tokens(),
+            1,
+            "panic path must refund the consumed token"
+        );
+
+        let result = rl.call(now, || Ok::<u32, &'static str>(7));
+        assert_eq!(result.unwrap(), 7);
+    }
+
     // =========================================================================
     // Time Until Available Tests
     // =========================================================================
@@ -1564,6 +1659,29 @@ mod tests {
         let later = Time::from_millis(200);
         let result = rl.check_entry(entry_id, later);
         assert!(matches!(result, Err(RateLimitError::Timeout { .. })));
+    }
+
+    #[test]
+    fn check_entry_grants_when_tokens_refill_exactly_at_timeout_boundary() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(100),
+            burst: 1,
+            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(100)),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now));
+
+        let entry_id = rl.enqueue(1, now).unwrap();
+
+        let boundary = Time::from_millis(100);
+        let result = rl.check_entry(entry_id, boundary);
+        assert!(
+            matches!(result, Ok(true)),
+            "entry should be granted when refill lands exactly on the timeout boundary, got {result:?}"
+        );
     }
 
     #[test]

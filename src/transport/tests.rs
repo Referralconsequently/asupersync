@@ -960,31 +960,35 @@ mod tests {
                 counts.clone()
             );
 
-            let sum = total_deliveries as f64;
-            let sum_sq: f64 = counts
+            let total_deliveries_u128 =
+                u128::try_from(total_deliveries).expect("delivery count fits in u128");
+            let endpoint_count_u128 =
+                u128::try_from(counts.len()).expect("endpoint count fits in u128");
+            let sum_sq: u128 = counts
                 .iter()
                 .map(|count| {
-                    let count = *count as f64;
+                    let count = u128::try_from(*count).expect("endpoint count fits in u128");
                     count * count
                 })
                 .sum();
-            let fairness_index = (sum * sum) / (counts.len() as f64 * sum_sq);
+            let fairness_numerator = total_deliveries_u128 * total_deliveries_u128;
+            let fairness_denominator = endpoint_count_u128 * sum_sq;
             crate::assert_with_log!(
-                (fairness_index - 1.0).abs() < f64::EPSILON,
+                fairness_numerator == fairness_denominator,
                 "TW-FAIRNESS Jain index stays ideal for equal-flow replay",
-                1.0,
-                fairness_index
+                fairness_numerator,
+                fairness_denominator
             );
 
-            let ideal_share = total_deliveries as f64 / counts.len() as f64;
-            let min_share_pct = (*counts.iter().min().expect("counts cannot be empty") as f64
-                / ideal_share)
-                * 100.0;
+            let min_count = *counts.iter().min().expect("counts cannot be empty");
+            let min_share_numerator = u128::try_from(min_count)
+                .expect("endpoint count fits in u128")
+                * endpoint_count_u128;
             crate::assert_with_log!(
-                (min_share_pct - 100.0).abs() < f64::EPSILON,
+                min_share_numerator == total_deliveries_u128,
                 "TW-FAIRNESS minimum flow share stays at the full fair-share target",
-                100.0,
-                min_share_pct
+                total_deliveries_u128,
+                min_share_numerator
             );
 
             crate::test_complete!("test_transport_workload_tw_fairness_round_robin_balance");
