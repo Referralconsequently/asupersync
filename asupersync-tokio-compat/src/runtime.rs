@@ -25,8 +25,20 @@ impl AsupersyncRuntime {
     pub fn new(cx: &Cx) -> Self {
         Self {
             cx: cx.clone(),
-            region_id: cx.region(),
+            region_id: cx.region_id(),
         }
+    }
+
+    /// Access the underlying Asupersync context captured by this runtime.
+    #[must_use]
+    pub const fn cx(&self) -> &Cx {
+        &self.cx
+    }
+
+    /// Return the region that owns tasks spawned through this runtime.
+    #[must_use]
+    pub const fn region_id(&self) -> RegionId {
+        self.region_id
     }
 }
 
@@ -38,6 +50,7 @@ mod tests {
     fn test_asupersync_runtime_creation() {
         let cx = Cx::for_testing();
         let rt = AsupersyncRuntime::new(&cx);
-        assert_eq!(rt.region_id, cx.region());
+        assert_eq!(rt.region_id(), cx.region_id());
+        assert_eq!(rt.cx().region_id(), cx.region_id());
     }
 }
