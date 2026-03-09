@@ -1295,7 +1295,11 @@ where
                 state.active += 1;
                 state.total_acquisitions += 1;
                 if let Some(id) = waiter_id {
-                    state.waiters.retain(|w| w.id != id);
+                    if state.waiters.front().is_some_and(|w| w.id == id) {
+                        state.waiters.pop_front();
+                    } else {
+                        state.waiters.retain(|w| w.id != id);
+                    }
                 }
                 Some((idle.resource, idle.created_at))
             } else {
@@ -1333,7 +1337,11 @@ where
 
         state.creating += 1;
         if let Some(id) = waiter_id {
-            state.waiters.retain(|w| w.id != id);
+            if state.waiters.front().is_some_and(|w| w.id == id) {
+                state.waiters.pop_front();
+            } else {
+                state.waiters.retain(|w| w.id != id);
+            }
         }
         true
     }
