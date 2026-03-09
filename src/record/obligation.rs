@@ -63,6 +63,7 @@ pub enum ObligationKind {
 
 impl ObligationKind {
     /// Returns a short string for tracing and diagnostics.
+    #[inline]
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -93,6 +94,7 @@ pub enum ObligationAbortReason {
 
 impl ObligationAbortReason {
     /// Returns a short string for tracing and diagnostics.
+    #[inline]
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -143,6 +145,7 @@ pub enum ObligationState {
 
 impl ObligationState {
     /// Returns true if the obligation is in a terminal state.
+    #[inline]
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Committed | Self::Aborted | Self::Leaked)
@@ -150,18 +153,21 @@ impl ObligationState {
 
     /// Returns true if the obligation is resolved (not pending).
     /// Note: Leaked counts as resolved (it's terminal, just not successful).
+    #[inline]
     #[must_use]
     pub const fn is_resolved(self) -> bool {
         self.is_terminal()
     }
 
     /// Returns true if the obligation was successfully resolved (not leaked).
+    #[inline]
     #[must_use]
     pub const fn is_success(self) -> bool {
         matches!(self, Self::Committed | Self::Aborted)
     }
 
     /// Returns true if the obligation leaked (error state).
+    #[inline]
     #[must_use]
     pub const fn is_leaked(self) -> bool {
         matches!(self, Self::Leaked)
@@ -313,6 +319,7 @@ impl ObligationRecord {
     }
 
     /// Returns true if the obligation is still pending.
+    #[inline]
     #[must_use]
     pub const fn is_pending(&self) -> bool {
         matches!(self.state, ObligationState::Reserved)

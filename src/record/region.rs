@@ -362,12 +362,14 @@ impl RegionRecord {
     }
 
     /// Returns the current region state.
+    #[inline]
     #[must_use]
     pub fn state(&self) -> RegionState {
         self.state.load()
     }
 
     /// Returns the region budget.
+    #[inline]
     #[must_use]
     pub fn budget(&self) -> Budget {
         self.inner.read().budget
@@ -379,6 +381,7 @@ impl RegionRecord {
     }
 
     /// Returns the current admission limits for this region.
+    #[inline]
     #[must_use]
     pub fn limits(&self) -> RegionLimits {
         self.inner.read().limits.clone()
@@ -390,6 +393,7 @@ impl RegionRecord {
     }
 
     /// Returns the number of pending obligations tracked for this region.
+    #[inline]
     #[must_use]
     pub fn pending_obligations(&self) -> usize {
         self.inner.read().pending_obligations
@@ -460,6 +464,7 @@ impl RegionRecord {
     }
 
     /// Returns true if the region has any live children, tasks, or pending obligations.
+    #[inline]
     #[must_use]
     pub fn has_live_work(&self) -> bool {
         let inner = self.inner.read();

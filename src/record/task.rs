@@ -244,12 +244,14 @@ impl TaskWakeState {
 
 impl TaskState {
     /// Returns true if the task is in a terminal state.
+    #[inline]
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed(_))
     }
 
     /// Returns true if cancellation has been requested or is in progress.
+    #[inline]
     #[must_use]
     pub fn is_cancelling(&self) -> bool {
         matches!(
@@ -259,6 +261,7 @@ impl TaskState {
     }
 
     /// Returns true if the task can be polled.
+    #[inline]
     #[must_use]
     pub fn can_be_polled(&self) -> bool {
         matches!(
@@ -380,12 +383,14 @@ impl TaskRecord {
     }
 
     /// Returns the logical time when the task was created.
+    #[inline]
     #[must_use]
     pub const fn created_at(&self) -> Time {
         self.created_at
     }
 
     /// Sets the shared CxInner.
+    #[inline]
     pub fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
         self.cx_inner = Some(inner);
     }
@@ -408,12 +413,14 @@ impl TaskRecord {
     }
 
     /// Returns true if the task can be polled.
+    #[inline]
     #[must_use]
     pub fn is_runnable(&self) -> bool {
         matches!(&self.state, TaskState::Created | TaskState::Running) || self.state.can_be_polled()
     }
 
     /// Returns a string name for the current state (for tracing).
+    #[inline]
     #[must_use]
     pub fn state_name(&self) -> &'static str {
         match &self.state {
@@ -427,6 +434,7 @@ impl TaskRecord {
     }
 
     /// Returns the atomic lifecycle phase for this task.
+    #[inline]
     #[must_use]
     pub fn phase(&self) -> TaskPhase {
         self.phase.load()
