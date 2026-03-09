@@ -11,18 +11,23 @@ use crate::net::tcp::traits::TcpListenerApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
+use crate::types::Time;
 use parking_lot::Mutex;
 use std::future::poll_fn;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(4);
 const REARMED_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const REARMED_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(32);
 const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(25);
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
 
 /// A TCP listener.
 #[derive(Debug)]
@@ -30,6 +35,7 @@ pub struct TcpListener {
     pub(crate) inner: net::TcpListener,
     registration: Mutex<Option<IoRegistration>>,
     accept_storm: Mutex<AcceptStormState>,
+    time_getter: fn() -> Time,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,11 +47,18 @@ enum InterestRegistrationMode {
 #[derive(Debug, Default)]
 struct AcceptStormState {
     consecutive_would_block: u32,
-    last_would_block_at: Option<Instant>,
+    last_would_block_at: Option<Time>,
 }
 
 impl TcpListener {
     pub(crate) fn from_std(inner: net::TcpListener) -> io::Result<Self> {
+        Self::from_std_with_time_getter(inner, wall_clock_now)
+    }
+
+    pub(crate) fn from_std_with_time_getter(
+        inner: net::TcpListener,
+        time_getter: fn() -> Time,
+    ) -> io::Result<Self> {
         // Ensure accept polling never blocks when callers pass a default
         // blocking std listener.
         inner.set_nonblocking(true)?;
@@ -53,6 +66,7 @@ impl TcpListener {
             inner,
             registration: Mutex::new(None),
             accept_storm: Mutex::new(AcceptStormState::default()),
+            time_getter,
         })
     }
 
@@ -127,10 +141,10 @@ impl TcpListener {
 
     fn note_accept_would_block(&self) -> Duration {
         let mut state = self.accept_storm.lock();
-        let now = Instant::now();
+        let now = (self.time_getter)();
 
         if let Some(last) = state.last_would_block_at {
-            if now.saturating_duration_since(last) <= ACCEPT_STORM_WINDOW {
+            if Duration::from_nanos(now.duration_since(last)) <= ACCEPT_STORM_WINDOW {
                 state.consecutive_would_block = state.consecutive_would_block.saturating_add(1);
             } else {
                 state.consecutive_would_block = 1;
@@ -300,8 +314,11 @@ mod tests {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
+    use std::time::Instant;
+
+    static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn test_bind() {
@@ -323,6 +340,14 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW_NANOS.store(nanos, Ordering::SeqCst);
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW_NANOS.load(Ordering::SeqCst))
     }
 
     struct CountingWaker {
@@ -438,6 +463,60 @@ mod tests {
             hits.load(Ordering::SeqCst),
             0,
             "reactor-armed accept retry should rely on the reactor instead of self-waking"
+        );
+    }
+
+    #[test]
+    fn accept_storm_window_respects_custom_time_getter() {
+        let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        set_test_time(0);
+        let listener = TcpListener::from_std_with_time_getter(raw, test_time).expect("wrap");
+
+        assert_eq!(listener.note_accept_would_block(), REARMED_ACCEPT_BACKOFF_BASE);
+        assert_eq!(
+            listener.accept_storm.lock().consecutive_would_block,
+            1,
+            "first would-block should start the storm counter"
+        );
+
+        set_test_time(Duration::from_millis(5).as_nanos() as u64);
+        assert_eq!(listener.note_accept_would_block(), REARMED_ACCEPT_BACKOFF_BASE);
+        assert_eq!(
+            listener.accept_storm.lock().consecutive_would_block,
+            2,
+            "within-window would-block should increment the storm counter"
+        );
+
+        set_test_time(Duration::from_millis(50).as_nanos() as u64);
+        assert_eq!(listener.note_accept_would_block(), REARMED_ACCEPT_BACKOFF_BASE);
+        assert_eq!(
+            listener.accept_storm.lock().consecutive_would_block,
+            1,
+            "outside-window would-block should reset the storm counter"
+        );
+    }
+
+    #[test]
+    fn accept_storm_backoff_escalates_without_sleep() {
+        let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        set_test_time(0);
+        let listener = TcpListener::from_std_with_time_getter(raw, test_time).expect("wrap");
+
+        let mut backoff = Duration::ZERO;
+        for idx in 0..65 {
+            set_test_time(Duration::from_millis(idx).as_nanos() as u64);
+            backoff = listener.note_accept_would_block();
+        }
+
+        assert_eq!(
+            backoff,
+            REARMED_ACCEPT_BACKOFF_BASE.saturating_mul(2),
+            "65 consecutive would-blocks inside the storm window should double the backoff"
+        );
+        assert_eq!(
+            listener.accept_storm.lock().consecutive_would_block,
+            65,
+            "storm counter should track the deterministic sequence length"
         );
     }
 }
