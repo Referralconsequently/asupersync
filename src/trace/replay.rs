@@ -70,7 +70,10 @@ pub struct TraceMetadata {
     /// Original RNG seed used for the execution.
     pub seed: u64,
 
-    /// Wall-clock timestamp when recording started (Unix epoch nanos).
+    /// Deterministic recording stamp for this trace.
+    ///
+    /// `0` means no wall-clock timestamp was attached. Deterministic runtime
+    /// paths use `0` by default so identical runs produce identical metadata.
     pub recorded_at: u64,
 
     /// Runtime configuration hash for compatibility checking.
@@ -90,9 +93,7 @@ impl TraceMetadata {
         Self {
             version: REPLAY_SCHEMA_VERSION,
             seed,
-            recorded_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos() as u64),
+            recorded_at: 0,
             config_hash: 0,
             description: None,
         }
@@ -735,7 +736,17 @@ mod tests {
         let meta = TraceMetadata::new(42);
         assert_eq!(meta.version, REPLAY_SCHEMA_VERSION);
         assert_eq!(meta.seed, 42);
+        assert_eq!(meta.recorded_at, 0);
         assert!(meta.is_compatible());
+    }
+
+    #[test]
+    fn metadata_creation_is_deterministic_for_same_seed() {
+        let first = TraceMetadata::new(42);
+        let second = TraceMetadata::new(42);
+
+        assert_eq!(first, second);
+        assert_eq!(first.recorded_at, 0);
     }
 
     #[test]

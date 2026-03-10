@@ -4257,6 +4257,42 @@ mod tests {
         crate::test_complete!("replay_records_correct_severity_for_cancelled_task");
     }
 
+    #[test]
+    fn replay_recording_metadata_is_stable_for_same_seed() {
+        init_test("replay_recording_metadata_is_stable_for_same_seed");
+
+        let mut first = LabRuntime::new(LabConfig::new(42).with_default_replay_recording());
+        let mut second = LabRuntime::new(LabConfig::new(42).with_default_replay_recording());
+
+        let first_trace = first
+            .finish_replay_trace()
+            .expect("first replay recording enabled");
+        let second_trace = second
+            .finish_replay_trace()
+            .expect("second replay recording enabled");
+
+        crate::assert_with_log!(
+            first_trace.metadata == second_trace.metadata,
+            "replay metadata should match for identical seeds",
+            &first_trace.metadata,
+            &second_trace.metadata
+        );
+        crate::assert_with_log!(
+            first_trace.events == second_trace.events,
+            "replay events should match for identical seeds",
+            &first_trace.events,
+            &second_trace.events
+        );
+        crate::assert_with_log!(
+            first_trace.metadata.recorded_at == 0,
+            "recorded_at defaults to deterministic zero stamp",
+            0u64,
+            first_trace.metadata.recorded_at
+        );
+
+        crate::test_complete!("replay_recording_metadata_is_stable_for_same_seed");
+    }
+
     // =========================================================================
     // Pure data-type tests (wave 40 – CyanBarn)
     // =========================================================================
