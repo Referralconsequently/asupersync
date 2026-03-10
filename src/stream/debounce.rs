@@ -15,6 +15,13 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+/// Cooperative budget for immediately-ready items drained in a single poll.
+///
+/// Without this cap, an always-ready upstream stream can monopolize the
+/// executor forever while debounce keeps replacing the buffered item and
+/// resetting the quiet-period timer.
+const DEBOUNCE_READY_DRAIN_BUDGET: usize = 1024;
+
 /// A stream that debounces items, emitting only after a quiet period.
 ///
 /// Created by [`StreamExt::debounce`](super::StreamExt::debounce).
@@ -109,6 +116,7 @@ impl<S: Stream> Stream for Debounce<S> {
 
         // Drain all immediately available items from the underlying stream.
         let had_pending_before = this.pending.is_some();
+        let mut drained_this_poll = 0usize;
         if !*this.done {
             loop {
                 match this.stream.as_mut().poll_next(cx) {
@@ -116,6 +124,15 @@ impl<S: Stream> Stream for Debounce<S> {
                         *this.pending = Some((item, (this.time_getter)()));
                         // New item arrived, reset the timer.
                         *this.timer = None;
+                        drained_this_poll += 1;
+                        if drained_this_poll >= DEBOUNCE_READY_DRAIN_BUDGET {
+                            // Yield cooperatively so an always-ready source
+                            // cannot monopolize the executor. The buffered item
+                            // remains pending and a self-wake drives the next
+                            // burst-drain step.
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
                     }
                     Poll::Ready(None) => {
                         *this.done = true;
@@ -182,6 +199,18 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     fn init_test(name: &str) {
@@ -312,6 +341,21 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct AlwaysReadyCounter {
+        next: usize,
+    }
+
+    impl Stream for AlwaysReadyCounter {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let item = self.next;
+            self.next = self.next.saturating_add(1);
+            Poll::Ready(Some(item))
+        }
+    }
+
     #[test]
     fn debounce_emits_immediately_when_timer_future_is_ready() {
         init_test("debounce_emits_immediately_when_timer_future_is_ready");
@@ -377,5 +421,44 @@ mod tests {
             "debounce timer must use Sleep::new for wake registration"
         );
         crate::test_complete!("debounce_custom_time_getter_arms_wake_capable_sleep");
+    }
+
+    #[test]
+    fn debounce_yields_cooperatively_on_always_ready_burst() {
+        init_test("debounce_yields_cooperatively_on_always_ready_burst");
+        set_test_time(0);
+        let woke = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woke))));
+        let mut cx = Context::from_waker(&waker);
+        let mut stream = Debounce::with_time_getter(
+            AlwaysReadyCounter::default(),
+            Duration::from_secs(5),
+            test_time,
+        );
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
+        assert!(
+            woke.swap(false, Ordering::SeqCst),
+            "debounce should self-wake after hitting the cooperative burst budget"
+        );
+        assert_eq!(
+            stream.pending.as_ref().map(|(item, _)| *item),
+            Some(DEBOUNCE_READY_DRAIN_BUDGET - 1)
+        );
+        assert!(
+            stream.timer.is_none(),
+            "timer should stay cleared while the upstream keeps producing immediately"
+        );
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "debounce should continue self-waking while draining later burst slices"
+        );
+        assert_eq!(
+            stream.pending.as_ref().map(|(item, _)| *item),
+            Some((DEBOUNCE_READY_DRAIN_BUDGET * 2) - 1)
+        );
+        crate::test_complete!("debounce_yields_cooperatively_on_always_ready_burst");
     }
 }

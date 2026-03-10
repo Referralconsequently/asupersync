@@ -39,10 +39,11 @@ fn bench_region_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("tracing_overhead");
 
     group.bench_function("create_root_region", |b: &mut criterion::Bencher| {
-        let mut state = RuntimeState::new();
-        b.iter(|| {
-            std::hint::black_box(state.create_root_region(Budget::INFINITE))
-        });
+        b.iter_batched(
+            || RuntimeState::new(),
+            |mut state| std::hint::black_box(state.create_root_region(Budget::INFINITE)),
+            criterion::BatchSize::SmallInput,
+        );
     });
 
     group.finish();
@@ -52,11 +53,17 @@ fn bench_task_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("tracing_overhead");
 
     group.bench_function("create_task", |b: &mut criterion::Bencher| {
-        let mut state = RuntimeState::new();
-        let region = state.create_root_region(Budget::INFINITE);
-        b.iter(|| {
-            std::hint::black_box(state.create_task(region, Budget::INFINITE, async { 42 }))
-        });
+        b.iter_batched(
+            || {
+                let mut state = RuntimeState::new();
+                let region = state.create_root_region(Budget::INFINITE);
+                (state, region)
+            },
+            |(mut state, region)| {
+                std::hint::black_box(state.create_task(region, Budget::INFINITE, async { 42 }))
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 
     group.finish();
