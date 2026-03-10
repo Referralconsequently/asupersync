@@ -2121,7 +2121,7 @@ impl ThreeLaneWorker {
             .as_ref()
             .map_or(Time::ZERO, TimerDriverHandle::now);
 
-        // ── PHASE 1: Global queues (lock-free) ───────────────────────
+        // ── PHASE 1: Highest Priority Global Queue ───────────────────────
         if suggestion == SchedulingSuggestion::MeetDeadlines {
             // Deadline pressure: global timed first.
             if let Some(tt) = self.global.pop_timed_if_due(now) {
@@ -2129,14 +2129,6 @@ impl ThreeLaneWorker {
                 self.ready_dispatch_streak = 0;
                 self.preemption_metrics.timed_dispatches += 1;
                 return Some(self.finish_dispatch(tt.task));
-            }
-            if check_cancel {
-                if let Some(pt) = self.global.pop_cancel() {
-                    self.cancel_streak += 1;
-                    self.ready_dispatch_streak = 0;
-                    self.record_cancel_dispatch(base_limit, effective_limit);
-                    return Some(self.finish_dispatch(pt.task));
-                }
             }
         } else {
             // Default / drain: cancel > timed.
@@ -2148,33 +2140,66 @@ impl ThreeLaneWorker {
                     return Some(self.finish_dispatch(pt.task));
                 }
             }
+        }
+
+        // ── PHASE 2: Interleaved Local and Global Priority Lanes ────────
+        // We acquire the local `PriorityScheduler` lock once and check
+        // the remaining cancel/timed lanes in strict suggestion order.
+        let mut local = self.local.lock();
+        let rng_hint = self.rng.next_u64();
+
+        if suggestion == SchedulingSuggestion::MeetDeadlines {
+            // MeetDeadlines: Timed > Cancel (global timed already checked)
+            if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
+                drop(local);
+                self.cancel_streak = 0;
+                self.ready_dispatch_streak = 0;
+                self.preemption_metrics.timed_dispatches += 1;
+                return Some(self.finish_dispatch(task));
+            }
+            if check_cancel {
+                if let Some(pt) = self.global.pop_cancel() {
+                    drop(local);
+                    self.cancel_streak += 1;
+                    self.ready_dispatch_streak = 0;
+                    self.record_cancel_dispatch(base_limit, effective_limit);
+                    return Some(self.finish_dispatch(pt.task));
+                }
+                if let Some(task) = local.pop_cancel_only_with_hint(rng_hint) {
+                    drop(local);
+                    self.cancel_streak += 1;
+                    self.ready_dispatch_streak = 0;
+                    self.record_cancel_dispatch(base_limit, effective_limit);
+                    return Some(self.finish_dispatch(task));
+                }
+            }
+        } else {
+            // Default: Cancel > Timed (global cancel already checked)
+            if check_cancel {
+                if let Some(task) = local.pop_cancel_only_with_hint(rng_hint) {
+                    drop(local);
+                    self.cancel_streak += 1;
+                    self.ready_dispatch_streak = 0;
+                    self.record_cancel_dispatch(base_limit, effective_limit);
+                    return Some(self.finish_dispatch(task));
+                }
+            }
             if let Some(tt) = self.global.pop_timed_if_due(now) {
+                drop(local);
                 self.cancel_streak = 0;
                 self.ready_dispatch_streak = 0;
                 self.preemption_metrics.timed_dispatches += 1;
                 return Some(self.finish_dispatch(tt.task));
             }
-        }
-
-        // ── PHASE 2: Local PriorityScheduler (Cancel / Timed) ────────
-        // We MUST check cancel and timed lanes before ready paths to avoid
-        // priority inversion where a ready task preempts a pending cancel/timed task.
-        if let Some((lane, task)) = self.try_local_priority_lanes(suggestion, check_cancel, now) {
-            match lane {
-                0 => {
-                    self.cancel_streak = self.cancel_streak.saturating_add(1);
-                    self.ready_dispatch_streak = 0;
-                    self.record_cancel_dispatch(base_limit, effective_limit);
-                }
-                1 => {
-                    self.cancel_streak = 0;
-                    self.ready_dispatch_streak = 0;
-                    self.preemption_metrics.timed_dispatches += 1;
-                }
-                _ => unreachable!(),
+            if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
+                drop(local);
+                self.cancel_streak = 0;
+                self.ready_dispatch_streak = 0;
+                self.preemption_metrics.timed_dispatches += 1;
+                return Some(self.finish_dispatch(task));
             }
-            return Some(self.finish_dispatch(task));
         }
+        drop(local);
 
         if self.should_force_ready_handoff() {
             self.preemption_metrics.browser_ready_handoff_yields += 1;
