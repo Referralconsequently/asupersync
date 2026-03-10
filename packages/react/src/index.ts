@@ -17,6 +17,7 @@ import {
   type RegionHandle,
 } from "@asupersync/browser";
 import {
+  createElement,
   createContext,
   useCallback,
   useContext,
@@ -30,7 +31,7 @@ import {
 export * from "@asupersync/browser";
 
 export interface ReactRuntimeSupportDiagnostics
-  extends BrowserRuntimeSupportDiagnostics {
+  extends Omit<BrowserRuntimeSupportDiagnostics, "packageName"> {
   packageName: "@asupersync/react";
 }
 
@@ -204,7 +205,7 @@ export function ReactRuntimeProvider({
     [status, diagnostics, runtime, error, reload],
   );
 
-  return <ReactRuntimeContext.Provider value={value}>{children}</ReactRuntimeContext.Provider>;
+  return createElement(ReactRuntimeContext.Provider, { value }, children);
 }
 
 export function useReactRuntimeContext(): ReactRuntimeContextValue {

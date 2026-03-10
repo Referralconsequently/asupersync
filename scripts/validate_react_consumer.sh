@@ -70,13 +70,21 @@ cp -R "${REPO_ROOT}/packages/browser" "${PKG_DIR}/browser"
 cp -R "${REPO_ROOT}/packages/react" "${PKG_DIR}/react"
 
 # Consumer installs from local package copies; rewrite workspace protocol so npm can resolve.
-python3 - "${PKG_DIR}/browser/package.json" "${PKG_DIR}/react/package.json" <<'PY'
+python3 - "${CONSUMER_DIR}/package.json" "${PKG_DIR}/browser/package.json" "${PKG_DIR}/react/package.json" <<'PY'
 import json
 import pathlib
 import sys
 
-browser_pkg = pathlib.Path(sys.argv[1])
-react_pkg = pathlib.Path(sys.argv[2])
+consumer_pkg = pathlib.Path(sys.argv[1])
+browser_pkg = pathlib.Path(sys.argv[2])
+react_pkg = pathlib.Path(sys.argv[3])
+
+consumer_data = json.loads(consumer_pkg.read_text())
+consumer_deps = consumer_data.setdefault("dependencies", {})
+consumer_deps["@asupersync/react"] = "file:../packages/react"
+consumer_deps["@asupersync/browser"] = "file:../packages/browser"
+consumer_deps["@asupersync/browser-core"] = "file:../packages/browser-core"
+consumer_pkg.write_text(json.dumps(consumer_data, indent=2) + "\n")
 
 browser_data = json.loads(browser_pkg.read_text())
 browser_deps = browser_data.setdefault("dependencies", {})

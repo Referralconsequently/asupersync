@@ -15,9 +15,9 @@ fn browser_core_package_manifest_declares_artifact_layout() {
     let raw = fs::read_to_string(package_json_path).expect("read package.json");
     let manifest: Value = serde_json::from_str(&raw).expect("parse package.json");
 
-    assert_eq!(manifest["main"], "./asupersync.js");
-    assert_eq!(manifest["module"], "./asupersync.js");
-    assert_eq!(manifest["types"], "./asupersync.d.ts");
+    assert_eq!(manifest["main"], "./index.js");
+    assert_eq!(manifest["module"], "./index.js");
+    assert_eq!(manifest["types"], "./index.d.ts");
     assert_eq!(
         manifest["exports"]["./abi-metadata.json"],
         "./abi-metadata.json"

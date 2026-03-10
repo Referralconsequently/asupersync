@@ -42,7 +42,6 @@ import initWasm, {
   type HandleKind,
   type HandleRef,
   type InitInput,
-  type Outcome,
   type Recoverability,
   type ScopeEnterRequest,
   type TaskCancelRequest,
@@ -98,7 +97,6 @@ export type {
   HandleKind,
   HandleRef,
   InitInput,
-  Outcome,
   Recoverability,
   ScopeEnterRequest,
   TaskCancelRequest,
@@ -112,7 +110,7 @@ export type {
 };
 
 export type BrowserAbiMetadata = typeof abiMetadata;
-type BrowserOutcome<T = unknown> = Outcome<T, AbiFailure>;
+type BrowserOutcome<T = unknown> = import("@asupersync/browser-core").Outcome<T, AbiFailure>;
 
 export interface BrowserRuntimeOptions {
   wasmInput?: InitInput;
@@ -335,6 +333,8 @@ export function formatOutcomeFailure(outcome: Exclude<BrowserOutcome, { outcome:
     case "panicked":
       return `panicked: ${outcome.message}`;
   }
+
+  return "unknown outcome failure";
 }
 
 export function unwrapOutcome<T>(outcome: BrowserOutcome<T>): T {
@@ -462,7 +462,7 @@ export class TaskHandle {
   }
 
   join(
-    outcome: BrowserOutcome,
+    outcome: BrowserOutcome<WasmValue>,
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<WasmValue> {
     return taskJoin(this.core, outcome, consumerVersion);
