@@ -563,9 +563,8 @@ impl LoadBalancer {
                             let count = ep.connection_count();
                             if top_n.len() == n {
                                 let last = &top_n[n - 1];
-                                if last.1 == 0 && count >= last.1 {
-                                    // Already have N items with 0 connections, can't improve
-                                    continue;
+                                if last.1 == 0 {
+                                    break;
                                 }
                                 if count > last.1 || (count == last.1 && idx > last.0) {
                                     continue;
@@ -599,8 +598,8 @@ impl LoadBalancer {
 
                             if top_n.len() == n {
                                 let last = &top_n[n - 1];
-                                if last.1 == 0 && count > 0 {
-                                    continue; // Can't beat zero load
+                                if last.1 == 0 {
+                                    break;
                                 }
                                 let (other_idx, other_count, other_weight, _) = *last;
                                 let is_better = (count * other_weight) < (other_count * weight)
