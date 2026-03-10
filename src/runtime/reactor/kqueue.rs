@@ -210,24 +210,55 @@ impl Reactor for KqueueReactor {
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         let mut regs = self.registrations.lock();
-        let info = regs
-            .get_mut(&token)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
+        let entry = match regs.entry(token) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry,
+            std::collections::hash_map::Entry::Vacant(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "token not registered",
+                ));
+            }
+        };
+        let raw_fd = entry.get().raw_fd;
 
         // Create the new polling event
         let event = Self::interest_to_poll_event(token, interest);
 
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
         // Modify the kqueue registration
-        self.poller.modify(&borrowed_fd, event)?;
+        let result = match self.poller.modify(&borrowed_fd, event) {
+            Ok(()) => {
+                entry.into_mut().interest = interest;
+                Ok(())
+            }
+            Err(err) => match err.raw_os_error() {
+                Some(libc::ENOENT) => {
+                    entry.remove();
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "token not registered",
+                    ))
+                }
+                Some(libc::EBADF) => {
+                    let fd_still_valid = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } != -1;
+                    if fd_still_valid {
+                        Err(err)
+                    } else {
+                        entry.remove();
+                        Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "token not registered",
+                        ))
+                    }
+                }
+                _ => Err(err),
+            },
+        };
 
-        // Update our bookkeeping
-        info.interest = interest;
-
-        Ok(())
+        result
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
