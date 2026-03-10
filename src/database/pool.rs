@@ -36,8 +36,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// Time source hook used by pool lifecycle bookkeeping.
+pub type TimeGetter = fn() -> Instant;
+
+/// Sleep hook used by synchronous retry/backoff loops.
+pub type SleepFn = fn(Duration);
+
 fn wall_clock_now() -> Instant {
     Instant::now()
+}
+
+fn thread_sleep(duration: Duration) {
+    std::thread::sleep(duration);
 }
 
 // ─── ConnectionManager trait ────────────────────────────────────────────────
@@ -201,7 +211,8 @@ pub struct DbPool<M: ConnectionManager> {
     config: DbPoolConfig,
     inner: Mutex<PoolInner<M::Connection>>,
     stats: PoolStatCounters,
-    time_getter: fn() -> Instant,
+    time_getter: TimeGetter,
+    sleep_fn: SleepFn,
 }
 
 struct PoolStatCounters {
@@ -289,14 +300,20 @@ impl<E: std::error::Error + 'static> std::error::Error for DbPoolError<E> {
 impl<M: ConnectionManager> DbPool<M> {
     /// Create a new connection pool with the given manager and configuration.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
-        Self::with_time_getter(manager, config, wall_clock_now)
+        Self::with_time_getter_and_sleep_fn(manager, config, wall_clock_now, thread_sleep)
     }
 
     /// Create a new connection pool with a custom time source.
-    pub fn with_time_getter(
+    pub fn with_time_getter(manager: M, config: DbPoolConfig, time_getter: TimeGetter) -> Self {
+        Self::with_time_getter_and_sleep_fn(manager, config, time_getter, thread_sleep)
+    }
+
+    /// Create a new connection pool with custom time and sleep hooks.
+    pub fn with_time_getter_and_sleep_fn(
         manager: M,
         config: DbPoolConfig,
-        time_getter: fn() -> Instant,
+        time_getter: TimeGetter,
+        sleep_fn: SleepFn,
     ) -> Self {
         Self {
             manager: Arc::new(manager),
@@ -308,6 +325,7 @@ impl<M: ConnectionManager> DbPool<M> {
             }),
             stats: PoolStatCounters::default(),
             time_getter,
+            sleep_fn,
         }
     }
 
@@ -324,8 +342,14 @@ impl<M: ConnectionManager> DbPool<M> {
 
     /// Get the time source used by lifecycle bookkeeping.
     #[must_use]
-    pub const fn time_getter(&self) -> fn() -> Instant {
+    pub const fn time_getter(&self) -> TimeGetter {
         self.time_getter
+    }
+
+    /// Get the sleep hook used by synchronous retry/backoff loops.
+    #[must_use]
+    pub const fn sleep_fn(&self) -> SleepFn {
+        self.sleep_fn
     }
 
     /// Get current pool statistics.
@@ -492,7 +516,7 @@ impl<M: ConnectionManager> DbPool<M> {
 
                     // Calculate backoff delay (no jitter in synchronous context).
                     let delay = calculate_delay(policy, attempt, None);
-                    std::thread::sleep(delay.min(remaining));
+                    (self.sleep_fn)(delay.min(remaining));
 
                     // Re-check deadline after sleep.
                     if (self.time_getter)() >= deadline {
@@ -1174,7 +1198,7 @@ impl<M: AsyncConnectionManager> fmt::Debug for AsyncPooledConnection<'_, M> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1184,6 +1208,7 @@ mod tests {
     static TEST_NOW_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
     static TEST_NOW_BASE: OnceLock<Instant> = OnceLock::new();
     static TEST_TIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static TEST_SLEEP_CALLS: OnceLock<Mutex<Vec<Duration>>> = OnceLock::new();
 
     fn set_test_time(nanos: u64) {
         TEST_NOW_OFFSET_NS.store(nanos, Ordering::SeqCst);
@@ -1203,6 +1228,32 @@ mod tests {
                 TEST_NOW_OFFSET_NS.load(Ordering::SeqCst),
             ))
             .expect("test instant overflow")
+    }
+
+    fn reset_test_sleep_calls() {
+        TEST_SLEEP_CALLS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("test sleep call lock poisoned")
+            .clear();
+    }
+
+    fn recorded_test_sleep_calls() -> Vec<Duration> {
+        TEST_SLEEP_CALLS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("test sleep call lock poisoned")
+            .clone()
+    }
+
+    fn advancing_sleep(duration: Duration) {
+        TEST_SLEEP_CALLS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("test sleep call lock poisoned")
+            .push(duration);
+        let delta_ns = u64::try_from(duration.as_nanos()).expect("sleep duration too large");
+        TEST_NOW_OFFSET_NS.fetch_add(delta_ns, Ordering::SeqCst);
     }
 
     // ================================================================
@@ -2012,6 +2063,57 @@ mod tests {
         assert_eq!(pool.stats().total_discards, 1);
         assert_eq!(pool.manager.disconnects(), 1);
         crate::test_complete!("async_pool_time_getter_evicts_stale_idle_on_checkout_without_sleep");
+    }
+
+    #[test]
+    fn get_with_retry_uses_injected_sleep_hook_without_wall_sleep() {
+        init_test("get_with_retry_uses_injected_sleep_hook_without_wall_sleep");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
+        reset_test_sleep_calls();
+
+        let manager = TestManager::new();
+        manager.set_fail_connect(true);
+        let config = DbPoolConfig::default().connection_timeout(Duration::from_millis(5));
+        let pool =
+            DbPool::with_time_getter_and_sleep_fn(manager, config, test_now, advancing_sleep);
+        let policy = RetryPolicy::new()
+            .with_max_attempts(10)
+            .with_initial_delay(Duration::from_millis(2))
+            .with_max_delay(Duration::from_millis(10))
+            .with_multiplier(2.0)
+            .no_jitter();
+        let expected_sleeps = vec![Duration::from_millis(2), Duration::from_millis(3)];
+        let expected_elapsed_ns =
+            u64::try_from(Duration::from_millis(5).as_nanos()).expect("duration fits in u64");
+
+        let result = pool.get_with_retry(&policy);
+        crate::assert_with_log!(
+            matches!(result, Err(DbPoolError::Timeout)),
+            "retry times out after synthetic backoff budget",
+            true,
+            matches!(result, Err(DbPoolError::Timeout))
+        );
+        crate::assert_with_log!(
+            pool.stats().total_timeouts == 1,
+            "timeout metric increments once",
+            1u64,
+            pool.stats().total_timeouts
+        );
+        let actual_sleeps = recorded_test_sleep_calls();
+        crate::assert_with_log!(
+            actual_sleeps == expected_sleeps,
+            "sleep hook receives bounded retry delays",
+            expected_sleeps,
+            actual_sleeps
+        );
+        crate::assert_with_log!(
+            TEST_NOW_OFFSET_NS.load(Ordering::SeqCst) == expected_elapsed_ns,
+            "synthetic clock advanced exactly by sleep hook",
+            expected_elapsed_ns,
+            TEST_NOW_OFFSET_NS.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("get_with_retry_uses_injected_sleep_hook_without_wall_sleep");
     }
 
     // ================================================================
