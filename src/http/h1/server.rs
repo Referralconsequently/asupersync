@@ -232,6 +232,9 @@ where
                 );
 
                 poll_fn(|cx| {
+                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(ReadOutcome::Shutdown);
+                    }
                     if signal.is_shutting_down() {
                         return Poll::Ready(ReadOutcome::Shutdown);
                     }
@@ -245,7 +248,17 @@ where
                 })
                 .await
             } else {
-                ReadOutcome::Read(framed.poll_next_ready().await)
+                let mut read_fut = std::pin::pin!(framed.poll_next_ready());
+                poll_fn(|cx| {
+                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(ReadOutcome::Shutdown);
+                    }
+                    if let Poll::Ready(r) = read_fut.as_mut().poll(cx) {
+                        return Poll::Ready(ReadOutcome::Read(r));
+                    }
+                    Poll::Pending
+                })
+                .await
             }
         });
 
@@ -358,9 +371,16 @@ where
                 let mut reject = Response::new(417, default_reason(417), Vec::new());
                 finalize_response_persistence(req.version, &mut reject, true);
                 framed.send(reject)?;
-                poll_fn(|cx| framed.poll_flush(cx))
-                    .await
-                    .map_err(HttpError::Io)?;
+                poll_fn(|cx| {
+                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "connection cancelled",
+                        ))));
+                    }
+                    framed.poll_flush(cx).map_err(HttpError::Io)
+                })
+                .await?;
                 state.requests_served += 1;
                 state.last_request_at = Cx::current()
                     .and_then(|cx| cx.timer_driver())
@@ -373,9 +393,16 @@ where
                 let mut continue_response = Response::new(100, default_reason(100), Vec::new());
                 finalize_response_persistence(req.version, &mut continue_response, false);
                 framed.send(continue_response)?;
-                poll_fn(|cx| framed.poll_flush(cx))
-                    .await
-                    .map_err(HttpError::Io)?;
+                poll_fn(|cx| {
+                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "connection cancelled",
+                        ))));
+                    }
+                    framed.poll_flush(cx).map_err(HttpError::Io)
+                })
+                .await?;
             }
 
             // Determine if we should close after this request
@@ -395,9 +422,16 @@ where
             // Write response
             framed.send(resp)?;
             // `Framed::send` only encodes into the internal write buffer; flush to the socket.
-            poll_fn(|cx| framed.poll_flush(cx))
-                .await
-                .map_err(HttpError::Io)?;
+            poll_fn(|cx| {
+                if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                    return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "connection cancelled",
+                    ))));
+                }
+                framed.poll_flush(cx).map_err(HttpError::Io)
+            })
+            .await?;
 
             state.requests_served += 1;
             state.last_request_at = Cx::current()
