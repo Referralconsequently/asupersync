@@ -317,6 +317,21 @@ impl LoadBalancer {
     where
         F: FnMut(&(usize, &'a Arc<Endpoint>), &(usize, &'a Arc<Endpoint>)) -> std::cmp::Ordering,
     {
+        if n == 0 || available.is_empty() {
+            return Vec::new();
+        }
+        if n == 1 {
+            let mut best_idx = 0;
+            let mut best_ep = available[0];
+            for (i, ep) in available.into_iter().enumerate().skip(1) {
+                if cmp(&(i, ep), &(best_idx, best_ep)) == std::cmp::Ordering::Less {
+                    best_idx = i;
+                    best_ep = ep;
+                }
+            }
+            return vec![best_ep];
+        }
+
         let mut ranked: Vec<(usize, &Arc<Endpoint>)> = available.into_iter().enumerate().collect();
 
         if n < ranked.len() {
@@ -344,72 +359,103 @@ impl LoadBalancer {
         endpoints: &'a [Arc<Endpoint>],
         object_id: Option<ObjectId>,
     ) -> Option<&'a Arc<Endpoint>> {
-        if matches!(self.strategy, LoadBalanceStrategy::Random) {
-            return self.select_random_single_without_materializing(endpoints);
-        }
-
-        let available: SmallVec<[&Arc<Endpoint>; 8]> = endpoints
-            .iter()
-            .filter(|e| e.state().can_receive())
-            .collect();
-
-        if available.is_empty() {
+        if endpoints.is_empty() {
             return None;
         }
 
         match self.strategy {
-            LoadBalanceStrategy::RoundRobin => {
-                let idx =
-                    (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available.len();
-                Some(available[idx])
+            LoadBalanceStrategy::Random => {
+                self.select_random_single_without_materializing(endpoints)
             }
-
+            LoadBalanceStrategy::LeastConnections => {
+                let mut best = None;
+                let mut best_count = u32::MAX;
+                for ep in endpoints {
+                    if ep.state().can_receive() {
+                        let count = ep.connection_count();
+                        if count < best_count {
+                            best_count = count;
+                            best = Some(ep);
+                        }
+                    }
+                }
+                best
+            }
+            LoadBalanceStrategy::WeightedLeastConnections => {
+                let mut best = None;
+                let mut best_score = None;
+                for ep in endpoints {
+                    if ep.state().can_receive() {
+                        let count = u128::from(ep.connection_count());
+                        let weight = u128::from(ep.weight.max(1));
+                        
+                        let is_better = match best_score {
+                            None => true,
+                            Some((best_count_u128, best_weight_u128)) => {
+                                (count * best_weight_u128) < (best_count_u128 * weight)
+                            }
+                        };
+                        if is_better {
+                            best_score = Some((count, weight));
+                            best = Some(ep);
+                        }
+                    }
+                }
+                best
+            }
+            LoadBalanceStrategy::RoundRobin => {
+                let count = endpoints.iter().filter(|e| e.state().can_receive()).count();
+                if count == 0 {
+                    return None;
+                }
+                let target = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % count;
+                endpoints.iter().filter(|e| e.state().can_receive()).nth(target)
+            }
             LoadBalanceStrategy::WeightedRoundRobin => {
-                let total_weight: u64 = available.iter().map(|e| u64::from(e.weight)).sum();
+                let total_weight: u64 = endpoints
+                    .iter()
+                    .filter(|e| e.state().can_receive())
+                    .map(|e| u64::from(e.weight))
+                    .sum();
                 if total_weight == 0 {
-                    return Some(available[0]);
+                    return endpoints.iter().find(|e| e.state().can_receive());
                 }
 
                 let counter = self.rr_counter.fetch_add(1, Ordering::Relaxed);
                 let target = counter % total_weight;
 
                 let mut cumulative = 0u64;
-                for endpoint in &available {
-                    cumulative += u64::from(endpoint.weight);
-                    if target < cumulative {
-                        return Some(endpoint);
+                for endpoint in endpoints {
+                    if endpoint.state().can_receive() {
+                        cumulative += u64::from(endpoint.weight);
+                        if target < cumulative {
+                            return Some(endpoint);
+                        }
                     }
                 }
-                available.last().copied()
+                endpoints.iter().filter(|e| e.state().can_receive()).last()
             }
-
-            LoadBalanceStrategy::LeastConnections => {
-                available.into_iter().min_by_key(|e| e.connection_count())
+            LoadBalanceStrategy::HashBased => {
+                let count = endpoints.iter().filter(|e| e.state().can_receive()).count();
+                if count == 0 {
+                    return None;
+                }
+                object_id.map_or_else(
+                    || {
+                        // Fall back to round-robin
+                        let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % count;
+                        endpoints.iter().filter(|e| e.state().can_receive()).nth(idx)
+                    },
+                    |oid| {
+                        let hash = oid.as_u128() as usize;
+                        let idx = hash % count;
+                        endpoints.iter().filter(|e| e.state().can_receive()).nth(idx)
+                    },
+                )
             }
-
-            LoadBalanceStrategy::WeightedLeastConnections => available
-                .into_iter()
-                .min_by(|a, b| Self::compare_weighted_load(a, b)),
-
-            LoadBalanceStrategy::Random => {
-                // Random is handled before healthy-endpoint materialization.
-                // Keep this branch as a conservative fallback.
-                self.select_random_single_without_materializing(endpoints)
+            LoadBalanceStrategy::FirstAvailable => {
+                endpoints.iter().find(|e| e.state().can_receive())
             }
-
-            LoadBalanceStrategy::HashBased => object_id.map_or_else(
-                || {
-                    // Fall back to round-robin
-                    let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize)
-                        % available.len();
-                    Some(available[idx])
-                },
-                |oid| {
-                    let hash = oid.as_u128() as usize;
-                    Some(available[hash % available.len()])
-                },
-            ),
-            LoadBalanceStrategy::FirstAvailable => Some(available[0]),
         }
     }
 
@@ -424,11 +470,52 @@ impl LoadBalancer {
             return Vec::new();
         }
 
-        if matches!(self.strategy, LoadBalanceStrategy::Random) && n == 1 {
-            return self
-                .select_random_single_without_materializing(endpoints)
-                .into_iter()
-                .collect();
+        if n == 1 {
+            match self.strategy {
+                LoadBalanceStrategy::Random => {
+                    return self
+                        .select_random_single_without_materializing(endpoints)
+                        .into_iter()
+                        .collect();
+                }
+                LoadBalanceStrategy::LeastConnections => {
+                    let mut best = None;
+                    let mut best_count = u32::MAX;
+                    for ep in endpoints {
+                        if ep.state().can_receive() {
+                            let count = ep.connection_count();
+                            if count < best_count {
+                                best_count = count;
+                                best = Some(ep);
+                            }
+                        }
+                    }
+                    return best.into_iter().collect();
+                }
+                LoadBalanceStrategy::WeightedLeastConnections => {
+                    let mut best = None;
+                    let mut best_score = None;
+                    for ep in endpoints {
+                        if ep.state().can_receive() {
+                            let count = u128::from(ep.connection_count());
+                            let weight = u128::from(ep.weight.max(1));
+                            
+                            let is_better = match best_score {
+                                None => true,
+                                Some((best_count_u128, best_weight_u128)) => {
+                                    (count * best_weight_u128) < (best_count_u128 * weight)
+                                }
+                            };
+                            if is_better {
+                                best_score = Some((count, weight));
+                                best = Some(ep);
+                            }
+                        }
+                    }
+                    return best.into_iter().collect();
+                }
+                _ => {}
+            }
         }
 
         if matches!(self.strategy, LoadBalanceStrategy::Random)
@@ -436,6 +523,79 @@ impl LoadBalancer {
         {
             if let Some(selected) = self.select_n_random_small_without_materializing(endpoints, n) {
                 return selected;
+            }
+        }
+
+        if n <= 16 {
+            match self.strategy {
+                LoadBalanceStrategy::LeastConnections => {
+                    let mut top_n = smallvec::SmallVec::<[(usize, u32, &'a Arc<Endpoint>); 16]>::new();
+                    for (idx, ep) in endpoints.iter().enumerate() {
+                        if ep.state().can_receive() {
+                            let count = ep.connection_count();
+                            if top_n.len() == n {
+                                let last = &top_n[n - 1];
+                                if count > last.1 || (count == last.1 && idx > last.0) {
+                                    continue;
+                                }
+                            }
+                            // Insertion sort
+                            let mut insert_pos = top_n.len();
+                            for i in 0..top_n.len() {
+                                if count < top_n[i].1 || (count == top_n[i].1 && idx < top_n[i].0) {
+                                    insert_pos = i;
+                                    break;
+                                }
+                            }
+                            if insert_pos < n {
+                                top_n.insert(insert_pos, (idx, count, ep));
+                                if top_n.len() > n {
+                                    top_n.pop();
+                                }
+                            }
+                        }
+                    }
+                    return top_n.into_iter().map(|(_, _, ep)| ep).collect();
+                }
+                LoadBalanceStrategy::WeightedLeastConnections => {
+                    let mut top_n = smallvec::SmallVec::<[(usize, u128, u128, &'a Arc<Endpoint>); 16]>::new();
+                    for (idx, ep) in endpoints.iter().enumerate() {
+                        if ep.state().can_receive() {
+                            let count = u128::from(ep.connection_count());
+                            let weight = u128::from(ep.weight.max(1));
+                            
+                            if top_n.len() == n {
+                                let last = &top_n[n - 1];
+                                let (other_idx, other_count, other_weight, _) = *last;
+                                let is_better = (count * other_weight) < (other_count * weight) ||
+                                    ((count * other_weight) == (other_count * weight) && idx < other_idx);
+                                if !is_better {
+                                    continue;
+                                }
+                            }
+
+                            // Insertion sort
+                            let mut insert_pos = top_n.len();
+                            for i in 0..top_n.len() {
+                                let (other_idx, other_count, other_weight, _) = top_n[i];
+                                let is_better = (count * other_weight) < (other_count * weight) ||
+                                    ((count * other_weight) == (other_count * weight) && idx < other_idx);
+                                if is_better {
+                                    insert_pos = i;
+                                    break;
+                                }
+                            }
+                            if insert_pos < n {
+                                top_n.insert(insert_pos, (idx, count, weight, ep));
+                                if top_n.len() > n {
+                                    top_n.pop();
+                                }
+                            }
+                        }
+                    }
+                    return top_n.into_iter().map(|(_, _, _, ep)| ep).collect();
+                }
+                _ => {}
             }
         }
 
