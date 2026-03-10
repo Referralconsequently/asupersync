@@ -2230,7 +2230,11 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use crate::Time;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
 
     std::thread_local! {
         static TEST_POOL_TIME_BASE: RefCell<Option<Instant>> = const { RefCell::new(None) };
@@ -2271,6 +2275,19 @@ mod tests {
         reset_test_pool_time();
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn test_cx_with_timer(timer: TimerDriverHandle) -> Cx {
+        Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
+        )
     }
 
     struct ReentrantReturnWaker {
@@ -2332,6 +2349,36 @@ mod tests {
     }
 
     #[test]
+    fn pooled_resource_return_hold_duration_uses_time_getter() {
+        init_test("pooled_resource_return_hold_duration_uses_time_getter");
+        let (tx, rx) = mpsc::channel();
+        let pooled = PooledResource::new_with_time_getter(7u8, tx, test_pool_time_now);
+
+        advance_test_pool_time(Duration::from_millis(15));
+        pooled.return_to_pool();
+
+        let msg = rx.recv().expect("return message");
+        match msg {
+            PoolReturn::Return {
+                resource: value,
+                hold_duration,
+                ..
+            } => {
+                crate::assert_with_log!(value == 7, "return value", 7u8, value);
+                crate::assert_with_log!(
+                    hold_duration == Duration::from_millis(15),
+                    "hold duration uses injected time getter",
+                    Duration::from_millis(15),
+                    hold_duration
+                );
+            }
+            PoolReturn::Discard { .. } => unreachable!("unexpected discard"),
+        }
+
+        crate::test_complete!("pooled_resource_return_hold_duration_uses_time_getter");
+    }
+
+    #[test]
     fn pooled_resource_notifies_wakers_outside_return_waker_lock() {
         init_test("pooled_resource_notifies_wakers_outside_return_waker_lock");
         let (return_tx, _return_rx) = mpsc::channel();
@@ -2378,6 +2425,31 @@ mod tests {
             }
         }
         crate::test_complete!("pooled_resource_discard_sends_discard");
+    }
+
+    #[test]
+    fn pooled_resource_discard_hold_duration_uses_time_getter() {
+        init_test("pooled_resource_discard_hold_duration_uses_time_getter");
+        let (tx, rx) = mpsc::channel();
+        let pooled = PooledResource::new_with_time_getter(9u8, tx, test_pool_time_now);
+
+        advance_test_pool_time(Duration::from_millis(12));
+        pooled.discard();
+
+        let msg = rx.recv().expect("return message");
+        match msg {
+            PoolReturn::Return { .. } => unreachable!("unexpected return"),
+            PoolReturn::Discard { hold_duration } => {
+                crate::assert_with_log!(
+                    hold_duration == Duration::from_millis(12),
+                    "discard hold duration uses injected time getter",
+                    Duration::from_millis(12),
+                    hold_duration
+                );
+            }
+        }
+
+        crate::test_complete!("pooled_resource_discard_hold_duration_uses_time_getter");
     }
 
     #[test]
@@ -2976,33 +3048,53 @@ mod tests {
     fn acquire_timeout_reports_timeout_and_cleans_waiter_state() {
         init_test("acquire_timeout_reports_timeout_and_cleans_waiter_state");
 
-        let pool = GenericPool::new(
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = test_cx_with_timer(timer.clone());
+        let _guard = Cx::set_current(Some(cx.clone()));
+        let pool = GenericPool::with_time_getter(
             simple_factory,
             PoolConfig::with_max_size(1).acquire_timeout(Duration::from_millis(25)),
+            test_pool_time_now,
         );
-        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         // Hold the only slot so the next acquire must wait and hit timeout.
         let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
 
-        let timeout_start = std::time::Instant::now();
-        let result = futures_lite::future::block_on(pool.acquire(&cx));
-        let waited = timeout_start.elapsed();
+        let waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut acquire_fut = std::pin::pin!(pool.acquire(&cx));
+
+        let first_poll = acquire_fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "second acquire should block while pool is exhausted",
+            true,
+            first_poll.is_pending()
+        );
+        crate::assert_with_log!(
+            pool.stats().waiters == 1,
+            "blocked acquire should register exactly one waiter",
+            1usize,
+            pool.stats().waiters
+        );
+
+        advance_test_pool_time(Duration::from_millis(25));
+        clock.advance(Time::from_millis(25).as_nanos());
+        let _ = timer.process_timers();
+
+        let result = acquire_fut.as_mut().poll(&mut task_cx);
 
         assert!(
-            matches!(result, Err(PoolError::Timeout)),
+            matches!(result, Poll::Ready(Err(PoolError::Timeout))),
             "second acquire should timeout when pool remains exhausted"
-        );
-        assert!(
-            waited >= Duration::from_millis(10),
-            "timeout path should wait before failing; waited {waited:?}"
         );
 
         // Waiter cleanup and wait-time accounting must run even on timeout.
         let stats = pool.stats();
         assert_eq!(stats.waiters, 0, "timeout should not leak waiters");
         assert!(
-            stats.total_wait_time >= Duration::from_millis(10),
+            stats.total_wait_time == Duration::from_millis(25),
             "timeout wait should be accounted in pool stats; got {got:?}",
             got = stats.total_wait_time
         );
@@ -3326,7 +3418,7 @@ mod tests {
     fn warmup_created_timestamps_follow_time_getter() {
         init_test("warmup_created_timestamps_follow_time_getter");
 
-        set_test_pool_time_offset(Duration::from_secs(24 * 60 * 60));
+        set_test_pool_time_offset(Duration::from_hours(24));
 
         let config = PoolConfig::with_max_size(4)
             .warmup_connections(1)
@@ -3694,11 +3786,37 @@ mod tests {
         let pool2 = Arc::clone(&pool);
         let blocker = std::thread::spawn(move || {
             let cx2: crate::cx::Cx = crate::cx::Cx::for_testing();
-            futures_lite::future::block_on(pool2.acquire(&cx2))
+            let waker = noop_pool_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut acquire_fut = std::pin::pin!(pool2.acquire(&cx2));
+
+            match acquire_fut.as_mut().poll(&mut task_cx) {
+                Poll::Pending => {}
+                Poll::Ready(result) => return result,
+            }
+
+            loop {
+                match acquire_fut.as_mut().poll(&mut task_cx) {
+                    Poll::Ready(result) => return result,
+                    Poll::Pending => std::thread::yield_now(),
+                }
+            }
         });
 
-        // Give the blocker time to enter WaitForNotification.
-        std::thread::sleep(Duration::from_millis(20));
+        let mut waiter_registered = false;
+        for _ in 0..4_096 {
+            if pool.stats().waiters == 1 {
+                waiter_registered = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        crate::assert_with_log!(
+            waiter_registered,
+            "blocker should register as a waiter without sleep-based synchronization",
+            true,
+            waiter_registered
+        );
 
         // Return the resource — this should wake the blocked acquirer.
         held.return_to_pool();
