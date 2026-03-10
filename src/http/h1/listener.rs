@@ -327,7 +327,7 @@ impl ConnectionTasks {
 
     async fn join_all(&mut self) {
         for handle in self.handles.drain(..) {
-            let result = CatchUnwind(Box::pin(handle)).await;
+            let result = CatchUnwind { inner: handle }.await;
             if let Err(payload) = result {
                 let _ = &payload;
                 error!(
@@ -339,14 +339,18 @@ impl ConnectionTasks {
     }
 }
 
-struct CatchUnwind<F>(Pin<Box<F>>);
+#[pin_project::pin_project]
+struct CatchUnwind<F> {
+    #[pin]
+    inner: F,
+}
 
 impl<F: Future> Future for CatchUnwind<F> {
     type Output = std::thread::Result<F::Output>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        let inner = self.0.as_mut();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.inner.as_mut().poll(cx)));
         match result {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),

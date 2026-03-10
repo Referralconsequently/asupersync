@@ -649,9 +649,7 @@ impl ControllerRegistry {
         if reg.min_version > reg.max_version {
             return Err(RegistrationError::InvertedVersionRange);
         }
-        if SNAPSHOT_VERSION < reg.min_version
-            || SNAPSHOT_VERSION.major > reg.max_version.major
-        {
+        if SNAPSHOT_VERSION < reg.min_version || SNAPSHOT_VERSION > reg.max_version {
             return Err(RegistrationError::IncompatibleVersion {
                 current: SNAPSHOT_VERSION,
                 min: reg.min_version,
@@ -1235,8 +1233,14 @@ mod tests {
 
         // Test minor version incompatibility
         let mut reg2 = test_registration("future-minor-ctrl");
-        reg2.min_version = SnapshotVersion { major: SNAPSHOT_VERSION.major, minor: SNAPSHOT_VERSION.minor + 1 };
-        reg2.max_version = SnapshotVersion { major: SNAPSHOT_VERSION.major, minor: SNAPSHOT_VERSION.minor + 1 };
+        reg2.min_version = SnapshotVersion {
+            major: SNAPSHOT_VERSION.major,
+            minor: SNAPSHOT_VERSION.minor + 1,
+        };
+        reg2.max_version = SnapshotVersion {
+            major: SNAPSHOT_VERSION.major,
+            minor: SNAPSHOT_VERSION.minor + 1,
+        };
         assert!(matches!(
             registry.register(reg2).unwrap_err(),
             RegistrationError::IncompatibleVersion { .. }

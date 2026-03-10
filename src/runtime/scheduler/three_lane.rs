@@ -435,7 +435,7 @@ impl WorkerCoordinator {
         }
         let start_idx = self.next_wake.fetch_add(num_wakes, Ordering::Relaxed);
         for i in 0..num_wakes {
-            let idx = start_idx + i;
+            let idx = start_idx.wrapping_add(i);
             let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
             self.parkers[slot].unpark();
         }
@@ -2857,7 +2857,9 @@ impl ThreeLaneWorker {
 
                     let mut finalizer_wakes = 0;
                     for (finalizer_task, priority) in finalizers {
-                        self.worker.global.inject_ready_uncounted(finalizer_task, priority);
+                        self.worker
+                            .global
+                            .inject_ready_uncounted(finalizer_task, priority);
                         finalizer_wakes += 1;
                     }
                     if finalizer_wakes > 0 {
@@ -3259,9 +3261,14 @@ impl ThreeLaneWorker {
         if tasks.is_empty() {
             return false;
         }
+        let mut finalizer_wakes = 0;
         for (task_id, priority) in tasks {
-            self.global.inject_ready(task_id, priority);
-            self.coordinator.wake_one();
+            self.global.inject_ready_uncounted(task_id, priority);
+            finalizer_wakes += 1;
+        }
+        if finalizer_wakes > 0 {
+            self.global.add_ready_count(finalizer_wakes);
+            self.coordinator.wake_many(finalizer_wakes);
         }
         true
     }
@@ -4239,7 +4246,9 @@ mod tests {
         {
             let mut guard = cx_inner.write();
             guard.cancel_requested = true;
-            guard.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
+            guard
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             guard.cancel_reason = Some(CancelReason::timeout());
         }
 
@@ -4428,7 +4437,9 @@ mod tests {
         {
             let mut guard = cx_inner.write();
             guard.cancel_requested = true;
-            guard.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
+            guard
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             guard.cancel_reason = Some(CancelReason::new(CancelKind::User));
         }
 
@@ -6104,7 +6115,7 @@ mod tests {
             local_ready: Arc::clone(&local_ready),
             parker,
             fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    cx_inner: Weak::new(),
+            cx_inner: Weak::new(),
         }));
 
         // Set local_ready TLS (waker uses schedule_local_task, not LocalQueue).
@@ -6144,7 +6155,7 @@ mod tests {
             local_ready: Arc::clone(&local_ready),
             parker,
             fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    cx_inner: Weak::new(),
+            cx_inner: Weak::new(),
         }));
 
         waker.wake_by_ref();

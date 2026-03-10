@@ -1227,7 +1227,6 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-#[allow(unsafe_code)]
 #[pin_project::pin_project]
 struct CatchUnwind<F> {
     #[pin]
@@ -1239,7 +1238,9 @@ impl<F: Future> Future for CatchUnwind<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.inner.as_mut().poll(cx)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.inner.as_mut().poll(cx)
+        }));
         match result {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),

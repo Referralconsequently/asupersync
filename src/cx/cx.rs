@@ -1728,6 +1728,9 @@ impl<Caps> Cx<Caps> {
     pub fn set_cancel_requested(&self, value: bool) {
         let mut inner = self.inner.write();
         inner.cancel_requested = value;
+        inner
+            .fast_cancel
+            .store(value, std::sync::atomic::Ordering::Release);
         if !value {
             inner.cancel_reason = None;
         }
@@ -1780,7 +1783,9 @@ impl<Caps> Cx<Caps> {
             }
 
             inner.cancel_requested = true;
-            inner.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
+            inner
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
             drop(inner);
             (region, task)
@@ -1830,7 +1835,9 @@ impl<Caps> Cx<Caps> {
             let reason = CancelReason::new(kind).with_region(region);
 
             inner.cancel_requested = true;
-            inner.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
+            inner
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
             region
         };
@@ -2020,7 +2027,9 @@ impl<Caps> Cx<Caps> {
     pub fn set_cancel_reason(&self, reason: CancelReason) {
         let mut inner = self.inner.write();
         inner.cancel_requested = true;
-        inner.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
+        inner
+            .fast_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
         inner.cancel_reason = Some(reason);
     }
 

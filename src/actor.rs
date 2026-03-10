@@ -293,7 +293,9 @@ impl<A: Actor> ActorHandle<A> {
         if let Some(inner) = self.inner.upgrade() {
             let mut guard = inner.write();
             guard.cancel_requested = true;
-            guard.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
+            guard
+                .fast_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         self.sender.wake_receiver();
     }

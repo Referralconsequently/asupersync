@@ -2163,10 +2163,9 @@ mod tests {
     use super::*;
     use crate::io::AsyncWriteExt;
     use futures_lite::future::block_on;
+    use std::cell::Cell;
     use std::future::poll_fn;
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::cell::Cell;
 
     thread_local! {
         static HTTP_CLIENT_TEST_TIME_NANOS: Cell<u64> = Cell::new(0);
@@ -2177,7 +2176,7 @@ mod tests {
     }
 
     fn http_client_test_time() -> Time {
-        Time::from_nanos(HTTP_CLIENT_TEST_TIME_NANOS.with(|t| t.get()))
+        Time::from_nanos(HTTP_CLIENT_TEST_TIME_NANOS.with(std::cell::Cell::get))
     }
 
     fn loopback_client_io() -> ClientIo {

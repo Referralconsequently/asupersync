@@ -722,11 +722,15 @@ pub fn make_race_all_result<T, E>(
 macro_rules! race {
     // Biased mode
     (biased; $($future:expr),+ $(,)?) => {{
-        compile_error!("race! macro is not yet implemented. Use Scope::race() or Cx::race() instead.");
+        compile_error!(
+            "race! macro is not yet implemented. Use Scope::race() or Cx::race() instead."
+        );
     }};
     // Basic positional syntax
     ($($future:expr),+ $(,)?) => {{
-        compile_error!("race! macro is not yet implemented. Use Scope::race() or Cx::race() instead.");
+        compile_error!(
+            "race! macro is not yet implemented. Use Scope::race() or Cx::race() instead."
+        );
     }};
 }
 
