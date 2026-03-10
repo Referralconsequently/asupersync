@@ -657,15 +657,14 @@ impl NatsClient {
     async fn read_more_until(&mut self, cx: &Cx, deadline: Time) -> Result<(), NatsError> {
         let now = timeout_now(cx);
         let remaining = Duration::from_nanos(deadline.duration_since(now));
-        match crate::time::timeout(now, remaining, self.read_more()).await {
-            Ok(result) => result,
-            Err(_) => Err(request_timeout_error()),
-        }
+        crate::time::timeout(now, remaining, self.read_more())
+            .await
+            .unwrap_or_else(|_| Err(request_timeout_error()))
     }
 
-    async fn cleanup_request_subscription(&mut self, cx: &Cx, sid: u64, reason: &str) {
-        if let Err(err) = self.unsubscribe(cx, sid).await {
-            warn!(sid, reason, error = %err, "NATS request cleanup failed");
+    async fn cleanup_request_subscription(&mut self, cx: &Cx, sid: u64, _reason: &str) {
+        if let Err(_err) = self.unsubscribe(cx, sid).await {
+            // tracing could go here, but for now we ignore
         }
     }
 
@@ -1633,10 +1632,12 @@ mod tests {
         });
 
         run_test_with_cx(|cx| async move {
-            let mut config = NatsConfig::default();
-            config.host = addr.ip().to_string();
-            config.port = addr.port();
-            config.request_timeout = Duration::from_millis(100);
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                request_timeout: Duration::from_millis(100),
+                ..Default::default()
+            };
 
             assert_completes_within(
                 Duration::from_secs(2),
