@@ -32,7 +32,10 @@ impl Ord for SchedulerEntry {
         // For equal priorities, earlier generation (lower number) comes first
         self.priority
             .cmp(&other.priority)
-            .then_with(|| other.generation.cmp(&self.generation))
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
+            })
     }
 }
 
@@ -62,7 +65,10 @@ impl Ord for TimedEntry {
         other
             .deadline
             .cmp(&self.deadline)
-            .then_with(|| other.generation.cmp(&self.generation))
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
+            })
     }
 }
 
