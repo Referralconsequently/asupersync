@@ -13,6 +13,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+fn wall_clock_now() -> Instant {
+    Instant::now()
+}
+
 /// Adaptive threshold configuration for deadline monitoring.
 #[derive(Debug, Clone)]
 pub struct AdaptiveDeadlineConfig {
@@ -163,6 +167,7 @@ pub struct DeadlineMonitor {
     last_scan_time: Option<Time>,
     last_scan_instant: Option<Instant>,
     scan_generation: u64,
+    time_getter: fn() -> Instant,
 }
 
 impl fmt::Debug for DeadlineMonitor {
@@ -180,6 +185,12 @@ impl DeadlineMonitor {
     /// Creates a new deadline monitor.
     #[must_use]
     pub fn new(config: MonitorConfig) -> Self {
+        Self::with_time_getter(config, wall_clock_now)
+    }
+
+    /// Creates a new deadline monitor with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(config: MonitorConfig, time_getter: fn() -> Instant) -> Self {
         Self {
             config,
             on_warning: None,
@@ -189,6 +200,7 @@ impl DeadlineMonitor {
             last_scan_time: None,
             last_scan_instant: None,
             scan_generation: 0,
+            time_getter,
         }
     }
 
@@ -317,7 +329,7 @@ impl DeadlineMonitor {
             return;
         }
 
-        let now_instant = Instant::now();
+        let now_instant = (self.time_getter)();
         let interval_nanos = duration_to_nanos(self.config.check_interval);
         if interval_nanos > 0 && self.last_scan_time.is_some() {
             let logical_elapsed = self
@@ -558,12 +570,46 @@ mod tests {
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
     use parking_lot::{Mutex, RwLock};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, OnceLock};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    static TEST_NOW_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
+    static TEST_NOW_BASE: OnceLock<Instant> = OnceLock::new();
+    static TEST_TIME_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+    fn lock_test_clock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_TIME_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW_OFFSET_NS.store(nanos, Ordering::SeqCst);
+    }
+
+    fn test_now() -> Instant {
+        TEST_NOW_BASE
+            .get_or_init(|| {
+                Instant::now()
+                    .checked_add(Duration::from_hours(1))
+                    .unwrap_or_else(Instant::now)
+            })
+            .checked_add(Duration::from_nanos(
+                TEST_NOW_OFFSET_NS.load(Ordering::SeqCst),
+            ))
+            .expect("deadline monitor test instant overflow")
+    }
+
+    fn test_now_minus(duration: Duration) -> Instant {
+        test_now()
+            .checked_sub(duration)
+            .expect("deadline monitor test instant underflow")
     }
 
     fn make_task(
@@ -588,6 +634,8 @@ mod tests {
     #[test]
     fn warns_on_approaching_deadline() {
         init_test("warns_on_approaching_deadline");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
@@ -595,7 +643,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -608,7 +656,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(100),
-            Some(Instant::now()),
+            Some(test_now()),
             None,
             None,
         );
@@ -631,6 +679,8 @@ mod tests {
     #[test]
     fn warns_on_no_progress() {
         init_test("warns_on_no_progress");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.1,
@@ -638,7 +688,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -646,9 +696,7 @@ mod tests {
             warnings_ref.lock().push(warning.reason);
         });
 
-        let stale = Instant::now()
-            .checked_sub(Duration::from_secs(30))
-            .unwrap_or_else(Instant::now);
+        let stale = test_now_minus(Duration::from_secs(30));
         let task = make_task(
             TaskId::new_for_test(2, 0),
             RegionId::new_for_test(1, 0),
@@ -677,6 +725,8 @@ mod tests {
     #[test]
     fn warns_on_no_progress_for_old_task_without_checkpoint_on_first_scan() {
         init_test("warns_on_no_progress_for_old_task_without_checkpoint_on_first_scan");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
@@ -684,7 +734,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -718,6 +768,8 @@ mod tests {
     #[test]
     fn warns_on_no_progress_after_checkpoint_when_logical_time_advances() {
         init_test("warns_on_no_progress_after_checkpoint_when_logical_time_advances");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
@@ -725,7 +777,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -738,7 +790,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(1_000),
-            Some(Instant::now()),
+            Some(test_now()),
             Some("checkpointed"),
             None,
         );
@@ -767,6 +819,8 @@ mod tests {
     #[test]
     fn warns_only_once_per_task() {
         init_test("warns_only_once_per_task");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
@@ -774,7 +828,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -803,6 +857,8 @@ mod tests {
     #[test]
     fn check_interval_uses_logical_time_not_wall_clock() {
         init_test("check_interval_uses_logical_time_not_wall_clock");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::from_secs(1),
             warning_threshold_fraction: 0.2,
@@ -810,7 +866,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -847,8 +903,10 @@ mod tests {
     }
 
     #[test]
-    fn check_interval_falls_back_to_wall_clock_when_logical_time_is_stable() {
-        init_test("check_interval_falls_back_to_wall_clock_when_logical_time_is_stable");
+    fn check_interval_falls_back_to_time_getter_when_logical_time_is_stable() {
+        init_test("check_interval_falls_back_to_time_getter_when_logical_time_is_stable");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::from_millis(5),
             warning_threshold_fraction: 0.0,
@@ -856,7 +914,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -883,23 +941,25 @@ mod tests {
             first_count
         );
 
-        std::thread::sleep(Duration::from_millis(10));
+        set_test_time(Duration::from_millis(10).as_nanos() as u64);
         monitor.check(Time::from_secs(0), std::iter::once(&task));
         let recorded = warnings.lock().clone();
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::NoProgress],
-            "wall-clock fallback allows progress checks with stable logical time",
+            "time getter fallback allows progress checks with stable logical time",
             vec![WarningReason::NoProgress],
             recorded
         );
         crate::test_complete!(
-            "check_interval_falls_back_to_wall_clock_when_logical_time_is_stable"
+            "check_interval_falls_back_to_time_getter_when_logical_time_is_stable"
         );
     }
 
     #[test]
     fn warns_on_both_conditions() {
         init_test("warns_on_both_conditions");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.5,
@@ -907,7 +967,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -915,9 +975,7 @@ mod tests {
             warnings_ref.lock().push(warning.reason);
         });
 
-        let stale = Instant::now()
-            .checked_sub(Duration::from_secs(20))
-            .unwrap_or_else(Instant::now);
+        let stale = test_now_minus(Duration::from_secs(20));
         let task = make_task(
             TaskId::new_for_test(4, 0),
             RegionId::new_for_test(1, 0),
@@ -947,6 +1005,8 @@ mod tests {
     #[test]
     fn no_warning_with_recent_checkpoint() {
         init_test("no_warning_with_recent_checkpoint");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
@@ -954,7 +1014,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -967,7 +1027,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(1000),
-            Some(Instant::now()),
+            Some(test_now()),
             Some("recent checkpoint"),
             None,
         );
@@ -982,6 +1042,8 @@ mod tests {
     #[test]
     fn warning_includes_checkpoint_message() {
         init_test("warning_includes_checkpoint_message");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
@@ -989,7 +1051,7 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
@@ -1002,7 +1064,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(1000),
-            Some(Instant::now()),
+            Some(test_now()),
             Some("checkpoint message"),
             None,
         );
@@ -1078,6 +1140,8 @@ mod tests {
     #[test]
     fn adaptive_threshold_uses_percentile() {
         init_test("adaptive_threshold_uses_percentile");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
@@ -1091,7 +1155,7 @@ mod tests {
             },
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         monitor.record_completion(
             TaskId::new_for_test(10, 0),
@@ -1147,6 +1211,8 @@ mod tests {
     #[test]
     fn adaptive_threshold_fallback_used() {
         init_test("adaptive_threshold_fallback_used");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
@@ -1160,7 +1226,7 @@ mod tests {
             },
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
 
         monitor.record_completion(
             TaskId::new_for_test(13, 0),
@@ -1202,6 +1268,8 @@ mod tests {
     #[test]
     fn deadline_metrics_emitted() {
         init_test("deadline_metrics_emitted");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.0,
@@ -1209,13 +1277,11 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
         let metrics = Arc::new(TestMetrics::default());
         monitor.set_metrics_provider(metrics.clone());
 
-        let stale = Instant::now()
-            .checked_sub(Duration::from_secs(10))
-            .unwrap_or_else(Instant::now);
+        let stale = test_now_minus(Duration::from_secs(10));
         let task = make_task(
             TaskId::new_for_test(9, 0),
             RegionId::new_for_test(1, 0),
@@ -1252,6 +1318,8 @@ mod tests {
     #[test]
     fn checkpoint_interval_metrics_emitted() {
         init_test("checkpoint_interval_metrics_emitted");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
         let config = MonitorConfig {
             check_interval: Duration::ZERO,
             warning_threshold_fraction: 0.2,
@@ -1259,14 +1327,13 @@ mod tests {
             adaptive: AdaptiveDeadlineConfig::default(),
             enabled: true,
         };
-        let mut monitor = DeadlineMonitor::new(config);
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
         let metrics = Arc::new(TestMetrics::default());
         monitor.set_metrics_provider(metrics.clone());
 
-        let first = Instant::now()
-            .checked_sub(Duration::from_secs(5))
-            .unwrap_or_else(Instant::now);
-        let second = Instant::now();
+        let first = test_now_minus(Duration::from_secs(5));
+        set_test_time(Duration::from_secs(1).as_nanos() as u64);
+        let second = test_now();
         let task = make_task(
             TaskId::new_for_test(10, 0),
             RegionId::new_for_test(1, 0),

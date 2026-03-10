@@ -10,9 +10,9 @@ use crate::codec::{Decoder, Encoder};
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::{
-    ContinuationFrame, DataFrame, FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, GoAwayFrame,
+    parse_frame, ContinuationFrame, DataFrame, Frame, FrameHeader, FrameType, GoAwayFrame,
     HeadersFrame, PingFrame, PushPromiseFrame, RstStreamFrame, Setting, SettingsFrame,
-    WindowUpdateFrame, parse_frame,
+    WindowUpdateFrame, FRAME_HEADER_SIZE,
 };
 use super::hpack::{self, Header};
 use super::settings::Settings;
@@ -33,6 +33,10 @@ const RST_STREAM_RATE_LIMIT: u32 = 100;
 
 /// Window duration for RST_STREAM rate limiting (in milliseconds).
 const RST_STREAM_RATE_WINDOW_MS: u128 = 30_000;
+
+fn wall_clock_now() -> Instant {
+    Instant::now()
+}
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +222,8 @@ pub struct Connection {
     goaway_sent: bool,
     /// Pending operations to process.
     pending_ops: VecDeque<PendingOp>,
+    /// Clock source used by timeout and rate-limit bookkeeping.
+    time_getter: fn() -> Instant,
     /// Stream ID being continued (for CONTINUATION frames).
     continuation_stream_id: Option<u32>,
     /// When the current continuation sequence started.
@@ -237,6 +243,12 @@ impl Connection {
     /// Create a new client connection.
     #[must_use]
     pub fn client(settings: Settings) -> Self {
+        Self::client_with_time_getter(settings, wall_clock_now)
+    }
+
+    /// Create a new client connection with a custom time source.
+    #[must_use]
+    pub fn client_with_time_getter(settings: Settings, time_getter: fn() -> Instant) -> Self {
         let max_header_list_size = settings.max_header_list_size;
         let initial_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
@@ -256,17 +268,24 @@ impl Connection {
             goaway_received: false,
             goaway_sent: false,
             pending_ops: VecDeque::new(),
+            time_getter,
             continuation_stream_id: None,
             continuation_started_at: None,
             pending_push_promise: None,
             rst_stream_count: 0,
-            rst_stream_window_start: Instant::now(),
+            rst_stream_window_start: time_getter(),
         }
     }
 
     /// Create a new server connection.
     #[must_use]
     pub fn server(settings: Settings) -> Self {
+        Self::server_with_time_getter(settings, wall_clock_now)
+    }
+
+    /// Create a new server connection with a custom time source.
+    #[must_use]
+    pub fn server_with_time_getter(settings: Settings, time_getter: fn() -> Instant) -> Self {
         let max_header_list_size = settings.max_header_list_size;
         let initial_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
@@ -286,11 +305,12 @@ impl Connection {
             goaway_received: false,
             goaway_sent: false,
             pending_ops: VecDeque::new(),
+            time_getter,
             continuation_stream_id: None,
             continuation_started_at: None,
             pending_push_promise: None,
             rst_stream_count: 0,
-            rst_stream_window_start: Instant::now(),
+            rst_stream_window_start: time_getter(),
         }
     }
 
@@ -377,7 +397,7 @@ impl Connection {
     pub fn check_continuation_timeout(&mut self) -> Result<(), H2Error> {
         if let Some(started_at) = self.continuation_started_at {
             let timeout_ms = self.local_settings.continuation_timeout_ms;
-            let elapsed = started_at.elapsed();
+            let elapsed = (self.time_getter)().saturating_duration_since(started_at);
 
             if elapsed.as_millis() >= u128::from(timeout_ms) {
                 // Clear continuation state
@@ -663,7 +683,7 @@ impl Connection {
             self.decode_headers(frame.stream_id, frame.end_stream)
         } else {
             self.continuation_stream_id = Some(frame.stream_id);
-            self.continuation_started_at = Some(Instant::now());
+            self.continuation_started_at = Some((self.time_getter)());
             Ok(None)
         }
     }
@@ -817,11 +837,13 @@ impl Connection {
         }
 
         // Rate-limit RST_STREAM frames (CVE-2023-44487 mitigation).
-        let elapsed = self.rst_stream_window_start.elapsed().as_millis();
+        let elapsed = (self.time_getter)()
+            .saturating_duration_since(self.rst_stream_window_start)
+            .as_millis();
         if elapsed >= RST_STREAM_RATE_WINDOW_MS {
             // Reset the window.
             self.rst_stream_count = 1;
-            self.rst_stream_window_start = Instant::now();
+            self.rst_stream_window_start = (self.time_getter)();
         } else {
             self.rst_stream_count += 1;
             if self.rst_stream_count > RST_STREAM_RATE_LIMIT {
@@ -957,7 +979,7 @@ impl Connection {
                 promised_stream_id,
             });
             self.continuation_stream_id = Some(frame.stream_id);
-            self.continuation_started_at = Some(Instant::now());
+            self.continuation_started_at = Some((self.time_getter)());
             Ok(None)
         }
     }
@@ -1343,6 +1365,39 @@ mod tests {
     use super::*;
     use crate::bytes::Bytes;
     use crate::http::h2::settings;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    static TEST_TIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static TEST_NOW_BASE: OnceLock<Instant> = OnceLock::new();
+    static TEST_NOW_OFFSET_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn lock_test_clock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_TIME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test time lock poisoned")
+    }
+
+    fn set_test_time_offset(duration: Duration) {
+        let millis = u64::try_from(duration.as_millis()).expect("duration fits u64 millis");
+        TEST_NOW_OFFSET_MS.store(millis, Ordering::SeqCst);
+    }
+
+    fn advance_test_time(duration: Duration) {
+        let millis = u64::try_from(duration.as_millis()).expect("duration fits u64 millis");
+        TEST_NOW_OFFSET_MS.fetch_add(millis, Ordering::SeqCst);
+    }
+
+    fn test_now() -> Instant {
+        TEST_NOW_BASE
+            .get_or_init(Instant::now)
+            .checked_add(Duration::from_millis(
+                TEST_NOW_OFFSET_MS.load(Ordering::SeqCst),
+            ))
+            .expect("test instant overflow")
+    }
 
     #[test]
     fn data_frame_triggers_connection_window_update_on_low_watermark() {
@@ -1499,12 +1554,10 @@ mod tests {
         match frame {
             Frame::Settings(settings) => {
                 assert!(!settings.ack);
-                assert!(
-                    settings
-                        .settings
-                        .iter()
-                        .any(|setting| matches!(setting, Setting::EnablePush(false)))
-                );
+                assert!(settings
+                    .settings
+                    .iter()
+                    .any(|setting| matches!(setting, Setting::EnablePush(false))));
             }
             _ => panic!("expected SETTINGS frame"),
         }
@@ -1590,12 +1643,10 @@ mod tests {
         let frame = conn.next_frame().expect("expected initial settings frame");
         match frame {
             Frame::Settings(settings) => {
-                assert!(
-                    !settings
-                        .settings
-                        .iter()
-                        .any(|setting| matches!(setting, Setting::EnablePush(_)))
-                );
+                assert!(!settings
+                    .settings
+                    .iter()
+                    .any(|setting| matches!(setting, Setting::EnablePush(_))));
             }
             _ => panic!("expected SETTINGS frame"),
         }
@@ -2100,11 +2151,13 @@ mod tests {
 
     #[test]
     fn continuation_timeout_not_triggered_when_within_limit() {
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
         let settings = Settings {
             continuation_timeout_ms: 5000, // 5 seconds
             ..Default::default()
         };
-        let mut conn = Connection::server(settings);
+        let mut conn = Connection::server_with_time_getter(settings, test_now);
         conn.state = ConnectionState::Open;
 
         // Receive HEADERS without END_HEADERS
@@ -2113,7 +2166,9 @@ mod tests {
         assert!(result.is_ok());
         assert!(conn.is_awaiting_continuation());
 
-        // Immediately check timeout - should not trigger
+        advance_test_time(Duration::from_millis(10));
+
+        // Custom clock remains within the timeout window.
         assert!(conn.check_continuation_timeout().is_ok());
         assert!(conn.is_awaiting_continuation());
     }
@@ -2144,13 +2199,13 @@ mod tests {
 
     #[test]
     fn continuation_timeout_triggers_after_expiry() {
-        use std::time::Duration;
-
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
         let settings = Settings {
             continuation_timeout_ms: 50, // 50ms for fast test
             ..Default::default()
         };
-        let mut conn = Connection::server(settings);
+        let mut conn = Connection::server_with_time_getter(settings, test_now);
         conn.state = ConnectionState::Open;
 
         // Receive HEADERS without END_HEADERS
@@ -2158,12 +2213,7 @@ mod tests {
         conn.process_frame(headers).unwrap();
         assert!(conn.is_awaiting_continuation());
 
-        // Simulate a timeout without sleeping.
-        conn.continuation_started_at = Some(
-            Instant::now()
-                .checked_sub(Duration::from_millis(60))
-                .unwrap_or_else(Instant::now),
-        );
+        advance_test_time(Duration::from_millis(60));
 
         // Timeout should trigger
         let err = conn.check_continuation_timeout().unwrap_err();
@@ -2177,25 +2227,20 @@ mod tests {
 
     #[test]
     fn continuation_timeout_on_next_frame() {
-        use std::time::Duration;
-
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
         let settings = Settings {
             continuation_timeout_ms: 50, // 50ms for fast test
             ..Default::default()
         };
-        let mut conn = Connection::server(settings);
+        let mut conn = Connection::server_with_time_getter(settings, test_now);
         conn.state = ConnectionState::Open;
 
         // Receive HEADERS without END_HEADERS
         let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
         conn.process_frame(headers).unwrap();
 
-        // Simulate a timeout without sleeping.
-        conn.continuation_started_at = Some(
-            Instant::now()
-                .checked_sub(Duration::from_millis(60))
-                .unwrap_or_else(Instant::now),
-        );
+        advance_test_time(Duration::from_millis(60));
 
         // Try to process another CONTINUATION - should fail with timeout
         let continuation = Frame::Continuation(ContinuationFrame {
@@ -2210,12 +2255,12 @@ mod tests {
 
     #[test]
     fn push_promise_continuation_timeout() {
-        use std::time::Duration;
-
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
         let mut settings = Settings::client();
         settings.enable_push = true;
         settings.continuation_timeout_ms = 50;
-        let mut conn = Connection::client(settings);
+        let mut conn = Connection::client_with_time_getter(settings, test_now);
         conn.state = ConnectionState::Open;
 
         // First open a stream
@@ -2238,12 +2283,7 @@ mod tests {
         conn.process_frame(push).unwrap();
         assert!(conn.is_awaiting_continuation());
 
-        // Simulate a timeout without sleeping.
-        conn.continuation_started_at = Some(
-            Instant::now()
-                .checked_sub(Duration::from_millis(60))
-                .unwrap_or_else(Instant::now),
-        );
+        advance_test_time(Duration::from_millis(60));
 
         // Timeout should trigger
         let err = conn.check_continuation_timeout().unwrap_err();
@@ -3252,6 +3292,36 @@ mod tests {
             err.stream_id.is_none(),
             "RST_STREAM flood must be a connection error"
         );
+    }
+
+    #[test]
+    fn rst_stream_rate_limit_window_uses_time_getter() {
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
+        let mut conn = Connection::server_with_time_getter(Settings::default(), test_now);
+        conn.state = ConnectionState::Open;
+
+        for i in 0..RST_STREAM_RATE_LIMIT {
+            let stream_id = i * 2 + 1;
+            let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+            conn.process_frame(headers).unwrap();
+
+            let rst = Frame::RstStream(RstStreamFrame::new(stream_id, ErrorCode::Cancel));
+            conn.process_frame(rst).unwrap();
+        }
+
+        advance_test_time(Duration::from_millis(
+            u64::try_from(RST_STREAM_RATE_WINDOW_MS).expect("window fits u64") + 1,
+        ));
+
+        let stream_id = RST_STREAM_RATE_LIMIT * 2 + 1;
+        let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        let rst = Frame::RstStream(RstStreamFrame::new(stream_id, ErrorCode::Cancel));
+        conn.process_frame(rst)
+            .expect("rate-limit window should reset");
+        assert_eq!(conn.rst_stream_count, 1);
     }
 
     /// Regression: HEADERS on a stream with invalid parity must NOT bump

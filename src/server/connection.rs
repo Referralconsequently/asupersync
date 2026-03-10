@@ -10,13 +10,29 @@ use crate::time::sleep_until;
 use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::future::poll_fn;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
     crate::time::wall_now()
+}
+
+async fn sleep_until_with_time_getter(deadline: Time, time_getter: fn() -> Time) {
+    let mut sleep = sleep_until(deadline);
+    poll_fn(|cx| {
+        if sleep.poll_with_time(time_getter()).is_ready() {
+            return Poll::Ready(());
+        }
+
+        let _ = Pin::new(&mut sleep).poll(cx);
+        Poll::Pending
+    })
+    .await;
 }
 
 /// Unique identifier for a tracked connection.
@@ -264,7 +280,7 @@ impl ConnectionManager {
 
             // Check if drain deadline has passed
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
-                if ShutdownSignal::current_time() >= deadline {
+                if self.shutdown_signal.current_time() >= deadline {
                     // Timeout expired — transition to force close
                     let remaining = self.active_count();
                     let drained = initial_count.saturating_sub(remaining);
@@ -284,7 +300,7 @@ impl ConnectionManager {
             }
 
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
-                if ShutdownSignal::current_time() >= deadline {
+                if self.shutdown_signal.current_time() >= deadline {
                     let remaining = self.active_count();
                     let drained = initial_count.saturating_sub(remaining);
                     let _ = self.shutdown_signal.begin_force_close();
@@ -293,8 +309,10 @@ impl ConnectionManager {
             }
 
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
-                let sleep = sleep_until(deadline);
-                match Select::new(notified, sleep).await {
+                let sleep =
+                    sleep_until_with_time_getter(deadline, self.shutdown_signal.time_getter());
+                let mut sleep = std::pin::pin!(sleep);
+                match Select::new(notified, sleep.as_mut()).await {
                     Either::Left(()) | Either::Right(()) => {}
                 }
             } else {
@@ -357,10 +375,18 @@ impl std::fmt::Debug for ConnectionGuard {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -377,6 +403,10 @@ mod tests {
 
     fn test_addr(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
     }
 
     #[test]
@@ -905,6 +935,67 @@ mod tests {
             handle.join().expect("thread panicked");
         });
         crate::test_complete!("drain_with_stats_timeout_force_close");
+    }
+
+    #[test]
+    fn drain_with_stats_timeout_uses_injected_shutdown_clock() {
+        init_test("drain_with_stats_timeout_uses_injected_shutdown_clock");
+        set_test_time(0);
+
+        let signal = ShutdownSignal::with_time_getter(test_time);
+        let manager = ConnectionManager::with_time_getter(None, signal.clone(), test_time);
+        let _guard = manager.register(test_addr(1)).expect("register");
+
+        let began = manager.begin_drain(Duration::from_millis(50));
+        crate::assert_with_log!(began, "drain started", true, began);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut drain = Box::pin(manager.drain_with_stats());
+
+        crate::assert_with_log!(
+            matches!(drain.as_mut().poll(&mut cx), Poll::Pending),
+            "drain future initially pending",
+            true,
+            true
+        );
+
+        set_test_time(Duration::from_millis(60).as_nanos() as u64);
+
+        let poll = drain.as_mut().poll(&mut cx);
+        let completed = matches!(poll, Poll::Ready(_));
+        crate::assert_with_log!(
+            completed,
+            "drain completes once injected clock passes deadline",
+            true,
+            completed
+        );
+        let stats = if let Poll::Ready(stats) = poll {
+            stats
+        } else {
+            return;
+        };
+
+        crate::assert_with_log!(stats.drained == 0, "zero drained", 0, stats.drained);
+        crate::assert_with_log!(
+            stats.force_closed == 1,
+            "one force-closed",
+            1,
+            stats.force_closed
+        );
+        crate::assert_with_log!(
+            stats.duration == Duration::from_millis(60),
+            "duration uses injected shutdown clock",
+            Duration::from_millis(60),
+            stats.duration
+        );
+        crate::assert_with_log!(
+            signal.phase() == ShutdownPhase::ForceClosing,
+            "phase force-closing",
+            ShutdownPhase::ForceClosing,
+            signal.phase()
+        );
+        crate::test_complete!("drain_with_stats_timeout_uses_injected_shutdown_clock");
     }
 
     #[test]

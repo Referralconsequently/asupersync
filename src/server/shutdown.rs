@@ -11,8 +11,14 @@ use crate::sync::Notify;
 use crate::time::wall_now;
 use crate::types::Time;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
+
+fn default_time_getter() -> Time {
+    Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .map_or_else(wall_now, |timer| timer.now())
+}
 
 /// Phases of a graceful server shutdown.
 ///
@@ -72,9 +78,10 @@ struct SignalState {
     phase: AtomicU8,
     controller: ShutdownController,
     phase_notify: Notify,
-    /// Nanoseconds; 0 = None.
+    time_getter: fn() -> Time,
+    has_drain_deadline: AtomicBool,
     drain_deadline: AtomicU64,
-    /// Nanoseconds; 0 = None.
+    has_drain_start: AtomicBool,
     drain_start: AtomicU64,
 }
 
@@ -107,12 +114,6 @@ pub struct ShutdownSignal {
 }
 
 impl ShutdownSignal {
-    pub(crate) fn current_time() -> Time {
-        Cx::current()
-            .and_then(|cx| cx.timer_driver())
-            .map_or_else(wall_now, |timer| timer.now())
-    }
-
     fn duration_to_nanos(duration: Duration) -> u64 {
         duration.as_nanos().min(u128::from(u64::MAX)) as u64
     }
@@ -120,15 +121,34 @@ impl ShutdownSignal {
     /// Creates a new shutdown signal in the [`Running`](ShutdownPhase::Running) phase.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_time_getter(default_time_getter)
+    }
+
+    /// Creates a new shutdown signal with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(time_getter: fn() -> Time) -> Self {
         Self {
             state: Arc::new(SignalState {
                 phase: AtomicU8::new(ShutdownPhase::Running as u8),
                 controller: ShutdownController::new(),
                 phase_notify: Notify::new(),
+                time_getter,
+                has_drain_deadline: AtomicBool::new(false),
                 drain_deadline: AtomicU64::new(0),
+                has_drain_start: AtomicBool::new(false),
                 drain_start: AtomicU64::new(0),
             }),
         }
+    }
+
+    pub(crate) fn current_time(&self) -> Time {
+        (self.state.time_getter)()
+    }
+
+    /// Returns the time source used for shutdown bookkeeping.
+    #[must_use]
+    pub fn time_getter(&self) -> fn() -> Time {
+        self.state.time_getter
     }
 
     /// Returns the current shutdown phase.
@@ -158,10 +178,10 @@ impl ShutdownSignal {
     /// Returns the drain deadline, if one has been set.
     #[must_use]
     pub fn drain_deadline(&self) -> Option<Time> {
-        match self.state.drain_deadline.load(Ordering::Acquire) {
-            0 => None,
-            nanos => Some(Time::from_nanos(nanos)),
-        }
+        self.state
+            .has_drain_deadline
+            .load(Ordering::Acquire)
+            .then(|| Time::from_nanos(self.state.drain_deadline.load(Ordering::Acquire)))
     }
 
     /// Subscribes to the underlying shutdown controller for async waiting.
@@ -185,14 +205,16 @@ impl ShutdownSignal {
             Ordering::Acquire,
         );
         if result.is_ok() {
-            let now = Self::current_time();
+            let now = self.current_time();
             let deadline = now.saturating_add_nanos(Self::duration_to_nanos(timeout));
             self.state
                 .drain_deadline
                 .store(deadline.as_nanos(), Ordering::Release);
+            self.state.has_drain_deadline.store(true, Ordering::Release);
             self.state
                 .drain_start
                 .store(now.as_nanos(), Ordering::Release);
+            self.state.has_drain_start.store(true, Ordering::Release);
             self.state.controller.shutdown();
             self.state.phase_notify.notify_waiters();
             true
@@ -248,10 +270,10 @@ impl ShutdownSignal {
     /// Returns the time when drain began, if applicable.
     #[must_use]
     pub fn drain_start(&self) -> Option<Time> {
-        match self.state.drain_start.load(Ordering::Acquire) {
-            0 => None,
-            nanos => Some(Time::from_nanos(nanos)),
-        }
+        self.state
+            .has_drain_start
+            .load(Ordering::Acquire)
+            .then(|| Time::from_nanos(self.state.drain_start.load(Ordering::Acquire)))
     }
 
     /// Collects shutdown statistics.
@@ -267,7 +289,7 @@ impl ShutdownSignal {
     #[must_use]
     pub fn collect_stats(&self, drained: usize, force_closed: usize) -> ShutdownStats {
         let duration = self.drain_start().map_or(Duration::ZERO, |start| {
-            let now = Self::current_time();
+            let now = self.current_time();
             Duration::from_nanos(now.duration_since(start))
         });
         ShutdownStats {
@@ -307,10 +329,21 @@ impl std::fmt::Debug for ShutdownSignal {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW.store(nanos, Ordering::Relaxed);
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.load(Ordering::Relaxed))
     }
 
     #[test]
@@ -390,6 +423,38 @@ mod tests {
             signal.phase()
         );
         crate::test_complete!("begin_drain_idempotent");
+    }
+
+    #[test]
+    fn with_time_getter_controls_deadline_and_duration() {
+        init_test("with_time_getter_controls_deadline_and_duration");
+        set_test_time(0);
+        let signal = ShutdownSignal::with_time_getter(test_time);
+
+        let initiated = signal.begin_drain(Duration::from_nanos(25));
+        crate::assert_with_log!(initiated, "initiated", true, initiated);
+        crate::assert_with_log!(
+            signal.drain_start() == Some(Time::from_nanos(0)),
+            "drain start uses injected clock",
+            Some(Time::from_nanos(0)),
+            signal.drain_start()
+        );
+        crate::assert_with_log!(
+            signal.drain_deadline() == Some(Time::from_nanos(25)),
+            "deadline uses injected clock",
+            Some(Time::from_nanos(25)),
+            signal.drain_deadline()
+        );
+
+        set_test_time(80);
+        let stats = signal.collect_stats(2, 1);
+        crate::assert_with_log!(
+            stats.duration == Duration::from_nanos(80),
+            "duration uses injected clock",
+            Duration::from_nanos(80),
+            stats.duration
+        );
+        crate::test_complete!("with_time_getter_controls_deadline_and_duration");
     }
 
     #[test]

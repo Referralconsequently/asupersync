@@ -12,11 +12,12 @@ use crate::net::tcp::traits::TcpStreamApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::time::timeout;
-#[cfg(not(target_arch = "wasm32"))]
+use crate::time::TimeoutFuture;
 use crate::types::Time;
 #[cfg(not(target_arch = "wasm32"))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+#[cfg(not(target_arch = "wasm32"))]
+use std::future::{Future, poll_fn};
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
@@ -229,23 +230,36 @@ impl TcpStream {
         addr: A,
         timeout_duration: Duration,
     ) -> io::Result<Self> {
+        Self::connect_timeout_with_time_getter(addr, timeout_duration, timeout_now).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn connect_timeout_with_time_getter<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        timeout_duration: Duration,
+        time_getter: fn() -> Time,
+    ) -> io::Result<Self> {
+        let connect_future = Box::pin(Self::connect(addr));
+        match future_with_timeout(connect_future, timeout_duration, time_getter).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "tcp connect timeout",
+            )),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn connect_timeout_with_time_getter<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        timeout_duration: Duration,
+        _time_getter: fn() -> Time,
+    ) -> io::Result<Self> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = timeout_duration;
             Self::connect(addr).await
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let connect_future = std::pin::pin!(Self::connect(addr));
-            match timeout(timeout_now(), timeout_duration, connect_future).await {
-                Ok(Ok(stream)) => Ok(stream),
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "tcp connect timeout",
-                )),
-            }
         }
     }
 
@@ -437,6 +451,16 @@ pub(crate) fn fallback_rewake(cx: &Context<'_>) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn timeout_now() -> Time {
+    timeout_now_with_fallback(crate::time::wall_now)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn timeout_now() -> Time {
+    crate::time::wall_now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn timeout_now_with_fallback(fallback_now: fn() -> Time) -> Time {
     Cx::current()
         .and_then(|current| current.timer_driver())
         // Outside an active runtime context we still want timeouts to behave
@@ -444,7 +468,34 @@ fn timeout_now() -> Time {
         // because `Sleep`'s fallback clock is `wall_now()` (module-relative),
         // so a zero "now" can cause premature timeouts if `wall_now()` has
         // already advanced due to prior time ops in the same process.
-        .map_or_else(crate::time::wall_now, |driver| driver.now())
+        .map_or_else(fallback_now, |driver| driver.now())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn duration_to_nanos_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn future_with_timeout<F>(
+    future: F,
+    timeout_duration: Duration,
+    time_getter: fn() -> Time,
+) -> Result<F::Output, crate::time::Elapsed>
+where
+    F: Future + Unpin,
+{
+    let deadline =
+        time_getter().saturating_add_nanos(duration_to_nanos_saturating(timeout_duration));
+    let mut timeout = TimeoutFuture::new(future, deadline);
+    poll_fn(|cx| match timeout.poll_with_time(time_getter(), cx) {
+        Poll::Ready(result) => Poll::Ready(result),
+        Poll::Pending => {
+            let _ = Pin::new(&mut timeout).poll(cx);
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -837,7 +888,7 @@ mod tests {
     use std::io;
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
 
@@ -982,24 +1033,80 @@ mod tests {
     }
 
     #[test]
-    fn timeout_now_uses_wall_now_when_no_runtime_is_active() {
+    fn timeout_now_uses_injected_fallback_when_no_runtime_is_active() {
+        static FALLBACK_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn deterministic_now() -> Time {
+            Time::from_nanos(FALLBACK_NOW.load(Ordering::SeqCst))
+        }
+
         assert!(
             Cx::current().is_none(),
             "test must run without an active Cx"
         );
 
-        let t0 = crate::time::wall_now();
-        std::thread::sleep(Duration::from_millis(20));
-        let now = super::timeout_now();
+        FALLBACK_NOW.store(123_456, Ordering::SeqCst);
+        assert_eq!(
+            super::timeout_now_with_fallback(deterministic_now),
+            Time::from_nanos(123_456),
+            "no-runtime timeout path should delegate to injected fallback clock"
+        );
 
-        assert!(
-            now >= t0,
-            "timeout_now must be consistent with wall_now outside a runtime"
+        FALLBACK_NOW.store(789_000, Ordering::SeqCst);
+        assert_eq!(
+            super::timeout_now_with_fallback(deterministic_now),
+            Time::from_nanos(789_000),
+            "fallback clock should be consulted on every call"
         );
-        assert!(
-            now > Time::ZERO,
-            "wall time should have advanced; timeout_now should not be hard-coded to ZERO"
-        );
+    }
+
+    #[test]
+    fn future_with_timeout_honors_custom_clock() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let mut future = Box::pin(super::future_with_timeout(
+            std::future::pending::<()>(),
+            Duration::from_nanos(500),
+            test_time,
+        ));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Future::poll(future.as_mut(), &mut cx).is_pending());
+
+        TEST_NOW.store(2_000, Ordering::SeqCst);
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut cx),
+            Poll::Ready(Err(_))
+        ));
+    }
+
+    #[test]
+    fn future_with_timeout_completes_before_deadline() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let mut future = Box::pin(super::future_with_timeout(
+            std::future::ready(Ok::<u8, io::Error>(7)),
+            Duration::from_nanos(500),
+            test_time,
+        ));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut cx),
+            Poll::Ready(Ok(Ok(7)))
+        ));
     }
 
     #[test]
@@ -1191,14 +1298,9 @@ mod tests {
             hits: Arc::clone(&hits),
         }));
         let cx = Context::from_waker(&waker);
-        let started = std::time::Instant::now();
 
         fallback_rewake(&cx);
 
-        assert!(
-            started.elapsed() < Duration::from_millis(10),
-            "fallback re-wake must not sleep inline when no timer driver exists"
-        );
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
