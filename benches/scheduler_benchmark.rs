@@ -778,7 +778,8 @@ fn bench_intrusive_stack(c: &mut Criterion) {
                         for t in &tasks {
                             stack.push(*t, &mut arena);
                         }
-                        let stolen = stack.steal_batch(count / 2, &mut arena);
+                        let mut stolen = Vec::new();
+                        stack.steal_batch(count / 2, &mut arena, &mut stolen);
                         black_box(stolen)
                     },
                     BatchSize::SmallInput,

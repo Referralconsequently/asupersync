@@ -295,9 +295,9 @@ pub struct Scheduler {
 // Keep `Scheduler::new()` lightweight for tests and tiny local schedulers.
 // Production worker schedulers can opt into larger preallocation via
 // `Scheduler::with_capacity` at construction sites.
-const DEFAULT_SCHEDULER_CAPACITY: usize = 64;
-const DEFAULT_SCRATCH_CAPACITY: usize = 8;
-const MAX_SCRATCH_CAPACITY: usize = 64;
+const DEFAULT_SCHEDULER_CAPACITY: usize = 256;
+const DEFAULT_SCRATCH_CAPACITY: usize = 32;
+const MAX_SCRATCH_CAPACITY: usize = 256;
 
 impl Default for Scheduler {
     fn default() -> Self {

@@ -32,8 +32,7 @@
 use crate::types::Time;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, hash_map::Entry};
-use std::hash::{BuildHasherDefault, Hasher};
+use std::collections::BinaryHeap;
 use std::task::Waker;
 use std::time::Duration;
 
@@ -239,39 +238,7 @@ struct OverflowEntry {
     entry: TimerEntry,
 }
 
-/// Identity hasher specialized for the wheel's `u64` timer IDs.
-///
-/// `TimerWheel::active` is private and keyed only by timer IDs, so we can skip
-/// the overhead of `RandomState` while preserving exact lookup semantics.
-#[derive(Default)]
-struct TimerIdHasher(u64);
-
-impl Hasher for TimerIdHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        debug_assert_eq!(
-            bytes.len(),
-            std::mem::size_of::<u64>(),
-            "TimerIdHasher is only intended for u64 keys",
-        );
-        let mut padded = [0u8; std::mem::size_of::<u64>()];
-        let copy_len = bytes.len().min(padded.len());
-        padded[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        self.0 = u64::from_le_bytes(padded);
-    }
-}
-
-type TimerActivityMap = HashMap<u64, u64, BuildHasherDefault<TimerIdHasher>>;
+type TimerActivityMap = slab::Slab<u64>;
 
 impl PartialEq for OverflowEntry {
     fn eq(&self, other: &Self) -> bool {
@@ -377,7 +344,6 @@ pub struct TimerWheel {
     levels: [WheelLevel; LEVEL_COUNT],
     overflow: BinaryHeap<OverflowEntry>,
     ready: Vec<TimerEntry>,
-    next_id: u64,
     next_generation: u64,
     active: TimerActivityMap,
     config: TimerWheelConfig,
@@ -421,9 +387,8 @@ impl TimerWheel {
             levels,
             overflow: BinaryHeap::with_capacity(8),
             ready: Vec::with_capacity(8),
-            next_id: 0,
             next_generation: 0,
-            active: TimerActivityMap::with_capacity_and_hasher(64, BuildHasherDefault::default()),
+            active: slab::Slab::with_capacity(64),
             config,
             coalescing,
             max_wheel_duration_ns,
@@ -513,12 +478,10 @@ impl TimerWheel {
             }
         }
 
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
 
-        self.active.insert(id, generation);
+        let id = self.active.insert(generation) as u64;
 
         let entry = TimerEntry {
             deadline,
@@ -542,15 +505,15 @@ impl TimerWheel {
     ///
     /// Returns true if the timer was active and is now cancelled.
     pub fn cancel(&mut self, handle: &TimerHandle) -> bool {
-        match self.active.entry(handle.id) {
-            Entry::Occupied(entry) if *entry.get() == handle.generation => {
-                entry.remove();
-                if self.active.is_empty() {
-                    self.purge_inactive_storage();
-                }
-                true
+        let id_usize = handle.id as usize;
+        if self.active.get(id_usize).is_some_and(|&g| g == handle.generation) {
+            self.active.remove(id_usize);
+            if self.active.is_empty() {
+                self.purge_inactive_storage();
             }
-            _ => false,
+            true
+        } else {
+            false
         }
     }
 
@@ -911,7 +874,7 @@ impl TimerWheel {
 
             if should_fire {
                 let entry = ready.swap_remove(i);
-                self.active.remove(&entry.id);
+                self.active.remove(entry.id as usize);
                 wakers.push(entry.waker);
             } else {
                 let entry = ready.swap_remove(i);
@@ -1005,7 +968,7 @@ impl TimerWheel {
 
     fn is_live(&self, entry: &TimerEntry) -> bool {
         self.active
-            .get(&entry.id)
+            .get(entry.id as usize)
             .is_some_and(|generation| *generation == entry.generation)
     }
 
@@ -1128,16 +1091,6 @@ mod tests {
     }
 
     #[test]
-    fn timer_id_hasher_passthroughs_u64_hashes() {
-        use std::hash::Hash;
-
-        let timer_id = 0xDEAD_BEEF_CAFE_BABEu64;
-        let mut hasher = TimerIdHasher::default();
-        timer_id.hash(&mut hasher);
-        assert_eq!(hasher.finish(), timer_id);
-    }
-
-    #[test]
     fn wheel_register_and_fire() {
         init_test("wheel_register_and_fire");
         let mut wheel = TimerWheel::new();
@@ -1213,7 +1166,6 @@ mod tests {
     fn wheel_register_wraps_id_and_generation_without_immediate_collision() {
         init_test("wheel_register_wraps_id_and_generation_without_immediate_collision");
         let mut wheel = TimerWheel::new();
-        wheel.next_id = u64::MAX;
         wheel.next_generation = u64::MAX;
 
         let h1 = wheel.register(
@@ -1225,14 +1177,12 @@ mod tests {
             counter_waker(Arc::new(AtomicU64::new(0))),
         );
 
-        crate::assert_with_log!(h1.id == u64::MAX, "first id", u64::MAX, h1.id);
         crate::assert_with_log!(
             h1.generation == u64::MAX,
             "first generation",
             u64::MAX,
             h1.generation
         );
-        crate::assert_with_log!(h2.id == 0, "wrapped second id", 0, h2.id);
         crate::assert_with_log!(
             h2.generation == 0,
             "wrapped second generation",

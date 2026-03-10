@@ -15,9 +15,9 @@ mod imp {
     #![allow(clippy::cast_sign_loss)]
 
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
+    use std::collections::HashMap;
     use io_uring::{IoUring, opcode, types};
     use parking_lot::Mutex;
-    use hashbrown::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -244,7 +244,7 @@ mod imp {
                 }
             }
 
-            let mut completions = Vec::new();
+            let mut completions = smallvec::SmallVec::<[(u64, i32); 64]>::new();
             for cqe in ring.completion() {
                 completions.push((cqe.user_data(), cqe.result()));
             }

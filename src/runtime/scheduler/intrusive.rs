@@ -578,12 +578,11 @@ impl IntrusiveStack {
     /// # Complexity
     ///
     /// O(k) time where k is the number stolen. Allocates a Vec for the result.
-    pub fn steal_batch(&mut self, max_steal: usize, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
+    pub fn steal_batch(&mut self, max_steal: usize, arena: &mut Arena<TaskRecord>, stolen: &mut Vec<TaskId>) {
         if self.is_empty() {
-            return Vec::new();
+            return;
         }
         let steal_count = (self.len / 2).max(1).min(max_steal);
-        let mut stolen = Vec::with_capacity(steal_count);
 
         for _ in 0..steal_count {
             if let Some((bottom_id, _)) = self.steal_one_with_locality(arena) {
@@ -592,8 +591,6 @@ impl IntrusiveStack {
                 break;
             }
         }
-
-        stolen
     }
 
     /// Steals up to `max_steal` tasks into the destination stack.
@@ -1336,7 +1333,8 @@ mod tests {
         }
 
         // Steal should return oldest first (FIFO for stealing)
-        let stolen = stack.steal_batch(4, &mut arena);
+        let mut stolen = Vec::new();
+        stack.steal_batch(4, &mut arena, &mut stolen);
         assert_eq!(stolen.len(), 4);
         // Should have stolen 0, 1, 2, 3 (the oldest)
         for (i, task_id) in stolen.into_iter().enumerate() {
@@ -1432,7 +1430,8 @@ mod tests {
         // Stack now has [0, 1, 2, 3, 4] with len=5
         // Thief steals oldest - steal_batch takes at most half the queue
         // (5/2).max(1).min(2) = 2, so 2 tasks stolen
-        let stolen = stack.steal_batch(2, &mut arena);
+        let mut stolen = Vec::new();
+        stack.steal_batch(2, &mut arena, &mut stolen);
         assert_eq!(stolen.len(), 2);
         assert_eq!(stolen[0], task(0)); // Oldest is stolen first
         assert_eq!(stolen[1], task(1));
@@ -1457,7 +1456,8 @@ mod tests {
         stack.push(task(0), &mut arena);
 
         // Steal from single-element stack
-        let stolen = stack.steal_batch(4, &mut arena);
+        let mut stolen = Vec::new();
+        stack.steal_batch(4, &mut arena, &mut stolen);
         assert_eq!(stolen.len(), 1);
         assert_eq!(stolen[0], task(0));
         assert!(stack.is_empty());
@@ -1468,7 +1468,8 @@ mod tests {
         let mut arena = setup_arena(0);
         let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
 
-        let stolen = stack.steal_batch(4, &mut arena);
+        let mut stolen = Vec::new();
+        stack.steal_batch(4, &mut arena, &mut stolen);
         assert!(stolen.is_empty());
     }
 

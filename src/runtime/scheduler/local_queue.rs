@@ -4,7 +4,6 @@
 //! The stack stores links in `TaskRecord` via a shared `TaskTable` arena,
 //! keeping hot-path operations allocation-free.
 
-use std::collections::VecDeque;
 use crate::record::task::TaskRecord;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
@@ -14,6 +13,7 @@ use crate::types::{Budget, RegionId};
 use crate::util::Arena;
 use parking_lot::Mutex;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 thread_local! {
@@ -261,7 +261,7 @@ impl Stealer {
     fn steal_batch_locked(
         src: &mut VecDeque<TaskId>,
         dest: &mut VecDeque<TaskId>,
-        arena: &mut Arena<TaskRecord>,
+        arena: &Arena<TaskRecord>,
     ) -> bool {
         let initial_len = src.len();
         if initial_len == 0 {
@@ -270,7 +270,7 @@ impl Stealer {
         let steal_limit = (initial_len / 2).clamp(1, 256);
         let mut stolen = 0;
         let mut i = 0;
-        
+
         while i < src.len() && stolen < steal_limit && i < Self::SKIPPED_LOCALS_INLINE_CAP {
             let task_id = src[i];
             if let Some(record) = arena.get(task_id.arena_index()) {
@@ -283,18 +283,21 @@ impl Stealer {
             }
             i += 1;
         }
-        
+
         stolen > 0
     }
 
     /// Steals a task from the queue.
     #[inline]
     #[must_use]
+    #[allow(clippy::significant_drop_tightening)]
     pub fn steal(&self) -> Option<TaskId> {
         let mut stack = self.inner.lock();
-        if stack.is_empty() { return None; }
-        
-        self.tasks.with_tasks_arena_mut(|arena| {
+        if stack.is_empty() {
+            return None;
+        }
+
+        let result = self.tasks.with_tasks_arena_mut(|arena| {
             let mut i = 0;
             let len = stack.len();
             while i < len && i < Self::SKIPPED_LOCALS_INLINE_CAP {
@@ -307,7 +310,9 @@ impl Stealer {
                 i += 1;
             }
             None
-        })
+        });
+        drop(stack);
+        result
     }
 
     /// Steals a batch of tasks.

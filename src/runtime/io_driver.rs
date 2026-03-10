@@ -337,7 +337,7 @@ impl IoDriver {
         &mut self,
         events: Events,
         mut on_event: F,
-    ) -> Vec<Waker>
+    ) -> smallvec::SmallVec<[Waker; 64]>
     where
         F: FnMut(&Event, Option<Interest>),
     {
@@ -359,7 +359,7 @@ impl IoDriver {
         };
 
         let events_ref = restorer.events.as_ref().unwrap();
-        let mut wakers = Vec::with_capacity(events_ref.len());
+        let mut wakers = smallvec::SmallVec::with_capacity(events_ref.len());
         for event in events_ref {
             let interest = restorer.driver.interests.get(&event.token).copied();
             on_event(event, interest);
@@ -621,7 +621,7 @@ impl IoDriverHandle {
                 } else {
                     driver.restore_events_only(events);
                     drop(driver);
-                    Vec::new()
+                    smallvec::SmallVec::new()
                 }
             };
 

@@ -192,7 +192,9 @@ impl ObligationTable {
         let slot = record.holder.arena_index().index() as usize;
         if let Some(Some((holder, ids))) = self.by_holder.get_mut(slot) {
             if *holder == record.holder {
-                ids.retain(|id| *id != ob_id);
+                if let Some(pos) = ids.iter().position(|id| *id == ob_id) {
+                    ids.swap_remove(pos);
+                }
                 if ids.is_empty() {
                     self.by_holder[slot] = None;
                 }
