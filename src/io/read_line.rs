@@ -133,7 +133,7 @@ fn process_fresh_chunk(
                 if let Err(err) = append_utf8(buf, bytes_read, &chunk[..valid_len]) {
                     return ChunkAction::Finish(Err(err));
                 }
-                if found_newline {
+                if found_newline || e.error_len().is_some() {
                     ChunkAction::ConsumeAndFinish(invalid_data_result(e))
                 } else {
                     pending.extend_from_slice(&chunk[valid_len..]);
@@ -176,12 +176,12 @@ fn process_pending_chunk(
                     return ChunkAction::Finish(Err(err));
                 }
                 pending.drain(..valid_len);
-                if found_newline {
+                if found_newline || e.error_len().is_some() {
                     ChunkAction::ConsumeAndFinish(invalid_data_result(e))
                 } else {
                     ChunkAction::Consume
                 }
-            } else if e.error_len().is_some() {
+            } else if e.error_len().is_some() || found_newline {
                 ChunkAction::ConsumeAndFinish(invalid_data_result(e))
             } else {
                 ChunkAction::Consume
