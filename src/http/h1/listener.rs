@@ -25,12 +25,12 @@ const TRANSIENT_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const TRANSIENT_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(64);
 
 /// Low-overhead listener counters for diagnosing accept-path stalls.
-#[derive(Debug, Default)]
 pub struct Http1ListenerStats {
     accepted_total: AtomicU64,
     transient_accept_errors_total: AtomicU64,
     spawn_failures_total: AtomicU64,
     last_accept_at_ms: AtomicU64,
+    time_getter: fn() -> Time,
 }
 
 /// Immutable snapshot of [`Http1ListenerStats`].
@@ -42,15 +42,54 @@ pub struct Http1ListenerStatsSnapshot {
     pub transient_accept_errors_total: u64,
     /// Total failures to spawn a per-connection task after accept succeeded.
     pub spawn_failures_total: u64,
-    /// Unix time in milliseconds when the listener last accepted a connection.
+    /// Logical runtime time in milliseconds when the listener last accepted a connection.
     pub last_accept_at_ms: u64,
 }
 
+impl std::fmt::Debug for Http1ListenerStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http1ListenerStats")
+            .field(
+                "accepted_total",
+                &self.accepted_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "transient_accept_errors_total",
+                &self.transient_accept_errors_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "spawn_failures_total",
+                &self.spawn_failures_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "last_accept_at_ms",
+                &self.last_accept_at_ms.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for Http1ListenerStats {
+    fn default() -> Self {
+        Self::new(default_listener_time_getter)
+    }
+}
+
 impl Http1ListenerStats {
+    fn new(time_getter: fn() -> Time) -> Self {
+        Self {
+            accepted_total: AtomicU64::new(0),
+            transient_accept_errors_total: AtomicU64::new(0),
+            spawn_failures_total: AtomicU64::new(0),
+            last_accept_at_ms: AtomicU64::new(0),
+            time_getter,
+        }
+    }
+
     fn record_accepted(&self) {
         self.accepted_total.fetch_add(1, Ordering::Relaxed);
         self.last_accept_at_ms
-            .store(listener_diag_now_ms(), Ordering::Relaxed);
+            .store((self.time_getter)().as_millis(), Ordering::Relaxed);
     }
 
     fn record_transient_accept_error(&self) {
@@ -76,12 +115,10 @@ impl Http1ListenerStats {
     }
 }
 
-fn listener_diag_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0)
+fn default_listener_time_getter() -> Time {
+    Cx::current()
+        .and_then(|current| current.timer_driver())
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
 /// Configuration for the HTTP/1.1 listener.
@@ -93,6 +130,8 @@ pub struct Http1ListenerConfig {
     pub max_connections: Option<usize>,
     /// Drain timeout for graceful shutdown.
     pub drain_timeout: Duration,
+    /// Time source for shutdown bookkeeping, connection metadata, and listener diagnostics.
+    pub time_getter: fn() -> Time,
 }
 
 impl Default for Http1ListenerConfig {
@@ -101,6 +140,7 @@ impl Default for Http1ListenerConfig {
             http_config: Http1Config::default(),
             max_connections: Some(10_000),
             drain_timeout: Duration::from_secs(30),
+            time_getter: default_listener_time_getter,
         }
     }
 }
@@ -124,6 +164,13 @@ impl Http1ListenerConfig {
     #[must_use]
     pub fn drain_timeout(mut self, timeout: Duration) -> Self {
         self.drain_timeout = timeout;
+        self
+    }
+
+    /// Set the time source for listener bookkeeping and shutdown coordination.
+    #[must_use]
+    pub fn time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.time_getter = time_getter;
         self
     }
 }
@@ -179,10 +226,13 @@ where
         config: Http1ListenerConfig,
     ) -> io::Result<Self> {
         let tcp_listener = TcpListener::bind(addr).await?;
-        let shutdown_signal = ShutdownSignal::new();
-        let connection_manager =
-            ConnectionManager::new(config.max_connections, shutdown_signal.clone());
-        let stats = Arc::new(Http1ListenerStats::default());
+        let shutdown_signal = ShutdownSignal::with_time_getter(config.time_getter);
+        let connection_manager = ConnectionManager::with_time_getter(
+            config.max_connections,
+            shutdown_signal.clone(),
+            config.time_getter,
+        );
+        let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
 
         Ok(Self {
             tcp_listener,
@@ -200,10 +250,13 @@ where
         handler: F,
         config: Http1ListenerConfig,
     ) -> Self {
-        let shutdown_signal = ShutdownSignal::new();
-        let connection_manager =
-            ConnectionManager::new(config.max_connections, shutdown_signal.clone());
-        let stats = Arc::new(Http1ListenerStats::default());
+        let shutdown_signal = ShutdownSignal::with_time_getter(config.time_getter);
+        let connection_manager = ConnectionManager::with_time_getter(
+            config.max_connections,
+            shutdown_signal.clone(),
+            config.time_getter,
+        );
+        let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
 
         Self {
             tcp_listener,
@@ -467,9 +520,7 @@ fn transient_accept_backoff_delay(streak: u32) -> Duration {
 }
 
 fn transient_accept_now() -> Time {
-    Cx::current()
-        .and_then(|current| current.timer_driver())
-        .map_or_else(crate::time::wall_now, |driver| driver.now())
+    default_listener_time_getter()
 }
 
 #[cfg(test)]
@@ -482,6 +533,17 @@ mod tests {
     use crate::sync::Notify;
     use crate::test_utils::init_test_logging;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    static HTTP1_LISTENER_TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+    fn set_http1_listener_test_time(time: Time) {
+        HTTP1_LISTENER_TEST_NOW.store(time.as_nanos(), Ordering::Relaxed);
+    }
+
+    fn http1_listener_test_time() -> Time {
+        Time::from_nanos(HTTP1_LISTENER_TEST_NOW.load(Ordering::Relaxed))
+    }
 
     #[test]
     fn default_config() {
@@ -493,14 +555,17 @@ mod tests {
 
     #[test]
     fn config_builder() {
+        set_http1_listener_test_time(Time::from_nanos(77));
         let config = Http1ListenerConfig::default()
             .max_connections(Some(5000))
             .drain_timeout(Duration::from_mins(1))
-            .http_config(Http1Config::default().keep_alive(false));
+            .http_config(Http1Config::default().keep_alive(false))
+            .time_getter(http1_listener_test_time);
 
         assert_eq!(config.max_connections, Some(5000));
         assert_eq!(config.drain_timeout, Duration::from_mins(1));
         assert!(!config.http_config.keep_alive);
+        assert_eq!((config.time_getter)().as_nanos(), 77);
     }
 
     #[test]
@@ -616,6 +681,41 @@ mod tests {
             );
 
             assert_eq!(listener.local_addr().expect("addr"), addr);
+        });
+    }
+
+    #[test]
+    fn configured_time_getter_controls_listener_bookkeeping() {
+        crate::test_utils::run_test(|| async {
+            let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+            let config = Http1ListenerConfig::default()
+                .time_getter(http1_listener_test_time)
+                .drain_timeout(Duration::from_secs(3));
+            let listener = Http1Listener::from_listener(
+                tcp,
+                |_req| async { Response::new(200, "OK", Vec::new()) },
+                config,
+            );
+
+            set_http1_listener_test_time(Time::from_millis(321));
+            listener.stats_handle().record_accepted();
+            assert_eq!(listener.stats_handle().snapshot().last_accept_at_ms, 321);
+
+            set_http1_listener_test_time(Time::from_secs(7));
+            let addr = "127.0.0.1:8081".parse().expect("parse addr");
+            let _guard = listener
+                .connection_manager()
+                .register(addr)
+                .expect("register connection");
+            let connections = listener.connection_manager().active_connections();
+            assert_eq!(connections.len(), 1);
+            assert_eq!(connections[0].1.connected_at, Time::from_secs(7));
+
+            assert!(listener.begin_drain());
+            assert_eq!(
+                listener.shutdown_signal().drain_deadline(),
+                Some(Time::from_secs(10))
+            );
         });
     }
 
