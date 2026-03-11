@@ -89,10 +89,10 @@ fn register_interest(
     interest: Interest,
 ) -> io::Result<()> {
     if let Some(reg) = registration {
-        let combined = reg.interest() | interest;
+        let target_interest = interest;
         // Re-arm reactor interest and conditionally update the waker in a
         // single lock acquisition (will_wake guard skips the clone).
-        match reg.rearm(combined, cx.waker()) {
+        match reg.rearm(target_interest, cx.waker()) {
             Ok(true) => return Ok(()),
             Ok(false) => {
                 *registration = None;

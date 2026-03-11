@@ -260,11 +260,11 @@ impl UnixDatagram {
 
     /// Register interest with the reactor for async wakeup.
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let target_interest = interest;
         if let Some(registration) = &mut self.registration {
-            let combined = registration.interest() | interest;
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
-            match registration.rearm(combined, cx.waker()) {
+            match registration.rearm(target_interest, cx.waker()) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
                     self.registration = None;

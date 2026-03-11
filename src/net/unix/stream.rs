@@ -368,10 +368,9 @@ impl UnixStream {
     /// Registers interest with the I/O driver.
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let mut registration = self.registration.lock();
-        let mut target_interest = interest;
+        let target_interest = interest;
 
         if let Some(existing) = registration.as_mut() {
-            target_interest = existing.interest() | interest;
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
             match existing.rearm(target_interest, cx.waker()) {

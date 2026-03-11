@@ -432,9 +432,8 @@ impl UdpSocket {
     /// Register interest with the reactor.
     #[cfg(not(target_arch = "wasm32"))]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut target_interest = interest;
+        let target_interest = interest;
         if let Some(registration) = &mut self.registration {
-            target_interest = registration.interest() | interest;
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
             match registration.rearm(target_interest, cx.waker()) {

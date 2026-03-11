@@ -131,7 +131,9 @@ impl TcpListener {
                 match self.inner.accept() {
                     Ok((stream, addr)) => {
                         self.reset_accept_storm();
-                        return Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)));
+                        return Poll::Ready(
+                            TcpStream::from_std(stream).map(|stream| (stream, addr)),
+                        );
                     }
                     Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {}
                     Err(err) => return Poll::Ready(Err(err)),
@@ -418,10 +420,7 @@ mod tests {
     impl std::fmt::Debug for HookReactor {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("HookReactor")
-                .field(
-                    "registrations",
-                    &self.registrations.load(Ordering::SeqCst),
-                )
+                .field("registrations", &self.registrations.load(Ordering::SeqCst))
                 .finish_non_exhaustive()
         }
     }
