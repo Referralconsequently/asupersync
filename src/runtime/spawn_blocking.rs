@@ -85,7 +85,7 @@ impl<T> BlockingOneshot<T> {
         }));
         (
             Self {
-                state: Arc::clone(&state),
+                state: state.clone(),
                 sent: false,
             },
             BlockingOneshotReceiver { state },
@@ -122,6 +122,7 @@ impl<T> Drop for BlockingOneshot<T> {
             guard.closed_without_result = true;
             guard.waker.take()
         };
+
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -149,11 +150,11 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
         if guard.done {
             guard.result.take().map_or_else(
                 || {
-                    assert!(
-                        !guard.closed_without_result,
-                        "blocking operation ended without producing a result"
-                    );
-                    panic!("result consumed twice");
+                    if guard.closed_without_result {
+                        panic!("blocking operation ended without producing a result");
+                    } else {
+                        panic!("result consumed twice");
+                    }
                 },
                 |result| match result {
                     Ok(val) => std::task::Poll::Ready(val),
@@ -458,20 +459,38 @@ mod tests {
     }
 
     #[test]
+    fn blocking_oneshot_sender_drop_fails_closed() {
+        init_test("blocking_oneshot_sender_drop_fails_closed");
+        let (tx, rx) = BlockingOneshot::<u32>::new();
+        drop(tx);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(rx);
+        }));
+
+        let payload = panic.expect_err("receiver should fail closed when sender drops");
+        let message = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            String::new()
+        };
+
+        crate::assert_with_log!(
+            message.contains("without producing a result"),
+            "receiver panic message",
+            true,
+            message.contains("without producing a result")
+        );
+        crate::test_complete!("blocking_oneshot_sender_drop_fails_closed");
+    }
+
+    #[test]
     #[should_panic(expected = "test panic")]
     fn spawn_blocking_propagates_panic() {
         future::block_on(async {
             spawn_blocking(|| std::panic::panic_any("test panic")).await;
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "blocking operation ended without producing a result")]
-    fn blocking_oneshot_sender_drop_fails_closed() {
-        future::block_on(async {
-            let (tx, rx) = BlockingOneshot::<()>::new();
-            drop(tx);
-            rx.await;
         });
     }
 }
