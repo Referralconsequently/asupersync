@@ -329,8 +329,6 @@ mod tests {
     use crate::signal::ShutdownController;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
@@ -413,13 +411,16 @@ mod tests {
         }
     }
 
-    static TEST_GRACE_TIME_BASE: OnceLock<std::time::Instant> = OnceLock::new();
-    static TEST_GRACE_TIME_NANOS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static TEST_GRACE_TIME_BASE: std::time::Instant = std::time::Instant::now();
+        static TEST_GRACE_TIME_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     fn test_grace_time_now() -> std::time::Instant {
-        let base = *TEST_GRACE_TIME_BASE.get_or_init(std::time::Instant::now);
-        let offset = Duration::from_nanos(TEST_GRACE_TIME_NANOS.load(Ordering::SeqCst));
-        base.checked_add(offset).unwrap_or(base)
+        TEST_GRACE_TIME_BASE.with(|base| {
+            let offset = Duration::from_nanos(TEST_GRACE_TIME_NANOS.with(std::cell::Cell::get));
+            base.checked_add(offset).unwrap_or(*base)
+        })
     }
 
     #[test]
@@ -559,7 +560,7 @@ mod tests {
     #[test]
     fn grace_period_guard() {
         init_test("grace_period_guard");
-        TEST_GRACE_TIME_NANOS.store(0, Ordering::SeqCst);
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(0));
         let guard =
             GracePeriodGuard::with_time_getter(Duration::from_millis(100), test_grace_time_now);
         let elapsed = guard.is_elapsed();
@@ -572,7 +573,7 @@ mod tests {
             remaining
         );
 
-        TEST_GRACE_TIME_NANOS.store(40_000_000, Ordering::SeqCst);
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(40_000_000));
         let elapsed = guard.is_elapsed();
         crate::assert_with_log!(!elapsed, "not elapsed at 40ms", false, elapsed);
         let remaining = guard.remaining();
@@ -583,7 +584,7 @@ mod tests {
             remaining
         );
 
-        TEST_GRACE_TIME_NANOS.store(150_000_000, Ordering::SeqCst);
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(150_000_000));
         let elapsed = guard.is_elapsed();
         crate::assert_with_log!(elapsed, "elapsed at 150ms", true, elapsed);
         let remaining = guard.remaining();
@@ -696,14 +697,14 @@ mod tests {
 
     #[test]
     fn grace_period_guard_started_at_accessor() {
-        TEST_GRACE_TIME_NANOS.store(3_000_000, Ordering::SeqCst);
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(3_000_000));
         let guard = GracePeriodGuard::with_time_getter(Duration::from_secs(1), test_grace_time_now);
         assert_eq!(guard.started_at(), test_grace_time_now());
     }
 
     #[test]
     fn grace_period_guard_remaining_and_elapsed_at() {
-        TEST_GRACE_TIME_NANOS.store(0, Ordering::SeqCst);
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(0));
         let guard =
             GracePeriodGuard::with_time_getter(Duration::from_millis(250), test_grace_time_now);
 
