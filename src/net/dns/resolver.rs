@@ -508,7 +508,7 @@ mod tests {
     use futures_lite::future;
     use std::future::{Future, pending};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
@@ -516,14 +516,16 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     fn set_test_time(nanos: u64) {
-        TEST_NOW.store(nanos, Ordering::SeqCst);
+        TEST_NOW.with(|now: &std::cell::Cell<u64>| now.set(nanos));
     }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        Time::from_nanos(TEST_NOW.with(std::cell::Cell::get))
     }
 
     struct NoopWaker;
@@ -771,7 +773,6 @@ mod tests {
         );
 
         let second: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
-        println!("DEBUG: second = {:?}", second);
         crate::assert_with_log!(
             second.is_pending(),
             "ambient wake alone must not expire custom-clock timeout",
