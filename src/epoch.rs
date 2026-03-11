@@ -72,7 +72,10 @@ impl EpochId {
     /// Panics if incrementing would overflow.
     #[must_use]
     pub const fn next(self) -> Self {
-        Self(self.0 + 1)
+        match self.0.checked_add(1) {
+            Some(v) => Self(v),
+            None => panic!("EpochId overflow"),
+        }
     }
 
     /// Returns the next epoch, saturating at MAX.
@@ -730,7 +733,7 @@ impl EpochBarrier {
         if arrived >= u64::from(self.expected) {
             let result = BarrierResult {
                 trigger: BarrierTrigger::AllArrived,
-                arrived: arrived as u32,
+                arrived: u32::try_from(arrived).unwrap_or(u32::MAX),
                 expected: self.expected,
                 triggered_at: now,
             };
