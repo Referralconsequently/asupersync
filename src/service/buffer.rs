@@ -232,6 +232,8 @@ pub enum BufferError<E> {
     Full,
     /// The buffer has been closed.
     Closed,
+    /// The future was polled after it had already completed.
+    PolledAfterCompletion,
     /// The inner service returned an error.
     Inner(E),
 }
@@ -241,6 +243,7 @@ impl<E: fmt::Display> fmt::Display for BufferError<E> {
         match self {
             Self::Full => write!(f, "buffer full"),
             Self::Closed => write!(f, "buffer closed"),
+            Self::PolledAfterCompletion => write!(f, "buffer future polled after completion"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
     }
@@ -249,7 +252,7 @@ impl<E: fmt::Display> fmt::Display for BufferError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for BufferError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Full | Self::Closed => None,
+            Self::Full | Self::Closed | Self::PolledAfterCompletion => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -325,7 +328,7 @@ enum BufferFutureState<F, E, S, R> {
         shared: Arc<SharedBuffer<S>>,
     },
     /// Immediate error (buffer full or closed).
-    Error(Option<BufferError<E>>),
+    Error(BufferError<E>),
     /// Completed.
     Done,
 }
@@ -342,7 +345,7 @@ impl<F, E, S, R> BufferFuture<F, E, S, R> {
 
     fn error(err: BufferError<E>) -> Self {
         Self {
-            state: BufferFutureState::Error(Some(err)),
+            state: BufferFutureState::Error(err),
         }
     }
 }
@@ -410,7 +413,7 @@ where
                             drop(inner);
                             // Guard will handle the decrement + wakeups on drop.
                             drop(guard);
-                            this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
+                            this.state = BufferFutureState::Error(BufferError::Inner(e));
                             // Loop around to poll Error
                         }
                         Poll::Pending => {
@@ -444,12 +447,11 @@ where
                         }
                     }
                 }
-                BufferFutureState::Error(mut err) => {
-                    let err = err.take().expect("polled after completion");
+                BufferFutureState::Error(err) => {
                     return Poll::Ready(Err(err));
                 }
                 BufferFutureState::Done => {
-                    panic!("BufferFuture polled after completion")
+                    return Poll::Ready(Err(BufferError::PolledAfterCompletion));
                 }
             }
         }
@@ -893,6 +895,9 @@ mod tests {
         let closed: BufferError<&str> = BufferError::Closed;
         assert!(format!("{closed}").contains("buffer closed"));
 
+        let done: BufferError<&str> = BufferError::PolledAfterCompletion;
+        assert!(format!("{done}").contains("polled after completion"));
+
         let inner: BufferError<&str> = BufferError::Inner("oops");
         assert!(format!("{inner}").contains("inner service error"));
         crate::test_complete!("buffer_error_display");
@@ -908,6 +913,10 @@ mod tests {
         let dbg = format!("{closed:?}");
         assert!(dbg.contains("Closed"));
 
+        let done: BufferError<&str> = BufferError::PolledAfterCompletion;
+        let dbg = format!("{done:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
+
         let inner: BufferError<&str> = BufferError::Inner("err");
         let dbg = format!("{inner:?}");
         assert!(dbg.contains("Inner"));
@@ -921,6 +930,9 @@ mod tests {
 
         let closed: BufferError<std::io::Error> = BufferError::Closed;
         assert!(closed.source().is_none());
+
+        let done: BufferError<std::io::Error> = BufferError::PolledAfterCompletion;
+        assert!(done.source().is_none());
 
         let inner = BufferError::Inner(std::io::Error::other("test"));
         assert!(inner.source().is_some());
@@ -956,8 +968,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polled after completion")]
-    fn buffer_future_panics_when_polled_after_completion() {
+    fn buffer_future_second_poll_fails_closed_for_immediate_error() {
         let future = BufferFuture::<
             std::future::Ready<Result<i32, std::convert::Infallible>>,
             std::convert::Infallible,
@@ -967,8 +978,52 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut future = future;
-        let _ = Pin::new(&mut future).poll(&mut cx);
-        let _ = Pin::new(&mut future).poll(&mut cx); // should panic
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Err(BufferError::Full))));
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn buffer_future_second_poll_fails_closed_after_inner_success() {
+        let mut svc = Buffer::new(EchoService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = svc.poll_ready(&mut cx);
+        let mut future = svc.call(21);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(42))));
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn buffer_future_second_poll_fails_closed_after_inner_error() {
+        let mut svc = Buffer::new(FailService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = svc.poll_ready(&mut cx);
+        let mut future = svc.call(1);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Err(BufferError::Inner(_)))));
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
     }
 
     // ================================================================

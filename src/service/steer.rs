@@ -193,7 +193,7 @@ where
                     return result;
                 }
                 SteerState::Done => {
-                    panic!("SteerFuture polled after completion");
+                    return Poll::Ready(Err(SteerError::PolledAfterCompletion));
                 }
             }
         }
@@ -232,6 +232,8 @@ pub enum SteerError<E> {
     Inner(E),
     /// No services available.
     NoServices,
+    /// The steer future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl<E: fmt::Display> fmt::Display for SteerError<E> {
@@ -239,6 +241,7 @@ impl<E: fmt::Display> fmt::Display for SteerError<E> {
         match self {
             Self::Inner(e) => write!(f, "steer service error: {e}"),
             Self::NoServices => write!(f, "no services available"),
+            Self::PolledAfterCompletion => write!(f, "steer future polled after completion"),
         }
     }
 }
@@ -247,7 +250,7 @@ impl<E: std::error::Error + 'static> std::error::Error for SteerError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Inner(e) => Some(e),
-            Self::NoServices => None,
+            Self::NoServices | Self::PolledAfterCompletion => None,
         }
     }
 }
@@ -336,6 +339,23 @@ mod tests {
 
             self.available.fetch_add(1, Ordering::SeqCst);
             ready(Ok(self.id))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailService;
+
+    impl Service<usize> for FailService {
+        type Response = usize;
+        type Error = &'static str;
+        type Future = Ready<Result<usize, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: usize) -> Self::Future {
+            ready(Err("boom"))
         }
     }
 
@@ -428,6 +448,12 @@ mod tests {
     }
 
     #[test]
+    fn steer_error_polled_after_completion_display() {
+        let err: SteerError<std::io::Error> = SteerError::PolledAfterCompletion;
+        assert!(format!("{err}").contains("polled after completion"));
+    }
+
+    #[test]
     fn steer_error_source() {
         use std::error::Error;
         let err: SteerError<std::io::Error> = SteerError::Inner(std::io::Error::other("fail"));
@@ -435,6 +461,9 @@ mod tests {
 
         let err2: SteerError<std::io::Error> = SteerError::NoServices;
         assert!(err2.source().is_none());
+
+        let err3: SteerError<std::io::Error> = SteerError::PolledAfterCompletion;
+        assert!(err3.source().is_none());
     }
 
     #[test]
@@ -442,6 +471,13 @@ mod tests {
         let err: SteerError<std::io::Error> = SteerError::NoServices;
         let dbg = format!("{err:?}");
         assert!(dbg.contains("NoServices"));
+    }
+
+    #[test]
+    fn steer_error_debug_includes_polled_after_completion() {
+        let err: SteerError<std::io::Error> = SteerError::PolledAfterCompletion;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
     }
 
     #[test]
@@ -505,5 +541,37 @@ mod tests {
         assert_eq!(blocked_available.load(Ordering::SeqCst), 0);
         assert_eq!(ready_available.load(Ordering::SeqCst), 1);
         crate::test_complete!("steer_selected_route_is_not_blocked_by_other_backends");
+    }
+
+    #[test]
+    fn steer_future_second_poll_fails_closed_after_success() {
+        let mut future = Steer::new(vec![IdService { id: 7 }], |_: &usize| 0).call(0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(7))));
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(SteerError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn steer_future_second_poll_fails_closed_after_inner_error() {
+        let mut future = Steer::new(vec![FailService], |_: &usize| 0).call(0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Err(SteerError::Inner("boom")))));
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(SteerError::PolledAfterCompletion))
+        ));
     }
 }

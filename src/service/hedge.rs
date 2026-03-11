@@ -81,6 +81,8 @@ impl HedgeConfig {
 pub enum HedgeError<E> {
     /// The caller attempted `call()` without a preceding successful `poll_ready()`.
     NotReady,
+    /// The hedge future was polled after it had already completed.
+    PolledAfterCompletion,
     /// The inner service returned an error.
     Inner(E),
     /// Both primary and hedge requests failed.
@@ -96,6 +98,7 @@ impl<E: fmt::Display> fmt::Display for HedgeError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotReady => write!(f, "poll_ready required before call"),
+            Self::PolledAfterCompletion => write!(f, "hedge future polled after completion"),
             Self::Inner(e) => write!(f, "service error: {e}"),
             Self::BothFailed { primary, .. } => {
                 write!(f, "both primary and hedge failed: {primary}")
@@ -107,7 +110,7 @@ impl<E: fmt::Display> fmt::Display for HedgeError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for HedgeError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotReady => None,
+            Self::NotReady | Self::PolledAfterCompletion => None,
             Self::Inner(e) | Self::BothFailed { primary: e, .. } => Some(e),
         }
     }
@@ -351,7 +354,7 @@ where
                 }
                 polled.map_err(HedgeError::Inner)
             }
-            HedgeFutureState::Done => panic!("HedgeFuture polled after completion"),
+            HedgeFutureState::Done => Poll::Ready(Err(HedgeError::PolledAfterCompletion)),
         }
     }
 }
@@ -361,9 +364,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::Arc;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
 
     fn init_test(name: &str) {
@@ -678,6 +681,12 @@ mod tests {
     }
 
     #[test]
+    fn error_polled_after_completion_display() {
+        let err: HedgeError<std::io::Error> = HedgeError::PolledAfterCompletion;
+        assert_eq!(format!("{err}"), "hedge future polled after completion");
+    }
+
+    #[test]
     fn error_both_failed_display() {
         let err: HedgeError<std::io::Error> = HedgeError::BothFailed {
             primary: std::io::Error::other("p"),
@@ -694,6 +703,9 @@ mod tests {
 
         let not_ready: HedgeError<std::io::Error> = HedgeError::NotReady;
         assert!(not_ready.source().is_none());
+
+        let done: HedgeError<std::io::Error> = HedgeError::PolledAfterCompletion;
+        assert!(done.source().is_none());
     }
 
     #[test]
@@ -701,6 +713,13 @@ mod tests {
         let err: HedgeError<std::io::Error> = HedgeError::Inner(std::io::Error::other("fail"));
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Inner"));
+    }
+
+    #[test]
+    fn error_debug_includes_polled_after_completion() {
+        let err: HedgeError<std::io::Error> = HedgeError::PolledAfterCompletion;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
     }
 
     // ================================================================
@@ -712,5 +731,21 @@ mod tests {
         let fut = HedgeFuture::inner(std::future::ready(Ok::<i32, std::io::Error>(42)));
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("HedgeFuture"));
+    }
+
+    #[test]
+    fn hedge_future_second_poll_fails_closed() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = HedgeFuture::inner(std::future::ready(Ok::<i32, std::io::Error>(42)));
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(42))));
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(HedgeError::PolledAfterCompletion))
+        ));
     }
 }
