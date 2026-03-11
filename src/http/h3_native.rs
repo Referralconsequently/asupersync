@@ -332,7 +332,9 @@ impl H3Frame {
             decode_varint(input).map_err(|_| H3NativeError::InvalidFrame("frame type varint"))?;
         let (len, len_len) = decode_varint(&input[type_len..])
             .map_err(|_| H3NativeError::InvalidFrame("frame length varint"))?;
-        let len = len as usize;
+        let len: usize = len
+            .try_into()
+            .map_err(|_| H3NativeError::InvalidFrame("frame length exceeds addressable range"))?;
         let payload_start = type_len + len_len;
         if input.len().saturating_sub(payload_start) < len {
             return Err(H3NativeError::UnexpectedEof);
@@ -991,7 +993,9 @@ fn qpack_decode_string(
         ));
     }
     let (len, extra) = qpack_decode_prefixed_int(first, prefix_len, input)?;
-    let len = len as usize;
+    let len: usize = len
+        .try_into()
+        .map_err(|_| H3NativeError::InvalidFrame("qpack string length exceeds addressable range"))?;
     if input.len().saturating_sub(extra) < len {
         return Err(H3NativeError::UnexpectedEof);
     }
@@ -1237,7 +1241,7 @@ impl H3ConnectionState {
         state.on_frame(frame)
     }
 
-    /// Mark request-stream end.
+    /// Mark request-stream end and remove it from tracking.
     pub fn finish_request_stream(&mut self, stream_id: u64) -> Result<(), H3NativeError> {
         let state =
             self.request_streams
@@ -1245,7 +1249,11 @@ impl H3ConnectionState {
                 .ok_or(H3NativeError::ControlProtocol(
                     "unknown request stream on finish",
                 ))?;
-        state.mark_end_stream()
+        state.mark_end_stream()?;
+        // Remove finished stream to prevent unbounded memory growth on
+        // long-lived connections.
+        self.request_streams.remove(&stream_id);
+        Ok(())
     }
 
     /// Register and validate the type of a newly opened remote unidirectional stream.

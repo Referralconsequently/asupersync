@@ -1304,7 +1304,15 @@ impl MySqlConnection {
         let mut reader = PacketReader::new(data);
 
         let plugin_name = reader.read_null_terminated()?;
-        let auth_data = reader.read_rest();
+        // Strip trailing null byte from auth data — the initial handshake
+        // does this (line ~1163) but this path was missing it, causing
+        // the XOR scramble to include an extra 0x00 and auth to always fail.
+        let auth_data_raw = reader.read_rest();
+        let auth_data = if auth_data_raw.last() == Some(&0) {
+            &auth_data_raw[..auth_data_raw.len() - 1]
+        } else {
+            auth_data_raw
+        };
 
         let password = options.password.as_deref().unwrap_or("");
         let auth_response = match plugin_name {
@@ -1541,6 +1549,10 @@ impl MySqlConnection {
 
         loop {
             if cx.is_cancel_requested() {
+                // The server is still streaming row packets. Mark the
+                // connection as closed to prevent protocol desync on reuse
+                // (same as the max-rows guard below).
+                self.inner.closed = true;
                 return Err(MySqlError::Cancelled(
                     cx.cancel_reason()
                         .unwrap_or_else(|| crate::types::CancelReason::user("cancelled")),
@@ -1634,6 +1646,22 @@ impl MySqlConnection {
             && reader.read_u16_le().is_ok()
     }
 
+    /// Recognises a 0xFE-header OK packet used as a result-set terminator
+    /// in CLIENT_DEPRECATE_EOF mode.  Same structure as a regular OK
+    /// packet but with the legacy EOF header byte.
+    #[inline]
+    fn is_deprecate_eof_ok_packet(data: &[u8]) -> bool {
+        if data.first() != Some(&0xFE) {
+            return false;
+        }
+        // Same structure check as is_result_set_ok_packet but for 0xFE header.
+        let mut reader = PacketReader::new(&data[1..]);
+        reader.read_lenenc_int().is_ok()
+            && reader.read_lenenc_int().is_ok()
+            && reader.read_u16_le().is_ok()
+            && reader.read_u16_le().is_ok()
+    }
+
     /// Parse an incoming row packet or classify it as a result-set terminator.
     ///
     /// In `CLIENT_DEPRECATE_EOF` mode, packets starting with `0x00` are
@@ -1649,11 +1677,18 @@ impl MySqlConnection {
             return Ok(None);
         }
 
-        if deprecate_eof && data.first() == Some(&0x00) {
+        // In CLIENT_DEPRECATE_EOF mode the server sends an OK packet
+        // instead of EOF to terminate the result set.  That OK may use
+        // either a 0x00 or 0xFE header byte.  The 0xFE case with a
+        // non-empty info string (len ≥ 9) passes through is_eof_packet,
+        // so we must check for it explicitly here.
+        if deprecate_eof && matches!(data.first(), Some(&0x00) | Some(&0xFE)) {
             return match Self::parse_text_row(data, columns) {
                 Ok(values) => Ok(Some(values)),
                 Err(row_err) => {
-                    if Self::is_result_set_ok_packet(data) {
+                    if Self::is_result_set_ok_packet(data)
+                        || Self::is_deprecate_eof_ok_packet(data)
+                    {
                         Ok(None)
                     } else {
                         Err(row_err)
