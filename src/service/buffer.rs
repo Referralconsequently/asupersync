@@ -497,7 +497,12 @@ where
     type Future = BufferFuture<S::Future, S::Error, S, Request>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if *self.shared.closed.lock() {
+        let closed = *self.shared.closed.lock();
+        if closed {
+            if self.ready_slot_reserved {
+                self.ready_slot_reserved = false;
+                release_capacity_claim(&self.shared);
+            }
             return Poll::Ready(Err(BufferError::Closed));
         }
         if self.ready_slot_reserved {
@@ -1128,6 +1133,34 @@ mod tests {
         ));
         assert_eq!(svc.pending(), 0);
         crate::test_complete!("call_after_close_releases_reserved_slot");
+    }
+
+    #[test]
+    fn poll_ready_after_close_releases_reserved_slot() {
+        init_test("poll_ready_after_close_releases_reserved_slot");
+        let mut holder = Buffer::new(EchoService, 1);
+        let mut waiter = holder.clone();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(holder.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(holder.pending(), 1);
+
+        holder.close();
+
+        let result = holder.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
+        assert!(!holder.ready_slot_reserved);
+        assert_eq!(holder.pending(), 0);
+        assert!(holder.is_empty());
+
+        let waiter_result = waiter.poll_ready(&mut cx);
+        assert!(matches!(
+            waiter_result,
+            Poll::Ready(Err(BufferError::Closed))
+        ));
+        assert_eq!(waiter.pending(), 0);
+        crate::test_complete!("poll_ready_after_close_releases_reserved_slot");
     }
 
     // ================================================================
