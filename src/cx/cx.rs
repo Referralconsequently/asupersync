@@ -70,7 +70,7 @@ use crate::runtime::task_handle::JoinError;
 use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, error, info, trace};
+use crate::tracing_compat::{debug, error, info, trace, warn};
 use crate::types::{
     Budget, CancelKind, CancelReason, CxInner, RegionId, SystemPressure, TaskId, Time,
 };
@@ -682,6 +682,12 @@ impl<Caps> Cx<Caps> {
         context: &VerificationContext,
     ) -> Result<(), VerificationError> {
         let Some(token) = self.handles.macaroon.as_ref() else {
+            // Emit evidence for the no-macaroon rejection before returning.
+            warn!(
+                task_id = ?self.task_id(),
+                region_id = ?self.region_id(),
+                "capability verification failed: no macaroon attached"
+            );
             return Err(VerificationError::InvalidSignature);
         };
 
@@ -2200,6 +2206,27 @@ impl<Caps> Cx<Caps> {
             &priority_boosted,
         );
 
+        // Clamp child budget to parent constraints (structured concurrency
+        // invariant: child regions cannot exceed parent resource limits).
+        // Priority is intentionally unclamped — boosting is allowed.
+        let clamped_deadline = match (parent_budget.deadline, budget.deadline) {
+            (Some(parent), Some(child)) => Some(if child < parent { child } else { parent }),
+            (Some(parent), None) => Some(parent),
+            (None, child) => child,
+        };
+        let clamped_poll_quota = budget.poll_quota.min(parent_budget.poll_quota);
+        let clamped_cost_quota = match (parent_budget.cost_quota, budget.cost_quota) {
+            (Some(parent), Some(child)) => Some(child.min(parent)),
+            (Some(parent), None) => Some(parent),
+            (None, child) => child,
+        };
+        let clamped = Budget {
+            deadline: clamped_deadline,
+            poll_quota: clamped_poll_quota,
+            cost_quota: clamped_cost_quota,
+            priority: budget.priority,
+        };
+
         debug!(
             task_id = ?self.task_id(),
             region_id = ?self.region_id(),
@@ -2207,10 +2234,10 @@ impl<Caps> Cx<Caps> {
             parent_poll_quota = parent_budget.poll_quota,
             parent_cost_quota = ?parent_budget.cost_quota,
             parent_priority = parent_budget.priority,
-            budget_deadline = ?budget.deadline,
-            budget_poll_quota = budget.poll_quota,
-            budget_cost_quota = ?budget.cost_quota,
-            budget_priority = budget.priority,
+            budget_deadline = ?clamped.deadline,
+            budget_poll_quota = clamped.poll_quota,
+            budget_cost_quota = ?clamped.cost_quota,
+            budget_priority = clamped.priority,
             deadline_tightened,
             poll_tightened,
             cost_tightened,
@@ -2218,7 +2245,7 @@ impl<Caps> Cx<Caps> {
             budget_source = "explicit",
             "scope budget set"
         );
-        crate::cx::Scope::new(self.region_id(), budget)
+        crate::cx::Scope::new(self.region_id(), clamped)
     }
 }
 

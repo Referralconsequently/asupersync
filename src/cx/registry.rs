@@ -306,7 +306,7 @@ impl NamePermit {
             .take()
             .expect("NamePermit::commit called on already-resolved permit");
         NameLease {
-            name: self.name.clone(),
+            name: self.name,
             holder: self.holder,
             region: self.region,
             acquired_at: self.reserved_at,
@@ -851,15 +851,18 @@ impl NameRegistry {
                         current_holder,
                     }),
                     NameCollisionPolicy::Replace => {
-                        let displaced_active = self.leases.get(&name).cloned();
-                        // Remove old entries from both maps.
-                        self.leases.remove(&name);
+                        // Remove old entries from both maps; track whether
+                        // the displaced holder had an active lease (vs pending).
+                        let was_active = self.leases.remove(&name).is_some();
                         self.pending.remove(&name);
-                        if let Some(displaced) = displaced_active {
+                        // Only emit Released if the displaced entry was an
+                        // active lease (pending permits never emitted Acquired,
+                        // so emitting Released would create an unpaired event).
+                        if was_active {
                             self.emit_name_change(
                                 &name,
-                                displaced.holder,
-                                displaced.region,
+                                current_holder,
+                                current_region,
                                 NameOwnershipKind::Released,
                             );
                         }
