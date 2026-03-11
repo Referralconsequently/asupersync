@@ -671,6 +671,39 @@ mod tests {
     }
 
     #[test]
+    fn barrier_cancelled_wait_second_poll_fails_closed() {
+        init_test("barrier_cancelled_wait_second_poll_fails_closed");
+        let barrier = Barrier::new(2);
+        let cx: Cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+
+        let mut fut = barrier.wait(&cx);
+        let first = Pin::new(&mut fut).poll(&mut poll_cx);
+        let first_is_cancelled = matches!(first, Poll::Ready(Err(BarrierWaitError::Cancelled)));
+        crate::assert_with_log!(
+            first_is_cancelled,
+            "first poll is cancelled",
+            true,
+            first_is_cancelled
+        );
+
+        let second = Pin::new(&mut fut).poll(&mut poll_cx);
+        let second_is_polled_after_completion = matches!(
+            second,
+            Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion))
+        );
+        crate::assert_with_log!(
+            second_is_polled_after_completion,
+            "second poll fails closed",
+            true,
+            second_is_polled_after_completion
+        );
+        crate::test_complete!("barrier_cancelled_wait_second_poll_fails_closed");
+    }
+
+    #[test]
     fn barrier_wait_error_debug() {
         init_test("barrier_wait_error_debug");
         let err = BarrierWaitError::Cancelled;
