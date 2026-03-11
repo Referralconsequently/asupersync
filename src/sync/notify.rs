@@ -376,21 +376,9 @@ impl Notified<'_> {
             };
 
             if is_gen_changed {
-                let was_notify_one = if index < waiters.entries.len() {
-                    let entry = &waiters.entries[index];
-                    entry.notified && entry.generation == self.initial_generation
-                } else {
-                    false
-                };
-
                 waiters.remove(index);
                 self.waiter_index = None;
-
-                if was_notify_one {
-                    self.notify.pass_baton(waiters);
-                } else {
-                    drop(waiters);
-                }
+                drop(waiters);
 
                 return self.mark_done();
             }
@@ -452,7 +440,6 @@ impl Drop for Notified<'_> {
             if let Some(index) = self.waiter_index.take() {
                 let mut waiters = self.notify.waiters.lock();
 
-                let _current_generation = self.notify.generation.load(Ordering::Acquire);
                 let (was_notified, notified_generation) = if index < waiters.entries.len() {
                     let entry = &waiters.entries[index];
                     (entry.notified, entry.generation)
@@ -896,6 +883,87 @@ mod tests {
         drop(fut3);
 
         crate::test_complete!("dropped_broadcast_waiter_does_not_leak_stored_notification");
+    }
+
+    #[test]
+    fn dropped_notify_one_waiter_covered_by_broadcast_does_not_restore_token() {
+        init_test("dropped_notify_one_waiter_covered_by_broadcast_does_not_restore_token");
+        let notify = Notify::new();
+
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+
+        notify.notify_one();
+        notify.notify_waiters();
+
+        drop(fut1);
+        assert!(poll_once(&mut fut2).is_ready());
+        drop(fut2);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            stored == 0,
+            "broadcast-covered notify_one drop should not restore token",
+            0usize,
+            stored
+        );
+
+        let mut fut3 = notify.notified();
+        let pending = poll_once(&mut fut3).is_pending();
+        crate::assert_with_log!(
+            pending,
+            "new waiter should remain pending after broadcast-covered drop",
+            true,
+            pending
+        );
+        drop(fut3);
+
+        crate::test_complete!(
+            "dropped_notify_one_waiter_covered_by_broadcast_does_not_restore_token"
+        );
+    }
+
+    #[test]
+    fn polled_notify_one_waiter_covered_by_broadcast_does_not_restore_token() {
+        init_test("polled_notify_one_waiter_covered_by_broadcast_does_not_restore_token");
+        let notify = Notify::new();
+
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+
+        notify.notify_one();
+        notify.notify_waiters();
+
+        assert!(poll_once(&mut fut1).is_ready());
+        assert!(poll_once(&mut fut2).is_ready());
+        drop(fut1);
+        drop(fut2);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            stored == 0,
+            "broadcast-covered notify_one poll should not restore token",
+            0usize,
+            stored
+        );
+
+        let mut fut3 = notify.notified();
+        let pending = poll_once(&mut fut3).is_pending();
+        crate::assert_with_log!(
+            pending,
+            "new waiter should remain pending after broadcast-covered poll",
+            true,
+            pending
+        );
+        drop(fut3);
+
+        crate::test_complete!(
+            "polled_notify_one_waiter_covered_by_broadcast_does_not_restore_token"
+        );
     }
 
     // ── Invariant: notify_one baton-pass on waiter drop ────────────────
