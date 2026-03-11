@@ -1154,7 +1154,11 @@ mod tests {
         let protocol = GlobalProtocol::builder("no_calm")
             .participant("a", "role")
             .participant("b", "role")
-            .interaction(Interaction::comm("a", "msg", "Msg", "b").then(Interaction::end()))
+            .interaction(
+                Interaction::comm("a", "msg", "Msg", "b")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
+            )
             .build();
         let c = compiler();
         let output = c.compile(&protocol, "a").unwrap();
@@ -1246,7 +1250,11 @@ mod tests {
             .participant("a", "role")
             .participant("b", "role")
             .participant("ghost", "role")
-            .interaction(Interaction::comm("a", "msg", "Msg", "b").then(Interaction::end()))
+            .interaction(
+                Interaction::comm("a", "msg", "Msg", "b")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
+            )
             .build();
 
         let c = compiler();

@@ -49,10 +49,13 @@
 //!                 "coordinator",
 //!                 "commit_ready",
 //!                 Interaction::comm("coordinator", "commit", "CommitMsg", "worker")
-//!                     .then(Interaction::end()),
+//!                     .then(Interaction::end())
+//!                     .expect("comm interactions accept continuations"),
 //!                 Interaction::comm("coordinator", "abort", "AbortMsg", "worker")
-//!                     .then(Interaction::end()),
-//!             )),
+//!                     .then(Interaction::end())
+//!                     .expect("comm interactions accept continuations"),
+//!             ))
+//!             .expect("comm interactions accept continuations"),
 //!     )
 //!     .build();
 //!
@@ -236,6 +239,27 @@ pub struct ProtocolBuilder {
     duplicate_participants: BTreeSet<String>,
 }
 
+/// Builder error for invalid interaction chaining.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChoreographyBuildError {
+    /// A continuation was attached to an interaction kind that does not accept
+    /// direct chaining.
+    InvalidContinuationTarget {
+        /// The interaction kind that rejected the continuation.
+        kind: &'static str,
+    },
+}
+
+impl fmt::Display for ChoreographyBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidContinuationTarget { kind } => {
+                write!(f, "cannot attach a direct continuation to `{kind}`")
+            }
+        }
+    }
+}
+
 impl GlobalProtocol {
     /// Start building a new global protocol.
     pub fn builder(name: &str) -> ProtocolBuilder {
@@ -274,15 +298,13 @@ impl ProtocolBuilder {
     }
 
     /// Build the `GlobalProtocol`, consuming the builder.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no interaction was set.
     pub fn build(self) -> GlobalProtocol {
         GlobalProtocol {
             name: self.name,
             participants: self.participants,
-            interaction: self.interaction.expect("interaction must be set"),
+            // Missing interaction is treated as an empty protocol so validation
+            // can reject it deterministically without panicking.
+            interaction: self.interaction.unwrap_or(Interaction::End),
             duplicate_participants: self.duplicate_participants,
         }
     }
@@ -293,6 +315,19 @@ impl ProtocolBuilder {
 // ============================================================================
 
 impl Interaction {
+    fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Comm { .. } => "comm",
+            Self::Choice { .. } => "choice",
+            Self::Loop { .. } => "loop",
+            Self::Continue { .. } => "continue",
+            Self::Compensate { .. } => "compensate",
+            Self::Seq { .. } => "seq",
+            Self::Par { .. } => "par",
+            Self::End => "end",
+        }
+    }
+
     /// Create a communication action: `sender.action(msg) -> receiver`.
     pub fn comm(sender: &str, action: &str, msg_type: &str, receiver: &str) -> Self {
         Self::Comm {
@@ -351,19 +386,27 @@ impl Interaction {
     }
 
     /// Set the continuation after a `Comm` interaction.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a non-`Comm` variant.
-    #[must_use]
-    pub fn then(mut self, next: Interaction) -> Self {
-        match &mut self {
-            Self::Comm { then, .. } => {
-                **then = next;
-            }
-            _ => panic!("then() can only be called on Comm interactions"),
+    pub fn then(self, next: Interaction) -> Result<Self, ChoreographyBuildError> {
+        match self {
+            Self::Comm {
+                sender,
+                action,
+                msg_type,
+                receiver,
+                monotonicity,
+                ..
+            } => Ok(Self::Comm {
+                sender,
+                action,
+                msg_type,
+                receiver,
+                monotonicity,
+                then: Box::new(next),
+            }),
+            other => Err(ChoreographyBuildError::InvalidContinuationTarget {
+                kind: other.kind_name(),
+            }),
         }
-        self
     }
 
     /// Create a choice: `if decider.decides(predicate) { then } else { otherwise }`.
@@ -1159,8 +1202,14 @@ fn project_interaction(interaction: &Interaction, participant: &str) -> Option<L
                     forward: Box::new(f),
                     compensate: Box::new(c),
                 }),
-                (Some(f), None) => Some(f),
-                (None, Some(c)) => Some(c),
+                (Some(f), None) => Some(LocalType::Compensate {
+                    forward: Box::new(f),
+                    compensate: Box::new(LocalType::End),
+                }),
+                (None, Some(c)) => Some(LocalType::Compensate {
+                    forward: Box::new(LocalType::End),
+                    compensate: Box::new(c),
+                }),
                 (None, None) => None,
             }
         }
@@ -1481,7 +1530,8 @@ pub fn example_two_phase_commit() -> GlobalProtocol {
                     "worker",
                     Monotonicity::NonMonotone,
                 )
-                .then(Interaction::end()),
+                .then(Interaction::end())
+                .expect("comm interactions accept continuations"),
                 Interaction::comm_calm(
                     "coordinator",
                     "abort",
@@ -1489,8 +1539,10 @@ pub fn example_two_phase_commit() -> GlobalProtocol {
                     "worker",
                     Monotonicity::NonMonotone,
                 )
-                .then(Interaction::end()),
-            )),
+                .then(Interaction::end())
+                .expect("comm interactions accept continuations"),
+            ))
+            .expect("comm interactions accept continuations"),
         )
         .build()
 }
@@ -1537,7 +1589,8 @@ pub fn example_lease_renewal() -> GlobalProtocol {
                         "resource",
                         Monotonicity::Monotone,
                     )
-                    .then(Interaction::continue_("renew_loop")),
+                    .then(Interaction::continue_("renew_loop"))
+                    .expect("comm interactions accept continuations"),
                     Interaction::comm_calm(
                         "holder",
                         "release",
@@ -1545,9 +1598,11 @@ pub fn example_lease_renewal() -> GlobalProtocol {
                         "resource",
                         Monotonicity::NonMonotone,
                     )
-                    .then(Interaction::end()),
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
                 ),
-            )),
+            ))
+            .expect("comm interactions accept continuations"),
         )
         .build()
 }
@@ -1738,7 +1793,9 @@ mod tests {
         let protocol = GlobalProtocol::builder("bad")
             .participant("alice", "role")
             .interaction(
-                Interaction::comm("alice", "ping", "Ping", "alice").then(Interaction::end()),
+                Interaction::comm("alice", "ping", "Ping", "alice")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
             )
             .build();
 
@@ -1755,7 +1812,11 @@ mod tests {
     fn detects_undeclared_participant() {
         let protocol = GlobalProtocol::builder("bad")
             .participant("alice", "role")
-            .interaction(Interaction::comm("alice", "ping", "Ping", "bob").then(Interaction::end()))
+            .interaction(
+                Interaction::comm("alice", "ping", "Ping", "bob")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
+            )
             .build();
 
         let errors = protocol.validate();
@@ -1771,7 +1832,11 @@ mod tests {
             .participant("alice", "role-v1")
             .participant("alice", "role-v2")
             .participant("bob", "role")
-            .interaction(Interaction::comm("alice", "ping", "Ping", "bob").then(Interaction::end()))
+            .interaction(
+                Interaction::comm("alice", "ping", "Ping", "bob")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
+            )
             .build();
 
         let errors = protocol.validate();
@@ -1790,9 +1855,13 @@ mod tests {
                 "bob",
                 "some_pred",
                 // then-branch: alice sends first — violation!
-                Interaction::comm("alice", "msg", "Msg", "bob").then(Interaction::end()),
+                Interaction::comm("alice", "msg", "Msg", "bob")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
                 // else-branch: bob sends — ok
-                Interaction::comm("bob", "msg", "Msg", "alice").then(Interaction::end()),
+                Interaction::comm("bob", "msg", "Msg", "alice")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
             ))
             .build();
 
@@ -1812,7 +1881,8 @@ mod tests {
             .participant("bob", "role")
             .interaction(
                 Interaction::comm("alice", "msg", "Msg", "bob")
-                    .then(Interaction::continue_("nonexistent")),
+                    .then(Interaction::continue_("nonexistent"))
+                    .expect("comm interactions accept continuations"),
             )
             .build();
 
@@ -2007,13 +2077,21 @@ mod tests {
             .interaction(Interaction::choice(
                 "a",
                 "outer",
-                Interaction::comm("a", "m1", "M1", "b").then(Interaction::choice(
-                    "a",
-                    "inner",
-                    Interaction::comm("a", "m2", "M2", "b").then(Interaction::end()),
-                    Interaction::comm("a", "m3", "M3", "b").then(Interaction::end()),
-                )),
-                Interaction::comm("a", "m4", "M4", "b").then(Interaction::end()),
+                Interaction::comm("a", "m1", "M1", "b")
+                    .then(Interaction::choice(
+                        "a",
+                        "inner",
+                        Interaction::comm("a", "m2", "M2", "b")
+                            .then(Interaction::end())
+                            .expect("comm interactions accept continuations"),
+                        Interaction::comm("a", "m3", "M3", "b")
+                            .then(Interaction::end())
+                            .expect("comm interactions accept continuations"),
+                    ))
+                    .expect("comm interactions accept continuations"),
+                Interaction::comm("a", "m4", "M4", "b")
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
             ))
             .build();
 
@@ -2029,7 +2107,8 @@ mod tests {
             .participant("b", "role")
             .interaction(
                 Interaction::comm_generic("a", "send", "Payload", &["T"], "b")
-                    .then(Interaction::end()),
+                    .then(Interaction::end())
+                    .expect("comm interactions accept continuations"),
             )
             .build();
 
@@ -2069,16 +2148,68 @@ mod tests {
     }
 
     #[test]
+    fn compensation_only_participant_projection_preserves_scope() {
+        let protocol = GlobalProtocol::builder("compensate_scope")
+            .participant("a", "coordinator")
+            .participant("b", "worker")
+            .participant("c", "compensator")
+            .interaction(Interaction::seq(
+                Interaction::compensate(
+                    Interaction::comm("a", "reserve", "Reserve", "b"),
+                    Interaction::comm("a", "rollback", "Rollback", "c"),
+                ),
+                Interaction::comm("a", "notify", "Notify", "c"),
+            ))
+            .build();
+
+        let local_c = protocol
+            .project("c")
+            .expect("projection for c should exist");
+        match local_c {
+            LocalType::Compensate {
+                forward,
+                compensate,
+            } => {
+                match forward.as_ref() {
+                    LocalType::Recv {
+                        action, from, then, ..
+                    } => {
+                        assert_eq!(action, "notify");
+                        assert_eq!(from, "a");
+                        assert!(matches!(then.as_ref(), LocalType::End));
+                    }
+                    other => panic!("expected notify in forward branch, got {other}"),
+                }
+                match compensate.as_ref() {
+                    LocalType::Recv {
+                        action, from, then, ..
+                    } => {
+                        assert_eq!(action, "rollback");
+                        assert_eq!(from, "a");
+                        assert!(matches!(then.as_ref(), LocalType::End));
+                    }
+                    other => panic!("expected rollback in compensate branch, got {other}"),
+                }
+            }
+            other => panic!("expected compensate projection, got {other}"),
+        }
+    }
+
+    #[test]
     fn duplicate_loop_label_detected() {
         let protocol = GlobalProtocol::builder("dup_labels")
             .participant("a", "role")
             .participant("b", "role")
             .interaction(Interaction::loop_(
                 "x",
-                Interaction::comm("a", "m", "M", "b").then(Interaction::loop_(
-                    "x", // duplicate!
-                    Interaction::comm("a", "n", "N", "b").then(Interaction::continue_("x")),
-                )),
+                Interaction::comm("a", "m", "M", "b")
+                    .then(Interaction::loop_(
+                        "x", // duplicate!
+                        Interaction::comm("a", "n", "N", "b")
+                            .then(Interaction::continue_("x"))
+                            .expect("comm interactions accept continuations"),
+                    ))
+                    .expect("comm interactions accept continuations"),
             ))
             .build();
 
@@ -2314,12 +2445,14 @@ mod tests {
             .interaction(Interaction::choice(
                 "a",
                 "outer",
-                Interaction::comm("a", "m1", "M1", "b").then(Interaction::choice(
-                    "a",
-                    "inner",
-                    Interaction::comm("a", "m2", "M2", "b"),
-                    Interaction::comm("a", "m3", "M3", "b"),
-                )),
+                Interaction::comm("a", "m1", "M1", "b")
+                    .then(Interaction::choice(
+                        "a",
+                        "inner",
+                        Interaction::comm("a", "m2", "M2", "b"),
+                        Interaction::comm("a", "m3", "M3", "b"),
+                    ))
+                    .expect("comm interactions accept continuations"),
                 Interaction::comm("a", "m4", "M4", "b"),
             ))
             .build();
@@ -2334,12 +2467,14 @@ mod tests {
             .interaction(Interaction::choice(
                 "a",
                 "outer",
-                Interaction::comm("a", "notify", "Notify", "b").then(Interaction::choice(
-                    "b",
-                    "inner",
-                    Interaction::comm("b", "reply_yes", "Yes", "a"),
-                    Interaction::comm("b", "reply_no", "No", "a"),
-                )),
+                Interaction::comm("a", "notify", "Notify", "b")
+                    .then(Interaction::choice(
+                        "b",
+                        "inner",
+                        Interaction::comm("b", "reply_yes", "Yes", "a"),
+                        Interaction::comm("b", "reply_no", "No", "a"),
+                    ))
+                    .expect("comm interactions accept continuations"),
                 Interaction::comm("a", "skip", "Skip", "b"),
             ))
             .build();
@@ -2401,7 +2536,8 @@ mod tests {
                     "a",
                     "continue_pred",
                     Interaction::comm("a", "data", "Data", "b")
-                        .then(Interaction::continue_("main")),
+                        .then(Interaction::continue_("main"))
+                        .expect("comm interactions accept continuations"),
                     Interaction::comm("a", "done", "Done", "b"),
                 ),
             ))
@@ -2966,17 +3102,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "then() can only be called on Comm interactions")]
-    fn then_panics_on_non_comm() {
-        let _bad = Interaction::end().then(Interaction::end());
+    fn then_rejects_non_comm_interactions() {
+        let error = Interaction::end()
+            .then(Interaction::end())
+            .expect_err("non-comm interactions should reject direct continuations");
+        assert_eq!(
+            error,
+            ChoreographyBuildError::InvalidContinuationTarget { kind: "end" }
+        );
     }
 
     #[test]
-    #[should_panic(expected = "interaction must be set")]
-    fn builder_panics_without_interaction() {
-        let _bad = GlobalProtocol::builder("bad")
+    fn builder_without_interaction_validates_as_empty_protocol() {
+        let protocol = GlobalProtocol::builder("bad")
             .participant("a", "role")
             .build();
+        assert!(matches!(protocol.interaction, Interaction::End));
+        assert!(
+            protocol
+                .validate()
+                .iter()
+                .any(|error| matches!(error, ValidationError::EmptyProtocol))
+        );
     }
 
     // ------------------------------------------------------------------
@@ -3034,7 +3181,8 @@ mod tests {
             .participant("a", "role")
             .interaction(
                 Interaction::comm("a", "ping", "Ping", "a")
-                    .then(Interaction::comm("a", "send", "Msg", "ghost")),
+                    .then(Interaction::comm("a", "send", "Msg", "ghost"))
+                    .expect("comm interactions accept continuations"),
             )
             .build();
 
@@ -3087,7 +3235,9 @@ mod tests {
             .interaction(Interaction::seq(
                 Interaction::loop_(
                     "x",
-                    Interaction::comm("a", "m", "M", "b").then(Interaction::continue_("x")),
+                    Interaction::comm("a", "m", "M", "b")
+                        .then(Interaction::continue_("x"))
+                        .expect("comm interactions accept continuations"),
                 ),
                 Interaction::continue_("x"), // "x" is NOT enclosing here
             ))
@@ -3112,12 +3262,17 @@ mod tests {
             .interaction(Interaction::choice(
                 "a",
                 "pred",
-                Interaction::comm("a", "m1", "M", "b").then(Interaction::loop_(
-                    "inner",
-                    Interaction::comm("a", "ping", "Ping", "b")
-                        .then(Interaction::continue_("inner")),
-                )),
-                Interaction::comm("a", "m2", "M", "b").then(Interaction::continue_("inner")), // NOT enclosing
+                Interaction::comm("a", "m1", "M", "b")
+                    .then(Interaction::loop_(
+                        "inner",
+                        Interaction::comm("a", "ping", "Ping", "b")
+                            .then(Interaction::continue_("inner"))
+                            .expect("comm interactions accept continuations"),
+                    ))
+                    .expect("comm interactions accept continuations"),
+                Interaction::comm("a", "m2", "M", "b")
+                    .then(Interaction::continue_("inner"))
+                    .expect("comm interactions accept continuations"), // NOT enclosing
             ))
             .build();
 
@@ -3147,7 +3302,9 @@ mod tests {
             .interaction(Interaction::seq(
                 Interaction::loop_(
                     "x",
-                    Interaction::comm("a", "ping", "Ping", "b").then(Interaction::continue_("x")),
+                    Interaction::comm("a", "ping", "Ping", "b")
+                        .then(Interaction::continue_("x"))
+                        .expect("comm interactions accept continuations"),
                 ),
                 Interaction::comm("a", "notify", "Notify", "c"),
             ))
@@ -3177,7 +3334,9 @@ mod tests {
                 Interaction::choice(
                     "a",
                     "go",
-                    Interaction::comm("a", "data", "Data", "b").then(Interaction::continue_("x")),
+                    Interaction::comm("a", "data", "Data", "b")
+                        .then(Interaction::continue_("x"))
+                        .expect("comm interactions accept continuations"),
                     Interaction::comm("a", "done", "Done", "b"),
                 ),
             ))
