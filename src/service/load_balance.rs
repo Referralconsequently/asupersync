@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use super::Service;
+use super::discover::{Change, Discover};
 
 fn noop_waker() -> Waker {
     struct NoopWaker;
@@ -59,6 +60,13 @@ where
     let mut cx = Context::from_waker(&waker);
     let poll = service.poll_ready(&mut cx);
     (poll, woke.load(Ordering::SeqCst))
+}
+
+fn backend_matches_service<S>(backend: &Backend<S>, expected: &S) -> bool
+where
+    S: Eq,
+{
+    backend.service.lock().eq(expected)
 }
 
 // ─── Load metric ──────────────────────────────────────────────────────────
@@ -443,6 +451,58 @@ where
     }
 }
 
+impl<S, T: Strategy> LoadBalancer<S, T>
+where
+    S: Eq,
+{
+    /// Apply topology changes from a [`Discover`] source.
+    ///
+    /// This method is available when the discovered key type matches the
+    /// backend value stored by the balancer.
+    pub fn update_from_discover<D>(&self, discover: &D) -> Result<(), DiscoverUpdateError<D::Error>>
+    where
+        D: Discover<Key = S>,
+    {
+        let changes = discover
+            .poll_discover()
+            .map_err(DiscoverUpdateError::Discover)?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+
+        let mut backends = self.backends.lock();
+        for change in changes {
+            match change {
+                Change::Insert(service) => {
+                    if backends
+                        .iter()
+                        .any(|backend| backend_matches_service(backend, &service))
+                    {
+                        continue;
+                    }
+
+                    backends.push(Arc::new(Backend {
+                        service: Mutex::new(service),
+                        load: Arc::new(LoadMetric::new()),
+                    }));
+                }
+                Change::Remove(service) => {
+                    if let Some(index) = backends
+                        .iter()
+                        .position(|backend| backend_matches_service(backend, &service))
+                    {
+                        backends.remove(index);
+                    }
+                }
+            }
+        }
+
+        drop(backends);
+
+        Ok(())
+    }
+}
+
 impl<S, T: Strategy> LoadBalancer<S, T> {
     /// Pick a backend and dispatch a request through it.
     ///
@@ -594,6 +654,8 @@ impl<D: std::error::Error + 'static> std::error::Error for DiscoverUpdateError<D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use std::collections::VecDeque;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::task::{Context, Poll};
 
@@ -978,6 +1040,61 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ScriptedDiscover<K, E> {
+        polls: Mutex<VecDeque<Result<Vec<Change<K>>, E>>>,
+        endpoints: Mutex<Vec<K>>,
+    }
+
+    impl<K, E> ScriptedDiscover<K, E> {
+        fn new(polls: Vec<Result<Vec<Change<K>>, E>>) -> Self {
+            Self {
+                polls: Mutex::new(polls.into()),
+                endpoints: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl<K, E> Discover for ScriptedDiscover<K, E>
+    where
+        K: Clone + Eq + std::hash::Hash + fmt::Debug + Send + Sync + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        type Key = K;
+        type Error = E;
+
+        fn poll_discover(&self) -> Result<Vec<Change<K>>, Self::Error> {
+            let Some(next) = self.polls.lock().pop_front() else {
+                return Ok(Vec::new());
+            };
+            let changes = next?;
+
+            let mut endpoints = self.endpoints.lock();
+            for change in &changes {
+                match change {
+                    Change::Insert(endpoint) => {
+                        if !endpoints.contains(endpoint) {
+                            endpoints.push(endpoint.clone());
+                        }
+                    }
+                    Change::Remove(endpoint) => {
+                        if let Some(index) = endpoints.iter().position(|item| item == endpoint) {
+                            endpoints.remove(index);
+                        }
+                    }
+                }
+            }
+
+            drop(endpoints);
+
+            Ok(changes)
+        }
+
+        fn endpoints(&self) -> Vec<Self::Key> {
+            self.endpoints.lock().clone()
+        }
+    }
+
     #[test]
     fn lb_new_and_len() {
         init_test("lb_new_and_len");
@@ -1176,6 +1293,93 @@ mod tests {
         assert!(matches!(err, LoadBalanceError::NoReadyBackends));
         assert_eq!(lb.loads(), vec![0]);
         crate::test_complete!("lb_call_balanced_preserves_backend_local_state");
+    }
+
+    #[test]
+    fn lb_update_from_discover_applies_insert_remove_and_dedupes() {
+        init_test("lb_update_from_discover_applies_insert_remove_and_dedupes");
+        let discover = ScriptedDiscover::<String, std::io::Error>::new(vec![
+            Ok(vec![
+                Change::Insert("backend-a".to_string()),
+                Change::Insert("backend-a".to_string()),
+                Change::Insert("backend-b".to_string()),
+            ]),
+            Ok(vec![
+                Change::Remove("missing".to_string()),
+                Change::Remove("backend-a".to_string()),
+                Change::Insert("backend-c".to_string()),
+                Change::Insert("backend-c".to_string()),
+            ]),
+            Ok(vec![Change::Insert("backend-b".to_string())]),
+        ]);
+        let lb = LoadBalancer::empty(RoundRobin::new());
+
+        lb.update_from_discover(&discover)
+            .expect("initial inserts should apply");
+        assert_eq!(lb.len(), 2);
+        assert_eq!(
+            discover.endpoints(),
+            vec!["backend-a".to_string(), "backend-b".to_string()]
+        );
+
+        lb.update_from_discover(&discover)
+            .expect("removes and inserts should apply");
+        assert_eq!(lb.len(), 2);
+        assert_eq!(
+            discover.endpoints(),
+            vec!["backend-b".to_string(), "backend-c".to_string()]
+        );
+
+        lb.update_from_discover(&discover)
+            .expect("duplicate inserts should be ignored");
+        assert_eq!(lb.len(), 2);
+
+        let mut remaining = vec![
+            lb.remove(0).expect("backend-b should remain"),
+            lb.remove(0).expect("backend-c should remain"),
+        ];
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec!["backend-b".to_string(), "backend-c".to_string()]
+        );
+        crate::test_complete!("lb_update_from_discover_applies_insert_remove_and_dedupes");
+    }
+
+    #[test]
+    fn lb_update_from_static_discovery_is_idempotent() {
+        init_test("lb_update_from_static_discovery_is_idempotent");
+        let discover = super::super::discover::StaticList::new(vec![
+            "backend-a".to_string(),
+            "backend-b".to_string(),
+            "backend-a".to_string(),
+        ]);
+        let lb = LoadBalancer::empty(RoundRobin::new());
+
+        lb.update_from_discover(&discover)
+            .expect("first static discovery poll should populate backends");
+        assert_eq!(lb.len(), 2);
+
+        lb.update_from_discover(&discover)
+            .expect("subsequent static discovery polls should be no-ops");
+        assert_eq!(lb.len(), 2);
+        crate::test_complete!("lb_update_from_static_discovery_is_idempotent");
+    }
+
+    #[test]
+    fn lb_update_from_discover_propagates_errors() {
+        init_test("lb_update_from_discover_propagates_errors");
+        let discover = ScriptedDiscover::new(vec![Err(std::io::Error::other("discovery failed"))]);
+        let lb = LoadBalancer::<String, _>::empty(RoundRobin::new());
+
+        let err = lb
+            .update_from_discover(&discover)
+            .expect_err("discovery errors should bubble up");
+
+        assert!(matches!(err, DiscoverUpdateError::Discover(_)));
+        assert!(format!("{err}").contains("discovery failed"));
+        assert!(lb.is_empty());
+        crate::test_complete!("lb_update_from_discover_propagates_errors");
     }
 
     // ================================================================
