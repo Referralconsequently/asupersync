@@ -673,7 +673,7 @@ impl JetStreamContext {
 
         // Check for error in response
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\"") {
+        if response_str.contains("\"error\":{\"code\":") {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -742,7 +742,7 @@ impl JetStreamContext {
             .await?;
 
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\"") {
+        if response_str.contains("\"error\":{\"code\":") {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -770,7 +770,7 @@ impl JetStreamContext {
         let response = self.client.request(cx, &subject, b"").await?;
 
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\"") {
+        if response_str.contains("\"error\":{\"code\":") {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -794,7 +794,7 @@ impl JetStreamContext {
         let response = self.client.request(cx, &subject, b"").await?;
 
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\"") {
+        if response_str.contains("\"error\":{\"code\":") {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -809,7 +809,7 @@ impl JetStreamContext {
     fn parse_stream_info(payload: &[u8]) -> Result<StreamInfo, JsError> {
         let json = String::from_utf8_lossy(payload);
 
-        if json.contains("\"error\"") {
+        if json.contains("\"error\":{\"code\":") {
             return Err(Self::parse_api_error(&json));
         }
 
@@ -822,7 +822,9 @@ impl JetStreamContext {
             bytes: extract_json_u64(&json, "bytes").unwrap_or(0),
             first_seq: extract_json_u64(&json, "first_seq").unwrap_or(0),
             last_seq: extract_json_u64(&json, "last_seq").unwrap_or(0),
-            consumer_count: extract_json_u64(&json, "consumer_count").unwrap_or(0) as u32,
+            consumer_count: extract_json_u64(&json, "consumer_count")
+                .unwrap_or(0)
+                .min(u64::from(u32::MAX)) as u32,
         };
 
         Ok(StreamInfo {
@@ -834,7 +836,7 @@ impl JetStreamContext {
     fn parse_pub_ack(payload: &[u8]) -> Result<PubAck, JsError> {
         let json = String::from_utf8_lossy(payload);
 
-        if json.contains("\"error\"") {
+        if json.contains("\"error\":{\"code\":") {
             return Err(Self::parse_api_error(&json));
         }
 
@@ -853,10 +855,14 @@ impl JetStreamContext {
 
     fn parse_api_error(json: &str) -> JsError {
         let code = extract_json_u64(json, "code").unwrap_or(0) as u32;
+        // JetStream uses `err_code` for application-level error codes (e.g.,
+        // 10059 = stream not found).  The `code` field is the HTTP-style
+        // status (404, 500, etc.).
+        let err_code = extract_json_u64(json, "err_code").unwrap_or(0) as u32;
         let description = extract_json_string_simple(json, "description")
             .unwrap_or_else(|| "unknown error".to_string());
 
-        if code == 10059 {
+        if err_code == 10059 {
             // Stream not found
             return JsError::StreamNotFound(description);
         }
@@ -959,8 +965,16 @@ impl Consumer {
             compute_client_deadline(now, pull_timeout, Self::CLIENT_TIMEOUT_SLACK);
         let mut result: Result<(), JsError> = Ok(());
 
-        // Collect messages until we get batch or timeout
-        for _ in 0..batch {
+        // Collect messages until we get batch or timeout.
+        // The server may interleave status/control messages (heartbeats,
+        // flow-control, 408/409 advisories) that do not carry a $JS.ACK
+        // reply subject.  We skip those and only break on subscription
+        // close (None), timeout, or error.
+        let mut received = 0usize;
+        loop {
+            if received >= batch {
+                break;
+            }
             let item = if let Some(deadline) = client_deadline {
                 // Box::pin is required because timeout_at() needs Unpin
                 let next = Box::pin(sub.next(cx));
@@ -972,9 +986,10 @@ impl Consumer {
                 Ok(Ok(Some(msg))) => {
                     if let Some(js_msg) = Self::parse_js_message(msg) {
                         messages.push(js_msg);
-                    } else {
-                        break; // Status message or end
+                        received += 1;
                     }
+                    // Non-JetStream messages (status/control) are silently
+                    // skipped — the loop continues waiting for real messages.
                 }
                 Ok(Ok(None)) | Err(_) => break, // Subscription closed or timeout
                 Ok(Err(e)) => {
@@ -999,6 +1014,9 @@ impl Consumer {
     fn parse_js_message(msg: Message) -> Option<JsMessage> {
         // JetStream messages have metadata in headers (reply subject format)
         // Format: $JS.ACK.<stream>.<consumer>.<delivered>.<stream_seq>.<consumer_seq>.<timestamp>.<pending>
+        // Note: stream and consumer names may contain dots, so we parse
+        // the 5 trailing numeric fields from the right rather than using
+        // fixed left-hand indices.
         let reply = msg.reply_to?;
 
         if !reply.starts_with("$JS.ACK.") {
@@ -1006,12 +1024,18 @@ impl Consumer {
         }
 
         let parts: Vec<&str> = reply.split('.').collect();
+        // $JS (0), ACK (1), <stream..> , <consumer..>, delivered, stream_seq,
+        // consumer_seq, timestamp, pending => at least 9 tokens when stream
+        // and consumer are each a single segment; with dotted names there
+        // will be more. The last 5 tokens are always the numeric fields.
         if parts.len() < 9 {
             return None;
         }
 
-        let delivered: u32 = parts[4].parse().ok()?;
-        let sequence: u64 = parts[5].parse().ok()?;
+        // Parse from the tail: pending(-1), timestamp(-2), consumer_seq(-3),
+        // stream_seq(-4), delivered(-5).
+        let delivered: u32 = parts[parts.len() - 5].parse().ok()?;
+        let sequence: u64 = parts[parts.len() - 4].parse().ok()?;
 
         Some(JsMessage {
             subject: msg.subject,
@@ -1094,8 +1118,16 @@ fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
         match chars.next()? {
             (i, '"') => return Some(json[start..start + i].to_string()),
             (_, '\\') => {
-                // Skip the escaped character
-                chars.next()?;
+                // Skip the escaped character.  For \uXXXX sequences we
+                // must consume the 'u' plus all 4 hex digits so that a
+                // hex digit that happens to be '"' (impossible, but
+                // being defensive) doesn't terminate the string early.
+                let (_, esc) = chars.next()?;
+                if esc == 'u' {
+                    for _ in 0..4 {
+                        chars.next()?;
+                    }
+                }
             }
             _ => {}
         }
@@ -1594,5 +1626,93 @@ mod tests {
         assert_eq!(s.messages, 0);
         let cloned = s;
         assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    // ========================================================================
+    // Regression tests for audit batch 195 bug fixes
+    // ========================================================================
+
+    #[test]
+    fn parse_js_message_dotted_stream_name() {
+        // BUG-1 regression: stream/consumer names with dots should not break
+        // the ACK reply subject parser.  The format is:
+        // $JS.ACK.<stream>.<consumer>.<delivered>.<stream_seq>.<consumer_seq>.<ts>.<pending>
+        // With dotted names, there are >9 dot-separated segments.
+        let reply = "$JS.ACK.orders.v2.my.consumer.1.42.3.1234567890.5";
+        let msg = Message {
+            subject: "test.subject".to_string(),
+            sid: 1,
+            payload: b"hello".to_vec(),
+            reply_to: Some(reply.to_string()),
+        };
+        let js_msg = Consumer::parse_js_message(msg).expect("should parse dotted names");
+        // delivered=1 (5th from right), stream_seq=42 (4th from right)
+        assert_eq!(js_msg.delivered, 1);
+        assert_eq!(js_msg.sequence, 42);
+    }
+
+    #[test]
+    fn parse_js_message_simple_names() {
+        // Baseline: standard 9-segment ACK subject still works
+        let reply = "$JS.ACK.mystream.myconsumer.2.100.50.9999999.10";
+        let msg = Message {
+            subject: "test".to_string(),
+            sid: 1,
+            payload: vec![],
+            reply_to: Some(reply.to_string()),
+        };
+        let js_msg = Consumer::parse_js_message(msg).expect("should parse simple names");
+        assert_eq!(js_msg.delivered, 2);
+        assert_eq!(js_msg.sequence, 100);
+    }
+
+    #[test]
+    fn error_detection_no_false_positive() {
+        // BUG-2 regression: a response containing "error" in a data field
+        // should NOT be classified as an error.
+        let response = r#"{"stream":"error-handler","seq":1}"#;
+        assert!(
+            !response.contains("\"error\":{\"code\":"),
+            "data containing 'error' in name should not match error envelope"
+        );
+
+        // Actual error envelope should match
+        let error_response = r#"{"error":{"code":404,"description":"not found"}}"#;
+        assert!(
+            error_response.contains("\"error\":{\"code\":"),
+            "actual error envelope should match"
+        );
+    }
+
+    #[test]
+    fn parse_api_error_uses_err_code_for_stream_not_found() {
+        // BUG-4 regression: StreamNotFound should be returned when err_code
+        // is 10059, not when code is 10059.
+        let json = r#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#;
+        let err = JetStreamContext::parse_api_error(json);
+        assert!(
+            matches!(err, JsError::StreamNotFound(ref d) if d.contains("stream not found")),
+            "should classify as StreamNotFound, got: {err:?}"
+        );
+
+        // code=404 alone (no err_code=10059) should NOT produce StreamNotFound
+        let json2 = r#"{"error":{"code":404,"description":"generic not found"}}"#;
+        let err2 = JetStreamContext::parse_api_error(json2);
+        assert!(
+            matches!(err2, JsError::Api { code: 404, .. }),
+            "should be generic Api error, got: {err2:?}"
+        );
+    }
+
+    #[test]
+    fn extract_json_string_handles_unicode_escape() {
+        // BUG-7 regression: \uXXXX should not truncate the extracted string
+        let json = r#"{"name":"hello\u0020world","other":"val"}"#;
+        let result = extract_json_string_simple(json, "name");
+        assert_eq!(
+            result,
+            Some(r#"hello\u0020world"#.to_string()),
+            "unicode escape should not truncate"
+        );
     }
 }
