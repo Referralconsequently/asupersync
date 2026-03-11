@@ -1956,6 +1956,7 @@ impl WasmExportDispatcher {
         handle: &WasmHandleRef,
         outcome: WasmAbiOutcomeEnvelope,
     ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.dispatch_count += 1;
         let entry = self
             .handles
             .get(handle)

@@ -950,6 +950,7 @@ impl LabRuntime {
         let start_steps = self.steps;
         let mut auto_advances: u64 = 0;
         let mut total_wakeups: u64 = 0;
+        let mut stuck_counter: u32 = 0;
         let start_time = self.virtual_time;
 
         loop {
@@ -963,6 +964,7 @@ impl LabRuntime {
             // Run until the scheduler is empty
             let is_empty = self.scheduler.lock().is_empty();
             if !is_empty {
+                stuck_counter = 0;
                 self.step();
                 continue;
             }
@@ -993,6 +995,10 @@ impl LabRuntime {
 
             // Not quiescent but nothing to advance — try one more step
             // (there may be I/O or finalizers to process)
+            stuck_counter += 1;
+            if stuck_counter > 1000 {
+                break;
+            }
             self.step();
         }
 
@@ -1885,7 +1891,7 @@ impl LabRuntime {
     fn inject_spurious_wakes(&mut self, task_id: TaskId, priority: u8, count: usize) {
         // Record replay event
         self.replay_recorder
-            .record_wakeup_storm_injection(task_id, count as u32);
+            .record_wakeup_storm_injection(task_id, u32::try_from(count).unwrap_or(u32::MAX));
 
         // Schedule the task multiple times (spurious wakeups)
         let mut sched = self.scheduler.lock();

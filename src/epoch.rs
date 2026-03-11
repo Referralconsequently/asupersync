@@ -2333,7 +2333,7 @@ mod tests {
 
     // Test 22: EpochId next overflow panic
     #[test]
-    #[should_panic(expected = "attempt to add with overflow")]
+    #[should_panic(expected = "EpochId overflow")]
     fn test_epoch_id_next_overflow_panics() {
         init_test("test_epoch_id_next_overflow_panics");
         let max_epoch = EpochId::MAX;
