@@ -67,6 +67,8 @@ pub enum ReconnectError<E, M> {
     Inner(E),
     /// Failed to create a new service instance.
     Connect(M),
+    /// No connected inner service was available for `call`.
+    NotReady,
 }
 
 impl<E: fmt::Display, M: fmt::Display> fmt::Display for ReconnectError<E, M> {
@@ -74,6 +76,7 @@ impl<E: fmt::Display, M: fmt::Display> fmt::Display for ReconnectError<E, M> {
         match self {
             Self::Inner(e) => write!(f, "service error: {e}"),
             Self::Connect(e) => write!(f, "reconnect failed: {e}"),
+            Self::NotReady => write!(f, "service not ready; poll_ready required before call"),
         }
     }
 }
@@ -85,6 +88,7 @@ impl<E: std::error::Error + 'static, M: std::error::Error + 'static> std::error:
         match self {
             Self::Inner(e) => Some(e),
             Self::Connect(e) => Some(e),
+            Self::NotReady => None,
         }
     }
 }
@@ -224,10 +228,16 @@ where
     M: MakeService,
     M::Service: Service<Request> + Unpin,
     <M::Service as Service<Request>>::Future: Unpin,
+    <M::Service as Service<Request>>::Error: Unpin,
+    M::Error: Unpin,
 {
     type Response = <M::Service as Service<Request>>::Response;
     type Error = ReconnectError<<M::Service as Service<Request>>::Error, M::Error>;
-    type Future = ReconnectFuture<<M::Service as Service<Request>>::Future, M::Error>;
+    type Future = ReconnectFuture<
+        <M::Service as Service<Request>>::Future,
+        <M::Service as Service<Request>>::Error,
+        M::Error,
+    >;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if self.refresh_pending.swap(false, Ordering::AcqRel) {
@@ -290,55 +300,109 @@ where
         }
 
         let call_epoch = self.service_epoch.load(Ordering::Acquire);
+        let Some(inner) = self.inner.as_mut() else {
+            return ReconnectFuture::error(ReconnectError::NotReady);
+        };
+
         let guard =
             RefreshPendingGuard::new(&self.refresh_pending, &self.service_epoch, call_epoch);
-        let fut = self
-            .inner
-            .as_mut()
-            .expect("poll_ready must be called before call")
-            .call(req);
+        let fut = inner.call(req);
         guard.defuse();
-        ReconnectFuture {
-            inner: fut,
-            refresh_pending: Arc::clone(&self.refresh_pending),
-            service_epoch: Arc::clone(&self.service_epoch),
+        ReconnectFuture::inner(
+            fut,
+            Arc::clone(&self.refresh_pending),
+            Arc::clone(&self.service_epoch),
             call_epoch,
-            _maker_error: std::marker::PhantomData,
-        }
+        )
     }
 }
 
 /// Future returned by [`Reconnect`].
-pub struct ReconnectFuture<F, ME> {
-    inner: F,
-    refresh_pending: Arc<AtomicBool>,
-    service_epoch: Arc<AtomicU64>,
-    call_epoch: u64,
-    _maker_error: std::marker::PhantomData<fn() -> ME>,
+pub struct ReconnectFuture<F, E, ME> {
+    state: ReconnectFutureState<F, E, ME>,
 }
 
-impl<F, ME> fmt::Debug for ReconnectFuture<F, ME> {
+enum ReconnectFutureState<F, E, ME> {
+    Inner {
+        future: F,
+        refresh_pending: Arc<AtomicBool>,
+        service_epoch: Arc<AtomicU64>,
+        call_epoch: u64,
+    },
+    Error(Option<ReconnectError<E, ME>>),
+    Done,
+}
+
+impl<F, E, ME> ReconnectFuture<F, E, ME> {
+    fn inner(
+        future: F,
+        refresh_pending: Arc<AtomicBool>,
+        service_epoch: Arc<AtomicU64>,
+        call_epoch: u64,
+    ) -> Self {
+        Self {
+            state: ReconnectFutureState::Inner {
+                future,
+                refresh_pending,
+                service_epoch,
+                call_epoch,
+            },
+        }
+    }
+
+    fn error(error: ReconnectError<E, ME>) -> Self {
+        Self {
+            state: ReconnectFutureState::Error(Some(error)),
+        }
+    }
+}
+
+impl<F, E, ME> fmt::Debug for ReconnectFuture<F, E, ME> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReconnectFuture").finish()
     }
 }
 
-impl<F, T, E, ME> Future for ReconnectFuture<F, ME>
+impl<F, T, E, ME> Future for ReconnectFuture<F, E, ME>
 where
     F: Future<Output = Result<T, E>> + Unpin,
+    E: Unpin,
+    ME: Unpin,
 {
     type Output = Result<T, ReconnectError<E, ME>>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.inner).poll(cx) {
-            Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
-            Poll::Ready(Err(error)) => {
-                if self.service_epoch.load(Ordering::Acquire) == self.call_epoch {
-                    self.refresh_pending.store(true, Ordering::Release);
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let state = std::mem::replace(&mut this.state, ReconnectFutureState::Done);
+
+        match state {
+            ReconnectFutureState::Inner {
+                mut future,
+                refresh_pending,
+                service_epoch,
+                call_epoch,
+            } => match Pin::new(&mut future).poll(cx) {
+                Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+                Poll::Ready(Err(error)) => {
+                    if service_epoch.load(Ordering::Acquire) == call_epoch {
+                        refresh_pending.store(true, Ordering::Release);
+                    }
+                    Poll::Ready(Err(ReconnectError::Inner(error)))
                 }
-                Poll::Ready(Err(ReconnectError::Inner(error)))
-            }
-            Poll::Pending => Poll::Pending,
+                Poll::Pending => {
+                    this.state = ReconnectFutureState::Inner {
+                        future,
+                        refresh_pending,
+                        service_epoch,
+                        call_epoch,
+                    };
+                    Poll::Pending
+                }
+            },
+            ReconnectFutureState::Error(mut error) => Poll::Ready(Err(error
+                .take()
+                .expect("error future polled after completion"))),
+            ReconnectFutureState::Done => panic!("ReconnectFuture polled after completion"),
         }
     }
 }
@@ -797,6 +861,58 @@ mod tests {
     }
 
     #[test]
+    fn lazy_call_without_poll_ready_returns_not_ready() {
+        init_test("lazy_call_without_poll_ready_returns_not_ready");
+        let maker = ReconnectingMaker::new(1);
+        let mut rc = Reconnect::lazy(maker);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut call = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::NotReady))
+        ));
+        assert!(!rc.is_connected());
+        assert_eq!(rc.reconnect_count(), 0);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(1));
+        assert_eq!(rc.reconnect_count(), 1);
+
+        crate::test_complete!("lazy_call_without_poll_ready_returns_not_ready");
+    }
+
+    #[test]
+    fn call_after_disconnect_returns_not_ready() {
+        init_test("call_after_disconnect_returns_not_ready");
+        let maker = ReconnectingMaker::new(1);
+        let initial = ReconnectingSvc {
+            id: 0,
+            fail_next_call: false,
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        rc.disconnect();
+        assert!(!rc.is_connected());
+
+        let mut call = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::NotReady))
+        ));
+        assert_eq!(rc.reconnect_count(), 0);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(1));
+        assert_eq!(rc.reconnect_count(), 1);
+
+        crate::test_complete!("call_after_disconnect_returns_not_ready");
+    }
+
+    #[test]
     fn stale_call_error_does_not_drop_reconnected_service() {
         init_test("stale_call_error_does_not_drop_reconnected_service");
         let delayed_failure = ManualCallController::new();
@@ -899,11 +1015,20 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_error_not_ready_display() {
+        let err: ReconnectError<std::io::Error, std::io::Error> = ReconnectError::NotReady;
+        assert!(format!("{err}").contains("poll_ready required"));
+    }
+
+    #[test]
     fn reconnect_error_source() {
         use std::error::Error;
         let err: ReconnectError<std::io::Error, std::io::Error> =
             ReconnectError::Inner(std::io::Error::other("fail"));
         assert!(err.source().is_some());
+
+        let not_ready: ReconnectError<std::io::Error, std::io::Error> = ReconnectError::NotReady;
+        assert!(not_ready.source().is_none());
     }
 
     #[test]
@@ -942,13 +1067,12 @@ mod tests {
 
     #[test]
     fn reconnect_future_debug() {
-        let fut: ReconnectFuture<_, std::io::Error> = ReconnectFuture {
-            inner: std::future::ready(Ok::<i32, std::io::Error>(42)),
-            refresh_pending: Arc::new(AtomicBool::new(false)),
-            service_epoch: Arc::new(AtomicU64::new(0)),
-            call_epoch: 0,
-            _maker_error: std::marker::PhantomData,
-        };
+        let fut: ReconnectFuture<_, std::io::Error, std::io::Error> = ReconnectFuture::inner(
+            std::future::ready(Ok::<i32, std::io::Error>(42)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
+            0,
+        );
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("ReconnectFuture"));
     }
