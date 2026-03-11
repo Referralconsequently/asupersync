@@ -128,7 +128,7 @@ impl SymbolAssigner {
                 // Give each replica K symbols starting at a rotated offset.
                 let mut indices = Vec::with_capacity(k_usize);
                 for j in 0..std::cmp::min(k_usize, symbols.len()) {
-                    let idx = (replica_idx * k_usize / replicas.len() + j) % symbols.len();
+                    let idx = (replica_idx * symbols.len() / replicas.len() + j) % symbols.len();
                     if !indices.contains(&idx) {
                         indices.push(idx);
                     }

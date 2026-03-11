@@ -37,6 +37,11 @@ impl StreamId {
             StreamDirection::Bidirectional => 0u64,
             StreamDirection::Unidirectional => 1u64,
         };
+        // QUIC stream IDs use 2 low bits for type, leaving 62 bits for sequence.
+        debug_assert!(
+            seq < (1u64 << 62),
+            "QUIC stream sequence exceeds 62-bit limit"
+        );
         Self((seq << 2) | (direction_bit << 1) | initiator_bit)
     }
 
@@ -302,6 +307,10 @@ impl QuicStream {
     /// Account bytes written to this stream.
     pub fn write(&mut self, len: u64) -> Result<(), QuicStreamError> {
         if let Some(code) = self.stop_sending_error_code {
+            return Err(QuicStreamError::SendStopped { code });
+        }
+        // RFC 9000 §3.1: after issuing RESET_STREAM, no further STREAM frames.
+        if let Some((code, _)) = self.send_reset {
             return Err(QuicStreamError::SendStopped { code });
         }
         self.send_credit.consume(len)?;
