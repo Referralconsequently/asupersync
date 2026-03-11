@@ -730,7 +730,7 @@ impl FrameCodec {
                     let payload_len_usize =
                         usize::try_from(*payload_len).map_err(|_| WsError::PayloadTooLarge {
                             size: *payload_len,
-                            max: usize::MAX as u64,
+                            max: usize::MAX,
                         })?;
                     if src.len() < payload_len_usize {
                         return Ok(None);
