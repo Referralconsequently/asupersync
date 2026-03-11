@@ -415,9 +415,16 @@ fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
+fn timeout_now() -> Time {
+    crate::cx::Cx::current()
+        .and_then(|current| current.timer_driver())
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
+}
+
 #[derive(Debug)]
 struct ResolverTimeout<F> {
     future: F,
+    deadline: Time,
     sleep: Sleep,
     time_getter: fn() -> Time,
 }
@@ -425,17 +432,27 @@ struct ResolverTimeout<F> {
 impl<F> ResolverTimeout<F> {
     fn new(future: F, duration: Duration, time_getter: fn() -> Time) -> Self {
         let deadline = time_getter().saturating_add_nanos(duration_to_nanos(duration));
+        let wake_deadline = timeout_now().saturating_add_nanos(duration_to_nanos(duration));
         Self {
             future,
-            sleep: Sleep::new(deadline),
+            deadline,
+            // Use a wake-capable sleep in the runtime/wall-clock time domain,
+            // but keep `deadline` authoritative for timeout decisions.
+            sleep: Sleep::new(wake_deadline),
             time_getter,
         }
+    }
+
+    fn rearm_wake_sleep(&mut self) {
+        let remaining = self.deadline.duration_since((self.time_getter)());
+        let wake_deadline = timeout_now().saturating_add_nanos(remaining);
+        self.sleep.reset(wake_deadline);
     }
 
     #[cfg(test)]
     #[must_use]
     const fn deadline(&self) -> Time {
-        self.sleep.deadline()
+        self.deadline
     }
 }
 
@@ -452,13 +469,24 @@ where
             return Poll::Ready(Ok(output));
         }
 
-        if this.sleep.poll_with_time((this.time_getter)()).is_ready() {
-            return Poll::Ready(Err(Elapsed::new(this.sleep.deadline())));
+        if (this.time_getter)() >= this.deadline {
+            return Poll::Ready(Err(Elapsed::new(this.deadline)));
         }
 
-        // Preserve wake registration even when timeout decisions use a
-        // manual clock for deterministic tests.
-        let _ = Pin::new(&mut this.sleep).poll(cx);
+        match Pin::new(&mut this.sleep).poll(cx) {
+            Poll::Ready(()) => {
+                if (this.time_getter)() >= this.deadline {
+                    return Poll::Ready(Err(Elapsed::new(this.deadline)));
+                }
+
+                // The wake source fired before the injected clock reached the
+                // authoritative deadline, so re-arm for the remaining duration.
+                this.rearm_wake_sleep();
+                let _ = Pin::new(&mut this.sleep).poll(cx);
+            }
+            Poll::Pending => {}
+        }
+
         Poll::Pending
     }
 }
@@ -480,7 +508,7 @@ mod tests {
     use futures_lite::future;
     use std::future::{Future, pending};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
@@ -507,6 +535,28 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Arc::new(NoopWaker).into()
+    }
+
+    struct CountingWaker(AtomicUsize);
+
+    impl CountingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(AtomicUsize::new(0)))
+        }
+
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -668,6 +718,88 @@ mod tests {
         );
 
         crate::test_complete!("resolver_timeout_future_poll_honors_custom_time_getter");
+    }
+
+    #[test]
+    fn resolver_timeout_future_rearms_wake_source_when_timer_epoch_differs() {
+        init_test("resolver_timeout_future_rearms_wake_source_when_timer_epoch_differs");
+        set_test_time(0);
+
+        let clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_secs(5)));
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(1, 0),
+            crate::types::TaskId::new_for_test(1, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let resolver = Resolver::with_time_getter(ResolverConfig::default(), test_time);
+        let mut future = resolver.timeout_future(Duration::from_nanos(500), pending::<()>());
+        let waker = CountingWaker::new();
+        let waker_handle = waker.clone();
+        let task_waker: Waker = waker.into();
+        let mut cx = Context::from_waker(&task_waker);
+
+        let first: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "first poll pending",
+            true,
+            first.is_pending()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "wake source registered against ambient timer",
+            1,
+            timer.pending_count()
+        );
+
+        clock.advance(500);
+        let fired = timer.process_timers();
+        crate::assert_with_log!(fired == 1, "timer fired once", 1, fired);
+        crate::assert_with_log!(
+            waker_handle.count() > 0,
+            "timer wake reached task",
+            ">0",
+            waker_handle.count()
+        );
+
+        let second: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+        crate::assert_with_log!(
+            second.is_pending(),
+            "ambient wake alone must not expire custom-clock timeout",
+            true,
+            second.is_pending()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "wake source re-armed after early ambient wake",
+            1,
+            timer.pending_count()
+        );
+
+        set_test_time(500);
+        let third: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+        let elapsed_deadline = match third {
+            Poll::Ready(Err(elapsed)) => Some(elapsed.deadline()),
+            _ => None,
+        };
+        crate::assert_with_log!(
+            elapsed_deadline == Some(Time::from_nanos(500)),
+            "timeout should follow injected clock deadline",
+            Some(Time::from_nanos(500)),
+            elapsed_deadline
+        );
+
+        crate::test_complete!(
+            "resolver_timeout_future_rearms_wake_source_when_timer_epoch_differs"
+        );
     }
 
     #[test]
