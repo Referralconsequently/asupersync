@@ -494,7 +494,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         let ticks_to_advance = target_tick_u64 - self.current_tick;
 
         // If advancing more than SLOTS ticks, we need to scan all slots
-        if ticks_to_advance as usize >= SLOTS {
+        if ticks_to_advance >= SLOTS as u64 {
             // Full rotation or more: collect expired from ALL slots
             for slot in &self.slots {
                 let wakers = slot.collect_expired(now);

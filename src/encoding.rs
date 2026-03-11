@@ -308,7 +308,7 @@ impl Iterator for EncodingIterator<'_> {
 
         while self.block_index < self.blocks.len() {
             let block = self.blocks[self.block_index].clone();
-            let k = block.k as u32;
+            let k = u32::try_from(block.k).unwrap_or(u32::MAX);
             if k == 0 {
                 self.block_index += 1;
                 self.esi = 0;
@@ -317,10 +317,11 @@ impl Iterator for EncodingIterator<'_> {
                 continue;
             }
 
-            let repair = self.repair_override.unwrap_or_else(|| {
+            let repair = u32::try_from(self.repair_override.unwrap_or_else(|| {
                 compute_repair_count(block.k, self.pipeline.config.repair_overhead)
-            }) as u32;
-            let total = k + repair;
+            }))
+            .unwrap_or(u32::MAX);
+            let total = k.saturating_add(repair);
 
             if self.esi >= total {
                 self.block_index += 1;

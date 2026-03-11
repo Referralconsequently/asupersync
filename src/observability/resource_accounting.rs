@@ -476,7 +476,9 @@ impl ObligationKindStats {
     #[must_use]
     pub fn pending(&self) -> u64 {
         self.reserved
-            .saturating_sub(self.committed + self.aborted + self.leaked)
+            .saturating_sub(self.committed)
+            .saturating_sub(self.aborted)
+            .saturating_sub(self.leaked)
     }
 
     /// Returns the leak rate as a fraction of total reserved.
@@ -507,7 +509,7 @@ impl AdmissionKindStats {
     /// Returns the rejection rate as a fraction of total attempts.
     #[must_use]
     pub fn rejection_rate(&self) -> f64 {
-        let total = self.successes + self.rejections;
+        let total = self.successes.saturating_add(self.rejections);
         if total == 0 {
             return 0.0;
         }

@@ -234,6 +234,16 @@ impl CompatReader {
         reader.read_exact(&mut meta_len_bytes)?;
         let meta_len = u32::from_le_bytes(meta_len_bytes) as usize;
 
+        // Guard against corrupted files requesting huge allocations.
+        const MAX_META_SIZE: usize = 64 * 1024 * 1024;
+        if meta_len > MAX_META_SIZE {
+            return Err(TraceFileError::OversizedField {
+                field: "metadata",
+                actual: meta_len as u64,
+                max: MAX_META_SIZE as u64,
+            });
+        }
+
         // Read metadata with lenient deserialization
         let mut meta_bytes = vec![0u8; meta_len];
         reader.read_exact(&mut meta_bytes)?;
@@ -346,6 +356,16 @@ impl CompatReader {
                 .read_exact(&mut len_bytes)
                 .map_err(TraceFileError::Io)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
+
+            // Guard against corrupted files requesting huge allocations.
+            const MAX_EVENT_SIZE: usize = 64 * 1024 * 1024;
+            if len > MAX_EVENT_SIZE {
+                return Err(TraceFileError::OversizedField {
+                    field: "event",
+                    actual: len as u64,
+                    max: MAX_EVENT_SIZE as u64,
+                });
+            }
 
             // Read event data
             let mut event_bytes = vec![0u8; len];
@@ -472,6 +492,16 @@ impl Iterator for CompatEventIterator {
                 return Some(Err(TraceFileError::Io(e)));
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
+
+            // Guard against corrupted files requesting huge allocations.
+            const MAX_EVENT_SIZE: usize = 64 * 1024 * 1024;
+            if len > MAX_EVENT_SIZE {
+                return Some(Err(TraceFileError::OversizedField {
+                    field: "event",
+                    actual: len as u64,
+                    max: MAX_EVENT_SIZE as u64,
+                }));
+            }
 
             // Read event data
             let mut event_bytes = vec![0u8; len];

@@ -239,7 +239,10 @@ fn get_cookie(req: &Request, name: &str) -> Option<String> {
 
 /// Build a Set-Cookie header value.
 fn set_cookie_header(name: &str, value: &str, config: &SessionConfig) -> String {
-    let mut cookie = format!("{name}={value}; Path={}", config.cookie_path);
+    // Sanitize CRLF and semicolons to prevent HTTP response header injection.
+    let name = name.replace(['\r', '\n', ';', '='], "");
+    let path = config.cookie_path.replace(['\r', '\n', ';'], "");
+    let mut cookie = format!("{name}={value}; Path={path}");
     if config.http_only {
         cookie.push_str("; HttpOnly");
     }

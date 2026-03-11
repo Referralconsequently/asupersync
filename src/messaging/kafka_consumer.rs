@@ -308,6 +308,10 @@ impl KafkaConsumer {
         }
 
         let mut state = self.state.lock();
+        // Re-check closed under lock to prevent TOCTOU race with close().
+        if self.closed.load(Ordering::Acquire) {
+            return Err(KafkaError::Config("consumer is closed".to_string()));
+        }
         state.subscribed_topics = normalized;
         state.assigned_partitions = state
             .subscribed_topics
@@ -404,6 +408,10 @@ impl KafkaConsumer {
 
         let has_subscriptions = {
             let state = self.state.lock();
+            // Re-check closed under lock to prevent TOCTOU race with close().
+            if self.closed.load(Ordering::Acquire) {
+                return Err(KafkaError::Config("consumer is closed".to_string()));
+            }
             !state.subscribed_topics.is_empty()
         };
         if !has_subscriptions {
@@ -431,6 +439,10 @@ impl KafkaConsumer {
         // Hold the lock across validation and mutation to prevent TOCTOU
         // races between concurrent commit_offsets calls.
         let mut state = self.state.lock();
+        // Re-check closed under lock to prevent TOCTOU race with close().
+        if self.closed.load(Ordering::Acquire) {
+            return Err(KafkaError::Config("consumer is closed".to_string()));
+        }
         for tpo in offsets {
             if !state.subscribed_topics.contains(&tpo.topic) {
                 return Err(KafkaError::InvalidTopic(tpo.topic.clone()));

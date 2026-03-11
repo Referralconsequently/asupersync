@@ -362,20 +362,33 @@ impl ClientHandshake {
 
         if !self.protocols.is_empty() {
             request.push_str("Sec-WebSocket-Protocol: ");
-            request.push_str(&self.protocols.join(", "));
+            let sanitized: Vec<String> = self
+                .protocols
+                .iter()
+                .map(|p| p.replace(['\r', '\n'], ""))
+                .collect();
+            request.push_str(&sanitized.join(", "));
             request.push_str("\r\n");
         }
 
         if !self.extensions.is_empty() {
             request.push_str("Sec-WebSocket-Extensions: ");
-            request.push_str(&self.extensions.join(", "));
+            let sanitized: Vec<String> = self
+                .extensions
+                .iter()
+                .map(|e| e.replace(['\r', '\n'], ""))
+                .collect();
+            request.push_str(&sanitized.join(", "));
             request.push_str("\r\n");
         }
 
         for (name, value) in &self.headers {
-            request.push_str(name);
+            // Sanitize CRLF to prevent HTTP header injection.
+            let name = name.replace(['\r', '\n'], "");
+            let value = value.replace(['\r', '\n'], "");
+            request.push_str(&name);
             request.push_str(": ");
-            request.push_str(value);
+            request.push_str(&value);
             request.push_str("\r\n");
         }
 
@@ -605,6 +618,8 @@ impl ServerHandshake {
     /// Generate a rejection response with the given HTTP status code.
     #[must_use]
     pub fn reject(status: u16, reason: &str) -> Vec<u8> {
+        // Sanitize CRLF to prevent HTTP response header injection.
+        let reason = reason.replace(['\r', '\n'], "");
         format!(
             "HTTP/1.1 {status} {reason}\r\n\
              Connection: close\r\n\

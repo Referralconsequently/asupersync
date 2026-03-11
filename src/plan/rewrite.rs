@@ -446,6 +446,7 @@ impl PlanDag {
             for rule in rules {
                 if let Some(step) = self.apply_rule_checked(id, policy, *rule) {
                     report.steps.push(step);
+                    break; // node replaced — don't apply more rules to the orphaned original
                 }
             }
         }
@@ -715,11 +716,12 @@ impl PlanDag {
 
         let mut race_branches = Vec::with_capacity(join_children.len());
         for (_, join_nodes) in &join_children {
-            let mut remaining: Vec<PlanId> = join_nodes
-                .iter()
-                .copied()
-                .filter(|id| *id != shared)
-                .collect();
+            let mut remaining: Vec<PlanId> = join_nodes.clone();
+            if let Some(pos) = remaining.iter().position(|id| *id == shared) {
+                remaining.remove(pos);
+            } else {
+                return None;
+            }
             if remaining.is_empty() {
                 return None;
             }
