@@ -308,11 +308,14 @@ impl Stealer {
                 let task_id = stack[i];
                 if let Some(record) = arena.get(task_id.arena_index()) {
                     if !record.is_local() {
-                        return stack.remove(i);
+                        let removed = stack.remove(i);
+                        drop(stack);
+                        return removed;
                     }
                 }
                 i += 1;
             }
+            drop(stack);
             None
         })
     }

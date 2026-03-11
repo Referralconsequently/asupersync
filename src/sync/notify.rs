@@ -376,9 +376,22 @@ impl Notified<'_> {
             };
 
             if is_gen_changed {
+                let was_notify_one = if index < waiters.entries.len() {
+                    let entry = &waiters.entries[index];
+                    entry.notified && entry.generation == self.initial_generation
+                } else {
+                    false
+                };
+
                 waiters.remove(index);
                 self.waiter_index = None;
-                drop(waiters);
+
+                if was_notify_one {
+                    self.notify.pass_baton(waiters);
+                } else {
+                    drop(waiters);
+                }
+
                 return self.mark_done();
             }
 
