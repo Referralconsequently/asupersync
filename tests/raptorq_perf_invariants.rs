@@ -12,6 +12,7 @@
 
 mod common;
 
+use asupersync::raptorq::decision_contract::G7_DECISION_REPLAY_REF;
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{Gf256, Gf256ProfilePackId, gf256_profile_pack_catalog};
 use asupersync::raptorq::proof::ProofOutcome;
@@ -4597,6 +4598,55 @@ fn f6_regime_stats_populated_after_decode() {
     );
 }
 
+/// G7 invariant: runtime decode decisions expose concrete governance output.
+#[test]
+fn g7_runtime_governance_output_populated_after_decode() {
+    let k = 16;
+    let symbol_size = 64;
+    let seed = 0x6700_0001_u64;
+
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let received = build_decode_received(&source, &encoder, &decoder, &[1, 5, 9], 4);
+
+    let result = decoder.decode(&received).expect("decode should succeed");
+    let governance = result
+        .stats
+        .governance
+        .expect("G7 governance telemetry must be recorded");
+
+    assert_eq!(governance.replay_ref, G7_DECISION_REPLAY_REF);
+    assert_eq!(
+        governance
+            .state_posterior_permille
+            .iter()
+            .map(|&value| u32::from(value))
+            .sum::<u32>(),
+        1000,
+        "G7 state posterior must be normalized to permille"
+    );
+    assert_eq!(
+        governance
+            .top_evidence_contributors
+            .iter()
+            .map(|entry| u32::from(entry.contribution_permille))
+            .sum::<u32>(),
+        1000,
+        "G7 top contributors must be normalized to permille"
+    );
+    assert!(matches!(
+        governance.chosen_action,
+        "continue" | "canary_hold" | "rollback" | "fallback"
+    ));
+    if governance.deterministic_fallback_triggered {
+        assert_eq!(
+            governance.chosen_action, "fallback",
+            "G7 fallback trigger must force fallback action"
+        );
+    }
+}
+
 /// F6 invariant: first decode has window_len=1, stable phase, zero deltas.
 #[test]
 fn f6_first_decode_is_stable_with_zero_deltas() {
@@ -4741,6 +4791,10 @@ fn f6_deterministic_replay_across_decoders() {
         assert_eq!(
             result_a.stats.policy_reason, result_b.stats.policy_reason,
             "f6: policy_reason mismatch at decode {i}"
+        );
+        assert_eq!(
+            result_a.stats.governance, result_b.stats.governance,
+            "g7: governance telemetry mismatch at decode {i}"
         );
         assert_eq!(
             result_a.stats.hard_regime_fallbacks, result_b.stats.hard_regime_fallbacks,

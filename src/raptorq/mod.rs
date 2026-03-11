@@ -22,6 +22,7 @@
 //! ```
 
 pub mod builder;
+pub mod decision_contract;
 pub mod decoder;
 pub mod gf256;
 pub mod linalg;

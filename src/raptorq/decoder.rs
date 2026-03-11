@@ -17,6 +17,7 @@ use crate::raptorq::proof::{
     ReceivedSummary,
 };
 use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
+use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
 use std::collections::{BTreeSet, VecDeque};
@@ -184,6 +185,8 @@ pub struct DecodeStats {
     pub policy_reason: Option<&'static str>,
     /// Replay pointer for policy-decision forensics.
     pub policy_replay_ref: Option<&'static str>,
+    /// Concrete G7 governance output for this decoder policy decision.
+    pub governance: Option<decision_contract::GovernanceTelemetry>,
     /// Policy feature: matrix density in permille.
     pub policy_density_permille: usize,
     /// Policy feature: estimated rank deficit pressure in permille.
@@ -715,6 +718,7 @@ struct DecoderPolicyDecision {
     high_support_loss: u32,
     block_schur_loss: u32,
     reason: &'static str,
+    governance: Option<decision_contract::GovernanceTelemetry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -823,7 +827,43 @@ fn choose_runtime_decoder_policy(
         unsupported_cols,
         inactivation_pressure_permille,
     );
+    let mut decision = choose_low_level_decoder_policy(features, n_rows, n_cols);
+    let governance = decision_contract::evaluate_governance(&GovernanceSnapshot {
+        n_rows,
+        n_cols,
+        density_permille: features.density_permille,
+        rank_deficit_permille: features.rank_deficit_permille,
+        inactivation_pressure_permille: features.inactivation_pressure_permille,
+        overhead_ratio_permille: features.overhead_ratio_permille,
+        budget_exhausted: features.budget_exhausted,
+        baseline_loss: decision.baseline_loss,
+        high_support_loss: decision.high_support_loss,
+        block_schur_loss: decision.block_schur_loss,
+    });
+    match governance.chosen_action {
+        "canary_hold" if matches!(decision.mode, DecoderPolicyMode::BlockSchurLowRank) => {
+            decision.mode = DecoderPolicyMode::HighSupportFirst;
+            decision.reason = "g7_expected_loss_canary_hold";
+        }
+        "rollback" if !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline) => {
+            decision.mode = DecoderPolicyMode::ConservativeBaseline;
+            decision.reason = "g7_expected_loss_rollback";
+        }
+        "fallback" if !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline) => {
+            decision.mode = DecoderPolicyMode::ConservativeBaseline;
+            decision.reason = "g7_deterministic_fallback_trigger";
+        }
+        _ => {}
+    }
+    decision.governance = Some(governance);
+    decision
+}
 
+fn choose_low_level_decoder_policy(
+    features: DecoderPolicyFeatures,
+    n_rows: usize,
+    n_cols: usize,
+) -> DecoderPolicyDecision {
     let (baseline_loss, high_support_loss, mut block_schur_loss) = policy_losses(features, n_cols);
     if features.budget_exhausted {
         return DecoderPolicyDecision {
@@ -833,6 +873,7 @@ fn choose_runtime_decoder_policy(
             high_support_loss,
             block_schur_loss,
             reason: "policy_budget_exhausted_conservative",
+            governance: None,
         };
     }
 
@@ -847,6 +888,7 @@ fn choose_runtime_decoder_policy(
             high_support_loss,
             block_schur_loss,
             reason: "expected_loss_conservative_gate",
+            governance: None,
         };
     }
 
@@ -869,6 +911,7 @@ fn choose_runtime_decoder_policy(
         high_support_loss,
         block_schur_loss,
         reason: "expected_loss_minimum",
+        governance: None,
     }
 }
 
@@ -884,6 +927,7 @@ fn apply_policy_decision_to_stats(stats: &mut DecodeStats, decision: DecoderPoli
     stats.policy_mode = Some(decoder_policy_mode_label(decision.mode));
     stats.policy_reason = Some(decision.reason);
     stats.policy_replay_ref = Some(POLICY_REPLAY_REF);
+    stats.governance = decision.governance;
     stats.policy_density_permille = decision.features.density_permille;
     stats.policy_rank_deficit_permille = decision.features.rank_deficit_permille;
     stats.policy_inactivation_pressure_permille = decision.features.inactivation_pressure_permille;
@@ -4178,6 +4222,22 @@ mod tests {
         assert_eq!(state.stats.policy_replay_ref, Some(POLICY_REPLAY_REF));
         assert!(state.stats.policy_baseline_loss > 0);
         assert!(state.stats.policy_high_support_loss > 0);
+        let governance = state
+            .stats
+            .governance
+            .expect("governance telemetry must be recorded");
+        assert_eq!(
+            governance.replay_ref,
+            decision_contract::G7_DECISION_REPLAY_REF
+        );
+        assert_eq!(
+            governance
+                .state_posterior_permille
+                .iter()
+                .map(|&value| u32::from(value))
+                .sum::<u32>(),
+            1000
+        );
     }
 
     #[test]
@@ -4200,6 +4260,15 @@ mod tests {
         assert_eq!(state.stats.policy_reason, Some("expected_loss_minimum"));
         assert_eq!(state.stats.policy_replay_ref, Some(POLICY_REPLAY_REF));
         assert!(state.stats.policy_density_permille >= 350);
+        let governance = state
+            .stats
+            .governance
+            .expect("governance telemetry must be recorded");
+        assert!(matches!(
+            governance.chosen_action,
+            "continue" | "canary_hold" | "rollback" | "fallback"
+        ));
+        assert!(governance.confidence_score <= 1000);
     }
 
     #[test]
@@ -4211,6 +4280,11 @@ mod tests {
         assert_eq!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
         assert_eq!(decision.reason, "policy_budget_exhausted_conservative");
         assert!(decision.features.budget_exhausted);
+        assert!(
+            decision
+                .governance
+                .is_some_and(|telemetry| telemetry.deterministic_fallback_triggered)
+        );
     }
 
     #[test]
@@ -4242,6 +4316,10 @@ mod tests {
         assert_eq!(one, two, "policy decision should be deterministic");
         assert_eq!(one.mode, DecoderPolicyMode::ConservativeBaseline);
         assert_eq!(one.reason, "expected_loss_conservative_gate");
+        assert!(
+            one.governance.is_some(),
+            "G7 governance telemetry must be present"
+        );
     }
 
     // ── all_source_equations / source_equation coverage (br-3narc.2.7) ──
