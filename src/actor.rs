@@ -757,16 +757,25 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // Without masking, an aborted actor's on_stop could observe a stale
     // cancel_requested=true and bail early via cx.checkpoint().
     cx.trace("actor::on_stop");
-    {
-        let inner = cx.inner.clone();
-        inner.write().mask_depth += 1;
+    // Drop guard ensures mask_depth is decremented even if on_stop panics,
+    // preventing mask_depth leak across supervised restarts.
+    struct OnStopMaskGuard(Option<Box<dyn FnOnce() + Send>>);
+    impl Drop for OnStopMaskGuard {
+        fn drop(&mut self) {
+            if let Some(f) = self.0.take() {
+                f();
+            }
+        }
     }
+    let inner = cx.inner.clone();
+    inner.write().mask_depth += 1;
+    let unmask_inner = inner.clone();
+    let _mask_guard = OnStopMaskGuard(Some(Box::new(move || {
+        let mut g = unmask_inner.write();
+        g.mask_depth = g.mask_depth.saturating_sub(1);
+    })));
     actor.on_stop(&cx).await;
-    {
-        let inner = cx.inner.clone();
-        let mut guard = inner.write();
-        guard.mask_depth = guard.mask_depth.saturating_sub(1);
-    }
+    drop(_mask_guard);
 
     actor
 }
