@@ -185,7 +185,10 @@ impl RegionSnapshot {
         buf.extend_from_slice(&self.sequence.to_le_bytes());
 
         // Tasks
-        write_u32(&mut buf, self.tasks.len() as u32);
+        write_u32(
+            &mut buf,
+            u32::try_from(self.tasks.len()).expect("tasks exceed u32::MAX"),
+        );
         for task in &self.tasks {
             write_task_id(&mut buf, task.task_id);
             buf.push(task.state.as_u8());
@@ -193,7 +196,10 @@ impl RegionSnapshot {
         }
 
         // Children
-        write_u32(&mut buf, self.children.len() as u32);
+        write_u32(
+            &mut buf,
+            u32::try_from(self.children.len()).expect("children exceed u32::MAX"),
+        );
         for child in &self.children {
             write_region_id(&mut buf, *child);
         }
@@ -218,7 +224,10 @@ impl RegionSnapshot {
         }
 
         // Metadata
-        write_u32(&mut buf, self.metadata.len() as u32);
+        write_u32(
+            &mut buf,
+            u32::try_from(self.metadata.len()).expect("metadata exceeds u32::MAX"),
+        );
         buf.extend_from_slice(&self.metadata);
 
         buf
@@ -452,7 +461,10 @@ fn write_optional_string(buf: &mut Vec<u8>, value: Option<&str>) {
         Some(s) => {
             buf.push(1);
             let bytes = s.as_bytes();
-            write_u32(buf, bytes.len() as u32);
+            write_u32(
+                buf,
+                u32::try_from(bytes.len()).expect("string exceeds u32::MAX"),
+            );
             buf.extend_from_slice(bytes);
         }
         None => buf.push(0),

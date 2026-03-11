@@ -452,7 +452,7 @@ fn eval_context(
     confidence_score.hash(&mut hasher);
     uncertainty_score.hash(&mut hasher);
     let fingerprint = u128::from(hasher.finish());
-    let ts_unix_ms = ((snapshot.n_rows as u64) << 32) | snapshot.n_cols as u64;
+    let ts_unix_ms = ((snapshot.n_rows as u64) << 32) | ((snapshot.n_cols as u64) & 0xFFFF_FFFF);
     let e_process = 1.0
         + f64::from(
             snapshot
