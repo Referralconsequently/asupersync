@@ -174,10 +174,13 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
             Poll::Pending => {}
         }
 
-        // Check the timeout
+        // Check the timeout explicitly using the provided time
         if self.sleep.poll_with_time(now).is_ready() {
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
         }
+
+        // Register the waker with the underlying sleep future
+        let _ = Pin::new(&mut self.sleep).poll(cx);
 
         Poll::Pending
     }

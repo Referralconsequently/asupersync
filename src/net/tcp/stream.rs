@@ -511,14 +511,7 @@ where
     let deadline =
         time_getter().saturating_add_nanos(duration_to_nanos_saturating(timeout_duration));
     let mut timeout = TimeoutFuture::new(future, deadline);
-    poll_fn(|cx| match timeout.poll_with_time(time_getter(), cx) {
-        Poll::Ready(result) => Poll::Ready(result),
-        Poll::Pending => {
-            let _ = Pin::new(&mut timeout).poll(cx);
-            Poll::Pending
-        }
-    })
-    .await
+    poll_fn(|cx| timeout.poll_with_time(time_getter(), cx)).await
 }
 
 #[cfg(not(target_arch = "wasm32"))]

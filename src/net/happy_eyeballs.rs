@@ -439,14 +439,7 @@ where
     F: Future + Unpin,
 {
     let mut timeout = TimeoutFuture::new(future, deadline);
-    poll_fn(|cx| match timeout.poll_with_time(time_getter(), cx) {
-        Poll::Ready(result) => Poll::Ready(result),
-        Poll::Pending => {
-            let _ = Pin::new(&mut timeout).poll(cx);
-            Poll::Pending
-        }
-    })
-    .await
+    poll_fn(|cx| timeout.poll_with_time(time_getter(), cx)).await
 }
 
 /// Gets the current time, preferring the runtime timer driver over wall clock.
