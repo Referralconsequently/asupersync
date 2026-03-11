@@ -275,14 +275,21 @@ impl Stream {
 
     /// Consume from send window (for sending data).
     pub fn consume_send_window(&mut self, amount: u32) {
-        let amount = i32::try_from(amount).expect("window size exceeds i32");
-        self.send_window -= amount;
+        let amount_i64 = i64::from(amount);
+        let new_window = i64::from(self.send_window) - amount_i64;
+        // Clamp to i32 range — window can legitimately go negative per RFC 9113 §6.9.2
+        self.send_window =
+            i32::try_from(new_window.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
+                .unwrap_or(i32::MIN);
     }
 
     /// Consume from receive window (for receiving data).
     pub fn consume_recv_window(&mut self, amount: u32) {
-        let amount = i32::try_from(amount).expect("window size exceeds i32");
-        self.recv_window -= amount;
+        let amount_i64 = i64::from(amount);
+        let new_window = i64::from(self.recv_window) - amount_i64;
+        self.recv_window =
+            i32::try_from(new_window.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
+                .unwrap_or(i32::MIN);
     }
 
     /// Check if the receive window is low enough to warrant an automatic WINDOW_UPDATE.
@@ -857,11 +864,9 @@ mod tests {
         stream
             .add_header_fragment(Bytes::from(vec![0; 16]))
             .unwrap();
-        assert!(
-            stream
-                .add_header_fragment(Bytes::from(vec![0; 17]))
-                .is_err()
-        );
+        assert!(stream
+            .add_header_fragment(Bytes::from(vec![0; 17]))
+            .is_err());
     }
 
     #[test]

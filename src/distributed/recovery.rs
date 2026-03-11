@@ -12,15 +12,15 @@
 
 #![allow(clippy::result_large_err)]
 
-use crate::RejectReason;
 use crate::combinator::retry::RetryPolicy;
 use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
 use crate::error::{Error, ErrorKind};
+use crate::security::tag::AuthenticationTag;
 use crate::security::AuthenticatedSymbol;
 use crate::security::SecurityContext;
-use crate::security::tag::AuthenticationTag;
 use crate::types::symbol::{ObjectParams, Symbol};
 use crate::types::{RegionId, Time};
+use crate::RejectReason;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -519,7 +519,7 @@ impl StateDecoder {
 
         let config = DecodingConfig {
             symbol_size: params.symbol_size,
-            max_block_size: params.object_size as usize,
+            max_block_size: usize::try_from(params.object_size).unwrap_or(usize::MAX),
             repair_overhead: 1.0,
             min_overhead: 0,
             max_buffered_symbols: 0,

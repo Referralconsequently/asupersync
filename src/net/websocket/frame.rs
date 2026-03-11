@@ -727,7 +727,11 @@ impl FrameCodec {
                     mask_key,
                     payload_len,
                 } => {
-                    let payload_len_usize = *payload_len as usize;
+                    let payload_len_usize =
+                        usize::try_from(*payload_len).map_err(|_| WsError::PayloadTooLarge {
+                            size: *payload_len,
+                            max: usize::MAX as u64,
+                        })?;
                     if src.len() < payload_len_usize {
                         return Ok(None);
                     }
