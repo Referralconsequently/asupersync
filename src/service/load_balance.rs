@@ -138,6 +138,12 @@ pub trait Strategy: fmt::Debug + Send + Sync {
     /// `loads` contains the current in-flight count for each backend.
     /// Returns `None` if no backends are available.
     fn pick(&self, loads: &[u64]) -> Option<usize>;
+
+    /// Update any strategy-local state after a backend is inserted.
+    fn on_backend_inserted(&self, _index: usize) {}
+
+    /// Update any strategy-local state after a backend is removed.
+    fn on_backend_removed(&self, _index: usize) {}
 }
 
 // ─── RoundRobin ───────────────────────────────────────────────────────────
@@ -243,17 +249,18 @@ impl Strategy for PowerOfTwoChoices {
 /// Uses smooth weighted round-robin (SWRR) for even distribution.
 #[derive(Debug)]
 pub struct Weighted {
-    weights: Vec<u32>,
     state: Mutex<WeightedState>,
 }
 
 struct WeightedState {
+    weights: Vec<u32>,
     current_weights: Vec<i64>,
 }
 
 impl fmt::Debug for WeightedState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WeightedState")
+            .field("weights", &self.weights)
             .field("current_weights", &self.current_weights)
             .finish()
     }
@@ -268,8 +275,8 @@ impl Weighted {
     pub fn new(weights: Vec<u32>) -> Self {
         let len = weights.len();
         Self {
-            weights,
             state: Mutex::new(WeightedState {
+                weights,
                 current_weights: vec![0; len],
             }),
         }
@@ -278,22 +285,23 @@ impl Weighted {
 
 impl Strategy for Weighted {
     fn pick(&self, loads: &[u64]) -> Option<usize> {
-        if loads.is_empty() || self.weights.is_empty() {
-            return None;
-        }
-
-        let len = loads.len().min(self.weights.len());
-        let total_weight: i64 = self.weights[..len].iter().map(|&w| i64::from(w)).sum();
-
-        if total_weight == 0 {
+        if loads.is_empty() {
             return None;
         }
 
         let mut state = self.state.lock();
+        let weights_len = state.weights.len();
+        state.current_weights.resize(weights_len, 0);
 
-        // Ensure state vector matches backend count.
-        if state.current_weights.len() != len {
-            state.current_weights.resize(len, 0);
+        let len = loads.len().min(state.weights.len());
+        if len == 0 {
+            return None;
+        }
+
+        let total_weight: i64 = state.weights[..len].iter().map(|&w| i64::from(w)).sum();
+
+        if total_weight == 0 {
+            return None;
         }
 
         // SWRR: add effective weight, pick max, subtract total.
@@ -301,7 +309,7 @@ impl Strategy for Weighted {
         let mut best_weight = i64::MIN;
 
         for i in 0..len {
-            let ew = i64::from(self.weights[i]);
+            let ew = i64::from(state.weights[i]);
             state.current_weights[i] += ew;
             if state.current_weights[i] > best_weight {
                 best_weight = state.current_weights[i];
@@ -313,6 +321,25 @@ impl Strategy for Weighted {
         drop(state);
 
         Some(best_idx)
+    }
+
+    fn on_backend_inserted(&self, index: usize) {
+        let mut state = self.state.lock();
+        let index = index.min(state.weights.len());
+        state.weights.insert(index, 1);
+        state.current_weights.insert(index, 0);
+    }
+
+    fn on_backend_removed(&self, index: usize) {
+        let mut state = self.state.lock();
+        if index < state.weights.len() {
+            state.weights.remove(index);
+            if index < state.current_weights.len() {
+                state.current_weights.remove(index);
+            }
+            let weights_len = state.weights.len();
+            state.current_weights.resize(weights_len, 0);
+        }
     }
 }
 
@@ -402,11 +429,15 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     }
 
     /// Add a backend service.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn push(&self, service: S) {
-        self.backends.lock().push(Arc::new(Backend {
+        let mut backends = self.backends.lock();
+        let index = backends.len();
+        backends.push(Arc::new(Backend {
             service: Mutex::new(service),
             load: Arc::new(LoadMetric::new()),
         }));
+        self.strategy.on_backend_inserted(index);
     }
 
     /// Get the number of backends.
@@ -442,7 +473,9 @@ where
     pub fn remove(&self, index: usize) -> Option<S> {
         let mut backends = self.backends.lock();
         let backend = if index < backends.len() {
-            Some(backends.remove(index))
+            let backend = backends.remove(index);
+            self.strategy.on_backend_removed(index);
+            Some(backend)
         } else {
             None
         };
@@ -459,6 +492,7 @@ where
     ///
     /// This method is available when the discovered key type matches the
     /// backend value stored by the balancer.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn update_from_discover<D>(&self, discover: &D) -> Result<(), DiscoverUpdateError<D::Error>>
     where
         D: Discover<Key = S>,
@@ -481,10 +515,12 @@ where
                         continue;
                     }
 
+                    let index = backends.len();
                     backends.push(Arc::new(Backend {
                         service: Mutex::new(service),
                         load: Arc::new(LoadMetric::new()),
                     }));
+                    self.strategy.on_backend_inserted(index);
                 }
                 Change::Remove(service) => {
                     if let Some(index) = backends
@@ -492,6 +528,7 @@ where
                         .position(|backend| backend_matches_service(backend, &service))
                     {
                         backends.remove(index);
+                        self.strategy.on_backend_removed(index);
                     }
                 }
             }
@@ -1380,6 +1417,101 @@ mod tests {
         assert!(format!("{err}").contains("discovery failed"));
         assert!(lb.is_empty());
         crate::test_complete!("lb_update_from_discover_propagates_errors");
+    }
+
+    #[test]
+    fn lb_weighted_discovery_insert_syncs_strategy_state() {
+        init_test("lb_weighted_discovery_insert_syncs_strategy_state");
+        let discover = ScriptedDiscover::<String, std::io::Error>::new(vec![Ok(vec![
+            Change::Insert("backend-a".to_string()),
+            Change::Insert("backend-b".to_string()),
+        ])]);
+        let lb = LoadBalancer::empty(Weighted::new(vec![]));
+
+        lb.update_from_discover(&discover)
+            .expect("discovery inserts should update topology");
+        assert_eq!(lb.len(), 2);
+
+        let state = lb.strategy().state.lock();
+        assert_eq!(state.weights, vec![1, 1]);
+        assert_eq!(state.current_weights.len(), 2);
+        drop(state);
+
+        let loads = lb.loads();
+        let pattern: Vec<_> = (0..4)
+            .map(|_| {
+                lb.strategy()
+                    .pick(&loads)
+                    .expect("both backends should be selectable")
+            })
+            .collect();
+        assert_eq!(pattern, vec![0, 1, 0, 1]);
+        crate::test_complete!("lb_weighted_discovery_insert_syncs_strategy_state");
+    }
+
+    #[test]
+    fn lb_weighted_push_syncs_strategy_state() {
+        init_test("lb_weighted_push_syncs_strategy_state");
+        let lb = LoadBalancer::new(Weighted::new(vec![3]), vec![MockService::new(1)]);
+
+        lb.push(MockService::new(2));
+        assert_eq!(lb.len(), 2);
+
+        let state = lb.strategy().state.lock();
+        assert_eq!(state.weights, vec![3, 1]);
+        assert_eq!(state.current_weights.len(), 2);
+        drop(state);
+
+        let loads = lb.loads();
+        let pattern: Vec<_> = (0..4)
+            .map(|_| {
+                lb.strategy()
+                    .pick(&loads)
+                    .expect("new backend should participate in weighted selection")
+            })
+            .collect();
+        assert_eq!(pattern, vec![0, 0, 1, 0]);
+        crate::test_complete!("lb_weighted_push_syncs_strategy_state");
+    }
+
+    #[test]
+    fn lb_weighted_remove_reindexes_strategy_weights() {
+        init_test("lb_weighted_remove_reindexes_strategy_weights");
+        let lb = LoadBalancer::new(
+            Weighted::new(vec![5, 3, 2]),
+            vec![
+                MockService::new(1),
+                MockService::new(2),
+                MockService::new(3),
+            ],
+        );
+
+        let warmup_loads = lb.loads();
+        for _ in 0..3 {
+            let _ = lb
+                .strategy()
+                .pick(&warmup_loads)
+                .expect("weighted strategy should pick an initial backend");
+        }
+
+        let removed = lb.remove(1).expect("middle backend should exist");
+        assert_eq!(removed.id, 2);
+        assert_eq!(lb.len(), 2);
+
+        let state = lb.strategy().state.lock();
+        assert_eq!(state.weights, vec![5, 2]);
+        assert_eq!(state.current_weights.len(), 2);
+        drop(state);
+
+        let loads = lb.loads();
+        for _ in 0..16 {
+            let idx = lb
+                .strategy()
+                .pick(&loads)
+                .expect("remaining backends should stay selectable");
+            assert!(idx < 2, "removed backend index must not remain reachable");
+        }
+        crate::test_complete!("lb_weighted_remove_reindexes_strategy_weights");
     }
 
     // ================================================================
