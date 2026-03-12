@@ -4396,6 +4396,10 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".lane_len_b",
         ".addmul_decision == \"fused\"",
         ".addmul_decision == \"sequential\"",
+        ".criterion_sample_size",
+        ".criterion_warm_up_seconds",
+        ".criterion_measurement_seconds",
+        ".tail_confidence_proxy == \"criterion_interval_high_endpoint_proxy_p95p99\"",
         "bench_gf256_dual_policy_contract.ndjson",
     ] {
         assert!(

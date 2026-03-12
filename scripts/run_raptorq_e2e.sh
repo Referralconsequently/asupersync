@@ -343,6 +343,10 @@ validate_dual_policy_probe_contract() {
             (.max_lane_ratio | type == "number" and . >= 1 and floor == .) and
             (.mul_decision == "fused" or .mul_decision == "sequential") and
             (.addmul_decision == "fused" or .addmul_decision == "sequential") and
+            (.criterion_sample_size | type == "number" and . >= 1 and floor == .) and
+            (.criterion_warm_up_seconds | type == "number" and . > 0) and
+            (.criterion_measurement_seconds | type == "number" and . > 0) and
+            (.tail_confidence_proxy == "criterion_interval_high_endpoint_proxy_p95p99") and
             (.replay_pointer | type == "string" and length > 0) and
             (.artifact_path | type == "string" and length > 0) and
             (.repro_command | type == "string" and test("^((rch exec -- )?cargo bench --bench raptorq_benchmark -- gf256_dual_policy)")) and

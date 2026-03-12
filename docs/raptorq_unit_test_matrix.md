@@ -70,6 +70,7 @@ Current structured failure/logging anchors:
 - `tests/raptorq_perf_invariants.rs:667` (`seed_sweep_structured_logging`)
 - `tests/raptorq_conformance.rs:1181` report JSON includes scenario/block/loss/outcome/proof fields
 - deterministic report equality assertion at `tests/raptorq_conformance.rs:1277`
+- `scripts/run_raptorq_e2e.sh` Track-E dual-policy probe contract enforces criterion sample metadata (`criterion_sample_size`, `criterion_warm_up_seconds`, `criterion_measurement_seconds`) and explicit tail proxy label (`tail_confidence_proxy`)
 - unit edge-case structured failure context helper and scenario-tagged assertions in `src/raptorq/tests.rs` (`failure_context`, happy/boundary decode success paths, `insufficient_symbols_error`, `symbol_size_mismatch_error`, `large_block_bounded`)
 
 Required unit failure fields (for matrix governance):
@@ -229,7 +230,7 @@ Use these signal keys during triage, especially when CI gate logs (`tests/ci_reg
 
 | Lever | Primary Signal Keys | Interpretation |
 |---|---|---|
-| `E4` / `E5` | `profile_pack`, `architecture_class`, `profile_fallback_reason`, `mode` | verifies deterministic GF256 dispatch and fallback behavior |
+| `E4` / `E5` | `profile_pack`, `architecture_class`, `profile_fallback_reason`, `mode`, `criterion_sample_size`, `criterion_warm_up_seconds`, `criterion_measurement_seconds`, `tail_confidence_proxy` | verifies deterministic GF256 dispatch/fallback behavior and explicit benchmark-sampling contract metadata |
 | `C5` | `hard_regime_activated`, `hard_regime_branch`, `hard_regime_fallbacks` | verifies hard-regime activation and branch stability |
 | `C6` | `dense_core_rows`, `dense_core_cols`, `gauss_ops`, `peeling_fallback_reason` | verifies dense-core path engagement under loss pressure |
 | `F5` | `policy_mode`, `policy_reason`, `policy_baseline_loss`, `policy_high_support_loss`, `policy_block_schur_loss` | explains policy selection and expected-loss tradeoff |
