@@ -52,6 +52,12 @@ pub struct TimeoutFuture<F> {
     future: F,
     /// The sleep future for the timeout.
     sleep: Sleep,
+    /// Set once a terminal result has been returned and cleared only when
+    /// a timeout result is explicitly reset for reuse.
+    completed: bool,
+    /// Tracks whether the last terminal result was a timeout, which is the
+    /// only terminal state that `reset` can safely re-arm.
+    timed_out: bool,
 }
 
 impl<F> TimeoutFuture<F> {
@@ -78,6 +84,8 @@ impl<F> TimeoutFuture<F> {
         Self {
             future,
             sleep: Sleep::new(deadline),
+            completed: false,
+            timed_out: false,
         }
     }
 
@@ -90,6 +98,8 @@ impl<F> TimeoutFuture<F> {
         Self {
             future,
             sleep: Sleep::with_time_getter(deadline, time_getter),
+            completed: false,
+            timed_out: false,
         }
     }
 
@@ -105,6 +115,8 @@ impl<F> TimeoutFuture<F> {
         Self {
             future,
             sleep: Sleep::after(now, duration),
+            completed: false,
+            timed_out: false,
         }
     }
 
@@ -149,11 +161,19 @@ impl<F> TimeoutFuture<F> {
 
     /// Resets the timeout to a new deadline.
     pub fn reset(&mut self, deadline: Time) {
+        if self.timed_out {
+            self.completed = false;
+            self.timed_out = false;
+        }
         self.sleep.reset(deadline);
     }
 
     /// Resets the timeout to expire after the given duration.
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
+        if self.timed_out {
+            self.completed = false;
+            self.timed_out = false;
+        }
         self.sleep.reset_after(now, duration);
     }
 }
@@ -178,16 +198,23 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         now: Time,
         cx: &mut Context<'_>,
     ) -> Poll<Result<F::Output, Elapsed>> {
+        assert!(!self.completed, "TimeoutFuture polled after completion");
         // Poll the inner future first — if it's ready, return its result
         // even if the timeout has also elapsed, to avoid losing completed work.
         // SAFETY: We require F: Unpin, so this is safe
         match Pin::new(&mut self.future).poll(cx) {
-            Poll::Ready(output) => return Poll::Ready(Ok(output)),
+            Poll::Ready(output) => {
+                self.completed = true;
+                self.timed_out = false;
+                return Poll::Ready(Ok(output));
+            }
             Poll::Pending => {}
         }
 
         // Check the timeout explicitly using the provided time
         if self.sleep.poll_with_time(now).is_ready() {
+            self.completed = true;
+            self.timed_out = true;
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
         }
 
@@ -203,19 +230,28 @@ impl<F: Future> Future for TimeoutFuture<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
+        assert!(!*this.completed, "TimeoutFuture polled after completion");
 
         // Poll the inner future first — if it's ready, we should return its
         // result even if the timeout has also elapsed. This avoids losing
         // completed work at the boundary.
         match this.future.poll(cx) {
-            Poll::Ready(output) => return Poll::Ready(Ok(output)),
+            Poll::Ready(output) => {
+                *this.completed = true;
+                *this.timed_out = false;
+                return Poll::Ready(Ok(output));
+            }
             Poll::Pending => {}
         }
 
         // Poll the sleep future to register wakeup (e.g. background thread in standalone mode)
         let deadline = this.sleep.deadline();
         match Pin::new(this.sleep).poll(cx) {
-            Poll::Ready(()) => Poll::Ready(Err(Elapsed::new(deadline))),
+            Poll::Ready(()) => {
+                *this.completed = true;
+                *this.timed_out = true;
+                Poll::Ready(Err(Elapsed::new(deadline)))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -226,6 +262,8 @@ impl<F: Clone> Clone for TimeoutFuture<F> {
         Self {
             future: self.future.clone(),
             sleep: self.sleep.clone(),
+            completed: self.completed,
+            timed_out: self.timed_out,
         }
     }
 }
@@ -569,6 +607,100 @@ mod tests {
         crate::test_complete!("poll_with_time_zero_deadline");
     }
 
+    #[test]
+    fn poll_with_time_panics_after_success_completion() {
+        let mut t = TimeoutFuture::new(ready(42), Time::from_secs(10));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = t.poll_with_time(Time::from_secs(5), &mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(42))));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = t.poll_with_time(Time::from_secs(6), &mut cx);
+        }));
+        let message = panic.expect_err("re-poll after success should panic");
+        let text = message
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| message.downcast_ref::<String>().map(String::as_str))
+            .expect("unexpected panic payload");
+        assert!(text.contains("TimeoutFuture polled after completion"));
+    }
+
+    #[test]
+    fn poll_with_time_panics_after_timeout_until_reset() {
+        let future = CountingFuture {
+            count: 0,
+            ready_at: 3,
+        };
+        let mut t = TimeoutFuture::new(future, Time::from_secs(5));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(t.poll_with_time(Time::from_secs(0), &mut cx).is_pending());
+
+        let elapsed = t.poll_with_time(Time::from_secs(10), &mut cx);
+        assert!(matches!(elapsed, Poll::Ready(Err(_))));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = t.poll_with_time(Time::from_secs(11), &mut cx);
+        }));
+        panic.expect_err("re-poll after timeout should panic");
+
+        t.reset(Time::from_secs(20));
+        let resumed = t.poll_with_time(Time::from_secs(12), &mut cx);
+        assert!(matches!(resumed, Poll::Ready(Ok("done"))));
+    }
+
+    fn test_now() -> Time {
+        Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn poll_panics_after_success_completion() {
+        CURRENT_TIME.store(0, Ordering::SeqCst);
+        let mut t = TimeoutFuture::with_time_getter(ready(42), Time::from_secs(10), test_now);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut t).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(42))));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut t).poll(&mut cx);
+        }));
+        panic.expect_err("re-poll after success should panic");
+    }
+
+    #[test]
+    fn poll_panics_after_timeout_until_reset() {
+        CURRENT_TIME.store(0, Ordering::SeqCst);
+        let future = CountingFuture {
+            count: 0,
+            ready_at: 3,
+        };
+        let mut t = TimeoutFuture::with_time_getter(future, Time::from_secs(5), test_now);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Pin::new(&mut t).poll(&mut cx).is_pending());
+
+        CURRENT_TIME.store(10_000_000_000, Ordering::SeqCst);
+        let elapsed = Pin::new(&mut t).poll(&mut cx);
+        assert!(matches!(elapsed, Poll::Ready(Err(_))));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut t).poll(&mut cx);
+        }));
+        panic.expect_err("re-poll after timeout should panic");
+
+        t.reset(Time::from_secs(20));
+        CURRENT_TIME.store(12_000_000_000, Ordering::SeqCst);
+        let resumed = Pin::new(&mut t).poll(&mut cx);
+        assert!(matches!(resumed, Poll::Ready(Ok("done"))));
+    }
+
     // =========================================================================
     // Clone Tests
     // =========================================================================
@@ -600,6 +732,7 @@ mod tests {
     #[test]
     fn simulated_timeout_scenario() {
         init_test("simulated_timeout_scenario");
+        CURRENT_TIME.store(0, Ordering::SeqCst);
         // Simulate a scenario where we poll multiple times as time advances
 
         let mut t = TimeoutFuture::new(pending::<i32>(), Time::from_secs(5));

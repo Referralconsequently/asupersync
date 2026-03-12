@@ -480,7 +480,7 @@ impl Future for Notified<'_> {
         match self.state {
             NotifiedState::Init => self.poll_init(cx),
             NotifiedState::Waiting => self.poll_waiting(cx),
-            NotifiedState::Done => Poll::Ready(()),
+            NotifiedState::Done => panic!("Notified polled after completion"),
         }
     }
 }
@@ -589,6 +589,23 @@ mod tests {
     }
 
     #[test]
+    fn notified_repoll_panics_after_notify_one_completion() {
+        init_test("notified_repoll_panics_after_notify_one_completion");
+        let notify = Notify::new();
+        let mut fut = notify.notified();
+
+        assert!(poll_once(&mut fut).is_pending());
+        notify.notify_one();
+        assert!(poll_once(&mut fut).is_ready());
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_once(&mut fut);
+        }));
+        crate::assert_with_log!(repoll.is_err(), "repoll panics", true, repoll.is_err());
+        crate::test_complete!("notified_repoll_panics_after_notify_one_completion");
+    }
+
+    #[test]
     fn notify_before_wait_is_consumed() {
         init_test("notify_before_wait_is_consumed");
         let notify = Notify::new();
@@ -601,6 +618,22 @@ mod tests {
         let ready = poll_once(&mut fut).is_ready();
         crate::assert_with_log!(ready, "ready immediately", true, ready);
         crate::test_complete!("notify_before_wait_is_consumed");
+    }
+
+    #[test]
+    fn notified_repoll_panics_after_stored_notify_completion() {
+        init_test("notified_repoll_panics_after_stored_notify_completion");
+        let notify = Notify::new();
+        notify.notify_one();
+
+        let mut fut = notify.notified();
+        assert!(poll_once(&mut fut).is_ready());
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_once(&mut fut);
+        }));
+        crate::assert_with_log!(repoll.is_err(), "repoll panics", true, repoll.is_err());
+        crate::test_complete!("notified_repoll_panics_after_stored_notify_completion");
     }
 
     #[test]
