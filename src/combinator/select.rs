@@ -58,6 +58,7 @@ pub struct Select<A, B> {
     a: A,
     b: B,
     poll_a_first: bool,
+    completed: bool,
 }
 
 impl<A, B> Select<A, B> {
@@ -67,6 +68,7 @@ impl<A, B> Select<A, B> {
             a,
             b,
             poll_a_first: true,
+            completed: false,
         }
     }
 }
@@ -77,19 +79,24 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
+        assert!(!this.completed, "Select polled after completion");
 
         if this.poll_a_first {
             if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
+                this.completed = true;
                 return Poll::Ready(Either::Left(val));
             }
             if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
+                this.completed = true;
                 return Poll::Ready(Either::Right(val));
             }
         } else {
             if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
+                this.completed = true;
                 return Poll::Ready(Either::Right(val));
             }
             if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
+                this.completed = true;
                 return Poll::Ready(Either::Left(val));
             }
         }
@@ -108,6 +115,7 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
 pub struct SelectAll<F> {
     futures: Vec<F>,
     start_idx: usize,
+    completed: bool,
 }
 
 impl<F> SelectAll<F> {
@@ -121,6 +129,7 @@ impl<F> SelectAll<F> {
         Self {
             futures,
             start_idx: 0,
+            completed: false,
         }
     }
 }
@@ -130,6 +139,8 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(!self.completed, "SelectAll polled after completion");
+
         let len = self.futures.len();
         if len == 0 {
             return Poll::Pending;
@@ -139,6 +150,7 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
         for i in 0..len {
             let idx = (start + i) % len;
             if let Poll::Ready(v) = Pin::new(&mut self.futures[idx]).poll(cx) {
+                self.completed = true;
                 return Poll::Ready((v, idx));
             }
         }
@@ -899,5 +911,30 @@ mod tests {
             Poll::Ready(Err(SelectAllDrainError::PolledAfterCompletion))
         ));
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Select polled after completion")]
+    fn test_select_panics_on_repoll_after_completion() {
+        let left = std::future::ready(42);
+        let right = std::future::pending::<i32>();
+        let mut sel = Select::new(left, right);
+
+        let result = poll_once(&mut sel);
+        assert!(matches!(result, Poll::Ready(Either::Left(42))));
+        // This second poll should panic
+        let _ = poll_once(&mut sel);
+    }
+
+    #[test]
+    #[should_panic(expected = "SelectAll polled after completion")]
+    fn test_select_all_panics_on_repoll_after_completion() {
+        let futures = vec![std::future::ready(10)];
+        let mut sel = SelectAll::new(futures);
+
+        let result = poll_once(&mut sel);
+        assert!(matches!(result, Poll::Ready((10, 0))));
+        // This second poll should panic
+        let _ = poll_once(&mut sel);
     }
 }

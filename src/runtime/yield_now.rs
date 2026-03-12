@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 /// Future that yields execution back to the runtime.
 pub struct YieldNow {
     yielded: bool,
+    completed: bool,
 }
 
 impl Future for YieldNow {
@@ -12,7 +13,9 @@ impl Future for YieldNow {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(!self.completed, "YieldNow polled after completion");
         if self.yielded {
+            self.completed = true;
             Poll::Ready(())
         } else {
             self.yielded = true;
@@ -26,7 +29,10 @@ impl Future for YieldNow {
 #[inline]
 #[must_use]
 pub fn yield_now() -> YieldNow {
-    YieldNow { yielded: false }
+    YieldNow {
+        yielded: false,
+        completed: false,
+    }
 }
 
 #[cfg(test)]
@@ -66,5 +72,22 @@ mod tests {
 
         assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
         assert_eq!(wake_counter.wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "YieldNow polled after completion")]
+    fn yield_now_panics_on_repoll_after_completion() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("yield_now_panics_on_repoll_after_completion");
+
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = std::task::Waker::from(Arc::clone(&wake_counter));
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = std::pin::pin!(yield_now());
+
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
+        // This third poll should panic
+        let _ = fut.as_mut().poll(&mut cx);
     }
 }

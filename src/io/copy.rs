@@ -51,6 +51,7 @@ where
         pos: 0,
         cap: 0,
         total: 0,
+        completed: false,
     }
 }
 
@@ -64,6 +65,7 @@ pub struct Copy<'a, R: ?Sized, W: ?Sized> {
     pos: usize,
     cap: usize,
     total: u64,
+    completed: bool,
 }
 
 impl<R, W> Future for Copy<'_, R, W>
@@ -75,6 +77,9 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+
+        assert!(!this.completed, "Copy future polled after completion");
+
         let mut steps = 0;
 
         loop {
@@ -88,8 +93,12 @@ where
             if this.pos < this.cap {
                 match Pin::new(&mut *this.writer).poll_write(cx, &this.buf[this.pos..this.cap]) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Err(err)) => {
+                        this.completed = true;
+                        return Poll::Ready(Err(err));
+                    }
                     Poll::Ready(Ok(0)) => {
+                        this.completed = true;
                         return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                     }
                     Poll::Ready(Ok(n)) => {
@@ -105,8 +114,14 @@ where
             if this.read_done {
                 match Pin::new(&mut *this.writer).poll_flush(cx) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(this.total)),
+                    Poll::Ready(Err(err)) => {
+                        this.completed = true;
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        this.completed = true;
+                        return Poll::Ready(Ok(this.total));
+                    }
                 }
             }
 
@@ -117,7 +132,10 @@ where
                     if this.need_flush {
                         match Pin::new(&mut *this.writer).poll_flush(cx) {
                             Poll::Pending => return Poll::Pending,
-                            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                            Poll::Ready(Err(err)) => {
+                                this.completed = true;
+                                return Poll::Ready(Err(err));
+                            }
                             Poll::Ready(Ok(())) => {
                                 this.need_flush = false;
                             }
@@ -125,7 +143,10 @@ where
                     }
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
@@ -201,6 +222,7 @@ where
         writer,
         total: 0,
         need_flush: false,
+        completed: false,
     }
 }
 
@@ -210,6 +232,7 @@ pub struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     writer: &'a mut W,
     total: u64,
     need_flush: bool,
+    completed: bool,
 }
 
 impl<R, W> Future for CopyBuf<'_, R, W>
@@ -221,6 +244,9 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+
+        assert!(!this.completed, "CopyBuf future polled after completion");
+
         let mut steps = 0;
 
         loop {
@@ -235,7 +261,10 @@ where
                     if this.need_flush {
                         match Pin::new(&mut *this.writer).poll_flush(cx) {
                             Poll::Pending => return Poll::Pending,
-                            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                            Poll::Ready(Err(e)) => {
+                                this.completed = true;
+                                return Poll::Ready(Err(e));
+                            }
                             Poll::Ready(Ok(())) => {
                                 this.need_flush = false;
                             }
@@ -243,13 +272,21 @@ where
                     }
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(buf)) => buf,
             };
 
             if buf.is_empty() {
+                this.completed = true;
                 match Pin::new(&mut *this.writer).poll_flush(cx) {
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        // Un-mark: flush is pending, not truly complete yet
+                        this.completed = false;
+                        return Poll::Pending;
+                    }
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                     Poll::Ready(Ok(())) => return Poll::Ready(Ok(this.total)),
                 }
@@ -257,8 +294,12 @@ where
 
             let n = match Pin::new(&mut *this.writer).poll_write(cx, buf) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(0)) => {
+                    this.completed = true;
                     return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                 }
                 Poll::Ready(Ok(n)) => n,
@@ -310,6 +351,7 @@ where
         pos: 0,
         cap: 0,
         total: 0,
+        completed: false,
     }
 }
 
@@ -324,6 +366,7 @@ pub struct CopyWithProgress<'a, R: ?Sized, W: ?Sized, F> {
     pos: usize,
     cap: usize,
     total: u64,
+    completed: bool,
 }
 
 impl<R, W, F> Future for CopyWithProgress<'_, R, W, F>
@@ -336,6 +379,12 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+
+        assert!(
+            !this.completed,
+            "CopyWithProgress future polled after completion"
+        );
+
         let mut steps = 0;
 
         loop {
@@ -349,8 +398,12 @@ where
             if this.pos < this.cap {
                 match Pin::new(&mut *this.writer).poll_write(cx, &this.buf[this.pos..this.cap]) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Err(err)) => {
+                        this.completed = true;
+                        return Poll::Ready(Err(err));
+                    }
                     Poll::Ready(Ok(0)) => {
+                        this.completed = true;
                         return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                     }
                     Poll::Ready(Ok(n)) => {
@@ -367,8 +420,14 @@ where
             if this.read_done {
                 match Pin::new(&mut *this.writer).poll_flush(cx) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(this.total)),
+                    Poll::Ready(Err(err)) => {
+                        this.completed = true;
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        this.completed = true;
+                        return Poll::Ready(Ok(this.total));
+                    }
                 }
             }
 
@@ -379,7 +438,10 @@ where
                     if this.need_flush {
                         match Pin::new(&mut *this.writer).poll_flush(cx) {
                             Poll::Pending => return Poll::Pending,
-                            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                            Poll::Ready(Err(err)) => {
+                                this.completed = true;
+                                return Poll::Ready(Err(err));
+                            }
                             Poll::Ready(Ok(())) => {
                                 this.need_flush = false;
                             }
@@ -387,7 +449,10 @@ where
                     }
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
@@ -438,6 +503,7 @@ where
         b_to_a: TransferState::default(),
         a_to_b_total: 0,
         b_to_a_total: 0,
+        completed: false,
     }
 }
 
@@ -461,6 +527,7 @@ pub struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
     b_to_a: TransferState,
     a_to_b_total: u64,
     b_to_a_total: u64,
+    completed: bool,
 }
 
 const YIELD_BUDGET: usize = 64;
@@ -651,6 +718,12 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+
+        assert!(
+            !this.completed,
+            "CopyBidirectional future polled after completion"
+        );
+
         let mut steps = 0;
 
         // Poll both directions, interleaved, until both block or are done
@@ -666,14 +739,20 @@ where
             // Step A->B
             match this.step_a_to_b(cx) {
                 TransferResult::Progress => made_progress = true,
-                TransferResult::Error(e) => return Poll::Ready(Err(e)),
+                TransferResult::Error(e) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(e));
+                }
                 TransferResult::Done | TransferResult::Pending => {}
             }
 
             // Step B->A
             match this.step_b_to_a(cx) {
                 TransferResult::Progress => made_progress = true,
-                TransferResult::Error(e) => return Poll::Ready(Err(e)),
+                TransferResult::Error(e) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(e));
+                }
                 TransferResult::Done | TransferResult::Pending => {}
             }
 
@@ -689,6 +768,7 @@ where
                     && this.b_to_a.shutdown_done;
 
                 if a_to_b_done && b_to_a_done {
+                    this.completed = true;
                     return Poll::Ready(Ok((this.a_to_b_total, this.b_to_a_total)));
                 }
                 return Poll::Pending;

@@ -157,6 +157,8 @@ pub struct Sleep {
     /// Whether this sleep has been polled at least once.
     /// Used for tracing/debugging.
     polled: std::sync::atomic::AtomicBool,
+    /// Whether this sleep has already completed and not yet been reset.
+    completed: std::sync::atomic::AtomicBool,
     /// Shared state for background waiter thread.
     state: Arc<Mutex<SleepState>>,
 }
@@ -183,6 +185,7 @@ impl Sleep {
             deadline,
             time_getter: None,
             polled: std::sync::atomic::AtomicBool::new(false),
+            completed: std::sync::atomic::AtomicBool::new(false),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -231,6 +234,7 @@ impl Sleep {
             deadline,
             time_getter: Some(time_getter),
             polled: std::sync::atomic::AtomicBool::new(false),
+            completed: std::sync::atomic::AtomicBool::new(false),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -285,6 +289,8 @@ impl Sleep {
         self.deadline = deadline;
         self.polled
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.completed
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
@@ -320,6 +326,8 @@ impl Sleep {
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         self.polled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.completed
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
@@ -368,9 +376,15 @@ impl Sleep {
     ///
     /// Returns `Poll::Ready(())` if the deadline has passed.
     pub fn poll_with_time(&self, now: Time) -> Poll<()> {
+        assert!(
+            !self.completed.load(std::sync::atomic::Ordering::Acquire),
+            "Sleep polled after completion"
+        );
         self.polled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if now >= self.deadline {
+            self.completed
+                .store(true, std::sync::atomic::Ordering::Release);
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -483,7 +497,8 @@ impl Future for Sleep {
                         // Update existing timer with new waker
                         if let Some(handle) = state.timer_handle.take() {
                             let old_id = handle.id();
-                            let new_handle = timer.update(&handle, self.deadline, cx.waker().clone());
+                            let new_handle =
+                                timer.update(&handle, self.deadline, cx.waker().clone());
                             if let Some(trace) = trace.as_ref() {
                                 let seq = trace.next_seq();
                                 trace.push_event(TraceEvent::timer_cancelled(seq, now, old_id));
@@ -613,6 +628,7 @@ impl Clone for Sleep {
             deadline: self.deadline,
             time_getter: self.time_getter,
             polled: std::sync::atomic::AtomicBool::new(false), // Fresh clone hasn't been polled
+            completed: std::sync::atomic::AtomicBool::new(false),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -902,6 +918,22 @@ mod tests {
         crate::test_complete!("poll_with_time_zero_deadline");
     }
 
+    #[test]
+    fn poll_with_time_repoll_after_completion_panics() {
+        init_test("poll_with_time_repoll_after_completion_panics");
+        let sleep = Sleep::new(Time::from_secs(10));
+
+        let first = sleep.poll_with_time(Time::from_secs(10));
+        crate::assert_with_log!(first.is_ready(), "first ready", true, first.is_ready());
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = sleep.poll_with_time(Time::from_secs(10));
+        }));
+        crate::assert_with_log!(repoll.is_err(), "repoll panics", true, repoll.is_err());
+
+        crate::test_complete!("poll_with_time_repoll_after_completion_panics");
+    }
+
     // =========================================================================
     // Reset Tests
     // =========================================================================
@@ -944,6 +976,35 @@ mod tests {
             sleep.deadline()
         );
         crate::test_complete!("reset_after_changes_deadline");
+    }
+
+    #[test]
+    fn reset_after_completion_allows_sleep_reuse() {
+        init_test("reset_after_completion_allows_sleep_reuse");
+        let mut sleep = Sleep::new(Time::from_secs(10));
+
+        let first = sleep.poll_with_time(Time::from_secs(10));
+        crate::assert_with_log!(first.is_ready(), "first ready", true, first.is_ready());
+
+        sleep.reset(Time::from_secs(20));
+
+        let second = sleep.poll_with_time(Time::from_secs(15));
+        crate::assert_with_log!(
+            second.is_pending(),
+            "pending after reset before deadline",
+            true,
+            second.is_pending()
+        );
+
+        let third = sleep.poll_with_time(Time::from_secs(20));
+        crate::assert_with_log!(
+            third.is_ready(),
+            "ready after reset",
+            true,
+            third.is_ready()
+        );
+
+        crate::test_complete!("reset_after_completion_allows_sleep_reuse");
     }
 
     // =========================================================================
@@ -1091,6 +1152,26 @@ mod tests {
         );
 
         crate::test_complete!("reset_cancels_old_timer_and_re_registers_on_poll");
+    }
+
+    #[test]
+    fn future_repoll_after_completion_panics() {
+        init_test("future_repoll_after_completion_panics");
+        CURRENT_TIME.store(Time::from_secs(10).as_nanos(), Ordering::SeqCst);
+
+        let mut sleep = Sleep::with_time_getter(Time::from_secs(10), get_time);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(first.is_ready(), "first ready", true, first.is_ready());
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut sleep).poll(&mut task_cx);
+        }));
+        crate::assert_with_log!(repoll.is_err(), "repoll panics", true, repoll.is_err());
+
+        crate::test_complete!("future_repoll_after_completion_panics");
     }
 
     #[test]

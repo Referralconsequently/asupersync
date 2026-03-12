@@ -62,6 +62,7 @@ where
         buf,
         bytes_read: 0,
         pending: Vec::new(),
+        completed: false,
     }
 }
 
@@ -73,6 +74,7 @@ pub struct ReadLine<'a, R: ?Sized> {
     /// Holds incomplete UTF-8 bytes that were consumed from the reader
     /// but not yet appended to `buf`.
     pending: Vec<u8>,
+    completed: bool,
 }
 
 fn strip_cr_before_nl(buf: &mut String) {
@@ -198,6 +200,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        assert!(!this.completed, "ReadLine polled after completion");
         let mut steps = 0;
 
         loop {
@@ -209,15 +212,20 @@ where
 
             let available = match Pin::new(&mut *this.reader).poll_fill_buf(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Ready(Ok(buf)) => buf,
             };
 
             if available.is_empty() {
                 if let Err(err) = append_utf8(this.buf, &mut this.bytes_read, &this.pending) {
+                    this.completed = true;
                     return Poll::Ready(Err(err));
                 }
                 this.pending.clear();
+                this.completed = true;
                 return Poll::Ready(Ok(this.bytes_read));
             }
 
@@ -248,9 +256,13 @@ where
 
             match action {
                 ChunkAction::Consume => Pin::new(&mut *this.reader).consume(consume_len),
-                ChunkAction::Finish(result) => return Poll::Ready(result),
+                ChunkAction::Finish(result) => {
+                    this.completed = true;
+                    return Poll::Ready(result);
+                }
                 ChunkAction::ConsumeAndFinish(result) => {
                     Pin::new(&mut *this.reader).consume(consume_len);
+                    this.completed = true;
                     return Poll::Ready(result);
                 }
             }
