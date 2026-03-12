@@ -48,9 +48,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
-        if let Some(result) = this.result.as_ref() {
-            return Poll::Ready(*result);
-        }
+        assert!(this.result.is_none(), "Any polled after completion");
         let mut scanned_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -109,9 +107,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
-        if let Some(result) = this.result.as_ref() {
-            return Poll::Ready(*result);
-        }
+        assert!(this.result.is_none(), "All polled after completion");
         let mut scanned_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -418,8 +414,8 @@ mod tests {
     }
 
     #[test]
-    fn any_repoll_returns_same_result_without_touching_inner_stream() {
-        init_test("any_repoll_returns_same_result_without_touching_inner_stream");
+    fn any_repoll_panics_after_completion() {
+        init_test("any_repoll_panics_after_completion");
         let mut future = Any::new(MatchThenPanicStream::default(), |_: &usize| true);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -432,19 +428,21 @@ mod tests {
             first
         );
 
-        let second = Pin::new(&mut future).poll(&mut cx);
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
         crate::assert_with_log!(
-            second == Poll::Ready(true),
-            "second poll reuses terminal result",
-            Poll::Ready(true),
+            second.is_err(),
+            "second poll panics fail-closed",
+            true,
             second
         );
-        crate::test_complete!("any_repoll_returns_same_result_without_touching_inner_stream");
+        crate::test_complete!("any_repoll_panics_after_completion");
     }
 
     #[test]
-    fn all_repoll_returns_same_result_without_touching_inner_stream() {
-        init_test("all_repoll_returns_same_result_without_touching_inner_stream");
+    fn all_repoll_panics_after_completion() {
+        init_test("all_repoll_panics_after_completion");
         let mut future = All::new(OneThenDoneThenPanicStream::default(), |_: &usize| true);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -457,13 +455,15 @@ mod tests {
             first
         );
 
-        let second = Pin::new(&mut future).poll(&mut cx);
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
         crate::assert_with_log!(
-            second == Poll::Ready(true),
-            "second poll reuses terminal result",
-            Poll::Ready(true),
+            second.is_err(),
+            "second poll panics fail-closed",
+            true,
             second
         );
-        crate::test_complete!("all_repoll_returns_same_result_without_touching_inner_stream");
+        crate::test_complete!("all_repoll_panics_after_completion");
     }
 }

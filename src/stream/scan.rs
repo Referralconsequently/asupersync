@@ -74,7 +74,10 @@ where
                     Poll::Ready(None)
                 }
             }
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                *this.state = None;
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -100,6 +103,30 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct EmptyThenPanics {
+        completed: bool,
+    }
+
+    impl EmptyThenPanics {
+        fn new() -> Self {
+            Self { completed: false }
+        }
+    }
+
+    impl Stream for EmptyThenPanics {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(
+                !self.completed,
+                "scan inner stream repolled after completion"
+            );
+            self.completed = true;
+            Poll::Ready(None)
+        }
     }
 
     #[test]
@@ -165,6 +192,22 @@ mod tests {
 
         assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
         crate::test_complete!("scan_empty_stream");
+    }
+
+    #[test]
+    fn scan_does_not_repoll_exhausted_upstream() {
+        init_test("scan_does_not_repoll_exhausted_upstream");
+        let mut stream = Scan::new(EmptyThenPanics::new(), 0i32, |acc: &mut i32, x: i32| {
+            *acc += x;
+            Some(*acc)
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+
+        crate::test_complete!("scan_does_not_repoll_exhausted_upstream");
     }
 
     #[test]

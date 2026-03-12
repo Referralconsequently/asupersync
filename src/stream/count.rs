@@ -47,9 +47,7 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
         let mut this = self.project();
-        if *this.completed {
-            return Poll::Ready(*this.total);
-        }
+        assert!(!*this.completed, "Count polled after completion");
         let mut counted_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -250,8 +248,8 @@ mod tests {
     }
 
     #[test]
-    fn count_repoll_returns_same_total_without_touching_inner_stream() {
-        init_test("count_repoll_returns_same_total_without_touching_inner_stream");
+    fn count_repoll_panics_after_completion() {
+        init_test("count_repoll_panics_after_completion");
         let mut future = Count::new(OneThenDoneThenPanicStream::default());
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -264,13 +262,42 @@ mod tests {
             first
         );
 
-        let second = Pin::new(&mut future).poll(&mut cx);
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
         crate::assert_with_log!(
-            second == Poll::Ready(1),
-            "second poll reuses terminal count",
-            Poll::Ready(1),
+            second.is_err(),
+            "second poll panics fail-closed",
+            true,
             second
         );
-        crate::test_complete!("count_repoll_returns_same_total_without_touching_inner_stream");
+        crate::test_complete!("count_repoll_panics_after_completion");
+    }
+
+    #[test]
+    fn count_empty_repoll_panics_after_completion() {
+        init_test("count_empty_repoll_panics_after_completion");
+        let mut future = Count::new(iter(Vec::<usize>::new()));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(0),
+            "first poll returns empty count",
+            Poll::Ready(0),
+            first
+        );
+
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        crate::assert_with_log!(
+            second.is_err(),
+            "second poll panics fail-closed",
+            true,
+            second.is_err()
+        );
+        crate::test_complete!("count_empty_repoll_panics_after_completion");
     }
 }

@@ -20,6 +20,7 @@ pub struct Zip<S1: Stream, S2: Stream> {
     stream2: S2,
     queued1: Option<S1::Item>,
     queued2: Option<S2::Item>,
+    exhausted: bool,
 }
 
 impl<S1: Stream, S2: Stream> Zip<S1, S2> {
@@ -30,6 +31,7 @@ impl<S1: Stream, S2: Stream> Zip<S1, S2> {
             stream2,
             queued1: None,
             queued2: None,
+            exhausted: false,
         }
     }
 
@@ -64,11 +66,19 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        if *this.exhausted {
+            return Poll::Ready(None);
+        }
 
         if this.queued1.is_none() {
             match this.stream1.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => *this.queued1 = Some(item),
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.queued1 = None;
+                    *this.queued2 = None;
+                    *this.exhausted = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => {}
             }
         }
@@ -76,7 +86,12 @@ where
         if this.queued2.is_none() {
             match this.stream2.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => *this.queued2 = Some(item),
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.queued1 = None;
+                    *this.queued2 = None;
+                    *this.exhausted = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => {}
             }
         }
@@ -93,6 +108,10 @@ where
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.exhausted {
+            return (0, Some(0));
+        }
+
         let (lower1, upper1) = self.stream1.size_hint();
         let (lower2, upper2) = self.stream2.size_hint();
         let queued1 = usize::from(self.queued1.is_some());
@@ -219,6 +238,74 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct PollCountingPendingThenEmpty {
+        polls: usize,
+        completed: bool,
+    }
+
+    impl PollCountingPendingThenEmpty {
+        fn new() -> Self {
+            Self {
+                polls: 0,
+                completed: false,
+            }
+        }
+    }
+
+    impl Stream for PollCountingPendingThenEmpty {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(
+                !self.completed,
+                "pending-then-empty stream polled after completion"
+            );
+            self.polls += 1;
+            if self.polls == 1 {
+                Poll::Pending
+            } else {
+                self.completed = true;
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct PollCountingSingleThenEmpty<T> {
+        polls: usize,
+        next: Option<T>,
+        completed: bool,
+    }
+
+    impl<T> PollCountingSingleThenEmpty<T> {
+        fn new(item: T) -> Self {
+            Self {
+                polls: 0,
+                next: Some(item),
+                completed: false,
+            }
+        }
+    }
+
+    impl<T: Unpin> Stream for PollCountingSingleThenEmpty<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(
+                !self.completed,
+                "single-then-empty stream polled after completion"
+            );
+            self.polls += 1;
+            if let Some(item) = self.next.take() {
+                Poll::Ready(Some(item))
+            } else {
+                self.completed = true;
+                Poll::Ready(None)
+            }
+        }
+    }
+
     #[test]
     fn zip_size_hint_counts_buffered_items() {
         init_test("zip_size_hint_counts_buffered_items");
@@ -245,6 +332,47 @@ mod tests {
         crate::assert_with_log!(ok, "buffered pair yielded", true, ok);
 
         crate::test_complete!("zip_size_hint_counts_buffered_items");
+    }
+
+    #[test]
+    fn zip_clears_left_buffer_when_right_exhausts() {
+        init_test("zip_clears_left_buffer_when_right_exhausts");
+        let mut stream = Zip::new(iter(vec![1, 2]), PollCountingSingleThenEmpty::new(10));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some((1, 10)))
+        );
+        assert_eq!(stream.size_hint(), (0, Some(1)));
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+
+        crate::test_complete!("zip_clears_left_buffer_when_right_exhausts");
+    }
+
+    #[test]
+    fn zip_clears_right_buffer_when_left_exhausts() {
+        init_test("zip_clears_right_buffer_when_left_exhausts");
+        let mut stream = Zip::new(PollCountingPendingThenEmpty::new(), iter(vec![10]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
+        assert_eq!(stream.size_hint(), (0, Some(1)));
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+
+        crate::test_complete!("zip_clears_right_buffer_when_left_exhausts");
     }
 
     /// Invariant: zipping two empty streams immediately yields None.

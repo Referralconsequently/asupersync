@@ -260,6 +260,8 @@ fn compute_stagger_delay(config: &HappyEyeballsConfig, index: usize) -> Duration
 
 /// A boxed, pinned, Send future that yields a `TcpStream` or an I/O error.
 type ConnectFuture = Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>;
+const RACE_CONNECTIONS_POLLED_AFTER_COMPLETION: &str =
+    "Happy Eyeballs RaceConnections polled after completion";
 
 /// Future that races multiple connection attempts, returning the first success.
 ///
@@ -271,6 +273,8 @@ struct RaceConnections {
     futures: Vec<Option<ConnectFuture>>,
     /// Number of futures still pending.
     pending: usize,
+    /// Whether this future already returned a terminal outcome.
+    completed: bool,
     /// Last error seen (returned if all fail).
     last_error: Option<io::Error>,
     /// Sleep future for overall timeout.
@@ -286,13 +290,32 @@ impl RaceConnections {
         Self {
             futures: futures.into_iter().map(Some).collect(),
             pending,
+            completed: false,
             last_error: None,
             timeout_sleep,
             time_getter,
         }
     }
 
+    fn poll_after_completion_error() -> io::Error {
+        io::Error::other(RACE_CONNECTIONS_POLLED_AFTER_COMPLETION)
+    }
+
+    fn finish(&mut self, output: io::Result<TcpStream>) -> Poll<io::Result<TcpStream>> {
+        self.completed = true;
+        self.pending = 0;
+        self.last_error = None;
+        for slot in &mut self.futures {
+            *slot = None;
+        }
+        Poll::Ready(output)
+    }
+
     fn poll_with_time(&mut self, now: Time, cx: &mut Context<'_>) -> Poll<io::Result<TcpStream>> {
+        if self.completed {
+            return Poll::Ready(Err(Self::poll_after_completion_error()));
+        }
+
         // Check overall timeout first
         if self.timeout_sleep.poll_with_time(now).is_ready() {
             let err = self.last_error.take().unwrap_or_else(|| {
@@ -301,7 +324,7 @@ impl RaceConnections {
                     "Happy Eyeballs: overall connection timeout",
                 )
             });
-            return Poll::Ready(Err(err));
+            return self.finish(Err(err));
         }
 
         // Poll all active futures, collecting results to avoid borrow conflicts
@@ -340,7 +363,7 @@ impl RaceConnections {
 
         // Return winner if we have one
         if let Some(stream) = winner {
-            return Poll::Ready(Ok(stream));
+            return self.finish(Ok(stream));
         }
 
         if !any_pending && self.pending == 0 {
@@ -351,7 +374,7 @@ impl RaceConnections {
                     "Happy Eyeballs: all connection attempts failed",
                 )
             });
-            return Poll::Ready(Err(err));
+            return self.finish(Err(err));
         }
 
         Poll::Pending
@@ -464,7 +487,7 @@ mod tests {
     use super::*;
     use std::future::pending;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
@@ -481,6 +504,45 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Arc::new(NoopWaker).into()
+    }
+
+    #[derive(Debug)]
+    struct PollCountingPendingConnect {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl PollCountingPendingConnect {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Future for PollCountingPendingConnect {
+        type Output = io::Result<TcpStream>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending
+        }
+    }
+
+    fn connected_test_stream() -> TcpStream {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let accept_thread = std::thread::spawn(move || listener.accept().expect("accept").0);
+        let client = std::net::TcpStream::connect(addr).expect("connect client");
+        let _server = accept_thread.join().expect("join accept thread");
+        TcpStream::from_std(client).expect("wrap client stream")
+    }
+
+    fn assert_post_completion_error(result: Poll<io::Result<TcpStream>>) {
+        let err = match result {
+            Poll::Ready(Err(err)) => err,
+            Poll::Ready(Ok(_)) => panic!("expected post-completion error, got success"),
+            Poll::Pending => panic!("expected post-completion error, got pending"),
+        };
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.to_string(), RACE_CONNECTIONS_POLLED_AFTER_COMPLETION);
     }
 
     // =======================================================================
@@ -905,21 +967,25 @@ mod tests {
         init_test("race_connections_all_fail");
 
         // Race a single future that fails immediately
-        let fail_fut: Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>> =
-            Box::pin(async {
-                Err(io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    "test fail",
-                ))
-            });
+        let fail_fut: ConnectFuture = Box::pin(async {
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "test fail",
+            ))
+        });
 
         let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
-        let race = RaceConnections::new(vec![fail_fut], deadline, timeout_now);
-        let result = futures_lite::future::block_on(race);
+        let mut race = RaceConnections::new(vec![fail_fut], deadline, timeout_now);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = race.poll_with_time(timeout_now(), &mut cx);
 
         // Should complete with the error
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionRefused);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::ConnectionRefused
+        ));
+        assert_post_completion_error(race.poll_with_time(timeout_now(), &mut cx));
         crate::test_complete!("race_connections_all_fail");
     }
 
@@ -946,7 +1012,41 @@ mod tests {
         TEST_NOW.store(2_000, Ordering::SeqCst);
         let result = race.poll_with_time(test_time(), &mut cx);
         assert!(matches!(result, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::TimedOut));
+        assert_post_completion_error(race.poll_with_time(test_time(), &mut cx));
         crate::test_complete!("race_connections_timeout_honors_custom_clock");
+    }
+
+    #[test]
+    fn race_connections_success_repoll_fails_closed_and_drops_losers() {
+        init_test("race_connections_success_repoll_fails_closed_and_drops_losers");
+
+        let loser_polls = Arc::new(AtomicUsize::new(0));
+        let loser: ConnectFuture =
+            Box::pin(PollCountingPendingConnect::new(Arc::clone(&loser_polls)));
+        let winner: ConnectFuture = Box::pin(async { Ok(connected_test_stream()) });
+
+        let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
+        let mut race = RaceConnections::new(vec![loser, winner], deadline, timeout_now);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            race.poll_with_time(timeout_now(), &mut cx),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(
+            loser_polls.load(Ordering::SeqCst),
+            1,
+            "loser should be polled exactly once before winner completes"
+        );
+
+        assert_post_completion_error(race.poll_with_time(timeout_now(), &mut cx));
+        assert_eq!(
+            loser_polls.load(Ordering::SeqCst),
+            1,
+            "post-completion repoll must not touch dropped losers"
+        );
+        crate::test_complete!("race_connections_success_repoll_fails_closed_and_drops_losers");
     }
 
     // =======================================================================

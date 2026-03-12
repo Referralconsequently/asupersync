@@ -13,11 +13,16 @@ pub struct Take<S> {
     #[pin]
     stream: S,
     remaining: usize,
+    done: bool,
 }
 
 impl<S> Take<S> {
     pub(crate) fn new(stream: S, remaining: usize) -> Self {
-        Self { stream, remaining }
+        Self {
+            stream,
+            remaining,
+            done: false,
+        }
     }
 }
 
@@ -27,7 +32,9 @@ impl<S: Stream> Stream for Take<S> {
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
+        assert!(!*this.done, "Take polled after completion");
         if *this.remaining == 0 {
+            *this.done = true;
             return Poll::Ready(None);
         }
 
@@ -39,6 +46,7 @@ impl<S: Stream> Stream for Take<S> {
             }
             Poll::Ready(None) => {
                 *this.remaining = 0;
+                *this.done = true;
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
@@ -46,7 +54,7 @@ impl<S: Stream> Stream for Take<S> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.remaining == 0 {
+        if self.done || self.remaining == 0 {
             return (0, Some(0));
         }
 
@@ -89,9 +97,7 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        if *this.done {
-            return Poll::Ready(None);
-        }
+        assert!(!*this.done, "TakeWhile polled after completion");
 
         let next = this.stream.poll_next(cx);
         match next {
@@ -124,10 +130,77 @@ where
 mod tests {
     use super::*;
     use crate::stream::{StreamExt, iter};
+    use std::panic::AssertUnwindSafe;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Arc::new(NoopWaker).into()
+    }
+
+    #[derive(Debug)]
+    struct PollCountingEmptyStream {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl PollCountingEmptyStream {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Stream for PollCountingEmptyStream {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(None)
+        }
+    }
+
+    #[derive(Debug)]
+    struct PollCountingSingleStream {
+        polls: Arc<AtomicUsize>,
+        next: Option<i32>,
+        completed: bool,
+    }
+
+    impl PollCountingSingleStream {
+        fn new(item: i32, polls: Arc<AtomicUsize>) -> Self {
+            Self {
+                polls,
+                next: Some(item),
+                completed: false,
+            }
+        }
+    }
+
+    impl Stream for PollCountingSingleStream {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(!self.completed, "inner stream repolled after completion");
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if let Some(item) = self.next.take() {
+                Poll::Ready(Some(item))
+            } else {
+                self.completed = true;
+                Poll::Ready(None)
+            }
+        }
     }
 
     #[test]
@@ -198,19 +271,38 @@ mod tests {
     #[test]
     fn test_take_while_done_behavior() {
         init_test("test_take_while_done_behavior");
-        futures_lite::future::block_on(async {
-            let mut stream = iter(vec![1, 2, 3]).take_while(|v| *v < 3);
-            let first = stream.next().await;
-            crate::assert_with_log!(first == Some(1), "first", Some(1), first);
-            let second = stream.next().await;
-            crate::assert_with_log!(second == Some(2), "second", Some(2), second);
-            let third = stream.next().await;
-            crate::assert_with_log!(third.is_none(), "third none", true, third.is_none());
-            let fourth = stream.next().await;
-            crate::assert_with_log!(fourth.is_none(), "fourth none", true, fourth.is_none());
-            let hint = stream.size_hint();
-            crate::assert_with_log!(hint == (0, Some(0)), "size_hint done", (0, Some(0)), hint);
-        });
+        let stream = iter(vec![1, 2, 3]).take_while(|v| *v < 3);
+        let mut stream = std::pin::pin!(stream);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = stream.as_mut().poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Some(1))),
+            "first",
+            "Poll::Ready(Some(1))",
+            &first
+        );
+        let second = stream.as_mut().poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Some(2))),
+            "second",
+            "Poll::Ready(Some(2))",
+            &second
+        );
+        let third = stream.as_mut().poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(third, Poll::Ready(None)),
+            "third none",
+            "Poll::Ready(None)",
+            &third
+        );
+        let hint = stream.as_ref().get_ref().size_hint();
+        crate::assert_with_log!(hint == (0, Some(0)), "size_hint done", (0, Some(0)), hint);
+
+        let fourth =
+            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
+        crate::assert_with_log!(fourth.is_err(), "fourth panics", true, fourth.is_err());
         crate::test_complete!("test_take_while_done_behavior");
     }
 
@@ -239,5 +331,99 @@ mod tests {
         let stream = TakeWhile::new(iter(vec![1, 2]), pred as fn(&i32) -> bool);
         let dbg = format!("{stream:?}");
         assert!(dbg.contains("TakeWhile"));
+    }
+
+    #[test]
+    fn test_take_repoll_after_zero_limit_panics_without_polling_inner() {
+        init_test("test_take_repoll_after_zero_limit_panics_without_polling_inner");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stream = Take::new(PollCountingEmptyStream::new(Arc::clone(&polls)), 0);
+        let mut stream = std::pin::pin!(stream);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            stream.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        let second =
+            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
+
+        assert!(second.is_err(), "second poll should panic fail-closed");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            0,
+            "zero-limit take must not touch the inner stream"
+        );
+        crate::test_complete!("test_take_repoll_after_zero_limit_panics_without_polling_inner");
+    }
+
+    #[test]
+    fn test_take_repoll_after_inner_completion_panics_without_repolling_inner() {
+        init_test("test_take_repoll_after_inner_completion_panics_without_repolling_inner");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stream = Take::new(PollCountingEmptyStream::new(Arc::clone(&polls)), 1);
+        let mut stream = std::pin::pin!(stream);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            stream.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "inner stream should be polled once to discover exhaustion"
+        );
+
+        let second =
+            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
+
+        assert!(second.is_err(), "second poll should panic fail-closed");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "completed take must not repoll the exhausted inner stream"
+        );
+        crate::test_complete!(
+            "test_take_repoll_after_inner_completion_panics_without_repolling_inner"
+        );
+    }
+
+    #[test]
+    fn test_take_while_repoll_after_completion_panics_without_repolling_inner() {
+        init_test("test_take_while_repoll_after_completion_panics_without_repolling_inner");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stream = TakeWhile::new(
+            PollCountingSingleStream::new(3, Arc::clone(&polls)),
+            |v: &i32| *v < 3,
+        );
+        let mut stream = std::pin::pin!(stream);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            stream.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "predicate-failing item should be observed exactly once"
+        );
+
+        let second =
+            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
+
+        assert!(second.is_err(), "second poll should panic fail-closed");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "completed take_while must not repoll the inner stream"
+        );
+        crate::test_complete!(
+            "test_take_while_repoll_after_completion_panics_without_repolling_inner"
+        );
     }
 }
