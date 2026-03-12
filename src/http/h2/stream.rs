@@ -97,6 +97,22 @@ impl StreamState {
         matches!(self, Self::Closed)
     }
 
+    /// Check if the stream counts toward the max concurrent streams limit (RFC 7540 §5.1.2).
+    /// "open", "half-closed", and "reserved" states all count toward the limit.
+    /// Per RFC 7540 §5.1.2: "Streams in the 'reserved' state count toward the
+    /// maximum, unless they have been reset."
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Open
+                | Self::HalfClosedLocal
+                | Self::HalfClosedRemote
+                | Self::ReservedLocal
+                | Self::ReservedRemote
+        )
+    }
+
     /// Check if headers can be sent in this state.
     #[must_use]
     pub fn can_send_headers(&self) -> bool {
@@ -750,11 +766,10 @@ impl StreamStore {
         if self.streams.len() >= self.max_concurrent_streams as usize {
             let mut active_count = 0;
             self.streams.retain(|_, s| {
-                let active = !s.state.is_closed();
-                if active {
+                if s.state.is_active() {
                     active_count += 1;
                 }
-                active
+                !s.state.is_closed()
             });
 
             if active_count >= self.max_concurrent_streams {
@@ -815,7 +830,7 @@ impl StreamStore {
     pub fn active_count(&self) -> usize {
         self.streams
             .values()
-            .filter(|s| !s.state.is_closed())
+            .filter(|s| s.state.is_active())
             .count()
     }
 }
@@ -892,14 +907,16 @@ mod tests {
         let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         store.set_max_concurrent_streams(2);
 
-        store.allocate_stream_id().unwrap();
-        store.allocate_stream_id().unwrap();
+        let id1 = store.allocate_stream_id().unwrap();
+        store.get_mut(id1).unwrap().send_headers(false).unwrap();
+        let id2 = store.allocate_stream_id().unwrap();
+        store.get_mut(id2).unwrap().send_headers(false).unwrap();
 
-        // Third should fail
+        // Third should fail — two active streams already at the limit
         assert!(store.allocate_stream_id().is_err());
 
         // Close one stream
-        store.get_mut(1).unwrap().reset(ErrorCode::NoError);
+        store.get_mut(id1).unwrap().reset(ErrorCode::NoError);
         store.prune_closed();
 
         // Now we can allocate again
@@ -1908,10 +1925,11 @@ mod tests {
 
         // Rapidly allocate and close streams
         for round in 0..10 {
-            // Allocate up to max
+            // Allocate up to max and open them so they count as active
             let mut ids = Vec::new();
             for _ in 0..10 {
                 let id = store.allocate_stream_id().unwrap();
+                store.get_mut(id).unwrap().send_headers(false).unwrap();
                 ids.push(id);
             }
 
