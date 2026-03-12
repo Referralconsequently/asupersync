@@ -809,6 +809,8 @@ impl<H: Handler> Handler for RequestIdMiddleware<H> {
             let id = self.counter.fetch_add(1, Ordering::Relaxed);
             format!("req-{id}")
         });
+        // Sanitize CRLF from client-supplied header to prevent response header injection.
+        let request_id = request_id.replace(['\r', '\n'], "");
 
         req.extensions.insert("request_id", request_id.clone());
         req.extensions.insert("trace_id", request_id.clone());
@@ -912,9 +914,11 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
         }
 
         if let (Some(header_name), Some(id)) = (&self.policy.trace_header, trace_id.as_ref()) {
+            // Sanitize CRLF from trace ID to prevent response header injection.
+            let sanitized = id.replace(['\r', '\n'], "");
             resp.headers
                 .entry(header_name.clone())
-                .or_insert_with(|| id.clone());
+                .or_insert_with(|| sanitized);
         }
 
         if status_code >= 500 {

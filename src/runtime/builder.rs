@@ -1190,16 +1190,23 @@ impl RuntimeHandle {
 /// A join handle returned by [`RuntimeHandle::spawn`].
 pub struct JoinHandle<T> {
     state: Arc<Mutex<JoinState<T>>>,
+    completed: bool,
 }
 
 impl<T> JoinHandle<T> {
     fn new(state: Arc<Mutex<JoinState<T>>>) -> Self {
-        Self { state }
+        Self {
+            state,
+            completed: false,
+        }
     }
 
     /// Returns true if the task has completed.
     #[must_use]
     pub fn is_finished(&self) -> bool {
+        if self.completed {
+            return true;
+        }
         let guard = lock_state(&self.state);
         guard.result.is_some()
     }
@@ -1209,7 +1216,12 @@ impl<T> Future for JoinHandle<T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut guard = lock_state(&self.state);
+        let this = self.get_mut();
+        assert!(
+            !this.completed,
+            "runtime::JoinHandle polled after completion"
+        );
+        let mut guard = lock_state(&this.state);
         match guard.result.take() {
             None => {
                 if !guard
@@ -1221,8 +1233,15 @@ impl<T> Future for JoinHandle<T> {
                 }
                 Poll::Pending
             }
-            Some(Ok(output)) => Poll::Ready(output),
-            Some(Err(payload)) => std::panic::resume_unwind(payload),
+            Some(Ok(output)) => {
+                this.completed = true;
+                Poll::Ready(output)
+            }
+            Some(Err(payload)) => {
+                this.completed = true;
+                drop(guard);
+                std::panic::resume_unwind(payload)
+            }
         }
     }
 }
@@ -1725,6 +1744,18 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+        match payload.downcast::<String>() {
+            Ok(message) => *message,
+            Err(payload) => payload
+                .downcast::<&'static str>()
+                .map_or_else(
+                    |_| "<non-string panic payload>".to_string(),
+                    |message| (*message).to_string(),
+                ),
+        }
+    }
 
     #[test]
     fn runtime_handle_spawn_completes_via_scheduler() {
@@ -2564,6 +2595,79 @@ worker_threads = 16
             stopped.load(Ordering::SeqCst),
             1,
             "only the worker thread should trigger on_thread_stop"
+        );
+    }
+
+    #[test]
+    fn join_handle_second_poll_panics_after_success_and_stays_finished() {
+        init_test_logging();
+
+        let state = Arc::new(Mutex::new(JoinState::new()));
+        complete_task(&state, Ok(7_u8));
+
+        let mut join = std::pin::pin!(JoinHandle::new(Arc::clone(&state)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = join.as_mut().poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(7)));
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should remain finished after consuming the result"
+        );
+
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = join.as_mut().poll(&mut cx);
+        }));
+        let message =
+            panic_payload_to_string(second.expect_err("second poll must fail closed by panicking"));
+        assert!(
+            message.contains("runtime::JoinHandle polled after completion"),
+            "second poll should panic with completion misuse message, got {message}"
+        );
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should remain finished after post-completion misuse"
+        );
+    }
+
+    #[test]
+    fn join_handle_second_poll_panics_after_task_panic_and_stays_finished() {
+        init_test_logging();
+
+        let state = Arc::new(Mutex::new(JoinState::<u8>::new()));
+        complete_task(&state, Err(Box::new("join-handle boom")));
+
+        let mut join = std::pin::pin!(JoinHandle::new(Arc::clone(&state)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = join.as_mut().poll(&mut cx);
+        }));
+        let first_message =
+            panic_payload_to_string(first.expect_err("first poll should resume the task panic"));
+        assert!(
+            first_message.contains("join-handle boom"),
+            "first poll should preserve the original task panic, got {first_message}"
+        );
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should remain finished after propagating a task panic"
+        );
+
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = join.as_mut().poll(&mut cx);
+        }));
+        let second_message =
+            panic_payload_to_string(second.expect_err("second poll must fail closed by panicking"));
+        assert!(
+            second_message.contains("runtime::JoinHandle polled after completion"),
+            "second poll should panic with completion misuse message, got {second_message}"
+        );
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should remain finished after post-completion misuse"
         );
     }
 }
