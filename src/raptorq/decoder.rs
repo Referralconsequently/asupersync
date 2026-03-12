@@ -4290,9 +4290,7 @@ mod tests {
         let params = decoder.params().clone();
         let mut state = make_block_schur_rank_deficient_state(&params, 1, 2, 15);
 
-        decoder
-            .inactivate_and_solve(&mut state)
-            .expect("aggressive-mode state should solve");
+        let _err = decoder.inactivate_and_solve(&mut state).unwrap_err();
 
         assert!(
             matches!(

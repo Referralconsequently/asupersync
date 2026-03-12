@@ -47,8 +47,9 @@ impl std::error::Error for JoinError {}
 ///
 /// # Cancel Safety
 ///
-/// If `join()` is cancelled, the handle can be retried. The task's result
-/// will be available once the task completes.
+/// If `join()` is cancelled (the future is dropped before completion), the task
+/// is automatically aborted. This prevents orphan tasks in races and timeouts.
+/// The handle can be retried to await the cancellation result.
 ///
 /// # Example
 ///
