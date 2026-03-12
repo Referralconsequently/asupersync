@@ -847,6 +847,16 @@ pub enum WasmHandleError {
         /// Slot index.
         slot: u32,
     },
+    /// Boundary state transition was not legal under contract.
+    #[error("invalid state transition for slot {slot}: {from:?} -> {to:?}")]
+    InvalidStateTransition {
+        /// Slot index.
+        slot: u32,
+        /// Current boundary state.
+        from: WasmBoundaryState,
+        /// Requested boundary state.
+        to: WasmBoundaryState,
+    },
 }
 
 /// Handle table managing all boundary-visible entity handles.
@@ -1039,11 +1049,12 @@ impl WasmHandleTable {
         to: WasmBoundaryState,
     ) -> Result<(), WasmHandleError> {
         let entry = self.get_mut(handle)?;
-        validate_wasm_boundary_transition(entry.state, to).map_err(|_| {
-            // Re-read state for the error (entry borrow ended)
-            WasmHandleError::InvalidTransfer {
+        let from = entry.state;
+        validate_wasm_boundary_transition(from, to).map_err(|_| {
+            WasmHandleError::InvalidStateTransition {
                 slot: handle.slot,
-                current: WasmHandleOwnership::WasmOwned,
+                from,
+                to,
             }
         })?;
         // Re-borrow after validation
@@ -2594,8 +2605,14 @@ impl ReactProviderState {
 
     /// Advances to a new phase, validating the transition.
     fn advance(&mut self, to: ReactProviderPhase) -> Result<(), ReactProviderTransitionError> {
+        // Cap transition history to prevent unbounded growth.
+        const MAX_HISTORY: usize = 256;
+
         validate_provider_transition(self.phase, to)?;
         self.phase = to;
+        if self.transition_history.len() >= MAX_HISTORY {
+            self.transition_history.drain(..MAX_HISTORY / 2);
+        }
         self.transition_history.push(to);
         Ok(())
     }
@@ -3778,6 +3795,11 @@ impl NextjsBootstrapState {
         trigger: NextjsBootstrapTrigger,
         detail: Option<String>,
     ) {
+        // Cap transition log to prevent unbounded growth in long-running SPAs.
+        const MAX_TRANSITION_LOG: usize = 256;
+        if self.transition_log.len() >= MAX_TRANSITION_LOG {
+            self.transition_log.drain(..MAX_TRANSITION_LOG / 2);
+        }
         self.transition_log.push(NextjsBootstrapTransitionRecord {
             from,
             to,

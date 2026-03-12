@@ -612,8 +612,9 @@ impl CancelReason {
     /// ```
     #[must_use]
     pub fn with_cause_limited(mut self, cause: Self, config: &CancelAttributionConfig) -> Self {
-        // Check if adding this cause would exceed limits
-        let current_depth = self.chain_depth();
+        // Check if adding this cause would exceed limits.
+        // Use 1 for self (not chain_depth) because self.cause will be replaced.
+        let current_depth = 1_usize;
         let cause_depth = cause.chain_depth();
         let total_depth = current_depth + cause_depth;
 
