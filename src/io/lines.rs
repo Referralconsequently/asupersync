@@ -189,27 +189,21 @@ mod tests {
     }
 
     #[test]
-    fn lines_repoll_after_empty_completion_panics() {
+    fn lines_repoll_after_empty_completion_returns_none() {
         let data: &[u8] = b"";
         let reader = BufReader::new(data);
         let mut lines = Lines::new(reader);
 
         assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = poll_next(&mut lines);
-        }));
-        let message = panic.expect_err("re-poll after completion should panic");
-        let text = message
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| message.downcast_ref::<String>().map(String::as_str))
-            .expect("unexpected panic payload");
-        assert!(text.contains("Lines polled after completion"));
+        // Fail-closed: repoll after completion returns None instead of panicking
+        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+        // Third poll also safe
+        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
     }
 
     #[test]
-    fn lines_repoll_after_exhausting_non_empty_input_panics() {
+    fn lines_repoll_after_exhausting_non_empty_input_returns_none() {
         let data: &[u8] = b"line 1\nline 2";
         let reader = BufReader::new(data);
         let mut lines = Lines::new(reader);
@@ -218,9 +212,7 @@ mod tests {
         assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 2"));
         assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = poll_next(&mut lines);
-        }));
-        panic.expect_err("re-poll after completion should panic");
+        // Fail-closed: repoll after completion returns None instead of panicking
+        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
     }
 }
