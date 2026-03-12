@@ -75,6 +75,9 @@ impl<E: std::error::Error + 'static> std::error::Error for FilterError<E> {
 pub struct Filter<S, P> {
     inner: S,
     predicate: P,
+    // Tracks an inner readiness observation that has not yet been consumed by
+    // an accepted request. Rejected requests preserve this window because the
+    // inner service may already be holding state for the authorized call.
     ready_observed: bool,
 }
 
@@ -136,6 +139,10 @@ where
     type Future = FilterFuture<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.ready_observed {
+            return Poll::Ready(Ok(()));
+        }
+
         match self.inner.poll_ready(cx).map_err(FilterError::Inner) {
             Poll::Ready(Ok(())) => {
                 self.ready_observed = true;
@@ -150,11 +157,12 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        if !std::mem::replace(&mut self.ready_observed, false) {
+        if !self.ready_observed {
             return FilterFuture::NotReady;
         }
 
         if (self.predicate)(&req) {
+            self.ready_observed = false;
             FilterFuture::Inner(self.inner.call(req))
         } else {
             FilterFuture::Rejected
@@ -314,6 +322,55 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct StrictReservingService {
+        ready_polls: Arc<AtomicUsize>,
+        available: Arc<AtomicUsize>,
+        reserved: bool,
+    }
+
+    impl StrictReservingService {
+        fn new(ready_polls: Arc<AtomicUsize>, available: Arc<AtomicUsize>) -> Self {
+            Self {
+                ready_polls,
+                available,
+                reserved: false,
+            }
+        }
+    }
+
+    impl Service<i32> for StrictReservingService {
+        type Response = i32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<i32, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.ready_polls.fetch_add(1, Ordering::SeqCst);
+
+            if self.reserved {
+                return Poll::Pending;
+            }
+
+            let available = self.available.load(Ordering::SeqCst);
+            if available == 0 {
+                return Poll::Pending;
+            }
+
+            self.available.fetch_sub(1, Ordering::SeqCst);
+            self.reserved = true;
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            if !std::mem::replace(&mut self.reserved, false) {
+                return std::future::ready(Err("not ready"));
+            }
+
+            self.available.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(req))
+        }
+    }
+
     #[test]
     fn filter_new() {
         init_test("filter_new");
@@ -462,18 +519,30 @@ mod tests {
     }
 
     #[test]
-    fn rejected_request_consumes_ready_window() {
-        init_test("rejected_request_consumes_ready_window");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut filter = Filter::new(CountingReadyService::new(Arc::clone(&calls)), |x: &i32| {
-            *x > 10
-        });
+    fn rejected_request_preserves_ready_window_for_next_accepted_call() {
+        init_test("rejected_request_preserves_ready_window_for_next_accepted_call");
+        let ready_polls = Arc::new(AtomicUsize::new(0));
+        let available = Arc::new(AtomicUsize::new(1));
+        let inner = StrictReservingService::new(Arc::clone(&ready_polls), Arc::clone(&available));
+        let mut filter = Filter::new(inner, |x: &i32| *x > 10);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let ready = filter.poll_ready(&mut cx);
         let ready_ok = matches!(ready, Poll::Ready(Ok(())));
         crate::assert_with_log!(ready_ok, "poll_ready authorizes one call", true, ready_ok);
+        crate::assert_with_log!(
+            ready_polls.load(Ordering::SeqCst) == 1,
+            "inner poll_ready called once to reserve capacity",
+            1,
+            ready_polls.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            available.load(Ordering::SeqCst) == 0,
+            "inner reservation consumes the only available slot",
+            0,
+            available.load(Ordering::SeqCst)
+        );
 
         let mut rejected = filter.call(7);
         let rejected_result = Pin::new(&mut rejected).poll(&mut cx);
@@ -485,22 +554,47 @@ mod tests {
             rejected_ok
         );
 
-        let mut second = filter.call(11);
-        let second_result = Pin::new(&mut second).poll(&mut cx);
-        let second_not_ready = matches!(second_result, Poll::Ready(Err(FilterError::NotReady)));
+        let ready_again = filter.poll_ready(&mut cx);
+        let ready_again_ok = matches!(ready_again, Poll::Ready(Ok(())));
         crate::assert_with_log!(
-            second_not_ready,
-            "rejected call still consumes the readiness ticket",
+            ready_again_ok,
+            "existing readiness window is preserved across rejection",
             true,
-            second_not_ready
+            ready_again_ok
         );
         crate::assert_with_log!(
-            calls.load(Ordering::SeqCst) == 0,
-            "rejected requests never reach the inner service",
-            0,
-            calls.load(Ordering::SeqCst)
+            ready_polls.load(Ordering::SeqCst) == 1,
+            "re-poll short-circuits without touching the reserved inner service",
+            1,
+            ready_polls.load(Ordering::SeqCst)
         );
-        crate::test_complete!("rejected_request_consumes_ready_window");
+
+        let mut accepted = filter.call(11);
+        let accepted_result = Pin::new(&mut accepted).poll(&mut cx);
+        let accepted_ok = matches!(accepted_result, Poll::Ready(Ok(11)));
+        crate::assert_with_log!(
+            accepted_ok,
+            "accepted follow-up request consumes the preserved readiness window",
+            true,
+            accepted_ok
+        );
+        crate::assert_with_log!(
+            available.load(Ordering::SeqCst) == 1,
+            "inner reservation is released once an accepted request reaches the service",
+            1,
+            available.load(Ordering::SeqCst)
+        );
+
+        let mut third = filter.call(12);
+        let third_result = Pin::new(&mut third).poll(&mut cx);
+        let third_not_ready = matches!(third_result, Poll::Ready(Err(FilterError::NotReady)));
+        crate::assert_with_log!(
+            third_not_ready,
+            "accepted request still consumes the preserved readiness ticket",
+            true,
+            third_not_ready
+        );
+        crate::test_complete!("rejected_request_preserves_ready_window_for_next_accepted_call");
     }
 
     // ================================================================

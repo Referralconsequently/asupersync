@@ -59,6 +59,7 @@ use common::*;
 use asupersync::service::concurrency_limit::ConcurrencyLimitError;
 use asupersync::service::load_shed::{LoadShedError, Overloaded};
 use asupersync::service::rate_limit::RateLimitError;
+use asupersync::service::retry::RetryError;
 use asupersync::service::timeout::{TimeoutError, TimeoutFuture};
 use asupersync::service::{
     ConcurrencyLimitLayer, Identity, Layer, LimitedRetry, LoadShed, NoRetry, Policy, RateLimit,
@@ -790,7 +791,10 @@ fn svc_verify_019_retry_exhaustion() {
     };
 
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), "service error");
+    assert!(matches!(
+        result.unwrap_err(),
+        RetryError::Inner("service error")
+    ));
     // 1 initial + 2 retries = 3
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 

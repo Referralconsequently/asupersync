@@ -67,7 +67,7 @@ pub enum ReconnectError<E, M> {
     Inner(E),
     /// Failed to create a new service instance.
     Connect(M),
-    /// No connected inner service was available for `call`.
+    /// The caller attempted `call()` without a preceding successful `poll_ready()`.
     NotReady,
 }
 
@@ -100,11 +100,14 @@ impl<E: std::error::Error + 'static, M: std::error::Error + 'static> std::error:
 /// When `poll_ready` detects that the inner service is unavailable,
 /// or when a call fails and the service is marked as needing reconnection,
 /// a new service instance is created from the maker.
+///
+/// Each successful `poll_ready` authorizes exactly one subsequent `call`.
 pub struct Reconnect<M: MakeService> {
     maker: M,
     inner: Option<M::Service>,
     refresh_pending: Arc<AtomicBool>,
     service_epoch: Arc<AtomicU64>,
+    ready_observed: bool,
     /// Number of successful reconnections.
     successes: u64,
     /// Number of failed reconnection attempts.
@@ -120,6 +123,7 @@ impl<M: MakeService> Reconnect<M> {
             inner: Some(initial),
             refresh_pending: Arc::new(AtomicBool::new(false)),
             service_epoch: Arc::new(AtomicU64::new(1)),
+            ready_observed: false,
             successes: 0,
             failures: 0,
         }
@@ -133,6 +137,7 @@ impl<M: MakeService> Reconnect<M> {
             inner: None,
             refresh_pending: Arc::new(AtomicBool::new(false)),
             service_epoch: Arc::new(AtomicU64::new(0)),
+            ready_observed: false,
             successes: 0,
             failures: 0,
         }
@@ -147,6 +152,7 @@ impl<M: MakeService> Reconnect<M> {
                 self.inner = Some(svc);
                 self.refresh_pending.store(false, Ordering::Release);
                 self.service_epoch.fetch_add(1, Ordering::AcqRel);
+                self.ready_observed = false;
                 self.successes += 1;
                 Ok(())
             }
@@ -201,6 +207,7 @@ impl<M: MakeService> Reconnect<M> {
     fn invalidate_inner(&mut self) {
         let had_inner = self.inner.take().is_some();
         self.refresh_pending.store(false, Ordering::Release);
+        self.ready_observed = false;
         if had_inner {
             self.service_epoch.fetch_add(1, Ordering::AcqRel);
         }
@@ -216,10 +223,41 @@ impl<M: MakeService> fmt::Debug for Reconnect<M> {
                 &self.refresh_pending.load(Ordering::Relaxed),
             )
             .field("service_epoch", &self.service_epoch.load(Ordering::Relaxed))
+            .field("ready_observed", &self.ready_observed)
             .field("successes", &self.successes)
             .field("failures", &self.failures)
             .field("maker", &self.maker)
             .finish()
+    }
+}
+
+struct RefreshPendingGuard<'a> {
+    refresh_pending: &'a AtomicBool,
+    service_epoch: &'a AtomicU64,
+    call_epoch: u64,
+    armed: bool,
+}
+
+impl<'a> RefreshPendingGuard<'a> {
+    fn new(refresh_pending: &'a AtomicBool, service_epoch: &'a AtomicU64, call_epoch: u64) -> Self {
+        Self {
+            refresh_pending,
+            service_epoch,
+            call_epoch,
+            armed: true,
+        }
+    }
+
+    fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RefreshPendingGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed && self.service_epoch.load(Ordering::Acquire) == self.call_epoch {
+            self.refresh_pending.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -246,7 +284,10 @@ where
 
         // Ensure we have a connection.
         if self.inner.is_none() {
-            self.reconnect().map_err(ReconnectError::Connect)?;
+            if let Err(err) = self.reconnect() {
+                self.ready_observed = false;
+                return Poll::Ready(Err(ReconnectError::Connect(err)));
+            }
         }
 
         let svc = self
@@ -254,49 +295,26 @@ where
             .as_mut()
             .expect("inner must be Some after successful reconnect");
         match svc.poll_ready(cx) {
+            Poll::Ready(Ok(())) => {
+                self.ready_observed = true;
+                Poll::Ready(Ok(()))
+            }
             Poll::Ready(Err(e)) => {
                 // Inner service is broken — drop it to trigger reconnection
                 // on the next poll_ready call.
                 self.invalidate_inner();
                 Poll::Ready(Err(ReconnectError::Inner(e)))
             }
-            other => other.map_err(ReconnectError::Inner),
+            Poll::Pending => {
+                self.ready_observed = false;
+                Poll::Pending
+            }
         }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        struct RefreshPendingGuard<'a> {
-            refresh_pending: &'a AtomicBool,
-            service_epoch: &'a AtomicU64,
-            call_epoch: u64,
-            armed: bool,
-        }
-
-        impl<'a> RefreshPendingGuard<'a> {
-            fn new(
-                refresh_pending: &'a AtomicBool,
-                service_epoch: &'a AtomicU64,
-                call_epoch: u64,
-            ) -> Self {
-                Self {
-                    refresh_pending,
-                    service_epoch,
-                    call_epoch,
-                    armed: true,
-                }
-            }
-
-            fn defuse(mut self) {
-                self.armed = false;
-            }
-        }
-
-        impl Drop for RefreshPendingGuard<'_> {
-            fn drop(&mut self) {
-                if self.armed && self.service_epoch.load(Ordering::Acquire) == self.call_epoch {
-                    self.refresh_pending.store(true, Ordering::Release);
-                }
-            }
+        if !std::mem::replace(&mut self.ready_observed, false) {
+            return ReconnectFuture::error(ReconnectError::NotReady);
         }
 
         let call_epoch = self.service_epoch.load(Ordering::Acquire);
@@ -496,6 +514,27 @@ mod tests {
 
     impl std::error::Error for ReconnectingCallError {}
 
+    #[derive(Debug, Clone)]
+    struct CountingReconnectSvc {
+        id: u32,
+        calls: Arc<AtomicU32>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct CountingReconnectMaker {
+        next_id: Arc<AtomicU32>,
+        calls: Arc<AtomicU32>,
+    }
+
+    impl CountingReconnectMaker {
+        fn new(next_id: u32, calls: Arc<AtomicU32>) -> Self {
+            Self {
+                next_id: Arc::new(AtomicU32::new(next_id)),
+                calls,
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct ReconnectingSvc {
         id: u32,
@@ -586,6 +625,33 @@ mod tests {
             } else {
                 std::future::ready(Ok(self.id))
             }
+        }
+    }
+
+    impl Service<()> for CountingReconnectSvc {
+        type Response = u32;
+        type Error = ReconnectingCallError;
+        type Future = std::future::Ready<Result<u32, ReconnectingCallError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(self.id))
+        }
+    }
+
+    impl MakeService for CountingReconnectMaker {
+        type Service = CountingReconnectSvc;
+        type Error = MockMakerError;
+
+        fn make_service(&self) -> Result<Self::Service, Self::Error> {
+            Ok(CountingReconnectSvc {
+                id: self.next_id.fetch_add(1, Ordering::SeqCst),
+                calls: Arc::clone(&self.calls),
+            })
         }
     }
 
@@ -881,6 +947,68 @@ mod tests {
         assert_eq!(rc.reconnect_count(), 1);
 
         crate::test_complete!("lazy_call_without_poll_ready_returns_not_ready");
+    }
+
+    #[test]
+    fn connected_call_without_poll_ready_returns_not_ready() {
+        init_test("connected_call_without_poll_ready_returns_not_ready");
+        let calls = Arc::new(AtomicU32::new(0));
+        let maker = CountingReconnectMaker::new(1, Arc::clone(&calls));
+        let initial = CountingReconnectSvc {
+            id: 7,
+            calls: Arc::clone(&calls),
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut call = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::NotReady))
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "readiness misuse must not invoke the connected inner service"
+        );
+
+        crate::test_complete!("connected_call_without_poll_ready_returns_not_ready");
+    }
+
+    #[test]
+    fn connected_ready_window_is_consumed_by_call() {
+        init_test("connected_ready_window_is_consumed_by_call");
+        let calls = Arc::new(AtomicU32::new(0));
+        let maker = CountingReconnectMaker::new(1, Arc::clone(&calls));
+        let initial = CountingReconnectSvc {
+            id: 9,
+            calls: Arc::clone(&calls),
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut first = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut cx),
+            Poll::Ready(Ok(9))
+        ));
+
+        let mut second = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::NotReady))
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "exactly one call should consume a connected readiness window"
+        );
+
+        crate::test_complete!("connected_ready_window_is_consumed_by_call");
     }
 
     #[test]

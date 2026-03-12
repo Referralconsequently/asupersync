@@ -47,7 +47,7 @@ pub use load_balance::{
 pub use load_shed::{LoadShed, LoadShedError, LoadShedLayer, Overloaded};
 pub use rate_limit::{RateLimit, RateLimitError, RateLimitLayer};
 pub use reconnect::{MakeService, Reconnect, ReconnectError, ReconnectFuture, ReconnectLayer};
-pub use retry::{LimitedRetry, NoRetry, Policy, Retry, RetryLayer};
+pub use retry::{LimitedRetry, NoRetry, Policy, Retry, RetryError, RetryLayer};
 pub use steer::{Steer, SteerError};
 // Tower adapter types (available without feature flag for configuration)
 pub use service::{

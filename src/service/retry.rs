@@ -4,6 +4,7 @@
 //! according to a configurable [`Policy`].
 
 use super::{Layer, Service};
+use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -83,6 +84,33 @@ impl<S, P: Clone> Layer<S> for RetryLayer<P> {
     }
 }
 
+/// Error returned by the retry middleware.
+#[derive(Debug)]
+pub enum RetryError<E> {
+    /// The retry future was polled after it had already completed.
+    PolledAfterCompletion,
+    /// The inner service returned an error.
+    Inner(E),
+}
+
+impl<E: fmt::Display> fmt::Display for RetryError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolledAfterCompletion => write!(f, "retry future polled after completion"),
+            Self::Inner(e) => write!(f, "inner service error: {e}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for RetryError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PolledAfterCompletion => None,
+            Self::Inner(e) => Some(e),
+        }
+    }
+}
+
 /// A service that retries requests according to a policy.
 #[derive(Debug, Clone)]
 pub struct Retry<P, S> {
@@ -132,7 +160,7 @@ where
     Request: Unpin,
 {
     type Response = S::Response;
-    type Error = S::Error;
+    type Error = RetryError<S::Error>;
     type Future = RetryFuture<P, S, Request>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -214,7 +242,7 @@ where
     S::Error: Unpin,
     Request: Unpin,
 {
-    type Output = Result<S::Response, S::Error>;
+    type Output = Result<S::Response, RetryError<S::Error>>;
 
     #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -241,7 +269,7 @@ where
                         }
                         Poll::Ready(Err(e)) => {
                             this.state = RetryState::Done;
-                            return Poll::Ready(Err(e));
+                            return Poll::Ready(Err(RetryError::Inner(e)));
                         }
                         Poll::Ready(Ok(())) => {
                             let req = request.take().expect("request already taken");
@@ -290,7 +318,7 @@ where
                             None => {
                                 // No retry - return the result
                                 this.state = RetryState::Done;
-                                return Poll::Ready(result);
+                                return Poll::Ready(result.map_err(RetryError::Inner));
                             }
                             Some(retry_future) => {
                                 completed_attempts_this_poll += 1;
@@ -340,13 +368,13 @@ where
                                 // Cannot clone request - return original result
                                 let result = result.take().expect("result should exist");
                                 this.state = RetryState::Done;
-                                return Poll::Ready(result);
+                                return Poll::Ready(result.map_err(RetryError::Inner));
                             }
                         }
                     }
                 }
                 RetryState::Done => {
-                    panic!("RetryFuture polled after completion");
+                    return Poll::Ready(Err(RetryError::PolledAfterCompletion));
                 }
             }
         }
@@ -730,6 +758,48 @@ mod tests {
     }
 
     #[test]
+    fn retry_error_display_and_source() {
+        let inner = RetryError::Inner(std::io::Error::other("boom"));
+        assert!(format!("{inner}").contains("boom"));
+        assert!(std::error::Error::source(&inner).is_some());
+
+        let done: RetryError<std::io::Error> = RetryError::PolledAfterCompletion;
+        assert_eq!(format!("{done}"), "retry future polled after completion");
+        assert!(std::error::Error::source(&done).is_none());
+        assert!(format!("{done:?}").contains("PolledAfterCompletion"));
+    }
+
+    #[test]
+    fn retry_future_second_poll_fails_closed() {
+        init_test("retry_future_second_poll_fails_closed");
+        let policy = NoRetry::new();
+        let (svc, _) = FailingService::new(0);
+        let mut retry_svc = Retry::new(svc, policy);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = retry_svc.poll_ready(&mut cx);
+        let mut future = retry_svc.call(21);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(42))),
+            "first poll returns success",
+            "Poll::Ready(Ok(42))",
+            first
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(RetryError::PolledAfterCompletion))),
+            "second poll fails closed",
+            "Poll::Ready(Err(RetryError::PolledAfterCompletion))",
+            second
+        );
+        crate::test_complete!("retry_future_second_poll_fails_closed");
+    }
+
+    #[test]
     fn retry_exhausts_and_returns_error() {
         init_test("retry_exhausts_and_returns_error");
         let policy = LimitedRetry::<i32>::new(2);
@@ -745,7 +815,7 @@ mod tests {
         loop {
             match Pin::new(&mut future).poll(&mut cx) {
                 Poll::Ready(result) => {
-                    let err = matches!(result, Err("service error"));
+                    let err = matches!(result, Err(RetryError::Inner("service error")));
                     crate::assert_with_log!(err, "result err", true, err);
                     break;
                 }
@@ -796,9 +866,9 @@ mod tests {
 
         let second = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            matches!(second, Poll::Ready(Err("service error"))),
+            matches!(second, Poll::Ready(Err(RetryError::Inner("service error")))),
             "second poll resumes and returns the terminal error",
-            "Poll::Ready(Err(\"service error\"))",
+            "Poll::Ready(Err(RetryError::Inner(\"service error\")))",
             second
         );
         let total_calls = calls.load(Ordering::SeqCst);
