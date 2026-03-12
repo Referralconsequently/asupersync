@@ -1048,12 +1048,13 @@ impl LabRuntime {
     /// This simulates clock drift or NTP corrections. A warning is logged
     /// because large jumps may affect lease/timeout correctness.
     pub fn inject_clock_skew(&mut self, skew_nanos: u64) {
+        let _old_time = self.virtual_time;
         self.advance_time(skew_nanos);
 
         crate::tracing_compat::warn!(
             "virtual clock jump detected: old_time_ms={}, new_time_ms={}, jump_ms={} \
              -- may affect lease/timeout correctness",
-            self.virtual_time.as_nanos().saturating_sub(skew_nanos) / 1_000_000,
+            _old_time.as_nanos() / 1_000_000,
             self.virtual_time.as_nanos() / 1_000_000,
             skew_nanos / 1_000_000
         );
@@ -1716,7 +1717,7 @@ impl LabRuntime {
             return false;
         };
 
-        let mut skip_poll = chaos_rng.should_inject_cancel(&chaos_config);
+        let cancel = chaos_rng.should_inject_cancel(&chaos_config);
 
         // Check for delay injection
         let delay = chaos_rng
@@ -1725,11 +1726,11 @@ impl LabRuntime {
 
         // Check for budget exhaustion injection
         let budget_exhaust = chaos_rng.should_inject_budget_exhaust(&chaos_config);
-        skip_poll |= budget_exhaust;
+        let skip_poll = cancel | budget_exhaust;
 
-        // Now apply the injections (no more borrowing chaos_rng)
-        if skip_poll && !budget_exhaust {
-            // Cancellation was injected
+        // Now apply the injections (no more borrowing chaos_rng).
+        // Cancel and budget_exhaust are independent — apply both when both fire.
+        if cancel {
             self.chaos_stats.record_cancel();
             self.inject_cancel(task_id);
         }
