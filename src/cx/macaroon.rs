@@ -623,18 +623,36 @@ impl MacaroonToken {
                     // Per the Macaroon spec (Birgisson et al. 2014), all caveats
                     // from both authorizing and discharge macaroons must pass.
                     for (di, dc) in discharge.caveats.iter().enumerate() {
-                        if let Caveat::FirstParty { predicate } = dc {
-                            if let Err(reason) = check_caveat(predicate, context) {
-                                return Err(VerificationError::CaveatFailed {
-                                    index: i,
-                                    predicate: format!(
-                                        "discharge[{}].caveat[{}]: {}",
-                                        tp_id,
-                                        di,
-                                        predicate.display_string()
-                                    ),
-                                    reason,
-                                });
+                        match dc {
+                            Caveat::FirstParty { predicate } => {
+                                if let Err(reason) = check_caveat(predicate, context) {
+                                    return Err(VerificationError::CaveatFailed {
+                                        index: i,
+                                        predicate: format!(
+                                            "discharge[{}].caveat[{}]: {}",
+                                            tp_id,
+                                            di,
+                                            predicate.display_string()
+                                        ),
+                                        reason,
+                                    });
+                                }
+                            }
+                            Caveat::ThirdParty { identifier, .. } => {
+                                // Per Macaroon spec: third-party caveats on discharge
+                                // macaroons must also be satisfied by discharges.
+                                if !discharges.iter().any(|d| d.identifier == *identifier) {
+                                    return Err(VerificationError::CaveatFailed {
+                                        index: i,
+                                        predicate: format!(
+                                            "discharge[{}].caveat[{}]: unsatisfied third-party caveat '{}'",
+                                            tp_id, di, identifier,
+                                        ),
+                                        reason:
+                                            "no discharge provided for nested third-party caveat"
+                                                .to_owned(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -997,7 +1015,7 @@ fn hmac_compute(key: &AuthKey, message: &[u8]) -> AuthKey {
 /// XOR-pad two byte slices of equal length. Used for encrypting/decrypting
 /// third-party caveat verification keys.
 fn xor_pad(a: &[u8], b: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(
+    assert_eq!(
         a.len(),
         b.len(),
         "xor_pad: slices must have equal length ({} vs {})",

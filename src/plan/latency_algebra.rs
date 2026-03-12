@@ -160,6 +160,12 @@ impl PiecewiseLinearCurve {
 
         // Validate ordering, non-negativity, and continuity.
         for i in 0..segments.len() {
+            if !segments[i].rate.is_finite()
+                || !segments[i].burst.is_finite()
+                || !segments[i].start.is_finite()
+            {
+                return None;
+            }
             if segments[i].rate < 0.0 || segments[i].burst < 0.0 {
                 return None;
             }
@@ -230,7 +236,7 @@ impl PiecewiseLinearCurve {
         // Approximate staircase with piecewise-linear segments.
         // Each step is a steep ramp over a tiny epsilon, then flat.
         let mut segments = Vec::with_capacity(num_steps * 2);
-        let epsilon = period * 1e-6;
+        let epsilon = (period * 1e-6).max(f64::MIN_POSITIVE);
         let steep_rate = step_size / epsilon;
 
         #[allow(clippy::cast_precision_loss)]
@@ -461,14 +467,17 @@ fn build_curve_from_points(points: &[(f64, f64)]) -> PiecewiseLinearCurve {
         segments.push(Segment::new(t, rate, v));
     }
 
-    // Simplify: merge consecutive segments with the same rate.
+    // Simplify: merge consecutive collinear segments.
     let mut simplified = Vec::with_capacity(segments.len());
     for seg in &segments {
         if let Some(last) = simplified.last() {
             let last: &Segment = last;
             if (last.rate - seg.rate).abs() < 1e-9 {
-                // Same rate, skip this breakpoint.
-                continue;
+                // Same rate — verify collinearity before merging.
+                let expected_burst = last.rate.mul_add(seg.start - last.start, last.burst);
+                if (expected_burst - seg.burst).abs() < 1e-9 {
+                    continue;
+                }
             }
         }
         simplified.push(*seg);

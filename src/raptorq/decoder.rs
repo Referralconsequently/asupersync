@@ -2053,11 +2053,12 @@ impl InactivationDecoder {
                 if !hard_regime {
                     hard_regime = true;
                     state.stats.hard_regime_activated = true;
-                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
-                    state.stats.hard_regime_branch = Some(hard_plan.label());
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
                         Some("fallback_after_baseline_failure");
+                    // Rebuild matrix BEFORE selecting hard-regime plan so that
+                    // density metrics reflect the original matrix, not the
+                    // partially-eliminated one.
                     if let Some(base_b) = retry_rhs_snapshot.as_ref() {
                         rebuild_dense_matrix_from_equations(
                             &state.equations,
@@ -2068,6 +2069,8 @@ impl InactivationDecoder {
                         );
                         restore_dense_rhs(&mut b, base_b, symbol_size);
                     }
+                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
+                    state.stats.hard_regime_branch = Some(hard_plan.label());
                     continue;
                 }
                 if matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }) {
@@ -2318,20 +2321,12 @@ impl InactivationDecoder {
                 if !hard_regime {
                     hard_regime = true;
                     state.stats.hard_regime_activated = true;
-                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
-                    state.stats.hard_regime_branch = Some(hard_plan.label());
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
                         Some("fallback_after_baseline_failure");
-                    trace.record_strategy_transition(
-                        InactivationStrategy::AllAtOnce,
-                        hard_plan.strategy(),
-                        "fallback_after_baseline_failure",
-                    );
-                    trace.pivots = 0;
-                    trace.pivot_events.clear();
-                    trace.row_ops = 0;
-                    trace.truncated = false;
+                    // Rebuild matrix BEFORE selecting hard-regime plan so that
+                    // density metrics reflect the original matrix, not the
+                    // partially-eliminated one.
                     if let Some(base_b) = retry_rhs_snapshot.as_ref() {
                         rebuild_dense_matrix_from_equations(
                             &state.equations,
@@ -2342,6 +2337,17 @@ impl InactivationDecoder {
                         );
                         restore_dense_rhs(&mut b, base_b, symbol_size);
                     }
+                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
+                    state.stats.hard_regime_branch = Some(hard_plan.label());
+                    trace.record_strategy_transition(
+                        InactivationStrategy::AllAtOnce,
+                        hard_plan.strategy(),
+                        "fallback_after_baseline_failure",
+                    );
+                    trace.pivots = 0;
+                    trace.pivot_events.clear();
+                    trace.row_ops = 0;
+                    trace.truncated = false;
                     continue;
                 }
                 if matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }) {
