@@ -13,7 +13,7 @@
 //!
 //! | Operation | Deadline | Poll/Cost Quota | Priority |
 //! |-----------|----------|-----------------|----------|
-//! | `meet` (∧) | min (earlier wins) | min (tighter wins) | min (lower/tighter wins) |
+//! | `meet` (∧) | min (earlier wins) | min (tighter wins) | max (higher urgency wins) |
 //! | identity  | None (no deadline) | u32::MAX / None | 128 (neutral) |
 //!
 //! The **meet** operation (`combine`/`meet`) computes the tightest constraints
@@ -325,7 +325,7 @@ impl Budget {
     ///
     /// - Deadlines: min (earlier wins)
     /// - Quotas: min (tighter wins)
-    /// - Priority: min (lower/tighter wins)
+    /// - Priority: max (higher urgency wins)
     ///
     /// This is also known as the "meet" operation (∧) in lattice terminology.
     /// See also: [`meet`](Self::meet).

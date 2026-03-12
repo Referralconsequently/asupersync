@@ -127,7 +127,8 @@ where
         // and support cancellation.
         let result = crate::runtime::with_tokio_context(cx, || async move {
             response_future.await.map_err(BridgeError::Service)
-        }).await;
+        })
+        .await;
 
         match result {
             Some(res) => res,

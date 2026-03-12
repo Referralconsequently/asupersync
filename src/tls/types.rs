@@ -523,11 +523,18 @@ impl CertificatePin {
 /// A set of certificate pins for pinning validation.
 ///
 /// The set supports multiple pins to allow for key rotation without downtime.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CertificatePinSet {
     pins: BTreeSet<CertificatePin>,
     /// Whether to enforce pinning (fail if no pins match) or just warn.
     enforce: bool,
+}
+
+impl Default for CertificatePinSet {
+    /// Default pin set is empty with enforcement enabled (secure-by-default).
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CertificatePinSet {
