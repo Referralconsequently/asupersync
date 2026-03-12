@@ -42,6 +42,8 @@ pub enum LockError {
     Poisoned,
     /// Cancelled while waiting for the lock.
     Cancelled,
+    /// The lock future was polled after returning a terminal result.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for LockError {
@@ -49,6 +51,7 @@ impl std::fmt::Display for LockError {
         match self {
             Self::Poisoned => write!(f, "mutex poisoned"),
             Self::Cancelled => write!(f, "mutex lock cancelled"),
+            Self::PolledAfterCompletion => write!(f, "mutex lock future polled after completion"),
         }
     }
 }
@@ -266,6 +269,7 @@ impl<T> Mutex<T> {
             mutex: self,
             cx,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -330,6 +334,7 @@ pub struct LockFuture<'a, 'b, T> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl<'a, T> Future for LockFuture<'a, '_, T> {
@@ -337,21 +342,30 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.completed {
+            return Poll::Ready(Err(LockError::PolledAfterCompletion));
+        }
+
         // Check cancellation
         if let Err(_e) = self.cx.checkpoint() {
             if let Some(next) = take_waiter_and_next_waker(self.mutex, &mut self.waiter_id) {
                 next.wake();
             }
+            self.completed = true;
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
         match poll_lock_state(self.mutex, &mut self.waiter_id, context.waker()) {
-            LockPollState::Ready => Poll::Ready(Ok(MutexGuard { mutex: self.mutex })),
+            LockPollState::Ready => {
+                self.completed = true;
+                Poll::Ready(Ok(MutexGuard { mutex: self.mutex }))
+            }
             LockPollState::Pending => Poll::Pending,
             LockPollState::Poisoned(next_waker) => {
                 if let Some(next) = next_waker {
                     next.wake();
                 }
+                self.completed = true;
                 Poll::Ready(Err(LockError::Poisoned))
             }
         }
@@ -362,6 +376,59 @@ impl<T> Drop for LockFuture<'_, '_, T> {
     fn drop(&mut self) {
         if let Some(next) = take_waiter_and_next_waker(self.mutex, &mut self.waiter_id) {
             next.wake();
+        }
+    }
+}
+
+struct OwnedLockFuture<'b, T> {
+    mutex: Arc<Mutex<T>>,
+    cx: &'b Cx,
+    waiter_id: Option<u64>,
+    completed: bool,
+}
+
+impl<T> Drop for OwnedLockFuture<'_, T> {
+    fn drop(&mut self) {
+        if let Some(next) = take_waiter_and_next_waker(self.mutex.as_ref(), &mut self.waiter_id) {
+            next.wake();
+        }
+    }
+}
+
+impl<T> Future for OwnedLockFuture<'_, T> {
+    type Output = Result<OwnedMutexGuard<T>, LockError>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(LockError::PolledAfterCompletion));
+        }
+
+        if this.cx.checkpoint().is_err() {
+            if let Some(next) = take_waiter_and_next_waker(this.mutex.as_ref(), &mut this.waiter_id)
+            {
+                next.wake();
+            }
+            this.completed = true;
+            return Poll::Ready(Err(LockError::Cancelled));
+        }
+
+        match poll_lock_state(this.mutex.as_ref(), &mut this.waiter_id, context.waker()) {
+            LockPollState::Ready => {
+                this.completed = true;
+                Poll::Ready(Ok(OwnedMutexGuard {
+                    mutex: Arc::clone(&this.mutex),
+                }))
+            }
+            LockPollState::Pending => Poll::Pending,
+            LockPollState::Poisoned(next_waker) => {
+                if let Some(next) = next_waker {
+                    next.wake();
+                }
+                this.completed = true;
+                Poll::Ready(Err(LockError::Poisoned))
+            }
         }
     }
 }
@@ -417,64 +484,19 @@ unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}
 
 impl<T> OwnedMutexGuard<T> {
     /// Acquires the mutex asynchronously (owned).
-    #[allow(clippy::too_many_lines)]
-    pub async fn lock(mutex: Arc<Mutex<T>>, cx: &Cx) -> Result<Self, LockError> {
-        // Reuse the logic from LockFuture or reimplement?
-        // Since we need to return OwnedMutexGuard, we can't use LockFuture directly
-        // unless we change it to be generic over the guard type or use a helper.
-        // Re-implementing for simplicity (or use a shared internal lock async fn).
-
-        struct OwnedLockFuture<T> {
-            mutex: Arc<Mutex<T>>,
-            cx: Cx, // clone of cx
-            waiter_id: Option<u64>,
-        }
-
-        impl<T> Drop for OwnedLockFuture<T> {
-            fn drop(&mut self) {
-                if let Some(next) =
-                    take_waiter_and_next_waker(self.mutex.as_ref(), &mut self.waiter_id)
-                {
-                    next.wake();
-                }
-            }
-        }
-
-        impl<T> Future for OwnedLockFuture<T> {
-            type Output = Result<OwnedMutexGuard<T>, LockError>;
-            #[inline]
-            fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-                let this = self.get_mut();
-                if this.cx.checkpoint().is_err() {
-                    if let Some(next) =
-                        take_waiter_and_next_waker(this.mutex.as_ref(), &mut this.waiter_id)
-                    {
-                        next.wake();
-                    }
-                    return Poll::Ready(Err(LockError::Cancelled));
-                }
-
-                match poll_lock_state(this.mutex.as_ref(), &mut this.waiter_id, context.waker()) {
-                    LockPollState::Ready => Poll::Ready(Ok(OwnedMutexGuard {
-                        mutex: this.mutex.clone(),
-                    })),
-                    LockPollState::Pending => Poll::Pending,
-                    LockPollState::Poisoned(next_waker) => {
-                        if let Some(next) = next_waker {
-                            next.wake();
-                        }
-                        Poll::Ready(Err(LockError::Poisoned))
-                    }
-                }
-            }
-        }
-
+    pub fn lock<'b>(
+        mutex: Arc<Mutex<T>>,
+        cx: &'b Cx,
+    ) -> impl Future<Output = Result<Self, LockError>> + 'b
+    where
+        T: 'b,
+    {
         OwnedLockFuture {
             mutex,
-            cx: cx.clone(),
+            cx,
             waiter_id: None,
+            completed: false,
         }
-        .await
     }
 
     /// Tries to acquire the mutex without waiting.
@@ -598,6 +620,78 @@ mod tests {
             .expect("lock failed");
         crate::assert_with_log!(*guard == 42, "guard should read value", 42, *guard);
         crate::test_complete!("lock_acquires_mutex");
+    }
+
+    #[test]
+    fn lock_future_second_poll_fails_closed_while_guard_alive() {
+        init_test("lock_future_second_poll_fails_closed_while_guard_alive");
+        let cx = test_cx();
+        let mutex = Mutex::new(42_u32);
+
+        let mut future = mutex.lock(&cx);
+        let guard = poll_once(&mut future)
+            .expect("should complete immediately")
+            .expect("lock failed");
+
+        let second = poll_once(&mut future);
+        let failed_closed = matches!(second, Some(Err(LockError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            failed_closed,
+            "second poll should fail closed",
+            true,
+            failed_closed
+        );
+
+        let waiters = mutex.waiters();
+        crate::assert_with_log!(
+            waiters == 0,
+            "terminal repoll must not enqueue a waiter",
+            0_usize,
+            waiters
+        );
+
+        drop(guard);
+
+        let reacquired = mutex.try_lock().is_ok();
+        crate::assert_with_log!(
+            reacquired,
+            "terminal repoll must not retain or reacquire the lock",
+            true,
+            reacquired
+        );
+        crate::test_complete!("lock_future_second_poll_fails_closed_while_guard_alive");
+    }
+
+    #[test]
+    fn lock_future_second_poll_after_release_still_fails_closed() {
+        init_test("lock_future_second_poll_after_release_still_fails_closed");
+        let cx = test_cx();
+        let mutex = Mutex::new(7_u32);
+
+        let mut future = mutex.lock(&cx);
+        let guard = poll_once(&mut future)
+            .expect("should complete immediately")
+            .expect("lock failed");
+        drop(guard);
+
+        let second = poll_once(&mut future);
+        let failed_closed = matches!(second, Some(Err(LockError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            failed_closed,
+            "second poll after release should still fail closed",
+            true,
+            failed_closed
+        );
+
+        let lock = mutex.try_lock();
+        let available = lock.is_ok();
+        crate::assert_with_log!(
+            available,
+            "terminal repoll must not reacquire the mutex",
+            true,
+            available
+        );
+        crate::test_complete!("lock_future_second_poll_after_release_still_fails_closed");
     }
 
     #[test]
@@ -1008,6 +1102,81 @@ mod tests {
     }
 
     #[test]
+    fn owned_lock_future_second_poll_fails_closed_while_guard_alive() {
+        init_test("owned_lock_future_second_poll_fails_closed_while_guard_alive");
+        let cx = test_cx();
+        let mutex = Arc::new(Mutex::new(5_u32));
+
+        let mut future = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
+        let guard = poll_pinned_until_ready(future.as_mut()).expect("async lock should succeed");
+
+        let second = {
+            let waker = Waker::noop();
+            let mut task_cx = Context::from_waker(waker);
+            future.as_mut().poll(&mut task_cx)
+        };
+        let failed_closed = matches!(second, Poll::Ready(Err(LockError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            failed_closed,
+            "owned second poll should fail closed",
+            true,
+            failed_closed
+        );
+
+        let waiters = mutex.waiters();
+        crate::assert_with_log!(
+            waiters == 0,
+            "owned terminal repoll must not enqueue a waiter",
+            0_usize,
+            waiters
+        );
+
+        drop(guard);
+
+        let reacquired = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).is_ok();
+        crate::assert_with_log!(
+            reacquired,
+            "owned terminal repoll must not retain or reacquire the lock",
+            true,
+            reacquired
+        );
+        crate::test_complete!("owned_lock_future_second_poll_fails_closed_while_guard_alive");
+    }
+
+    #[test]
+    fn owned_lock_future_second_poll_after_release_still_fails_closed() {
+        init_test("owned_lock_future_second_poll_after_release_still_fails_closed");
+        let cx = test_cx();
+        let mutex = Arc::new(Mutex::new(9_u32));
+
+        let mut future = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
+        let guard = poll_pinned_until_ready(future.as_mut()).expect("async lock should succeed");
+        drop(guard);
+
+        let second = {
+            let waker = Waker::noop();
+            let mut task_cx = Context::from_waker(waker);
+            future.as_mut().poll(&mut task_cx)
+        };
+        let failed_closed = matches!(second, Poll::Ready(Err(LockError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            failed_closed,
+            "owned second poll after release should fail closed",
+            true,
+            failed_closed
+        );
+
+        let available = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).is_ok();
+        crate::assert_with_log!(
+            available,
+            "owned terminal repoll must not reacquire the mutex",
+            true,
+            available
+        );
+        crate::test_complete!("owned_lock_future_second_poll_after_release_still_fails_closed");
+    }
+
+    #[test]
     fn test_mutex_default() {
         init_test("test_mutex_default");
         let mutex: Mutex<u32> = Mutex::default();
@@ -1253,6 +1422,7 @@ mod tests {
     fn lock_error_debug_clone_copy_eq_display() {
         let poisoned = LockError::Poisoned;
         let cancelled = LockError::Cancelled;
+        let done = LockError::PolledAfterCompletion;
         let copied = poisoned;
         let cloned = poisoned;
         assert_eq!(copied, cloned);
@@ -1260,8 +1430,10 @@ mod tests {
         assert_ne!(poisoned, cancelled);
         assert!(format!("{poisoned:?}").contains("Poisoned"));
         assert!(format!("{cancelled:?}").contains("Cancelled"));
+        assert!(format!("{done:?}").contains("PolledAfterCompletion"));
         assert!(poisoned.to_string().contains("poisoned"));
         assert!(cancelled.to_string().contains("cancelled"));
+        assert!(done.to_string().contains("polled after completion"));
     }
 
     #[test]

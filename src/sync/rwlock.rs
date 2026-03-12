@@ -78,6 +78,8 @@ pub enum RwLockError {
     Poisoned,
     /// Cancelled while waiting.
     Cancelled,
+    /// The future was polled again after it already returned `Ready`.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for RwLockError {
@@ -85,6 +87,7 @@ impl std::fmt::Display for RwLockError {
         match self {
             Self::Poisoned => write!(f, "rwlock poisoned"),
             Self::Cancelled => write!(f, "rwlock acquisition cancelled"),
+            Self::PolledAfterCompletion => write!(f, "rwlock future polled after completion"),
         }
     }
 }
@@ -225,6 +228,7 @@ impl<T> RwLock<T> {
             lock: self,
             cx,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -246,6 +250,7 @@ impl<T> RwLock<T> {
             cx,
             waiter_id: None,
             counted: false,
+            completed: false,
         }
     }
 
@@ -387,6 +392,7 @@ pub struct ReadFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
     cx: &'b Cx,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl<'a, T> Future for ReadFuture<'a, '_, T> {
@@ -395,13 +401,18 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
     #[inline]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(RwLockError::PolledAfterCompletion));
+        }
         if this.cx.checkpoint().is_err() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
@@ -417,12 +428,14 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             // `state.readers` was already incremented for us.
             this.waiter_id = None;
             drop(state);
+            this.completed = true;
             return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
         }
 
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
             drop(state);
+            this.completed = true;
             return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
         }
 
@@ -468,6 +481,7 @@ pub struct WriteFuture<'a, 'b, T> {
     cx: &'b Cx,
     waiter_id: Option<u64>,
     counted: bool,
+    completed: bool,
 }
 
 impl<'a, T> Future for WriteFuture<'a, '_, T> {
@@ -476,13 +490,18 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
     #[inline]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(RwLockError::PolledAfterCompletion));
+        }
         if this.cx.checkpoint().is_err() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
@@ -506,6 +525,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
                 this.counted = false;
             }
             drop(state);
+            this.completed = true;
             return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
         }
 
@@ -519,6 +539,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
                 this.counted = false;
             }
             drop(state);
+            this.completed = true;
             return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
         }
 
@@ -610,6 +631,12 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
     }
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for RwLockReadGuard<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
 impl<T> Drop for RwLockReadGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
@@ -644,6 +671,12 @@ impl<T> DerefMut for RwLockWriteGuard<'_, T> {
     }
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for RwLockWriteGuard<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
 impl<T> Drop for RwLockWriteGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
@@ -667,6 +700,7 @@ impl<T> OwnedRwLockReadGuard<T> {
             lock,
             cx,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -695,6 +729,12 @@ impl<T> Deref for OwnedRwLockReadGuard<T> {
     }
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for OwnedRwLockReadGuard<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
 impl<T> Drop for OwnedRwLockReadGuard<T> {
     #[inline]
     fn drop(&mut self) {
@@ -716,6 +756,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
             cx,
             waiter_id: None,
             counted: false,
+            completed: false,
         }
     }
 
@@ -751,6 +792,12 @@ impl<T> DerefMut for OwnedRwLockWriteGuard<T> {
     }
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for OwnedRwLockWriteGuard<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
 impl<T> Drop for OwnedRwLockWriteGuard<T> {
     #[inline]
     fn drop(&mut self) {
@@ -766,6 +813,7 @@ pub struct OwnedReadFuture<'b, T> {
     lock: Arc<RwLock<T>>,
     cx: &'b Cx,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl<T> Future for OwnedReadFuture<'_, T> {
@@ -774,13 +822,18 @@ impl<T> Future for OwnedReadFuture<'_, T> {
     #[inline]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(RwLockError::PolledAfterCompletion));
+        }
         if this.cx.checkpoint().is_err() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
@@ -796,6 +849,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             // `state.readers` was already incremented for us.
             drop(state);
             this.waiter_id = None;
+            this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
                 lock: Arc::clone(&this.lock),
             }));
@@ -804,6 +858,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
             drop(state);
+            this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
                 lock: Arc::clone(&this.lock),
             }));
@@ -851,6 +906,7 @@ pub struct OwnedWriteFuture<'b, T> {
     cx: &'b Cx,
     waiter_id: Option<u64>,
     counted: bool,
+    completed: bool,
 }
 
 impl<T> Future for OwnedWriteFuture<'_, T> {
@@ -859,14 +915,19 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
     #[inline]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(RwLockError::PolledAfterCompletion));
+        }
 
         if this.cx.checkpoint().is_err() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
@@ -890,6 +951,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             drop(state);
             this.waiter_id = None;
             this.counted = false;
+            this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                 lock: Arc::clone(&this.lock),
             }));
@@ -905,6 +967,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             }
             drop(state);
             this.counted = false;
+            this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                 lock: Arc::clone(&this.lock),
             }));
@@ -1214,6 +1277,98 @@ mod tests {
             waiters == 0 && writer_count == 0
         );
         crate::test_complete!("test_rwlock_cancel_during_write_wait");
+    }
+
+    #[test]
+    fn read_future_second_poll_fails_closed() {
+        init_test("read_future_second_poll_fails_closed");
+        let cx = test_cx();
+        let lock = RwLock::new(42_u32);
+
+        let mut fut = lock.read(&cx);
+        let first = poll_once(&mut fut);
+        let Some(Ok(guard)) = first else {
+            panic!("expected ready read guard");
+        };
+
+        let second = poll_once(&mut fut);
+        let done = matches!(second, Some(Err(RwLockError::PolledAfterCompletion)));
+        crate::assert_with_log!(done, "read future second poll fails closed", true, done);
+
+        drop(guard);
+        crate::test_complete!("read_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn write_future_second_poll_fails_closed() {
+        init_test("write_future_second_poll_fails_closed");
+        let cx = test_cx();
+        let lock = RwLock::new(42_u32);
+
+        let mut fut = lock.write(&cx);
+        let first = poll_once(&mut fut);
+        let Some(Ok(mut guard)) = first else {
+            panic!("expected ready write guard");
+        };
+        *guard = 55;
+
+        let second = poll_once(&mut fut);
+        let done = matches!(second, Some(Err(RwLockError::PolledAfterCompletion)));
+        crate::assert_with_log!(done, "write future second poll fails closed", true, done);
+
+        drop(guard);
+        crate::test_complete!("write_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn owned_read_future_second_poll_fails_closed() {
+        init_test("owned_read_future_second_poll_fails_closed");
+        let cx = test_cx();
+        let lock = StdArc::new(RwLock::new(42_u32));
+
+        let mut fut = OwnedRwLockReadGuard::read(StdArc::clone(&lock), &cx);
+        let first = poll_once(&mut fut);
+        let Some(Ok(guard)) = first else {
+            panic!("expected ready owned read guard");
+        };
+
+        let second = poll_once(&mut fut);
+        let done = matches!(second, Some(Err(RwLockError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            done,
+            "owned read future second poll fails closed",
+            true,
+            done
+        );
+
+        drop(guard);
+        crate::test_complete!("owned_read_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn owned_write_future_second_poll_fails_closed() {
+        init_test("owned_write_future_second_poll_fails_closed");
+        let cx = test_cx();
+        let lock = StdArc::new(RwLock::new(42_u32));
+
+        let mut fut = OwnedRwLockWriteGuard::write(StdArc::clone(&lock), &cx);
+        let first = poll_once(&mut fut);
+        let Some(Ok(mut guard)) = first else {
+            panic!("expected ready owned write guard");
+        };
+        *guard = 77;
+
+        let second = poll_once(&mut fut);
+        let done = matches!(second, Some(Err(RwLockError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            done,
+            "owned write future second poll fails closed",
+            true,
+            done
+        );
+
+        drop(guard);
+        crate::test_complete!("owned_write_future_second_poll_fails_closed");
     }
 
     #[test]
@@ -1825,6 +1980,7 @@ mod tests {
     fn rwlock_error_debug_clone_copy_eq_display() {
         let poisoned = RwLockError::Poisoned;
         let cancelled = RwLockError::Cancelled;
+        let polled_after_completion = RwLockError::PolledAfterCompletion;
 
         let dbg = format!("{poisoned:?}");
         assert!(dbg.contains("Poisoned"));
@@ -1832,9 +1988,15 @@ mod tests {
         let cloned = poisoned;
         assert_eq!(cloned, RwLockError::Poisoned);
         assert_ne!(poisoned, cancelled);
+        assert_ne!(poisoned, polled_after_completion);
 
         assert!(poisoned.to_string().contains("poisoned"));
         assert!(cancelled.to_string().contains("cancelled"));
+        assert!(
+            polled_after_completion
+                .to_string()
+                .contains("polled after completion")
+        );
     }
 
     #[test]

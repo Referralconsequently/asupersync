@@ -58,6 +58,42 @@ struct WaiterState {
     next_waiter_id: u64,
 }
 
+#[cfg(test)]
+struct BlockingWaitHook {
+    entered_tx: std::sync::mpsc::Sender<()>,
+    release_rx: StdMutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl BlockingWaitHook {
+    fn run(&self) {
+        self.entered_tx
+            .send(())
+            .expect("blocking wait hook should report entry");
+        self.release_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv()
+            .expect("blocking wait hook should be released");
+    }
+}
+
+#[cfg(test)]
+static BLOCKING_WAIT_HOOK: OnceLock<StdMutex<Option<std::sync::Arc<BlockingWaitHook>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn run_blocking_wait_hook() {
+    let hook = BLOCKING_WAIT_HOOK
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook.run();
+    }
+}
+
 /// A cell that can be initialized exactly once.
 ///
 /// `OnceCell` provides a way to lazily initialize a value, potentially
@@ -149,9 +185,7 @@ impl<T> OnceCell<T> {
                 Ok(_) => {
                     // We are the initializer. Store the value.
                     let _ = self.value.set(value);
-                    self.state.store(INITIALIZED, Ordering::Release);
-                    self.wake_all();
-                    self.cvar.notify_all();
+                    self.transition_out_of_initializing(INITIALIZED);
                     return Ok(());
                 }
                 Err(INITIALIZED) => return Err(value),
@@ -204,11 +238,9 @@ impl<T> OnceCell<T> {
                     };
                     let value = f();
                     let _ = self.value.set(value);
-                    self.state.store(INITIALIZED, Ordering::Release);
                     guard.completed = true;
                     drop(guard);
-                    self.wake_all();
-                    self.cvar.notify_all();
+                    self.transition_out_of_initializing(INITIALIZED);
                     return self.value.get().expect("just initialized");
                 }
                 Err(INITIALIZED) => {
@@ -272,12 +304,9 @@ impl<T> OnceCell<T> {
 
                     // Store value and mark complete.
                     let _ = self.value.set(value);
-                    self.state.store(INITIALIZED, Ordering::Release);
                     guard.completed = true;
                     drop(guard); // Guard checks `completed` — won't reset state.
-
-                    self.wake_all();
-                    self.cvar.notify_all();
+                    self.transition_out_of_initializing(INITIALIZED);
                     return self.value.get().expect("just initialized");
                 }
                 Err(INITIALIZED) => {
@@ -348,12 +377,9 @@ impl<T> OnceCell<T> {
                         Ok(value) => {
                             // Store value and mark complete.
                             let _ = self.value.set(value);
-                            self.state.store(INITIALIZED, Ordering::Release);
                             guard.completed = true;
                             drop(guard); // Guard checks `completed` — won't reset state.
-
-                            self.wake_all();
-                            self.cvar.notify_all();
+                            self.transition_out_of_initializing(INITIALIZED);
                             return Ok(self.value.get().expect("just initialized"));
                         }
                         Err(e) => {
@@ -413,12 +439,29 @@ impl<T> OnceCell<T> {
         };
 
         while self.state.load(Ordering::Acquire) == INITIALIZING {
+            #[cfg(test)]
+            run_blocking_wait_hook();
             guard = match self.cvar.wait(guard) {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
         }
         drop(guard);
+    }
+
+    fn transition_out_of_initializing(&self, new_state: u8) {
+        let wakers: SmallVec<[Waker; 4]> = {
+            let mut guard = match self.waiters.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            self.state.store(new_state, Ordering::Release);
+            guard.waiters.drain(..).map(|waiter| waiter.waker).collect()
+        };
+        self.cvar.notify_all();
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     /// Wakes all async waiters.
@@ -525,10 +568,7 @@ impl<T> Drop for InitGuard<'_, T> {
     fn drop(&mut self) {
         if !self.completed {
             // Reset state to allow another attempt.
-            self.cell.state.store(UNINIT, Ordering::Release);
-            // Wake all waiters so they can retry instead of hanging forever.
-            self.cell.wake_all();
-            self.cell.cvar.notify_all();
+            self.cell.transition_out_of_initializing(UNINIT);
         }
     }
 }
@@ -590,9 +630,30 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
     use std::thread;
 
+    struct BlockingWaitHookGuard;
+
+    impl Drop for BlockingWaitHookGuard {
+        fn drop(&mut self) {
+            let mut guard = BLOCKING_WAIT_HOOK
+                .get_or_init(|| StdMutex::new(None))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = None;
+        }
+    }
+
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn install_blocking_wait_hook(hook: std::sync::Arc<BlockingWaitHook>) -> BlockingWaitHookGuard {
+        let mut guard = BLOCKING_WAIT_HOOK
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(hook);
+        BlockingWaitHookGuard
     }
 
     fn noop_waker() -> Waker {
@@ -1017,6 +1078,80 @@ mod tests {
         );
         assert!(cell.is_initialized());
         crate::test_complete!("get_or_init_blocking_retries_after_cancelled_async_init");
+    }
+
+    #[test]
+    fn get_or_init_blocking_does_not_miss_cancel_notify_between_check_and_wait() {
+        init_test("get_or_init_blocking_does_not_miss_cancel_notify_between_check_and_wait");
+        let cell = Arc::new(OnceCell::<u32>::new());
+
+        let (init_started_tx, init_started_rx) = std::sync::mpsc::channel();
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+        let (cancel_started_tx, cancel_started_rx) = std::sync::mpsc::channel();
+
+        let cell_for_init = Arc::clone(&cell);
+        let init_handle = thread::spawn(move || {
+            let mut init_fut =
+                Box::pin(cell_for_init.get_or_init(|| async { pending::<u32>().await }));
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(Future::poll(init_fut.as_mut(), &mut cx).is_pending());
+            init_started_tx
+                .send(())
+                .expect("init thread should report startup");
+            cancel_rx
+                .recv()
+                .expect("main thread should request cancellation");
+            cancel_started_tx
+                .send(())
+                .expect("init thread should report imminent cancellation");
+            drop(init_fut);
+        });
+
+        init_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("async initializer should enter INITIALIZING");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _hook_guard = install_blocking_wait_hook(std::sync::Arc::new(BlockingWaitHook {
+            entered_tx,
+            release_rx: StdMutex::new(release_rx),
+        }));
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cell_for_waiter = Arc::clone(&cell);
+        let waiter_handle = thread::spawn(move || {
+            let value = *cell_for_waiter.get_or_init_blocking(|| 42);
+            done_tx
+                .send(value)
+                .expect("waiter thread should report initialization result");
+        });
+
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("blocking waiter should reach the pre-wait hook");
+        cancel_tx
+            .send(())
+            .expect("main thread should be able to request cancellation");
+        cancel_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("init thread should start cancellation while waiter is paused");
+        release_tx
+            .send(())
+            .expect("main thread should release the waiter into condvar wait");
+
+        let value = done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("blocking waiter should not miss the cancellation wakeup");
+        assert_eq!(value, 42);
+        assert!(cell.is_initialized());
+
+        waiter_handle.join().expect("waiter thread panicked");
+        init_handle.join().expect("init thread panicked");
+        crate::test_complete!(
+            "get_or_init_blocking_does_not_miss_cancel_notify_between_check_and_wait"
+        );
     }
 
     #[test]

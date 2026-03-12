@@ -41,6 +41,8 @@ pub enum AcquireError {
     Closed,
     /// Cancelled while waiting.
     Cancelled,
+    /// The acquire future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for AcquireError {
@@ -48,6 +50,9 @@ impl std::fmt::Display for AcquireError {
         match self {
             Self::Closed => write!(f, "semaphore closed"),
             Self::Cancelled => write!(f, "semaphore acquire cancelled"),
+            Self::PolledAfterCompletion => {
+                write!(f, "semaphore acquire future polled after completion")
+            }
         }
     }
 }
@@ -186,6 +191,7 @@ impl Semaphore {
             cx,
             count,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -248,6 +254,7 @@ pub struct AcquireFuture<'a, 'b> {
     cx: &'b Cx,
     count: usize,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl Drop for AcquireFuture<'_, '_> {
@@ -271,6 +278,10 @@ impl<'a> Future for AcquireFuture<'a, '_> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.completed {
+            return Poll::Ready(Err(AcquireError::PolledAfterCompletion));
+        }
+
         if self.cx.checkpoint().is_err() {
             if let Some(waiter_id) = self.waiter_id {
                 let next_waker = {
@@ -285,6 +296,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                     next.wake();
                 }
             }
+            self.completed = true;
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
@@ -308,6 +320,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             }
             drop(state);
             self.waiter_id = None;
+            self.completed = true;
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
@@ -340,6 +353,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             drop(state);
             // Clear waiter_id after releasing state guard to avoid borrow conflicts.
             self.waiter_id = None;
+            self.completed = true;
             if let Some(next) = next_waker {
                 next.wake();
             }
@@ -418,6 +432,7 @@ impl OwnedSemaphorePermit {
             cx: Some(cx.clone()),
             count,
             waiter_id: None,
+            completed: false,
         }
         .await
     }
@@ -484,6 +499,7 @@ pub struct OwnedAcquireFuture {
     cx: Option<Cx>,
     count: usize,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl OwnedAcquireFuture {
@@ -498,6 +514,7 @@ impl OwnedAcquireFuture {
             cx: Some(cx),
             count,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -513,6 +530,7 @@ impl OwnedAcquireFuture {
             cx: None,
             count,
             waiter_id: None,
+            completed: false,
         }
     }
 }
@@ -538,6 +556,10 @@ impl Future for OwnedAcquireFuture {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(AcquireError::PolledAfterCompletion));
+        }
+
         if this.cx.as_ref().is_some_and(|cx| cx.checkpoint().is_err()) {
             if let Some(waiter_id) = this.waiter_id {
                 let next_waker = {
@@ -551,6 +573,7 @@ impl Future for OwnedAcquireFuture {
                     next.wake();
                 }
             }
+            this.completed = true;
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
@@ -571,6 +594,7 @@ impl Future for OwnedAcquireFuture {
             }
             drop(state);
             this.waiter_id = None;
+            this.completed = true;
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
@@ -599,6 +623,7 @@ impl Future for OwnedAcquireFuture {
             drop(state);
             // Prevent redundant Drop cleanup after releasing state guard.
             this.waiter_id = None;
+            this.completed = true;
             if let Some(next) = next_waker {
                 next.wake();
             }
@@ -1094,6 +1119,90 @@ mod tests {
     }
 
     #[test]
+    fn acquire_future_second_poll_fails_closed() {
+        init_test("acquire_future_second_poll_fails_closed");
+        let cx = test_cx();
+        let sem = Semaphore::new(1);
+
+        let mut fut = sem.acquire(&cx, 1);
+        let permit = poll_once(&mut fut)
+            .expect("first poll ready")
+            .expect("first poll acquires");
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "permit consumed once",
+            0usize,
+            sem.available_permits()
+        );
+
+        let second = poll_once(&mut fut);
+        let failed_closed = matches!(second, Some(Err(AcquireError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            failed_closed,
+            "second poll fails closed",
+            true,
+            failed_closed
+        );
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "second poll does not consume more permits",
+            0usize,
+            sem.available_permits()
+        );
+
+        drop(permit);
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "dropping original permit restores capacity",
+            1usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("acquire_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn owned_acquire_future_second_poll_fails_closed() {
+        init_test("owned_acquire_future_second_poll_fails_closed");
+        let cx = test_cx();
+        let sem = Arc::new(Semaphore::new(1));
+
+        let mut fut = OwnedAcquireFuture::new(Arc::clone(&sem), cx, 1);
+        let permit = poll_once(&mut fut)
+            .expect("first poll ready")
+            .expect("first poll acquires");
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "owned permit consumed once",
+            0usize,
+            sem.available_permits()
+        );
+
+        let second = poll_once(&mut fut);
+        let failed_closed = matches!(second, Some(Err(AcquireError::PolledAfterCompletion)));
+        crate::assert_with_log!(
+            failed_closed,
+            "owned second poll fails closed",
+            true,
+            failed_closed
+        );
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "owned second poll does not consume more permits",
+            0usize,
+            sem.available_permits()
+        );
+
+        drop(permit);
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "dropping original owned permit restores capacity",
+            1usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("owned_acquire_future_second_poll_fails_closed");
+    }
+
+    #[test]
     fn try_acquire_fails_when_closed() {
         init_test("try_acquire_fails_when_closed");
         let sem = Semaphore::new(5);
@@ -1559,6 +1668,7 @@ mod tests {
     fn acquire_error_debug_clone_copy_eq_display() {
         let closed = AcquireError::Closed;
         let cancelled = AcquireError::Cancelled;
+        let done = AcquireError::PolledAfterCompletion;
         let copied = closed;
         let closed_copy = closed;
         assert_eq!(copied, closed_copy);
@@ -1566,8 +1676,10 @@ mod tests {
         assert_ne!(closed, cancelled);
         assert!(format!("{closed:?}").contains("Closed"));
         assert!(format!("{cancelled:?}").contains("Cancelled"));
+        assert!(format!("{done:?}").contains("PolledAfterCompletion"));
         assert!(closed.to_string().contains("closed"));
         assert!(cancelled.to_string().contains("cancelled"));
+        assert!(done.to_string().contains("polled after completion"));
     }
 
     #[test]
