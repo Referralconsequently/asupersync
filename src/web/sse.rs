@@ -102,7 +102,7 @@ impl SseEvent {
     /// Set the retry interval from a [`Duration`].
     #[must_use]
     pub fn retry_duration(mut self, duration: Duration) -> Self {
-        self.retry = Some(duration.as_millis().min(u64::MAX as u128) as u64);
+        self.retry = Some(duration.as_millis().min(u128::from(u64::MAX)) as u64);
         self
     }
 

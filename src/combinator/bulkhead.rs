@@ -289,7 +289,10 @@ impl Bulkhead {
     #[must_use]
     pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
         // Prevent barging if there are queued operations.
-        if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+        // Acquire ordering synchronizes with the Release in enqueue/cancel,
+        // ensuring we observe the queue entry that was pushed before the
+        // counter increment.
+        if self.pending_queue_count.load(Ordering::Acquire) > 0 {
             return None;
         }
 
@@ -301,7 +304,7 @@ impl Bulkhead {
 
             // Re-check pending count inside the CAS loop to prevent TOCTOU races
             // where an enqueue happens right after our initial check.
-            if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+            if self.pending_queue_count.load(Ordering::Acquire) > 0 {
                 return None;
             }
 
@@ -354,7 +357,7 @@ impl Bulkhead {
         if timeout_count > 0 {
             #[allow(clippy::cast_possible_truncation)]
             self.pending_queue_count
-                .fetch_sub(timeout_count as u32, Ordering::Relaxed);
+                .fetch_sub(timeout_count as u32, Ordering::Release);
             self.total_timeout_atomic
                 .fetch_add(timeout_count, Ordering::Relaxed);
             self.total_wait_time_ms
@@ -390,7 +393,7 @@ impl Bulkhead {
                     break;
                 }
                 entry.result = Some(Ok(()));
-                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
+                self.pending_queue_count.fetch_sub(1, Ordering::Release);
 
                 // Record wait time
                 let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
@@ -454,7 +457,9 @@ impl Bulkhead {
             result: None,
         });
 
-        self.pending_queue_count.fetch_add(1, Ordering::Relaxed);
+        // Release ordering ensures the queue push above is visible to any
+        // thread that observes this counter increment via Acquire load.
+        self.pending_queue_count.fetch_add(1, Ordering::Release);
         self.total_queued_atomic.fetch_add(1, Ordering::Relaxed);
 
         Ok(entry_id)
@@ -524,7 +529,7 @@ impl Bulkhead {
                 self.max_queue_wait_ms_atomic
                     .fetch_max(wait_ms, Ordering::Relaxed);
 
-                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
+                self.pending_queue_count.fetch_sub(1, Ordering::Release);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
                 let _ = self.process_queue(now);
             }
@@ -587,7 +592,7 @@ impl Bulkhead {
 
         let mut queue = self.queue.write();
         queue.clear();
-        self.pending_queue_count.store(0, Ordering::Relaxed);
+        self.pending_queue_count.store(0, Ordering::Release);
         drop(queue);
     }
 }

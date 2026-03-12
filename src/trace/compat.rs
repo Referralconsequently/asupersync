@@ -40,6 +40,8 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 type SkipHandler = dyn Fn(&str, &[u8]) + Send + Sync;
+const MAX_META_SIZE: usize = 64 * 1024 * 1024;
+const MAX_EVENT_SIZE: usize = 64 * 1024 * 1024;
 
 // =============================================================================
 // Version Compatibility
@@ -234,8 +236,6 @@ impl CompatReader {
         reader.read_exact(&mut meta_len_bytes)?;
         let meta_len = u32::from_le_bytes(meta_len_bytes) as usize;
 
-        // Guard against corrupted files requesting huge allocations.
-        const MAX_META_SIZE: usize = 64 * 1024 * 1024;
         if meta_len > MAX_META_SIZE {
             return Err(TraceFileError::OversizedField {
                 field: "metadata",
@@ -357,8 +357,6 @@ impl CompatReader {
                 .map_err(TraceFileError::Io)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
 
-            // Guard against corrupted files requesting huge allocations.
-            const MAX_EVENT_SIZE: usize = 64 * 1024 * 1024;
             if len > MAX_EVENT_SIZE {
                 return Err(TraceFileError::OversizedField {
                     field: "event",
@@ -493,8 +491,6 @@ impl Iterator for CompatEventIterator {
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
 
-            // Guard against corrupted files requesting huge allocations.
-            const MAX_EVENT_SIZE: usize = 64 * 1024 * 1024;
             if len > MAX_EVENT_SIZE {
                 return Some(Err(TraceFileError::OversizedField {
                     field: "event",

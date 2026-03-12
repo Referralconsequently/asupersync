@@ -271,9 +271,10 @@ impl WebFrameCodec {
         if data.len() > self.max_frame_size {
             return Err(GrpcError::MessageTooLarge);
         }
+        let len = u32::try_from(data.len()).map_err(|_| GrpcError::MessageTooLarge)?;
         dst.reserve(5 + data.len());
         dst.put_u8(u8::from(compressed));
-        dst.put_u32(data.len() as u32);
+        dst.put_u32(len);
         dst.extend_from_slice(data);
         Ok(())
     }

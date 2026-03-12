@@ -638,18 +638,20 @@ impl PacketBuffer {
 
     /// Build packet with 4-byte header.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the payload exceeds `MAX_PACKET_SIZE` (16 MiB - 1).
-    /// MySQL protocol requires large payloads to be split across multiple
-    /// packets, which is not yet implemented.
-    fn build_packet(&self) -> Vec<u8> {
+    /// Returns `MySqlError::Protocol` if the payload exceeds
+    /// `MAX_PACKET_SIZE` (16 MiB - 1). MySQL protocol requires large
+    /// payloads to be split across multiple packets, which is not yet
+    /// implemented.
+    fn build_packet(&self) -> Result<Vec<u8>, MySqlError> {
         let len = self.buf.len();
-        assert!(
-            len <= MAX_PACKET_SIZE as usize,
-            "packet payload {len} exceeds MAX_PACKET_SIZE ({MAX_PACKET_SIZE}); \
-             large-payload splitting is not implemented"
-        );
+        if len > MAX_PACKET_SIZE as usize {
+            return Err(MySqlError::Protocol(format!(
+                "packet payload {len} exceeds MAX_PACKET_SIZE ({MAX_PACKET_SIZE}); \
+                 large-payload splitting is not implemented"
+            )));
+        }
         let mut result = Vec::with_capacity(4 + len);
         // 3 bytes length (little-endian)
         result.push((len & 0xFF) as u8);
@@ -658,7 +660,7 @@ impl PacketBuffer {
         // 1 byte sequence number
         result.push(self.sequence);
         result.extend_from_slice(&self.buf);
-        result
+        Ok(result)
     }
 }
 
@@ -1243,7 +1245,7 @@ impl MySqlConnection {
         // Auth plugin name
         buf.write_null_terminated(&handshake.auth_plugin_name);
 
-        let packet = buf.build_packet();
+        let packet = buf.build_packet()?;
         self.write_all(&packet).await?;
         self.inner.sequence = self.inner.sequence.wrapping_add(1);
 
@@ -1327,7 +1329,7 @@ impl MySqlConnection {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(self.inner.sequence);
         buf.write_bytes(&auth_response);
-        let packet = buf.build_packet();
+        let packet = buf.build_packet()?;
         self.write_all(&packet).await?;
         self.inner.sequence = self.inner.sequence.wrapping_add(1);
 
@@ -1433,7 +1435,10 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(sql.as_bytes());
-        let packet = buf.build_packet();
+        let packet = match buf.build_packet() {
+            Ok(p) => p,
+            Err(e) => return Outcome::Err(e),
+        };
 
         if let Err(e) = self.write_all(&packet).await {
             return Outcome::Err(e);
@@ -1479,7 +1484,16 @@ impl MySqlConnection {
         first_packet: &[u8],
     ) -> Result<Vec<MySqlRow>, MySqlError> {
         let mut reader = PacketReader::new(first_packet);
-        let column_count = reader.read_lenenc_int()? as usize;
+        let column_count_raw = reader.read_lenenc_int()?;
+        // Guard against corrupted/malicious servers sending enormous column counts.
+        // MySQL practical limit is 4096 columns; we use a generous cap.
+        const MAX_COLUMN_COUNT: u64 = 16_384;
+        if column_count_raw > MAX_COLUMN_COUNT {
+            return Err(MySqlError::Protocol(format!(
+                "column count {column_count_raw} exceeds maximum {MAX_COLUMN_COUNT}"
+            )));
+        }
+        let column_count = column_count_raw as usize;
         let deprecate_eof = self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF != 0;
         let max_rows = self.inner.max_result_rows;
 
@@ -1686,8 +1700,7 @@ impl MySqlConnection {
             return match Self::parse_text_row(data, columns) {
                 Ok(values) => Ok(Some(values)),
                 Err(row_err) => {
-                    if Self::is_result_set_ok_packet(data)
-                        || Self::is_deprecate_eof_ok_packet(data)
+                    if Self::is_result_set_ok_packet(data) || Self::is_deprecate_eof_ok_packet(data)
                     {
                         Ok(None)
                     } else {
@@ -1761,7 +1774,10 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(sql.as_bytes());
-        let packet = buf.build_packet();
+        let packet = match buf.build_packet() {
+            Ok(p) => p,
+            Err(e) => return Outcome::Err(e),
+        };
 
         if let Err(e) = self.write_all(&packet).await {
             return Outcome::Err(e);
@@ -1831,7 +1847,10 @@ impl MySqlConnection {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_PING);
-        let packet = buf.build_packet();
+        let packet = match buf.build_packet() {
+            Ok(p) => p,
+            Err(e) => return Outcome::Err(e),
+        };
 
         if let Err(e) = self.write_all(&packet).await {
             return Outcome::Err(e);
@@ -1878,8 +1897,9 @@ impl MySqlConnection {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUIT);
-        let packet = buf.build_packet();
-        let _ = self.write_all(&packet).await;
+        if let Ok(packet) = buf.build_packet() {
+            let _ = self.write_all(&packet).await;
+        }
 
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
         self.inner.closed = true;
@@ -1919,7 +1939,7 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(b"ROLLBACK");
-        let packet = buf.build_packet();
+        let packet = buf.build_packet()?;
 
         if let Err(e) = self.write_all(&packet).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -2238,7 +2258,7 @@ mod tests {
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(b"SELECT 1");
 
-        let packet = buf.build_packet();
+        let packet = buf.build_packet().unwrap();
         assert_eq!(packet[0], 9); // length low byte
         assert_eq!(packet[1], 0); // length mid byte
         assert_eq!(packet[2], 0); // length high byte
@@ -2372,7 +2392,7 @@ mod tests {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(5);
         buf.write_byte(0x00);
-        let packet = buf.build_packet();
+        let packet = buf.build_packet().unwrap();
         assert_eq!(packet[3], 5); // sequence byte
     }
 
@@ -2384,7 +2404,7 @@ mod tests {
         for _ in 0..256 {
             buf.write_byte(0x41);
         }
-        let packet = buf.build_packet();
+        let packet = buf.build_packet().unwrap();
         // Length should be 256 = 0x100
         assert_eq!(packet[0], 0x00); // low byte
         assert_eq!(packet[1], 0x01); // mid byte (256)
@@ -2610,13 +2630,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "exceeds MAX_PACKET_SIZE")]
     fn test_build_packet_rejects_oversized_payload() {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         // Write more than MAX_PACKET_SIZE bytes
         buf.buf = vec![0x41; MAX_PACKET_SIZE as usize + 1];
-        let _ = buf.build_packet();
+        assert!(buf.build_packet().is_err());
     }
 
     #[test]
@@ -2624,7 +2643,7 @@ mod tests {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.buf = vec![0x41; MAX_PACKET_SIZE as usize];
-        let packet = buf.build_packet();
+        let packet = buf.build_packet().unwrap();
         assert_eq!(packet.len(), 4 + MAX_PACKET_SIZE as usize);
     }
 

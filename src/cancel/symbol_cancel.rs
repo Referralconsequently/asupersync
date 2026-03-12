@@ -259,16 +259,24 @@ impl SymbolCancelToken {
             // Since we hold the write lock, and the winner releases the lock
             // only after writing Some(reason), we are guaranteed to see
             // the existing reason here.
-            match *reason_guard {
-                Some(ref mut stored) => {
-                    stored.strengthen(reason);
-                }
-                None => {
-                    // This case should be unreachable under the new locking protocol,
-                    // but we handle it safely just in case.
-                    *reason_guard = Some(reason.clone());
-                }
+            if let Some(ref mut stored) = *reason_guard {
+                stored.strengthen(reason);
+            } else {
+                // This case should be unreachable under the new locking protocol,
+                // but we handle it safely just in case (e.g. from_bytes).
+                *reason_guard = Some(reason.clone());
+                self.state
+                    .cancelled_at
+                    .compare_exchange(
+                        u64::MAX,
+                        now.as_nanos(),
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    )
+                    .ok();
             }
+
+            drop(reason_guard);
             false
         }
     }

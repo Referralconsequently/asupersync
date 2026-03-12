@@ -498,7 +498,11 @@ impl ProgressCertificate {
     /// If `potential` is negative, it is clamped to zero and an internal
     /// note is recorded.
     pub fn observe(&mut self, potential: f64) {
-        let potential = if potential.is_finite() { potential.max(0.0) } else { 0.0 };
+        let potential = if potential.is_finite() {
+            potential.max(0.0)
+        } else {
+            0.0
+        };
         let step = self.total_observations;
 
         let delta = self.last_potential.map_or(0.0, |prev| potential - prev);
