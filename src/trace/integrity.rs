@@ -613,9 +613,7 @@ fn verify_metadata(
     // Guard against corrupted metadata length to prevent OOM.
     if meta_len > MAX_METADATA_LEN {
         result.add_issue(IntegrityIssue::InvalidMetadata {
-            message: format!(
-                "metadata length {meta_len} exceeds maximum {MAX_METADATA_LEN}"
-            ),
+            message: format!("metadata length {meta_len} exceeds maximum {MAX_METADATA_LEN}"),
         });
         return !options.fail_fast;
     }
@@ -703,9 +701,7 @@ fn verify_events(
         if len > MAX_EVENT_LEN {
             result.add_issue(IntegrityIssue::InvalidEvent {
                 index: event_index,
-                message: format!(
-                    "event length {len} exceeds maximum {MAX_EVENT_LEN}"
-                ),
+                message: format!("event length {len} exceeds maximum {MAX_EVENT_LEN}"),
             });
             if options.fail_fast {
                 break;
