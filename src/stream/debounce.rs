@@ -144,13 +144,15 @@ impl<S: Stream> Stream for Debounce<S> {
         }
 
         // Check if the buffered item's quiet period has elapsed.
-        if let Some((_, received_at)) = this.pending.as_ref() {
+        let received_at_opt = this.pending.as_ref().map(|(_, t)| *t);
+        if let Some(received_at) = received_at_opt {
             let now = (this.time_getter)();
-            let elapsed = Duration::from_nanos(now.duration_since(*received_at));
+            let elapsed = Duration::from_nanos(now.duration_since(received_at));
             if *this.done || elapsed >= *this.period {
                 *this.timer = None;
-                let (item, _) = this.pending.take().unwrap();
-                return Poll::Ready(Some(item));
+                if let Some((item, _)) = this.pending.take() {
+                    return Poll::Ready(Some(item));
+                }
             }
             // Set up a timer for the remaining quiet period.
             let remaining = this.period.saturating_sub(elapsed);
@@ -166,10 +168,11 @@ impl<S: Stream> Stream for Debounce<S> {
                 if Pin::new(timer).poll(cx).is_ready() {
                     *this.timer = None;
                     let now = (this.time_getter)();
-                    let elapsed = Duration::from_nanos(now.duration_since(*received_at));
+                    let elapsed = Duration::from_nanos(now.duration_since(received_at));
                     if *this.done || elapsed >= *this.period {
-                        let (item, _) = this.pending.take().unwrap();
-                        return Poll::Ready(Some(item));
+                        if let Some((item, _)) = this.pending.take() {
+                            return Poll::Ready(Some(item));
+                        }
                     }
                     // A wall-clock wake must not override a custom logical
                     // clock. Re-arm the timer for the remaining period so

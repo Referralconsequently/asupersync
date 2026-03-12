@@ -25,13 +25,17 @@ pub struct Any<S, P> {
     #[pin]
     stream: S,
     predicate: P,
-    completed: bool,
+    result: Option<bool>,
 }
 
 impl<S, P> Any<S, P> {
     /// Creates a new `Any` future.
     pub(crate) fn new(stream: S, predicate: P) -> Self {
-        Self { stream, predicate, completed: false }
+        Self {
+            stream,
+            predicate,
+            result: None,
+        }
     }
 }
 
@@ -44,13 +48,15 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
-        assert!(!*this.completed, "Any polled after completion");
+        if let Some(result) = this.result.as_ref() {
+            return Poll::Ready(*result);
+        }
         let mut scanned_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if (this.predicate)(&item) {
-                        *this.completed = true;
+                        *this.result = Some(true);
                         return Poll::Ready(true);
                     }
 
@@ -61,7 +67,7 @@ where
                     }
                 }
                 Poll::Ready(None) => {
-                    *this.completed = true;
+                    *this.result = Some(false);
                     return Poll::Ready(false);
                 }
                 Poll::Pending => return Poll::Pending,
@@ -80,13 +86,17 @@ pub struct All<S, P> {
     #[pin]
     stream: S,
     predicate: P,
-    completed: bool,
+    result: Option<bool>,
 }
 
 impl<S, P> All<S, P> {
     /// Creates a new `All` future.
     pub(crate) fn new(stream: S, predicate: P) -> Self {
-        Self { stream, predicate, completed: false }
+        Self {
+            stream,
+            predicate,
+            result: None,
+        }
     }
 }
 
@@ -99,13 +109,15 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
-        assert!(!*this.completed, "All polled after completion");
+        if let Some(result) = this.result.as_ref() {
+            return Poll::Ready(*result);
+        }
         let mut scanned_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if !(this.predicate)(&item) {
-                        *this.completed = true;
+                        *this.result = Some(false);
                         return Poll::Ready(false);
                     }
 
@@ -116,7 +128,7 @@ where
                     }
                 }
                 Poll::Ready(None) => {
-                    *this.completed = true;
+                    *this.result = Some(true);
                     return Poll::Ready(true);
                 }
                 Poll::Pending => return Poll::Pending,
@@ -178,6 +190,47 @@ mod tests {
             let item = self.next;
             self.next += 1;
             Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MatchThenPanicStream {
+        emitted: bool,
+    }
+
+    impl Stream for MatchThenPanicStream {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(
+                !self.emitted,
+                "inner stream repolled after early completion"
+            );
+
+            self.emitted = true;
+            Poll::Ready(Some(1))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct OneThenDoneThenPanicStream {
+        emitted: bool,
+        completed: bool,
+    }
+
+    impl Stream for OneThenDoneThenPanicStream {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(!self.completed, "inner stream repolled after completion");
+
+            if self.emitted {
+                self.completed = true;
+                Poll::Ready(None)
+            } else {
+                self.emitted = true;
+                Poll::Ready(Some(2))
+            }
         }
     }
 
@@ -362,5 +415,55 @@ mod tests {
             second
         );
         crate::test_complete!("all_yields_after_budget_when_predicate_stays_true");
+    }
+
+    #[test]
+    fn any_repoll_returns_same_result_without_touching_inner_stream() {
+        init_test("any_repoll_returns_same_result_without_touching_inner_stream");
+        let mut future = Any::new(MatchThenPanicStream::default(), |_: &usize| true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(true),
+            "first poll finds match",
+            Poll::Ready(true),
+            first
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(true),
+            "second poll reuses terminal result",
+            Poll::Ready(true),
+            second
+        );
+        crate::test_complete!("any_repoll_returns_same_result_without_touching_inner_stream");
+    }
+
+    #[test]
+    fn all_repoll_returns_same_result_without_touching_inner_stream() {
+        init_test("all_repoll_returns_same_result_without_touching_inner_stream");
+        let mut future = All::new(OneThenDoneThenPanicStream::default(), |_: &usize| true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(true),
+            "first poll exhausts stream",
+            Poll::Ready(true),
+            first
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(true),
+            "second poll reuses terminal result",
+            Poll::Ready(true),
+            second
+        );
+        crate::test_complete!("all_repoll_returns_same_result_without_touching_inner_stream");
     }
 }

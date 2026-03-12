@@ -29,7 +29,11 @@ pub struct ForEach<S, F> {
 impl<S, F> ForEach<S, F> {
     /// Creates a new `ForEach` future.
     pub(crate) fn new(stream: S, f: F) -> Self {
-        Self { stream, f, completed: false }
+        Self {
+            stream,
+            f,
+            completed: false,
+        }
     }
 }
 
@@ -43,7 +47,9 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
-        assert!(!*this.completed, "ForEach polled after completion");
+        if *this.completed {
+            return Poll::Ready(());
+        }
         let mut processed_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -101,7 +107,9 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
-        assert!(!*this.completed, "ForEachAsync polled after completion");
+        if *this.completed {
+            return Poll::Ready(());
+        }
         let mut processed_this_poll = 0usize;
         loop {
             // Complete pending future first
@@ -188,6 +196,28 @@ mod tests {
             let item = self.next;
             self.next += 1;
             Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct OneThenDoneThenPanicStream {
+        emitted: bool,
+        completed: bool,
+    }
+
+    impl Stream for OneThenDoneThenPanicStream {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(!self.completed, "inner stream repolled after completion");
+
+            if self.emitted {
+                self.completed = true;
+                Poll::Ready(None)
+            } else {
+                self.emitted = true;
+                Poll::Ready(Some(7))
+            }
         }
     }
 
@@ -404,5 +434,86 @@ mod tests {
             seen.borrow().len()
         );
         crate::test_complete!("for_each_async_yields_after_budget_on_immediate_futures");
+    }
+
+    #[test]
+    fn for_each_repoll_is_ready_without_replaying_side_effects() {
+        init_test("for_each_repoll_is_ready_without_replaying_side_effects");
+        let seen = RefCell::new(Vec::new());
+        let mut future = ForEach::new(OneThenDoneThenPanicStream::default(), |x| {
+            seen.borrow_mut().push(x);
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(())),
+            "first poll completes",
+            "Poll::Ready(())",
+            first
+        );
+        crate::assert_with_log!(
+            seen.borrow().as_slice() == [7],
+            "side effect applied once",
+            vec![7],
+            seen.borrow().clone()
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(())),
+            "second poll stays ready",
+            "Poll::Ready(())",
+            second
+        );
+        crate::assert_with_log!(
+            seen.borrow().as_slice() == [7],
+            "side effect not replayed",
+            vec![7],
+            seen.borrow().clone()
+        );
+        crate::test_complete!("for_each_repoll_is_ready_without_replaying_side_effects");
+    }
+
+    #[test]
+    fn for_each_async_repoll_is_ready_without_replaying_side_effects() {
+        init_test("for_each_async_repoll_is_ready_without_replaying_side_effects");
+        let seen = RefCell::new(Vec::new());
+        let mut future = ForEachAsync::new(OneThenDoneThenPanicStream::default(), |x| {
+            let seen = &seen;
+            Box::pin(async move {
+                seen.borrow_mut().push(x);
+            })
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        loop {
+            if matches!(Pin::new(&mut future).poll(&mut cx), Poll::Ready(())) {
+                break;
+            }
+        }
+        crate::assert_with_log!(
+            seen.borrow().as_slice() == [7],
+            "side effect applied once",
+            vec![7],
+            seen.borrow().clone()
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(())),
+            "second poll stays ready",
+            "Poll::Ready(())",
+            second
+        );
+        crate::assert_with_log!(
+            seen.borrow().as_slice() == [7],
+            "async side effect not replayed",
+            vec![7],
+            seen.borrow().clone()
+        );
+        crate::test_complete!("for_each_async_repoll_is_ready_without_replaying_side_effects");
     }
 }

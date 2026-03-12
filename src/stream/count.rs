@@ -30,7 +30,11 @@ pub struct Count<S> {
 impl<S> Count<S> {
     /// Creates a new `Count` future.
     pub(crate) fn new(stream: S) -> Self {
-        Self { stream, total: 0, completed: false }
+        Self {
+            stream,
+            total: 0,
+            completed: false,
+        }
     }
 }
 
@@ -43,7 +47,9 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
         let mut this = self.project();
-        assert!(!*this.completed, "Count polled after completion");
+        if *this.completed {
+            return Poll::Ready(*this.total);
+        }
         let mut counted_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -118,6 +124,28 @@ mod tests {
             let item = self.next;
             self.next += 1;
             Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct OneThenDoneThenPanicStream {
+        emitted: bool,
+        completed: bool,
+    }
+
+    impl Stream for OneThenDoneThenPanicStream {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(!self.completed, "inner stream repolled after completion");
+
+            if self.emitted {
+                self.completed = true;
+                Poll::Ready(None)
+            } else {
+                self.emitted = true;
+                Poll::Ready(Some(1))
+            }
         }
     }
 
@@ -219,5 +247,30 @@ mod tests {
             second
         );
         crate::test_complete!("count_yields_after_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn count_repoll_returns_same_total_without_touching_inner_stream() {
+        init_test("count_repoll_returns_same_total_without_touching_inner_stream");
+        let mut future = Count::new(OneThenDoneThenPanicStream::default());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(1),
+            "first poll counts item",
+            Poll::Ready(1),
+            first
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(1),
+            "second poll reuses terminal count",
+            Poll::Ready(1),
+            second
+        );
+        crate::test_complete!("count_repoll_returns_same_total_without_touching_inner_stream");
     }
 }
