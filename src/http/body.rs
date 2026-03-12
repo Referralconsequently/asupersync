@@ -597,6 +597,9 @@ where
 pub struct Limited<B> {
     inner: B,
     remaining: u64,
+    // After an oversized frame trips the limit once, fail closed on any
+    // further poll instead of continuing to drive the inner body.
+    limit_exceeded: bool,
 }
 
 impl<B> Limited<B> {
@@ -605,6 +608,7 @@ impl<B> Limited<B> {
         Self {
             inner,
             remaining: limit,
+            limit_exceeded: false,
         }
     }
 }
@@ -633,11 +637,15 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = &mut *self;
+        if this.limit_exceeded {
+            return Poll::Ready(Some(Err(LimitedError::PolledAfterCompletion)));
+        }
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     let len = data.remaining() as u64;
                     if len > this.remaining {
+                        this.limit_exceeded = true;
                         return Poll::Ready(Some(Err(LimitedError::LengthLimit)));
                     }
                     this.remaining -= len;
@@ -672,6 +680,8 @@ where
 pub enum LimitedError<E> {
     /// The length limit was exceeded.
     LengthLimit,
+    /// This body was polled after a terminal length-limit violation.
+    PolledAfterCompletion,
     /// An error from the inner body.
     Inner(E),
 }
@@ -680,6 +690,7 @@ impl<E: fmt::Display> fmt::Display for LimitedError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LengthLimit => write!(f, "body length limit exceeded"),
+            Self::PolledAfterCompletion => write!(f, "limited body polled after completion"),
             Self::Inner(e) => write!(f, "{e}"),
         }
     }
@@ -688,7 +699,7 @@ impl<E: fmt::Display> fmt::Display for LimitedError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for LimitedError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::LengthLimit => None,
+            Self::LengthLimit | Self::PolledAfterCompletion => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -1134,6 +1145,9 @@ mod tests {
         let err: LimitedError<std::io::Error> = LimitedError::LengthLimit;
         assert_eq!(format!("{err}"), "body length limit exceeded");
 
+        let done: LimitedError<std::io::Error> = LimitedError::PolledAfterCompletion;
+        assert_eq!(format!("{done}"), "limited body polled after completion");
+
         let inner_err = LimitedError::Inner(std::io::Error::other("inner"));
         let disp = format!("{inner_err}");
         assert!(disp.contains("inner"), "{disp}");
@@ -1144,12 +1158,19 @@ mod tests {
         let err: LimitedError<&str> = LimitedError::LengthLimit;
         let dbg = format!("{err:?}");
         assert!(dbg.contains("LengthLimit"), "{dbg}");
+
+        let done: LimitedError<&str> = LimitedError::PolledAfterCompletion;
+        let dbg = format!("{done:?}");
+        assert!(dbg.contains("PolledAfterCompletion"), "{dbg}");
     }
 
     #[test]
     fn limited_error_source() {
         let err: LimitedError<std::io::Error> = LimitedError::LengthLimit;
         assert!(std::error::Error::source(&err).is_none());
+
+        let done: LimitedError<std::io::Error> = LimitedError::PolledAfterCompletion;
+        assert!(std::error::Error::source(&done).is_none());
 
         let inner = LimitedError::Inner(std::io::Error::other("cause"));
         assert!(std::error::Error::source(&inner).is_some());
@@ -1175,5 +1196,52 @@ mod tests {
         let limited = Limited::new(inner, 1024);
         let dbg = format!("{limited:?}");
         assert!(dbg.contains("Limited"), "{dbg}");
+    }
+
+    #[derive(Debug)]
+    struct PanicAfterFirstPollBody {
+        first_poll: bool,
+    }
+
+    impl PanicAfterFirstPollBody {
+        fn new() -> Self {
+            Self { first_poll: true }
+        }
+    }
+
+    impl Body for PanicAfterFirstPollBody {
+        type Data = BytesCursor;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            if self.first_poll {
+                self.first_poll = false;
+                let data = BytesCursor::new(Bytes::from_static(b"toolong"));
+                return Poll::Ready(Some(Ok(Frame::data(data))));
+            }
+
+            panic!("Limited polled inner body after terminal length-limit violation");
+        }
+    }
+
+    #[test]
+    fn limited_body_fail_closes_after_length_limit_violation() {
+        let inner = PanicAfterFirstPollBody::new();
+        let mut limited = Limited::new(inner, 3);
+
+        let first = poll_body(&mut limited);
+        assert!(matches!(
+            first,
+            Poll::Ready(Some(Err(LimitedError::LengthLimit)))
+        ));
+
+        let second = poll_body(&mut limited);
+        assert!(matches!(
+            second,
+            Poll::Ready(Some(Err(LimitedError::PolledAfterCompletion)))
+        ));
     }
 }

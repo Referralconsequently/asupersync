@@ -78,6 +78,8 @@ pub enum KafkaError {
     Transaction(String),
     /// Operation cancelled.
     Cancelled,
+    /// The future was polled after it had already completed.
+    PolledAfterCompletion,
     /// Configuration error.
     Config(String),
 }
@@ -95,6 +97,9 @@ impl fmt::Display for KafkaError {
             Self::InvalidTopic(topic) => write!(f, "Invalid Kafka topic: {topic}"),
             Self::Transaction(msg) => write!(f, "Kafka transaction error: {msg}"),
             Self::Cancelled => write!(f, "Kafka operation cancelled"),
+            Self::PolledAfterCompletion => {
+                write!(f, "Kafka future polled after completion")
+            }
             Self::Config(msg) => write!(f, "Kafka configuration error: {msg}"),
         }
     }
@@ -177,6 +182,7 @@ struct DeliveryState {
     value: Option<Result<RecordMetadata, KafkaError>>,
     waker: Option<Waker>,
     closed: bool,
+    completed: bool,
 }
 
 #[cfg(feature = "kafka")]
@@ -186,6 +192,7 @@ impl DeliveryState {
             value: None,
             waker: None,
             closed: false,
+            completed: false,
         }
     }
 }
@@ -234,15 +241,23 @@ impl Future for DeliveryReceiver {
     type Output = Result<RecordMetadata, KafkaError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.inner.lock();
+
+        if state.completed {
+            return Poll::Ready(Err(KafkaError::PolledAfterCompletion));
+        }
+
         if self.cx.checkpoint().is_err() {
-            let mut state = self.inner.lock();
             state.closed = true;
+            state.completed = true;
             state.waker = None;
             return Poll::Ready(Err(KafkaError::Cancelled));
         }
 
-        let mut state = self.inner.lock();
         if let Some(value) = state.value.take() {
+            state.closed = true;
+            state.completed = true;
+            state.waker = None;
             Poll::Ready(value)
         } else {
             if !state
@@ -333,10 +348,19 @@ fn acks_to_str(acks: Acks) -> &'static str {
 }
 
 #[cfg(feature = "kafka")]
+struct SendRequest<'a> {
+    topic: &'a str,
+    key: Option<&'a [u8]>,
+    payload: &'a [u8],
+    partition: Option<i32>,
+    headers: Option<&'a [(&'a str, &'a [u8])]>,
+}
+
+#[cfg(feature = "kafka")]
 fn build_client_config(
     config: &ProducerConfig,
     transactional: Option<&TransactionalConfig>,
-) -> Result<ClientConfig, KafkaError> {
+) -> ClientConfig {
     let mut client = ClientConfig::new();
     client.set("bootstrap.servers", config.bootstrap_servers.join(","));
     if let Some(client_id) = &config.client_id {
@@ -363,7 +387,7 @@ fn build_client_config(
         client.set("enable.idempotence", "true");
     }
 
-    Ok(client)
+    client
 }
 
 #[cfg(feature = "kafka")]
@@ -371,7 +395,7 @@ fn build_producer(
     config: &ProducerConfig,
     transactional: Option<&TransactionalConfig>,
 ) -> Result<ThreadedProducer<KafkaContext>, KafkaError> {
-    let client = build_client_config(config, transactional)?;
+    let client = build_client_config(config, transactional);
     client
         .create_with_context(KafkaContext)
         .map_err(|err| map_rdkafka_error(&err, None))
@@ -382,31 +406,28 @@ async fn send_with_producer(
     producer: &ThreadedProducer<KafkaContext>,
     cx: &Cx,
     config: &ProducerConfig,
-    topic: &str,
-    key: Option<&[u8]>,
-    payload: &[u8],
-    partition: Option<i32>,
-    headers: Option<&[(&str, &[u8])]>,
+    request: SendRequest<'_>,
 ) -> Result<RecordMetadata, KafkaError> {
     cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
-    if payload.len() > config.max_message_size {
+    if request.payload.len() > config.max_message_size {
         return Err(KafkaError::MessageTooLarge {
-            size: payload.len(),
+            size: request.payload.len(),
             max_size: config.max_message_size,
         });
     }
 
     let (sender, receiver) = delivery_channel(cx);
 
-    let mut record = BaseRecord::with_opaque_to(topic, Box::new(sender)).payload(payload);
-    if let Some(key) = key {
+    let mut record =
+        BaseRecord::with_opaque_to(request.topic, Box::new(sender)).payload(request.payload);
+    if let Some(key) = request.key {
         record = record.key(key);
     }
-    if let Some(partition) = partition {
+    if let Some(partition) = request.partition {
         record = record.partition(partition);
     }
-    if let Some(headers) = headers {
+    if let Some(headers) = request.headers {
         let mut owned_headers = OwnedHeaders::new();
         for (key, value) in headers {
             owned_headers = owned_headers.insert(Header {
@@ -622,7 +643,6 @@ pub struct RecordMetadata {
 ///
 /// Provides the API shape for a Kafka producer with Cx integration.
 /// Full implementation requires rdkafka integration.
-#[derive(Debug)]
 pub struct KafkaProducer {
     config: ProducerConfig,
     closed: AtomicBool,
@@ -630,14 +650,23 @@ pub struct KafkaProducer {
     producer: ThreadedProducer<KafkaContext>,
 }
 
+impl fmt::Debug for KafkaProducer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaProducer")
+            .field("config", &self.config)
+            .field("closed", &self.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
 impl KafkaProducer {
     /// Create a new Kafka producer.
     pub fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
         config.validate()?;
-        
+
         #[cfg(feature = "kafka")]
         let producer = build_producer(&config, None)?;
-        
+
         Ok(Self {
             config,
             closed: AtomicBool::new(false),
@@ -684,11 +713,13 @@ impl KafkaProducer {
                 &self.producer,
                 cx,
                 &self.config,
-                topic,
-                key,
-                payload,
-                partition,
-                None,
+                SendRequest {
+                    topic,
+                    key,
+                    payload,
+                    partition,
+                    headers: None,
+                },
             )
             .await
         }
@@ -741,11 +772,13 @@ impl KafkaProducer {
                 &self.producer,
                 cx,
                 &self.config,
-                topic,
-                key,
-                payload,
-                None,
-                Some(headers),
+                SendRequest {
+                    topic,
+                    key,
+                    payload,
+                    partition: None,
+                    headers: Some(headers),
+                },
             )
             .await
         }
@@ -997,6 +1030,23 @@ impl Drop for Transaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "kafka")]
+    use std::sync::Arc;
+    #[cfg(feature = "kafka")]
+    use std::task::{Context, Wake, Waker};
+
+    #[cfg(feature = "kafka")]
+    struct NoopWaker;
+
+    #[cfg(feature = "kafka")]
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[cfg(feature = "kafka")]
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
 
     #[test]
     fn test_acks_values() {
@@ -1079,6 +1129,9 @@ mod tests {
 
         let cancelled = KafkaError::Cancelled;
         assert!(cancelled.to_string().contains("cancelled"));
+
+        let done = KafkaError::PolledAfterCompletion;
+        assert!(done.to_string().contains("polled after completion"));
     }
 
     #[test]
@@ -1135,6 +1188,11 @@ mod tests {
         );
         assert!(KafkaError::Cancelled.to_string().contains("cancelled"));
         assert!(
+            KafkaError::PolledAfterCompletion
+                .to_string()
+                .contains("polled after completion")
+        );
+        assert!(
             KafkaError::Config("cfg".into())
                 .to_string()
                 .contains("configuration error")
@@ -1159,6 +1217,9 @@ mod tests {
     fn kafka_error_source_none_for_others() {
         let err = KafkaError::Cancelled;
         assert!(std::error::Error::source(&err).is_none());
+
+        let done = KafkaError::PolledAfterCompletion;
+        assert!(std::error::Error::source(&done).is_none());
     }
 
     #[test]
@@ -1451,5 +1512,58 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(flush_err, KafkaError::Config(msg) if msg.contains("closed")));
         });
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn delivery_receiver_repoll_after_success_fails_closed() {
+        let cx = Cx::for_testing();
+        let (sender, receiver) = delivery_channel(&cx);
+        sender.complete(Ok(RecordMetadata {
+            topic: "orders".to_string(),
+            partition: 2,
+            offset: 41,
+            timestamp: Some(123),
+        }));
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut receiver = std::pin::pin!(receiver);
+
+        match receiver.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(metadata)) => {
+                assert_eq!(metadata.topic, "orders");
+                assert_eq!(metadata.partition, 2);
+                assert_eq!(metadata.offset, 41);
+                assert_eq!(metadata.timestamp, Some(123));
+            }
+            other => panic!("expected Ready(Ok(_)), got {other:?}"),
+        }
+
+        assert!(matches!(
+            receiver.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(KafkaError::PolledAfterCompletion))
+        ));
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn delivery_receiver_repoll_after_cancellation_fails_closed() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let (_sender, receiver) = delivery_channel(&cx);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut receiver = std::pin::pin!(receiver);
+
+        assert!(matches!(
+            receiver.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(KafkaError::Cancelled))
+        ));
+        assert!(matches!(
+            receiver.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(KafkaError::PolledAfterCompletion))
+        ));
     }
 }

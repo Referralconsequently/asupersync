@@ -441,11 +441,13 @@ mod tests {
 
     #[test]
     fn sse_last_event_id_rejects_null_bytes() {
-        let sse = Sse::new(vec![SseEvent::default().data("event")])
-            .last_event_id("bad\0id");
+        let sse = Sse::new(vec![SseEvent::default().data("event")]).last_event_id("bad\0id");
         let body = sse.to_body();
         // Null-byte ID should be silently rejected, matching SseEvent::id() behavior.
-        assert!(!body.contains("id:"), "null-byte ID should not appear in output");
+        assert!(
+            !body.contains("id:"),
+            "null-byte ID should not appear in output"
+        );
         assert_eq!(body, "data:event\n\n");
     }
 
