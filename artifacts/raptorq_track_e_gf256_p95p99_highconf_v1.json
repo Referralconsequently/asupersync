@@ -4,6 +4,9 @@
   "generated_at_utc": "2026-03-05T21:51:17Z",
   "track_bead_id": "asupersync-36m6p",
   "external_ref": "bd-3g5em",
+  "evidence_role": "narrowed_closure_guardrail",
+  "scope_contract": "single_scenario_high_sample",
+  "successor_policy": "requires_new_artifact_version_for_broader_multi_scenario_refresh",
   "source_artifacts": [
     "artifacts/raptorq_track_e_gf256_p95p99_v1.json"
   ],
@@ -285,6 +288,8 @@
   "limitations": [
     "This closure artifact focuses on one closure-critical scenario (`RQ-E-GF256-005_n16384_seed4101_k64_sym16384`) rather than the full five-scenario matrix.",
     "p95/p99 values are conservative proxies derived from Criterion interval upper bounds because raw sample artifacts were not retrievable through current rch artifact-sync patterns.",
-    "Throughput percentiles use interval endpoints rather than raw-sample throughput distributions."
+    "Throughput percentiles use interval endpoints rather than raw-sample throughput distributions.",
+    "The retained `source_logs` entries summarize the three run classes but do not preserve concrete log file paths for replay-grade auditability.",
+    "Any broader multi-scenario high-confidence refresh must publish a new artifact/schema version rather than mutating this narrowed v1 packet in place."
   ]
 }

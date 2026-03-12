@@ -1615,6 +1615,21 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
         "Track-E high-confidence artifact must remain anchored to asupersync-36m6p"
     );
     assert_eq!(
+        highconf["evidence_role"].as_str(),
+        Some("narrowed_closure_guardrail"),
+        "high-confidence v1 must stay explicitly marked as narrowed guardrail evidence"
+    );
+    assert_eq!(
+        highconf["scope_contract"].as_str(),
+        Some("single_scenario_high_sample"),
+        "high-confidence v1 must keep its single-scenario semantic contract explicit"
+    );
+    assert_eq!(
+        highconf["successor_policy"].as_str(),
+        Some("requires_new_artifact_version_for_broader_multi_scenario_refresh"),
+        "broader high-confidence refreshes must version separately instead of mutating v1 semantics in place"
+    );
+    assert_eq!(
         highconf["source_artifacts"].as_array().map(Vec::len),
         Some(1),
         "Track-E high-confidence artifact must cite exactly one source artifact"
@@ -1752,6 +1767,15 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
             .as_array()
             .is_some_and(|items| !items.is_empty()),
         "high-confidence artifact must include non-empty limitations"
+    );
+    assert!(
+        highconf["limitations"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|text| text.contains("new artifact/schema version"))
+            })
+        }),
+        "high-confidence artifact limitations must preserve the versioned-successor guardrail"
     );
     let closure = &highconf["closure_assessment"];
     assert_eq!(
@@ -1906,6 +1930,8 @@ fn e3_track_e_highconf_closure_assessment_matches_recorded_tails() {
         "operation_tail_pattern_vs_baseline",
         "scope_sufficiency",
         "not-ready state",
+        "new artifact/schema",
+        "highconf_v1",
     ] {
         assert!(
             RAPTORQ_BASELINE_PROFILE_MD.contains(required),
@@ -2520,6 +2546,8 @@ fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
         "ready_for_e5_closure = false",
         "acceptance_criterion_4_status = not_met",
         "G3 closure remains blocked by E5",
+        "new artifact/schema version",
+        "highconf_v1",
     ] {
         assert!(
             RAPTORQ_OPT_DECISIONS_MD.contains(required),

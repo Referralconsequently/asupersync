@@ -95,7 +95,7 @@ Current artifact summary (`coverage_summary` in JSON):
 
 Closure blockers for `asupersync-3ltrv`:
 
-1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. The current narrowed high-confidence packet is useful guardrail evidence, but broader multi-scenario or raw-sample comparator evidence is still required before `asupersync-36m6p` can be treated as closure-complete for G3.
+1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. The current narrowed high-confidence packet is useful guardrail evidence, but broader multi-scenario or raw-sample comparator evidence is still required before `asupersync-36m6p` can be treated as closure-complete for G3. That future broader refresh must publish a new artifact/schema version rather than silently repurposing this narrowed `highconf_v1` packet.
 
 `F7` and `F8` remain resolved and are no longer current blockers.
 

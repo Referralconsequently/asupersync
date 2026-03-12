@@ -323,6 +323,11 @@ against premature E5 closure. It proves the current narrowed corpus is not
 enough to claim material uplift and therefore keeps `closure_assessment` in the
 not-ready state until a broader SIMD-active multi-scenario refresh lands.
 
+Contract note: `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` is
+intentionally a narrowed single-scenario guardrail packet. Any broader
+multi-scenario high-confidence refresh must publish a new artifact/schema
+version rather than silently mutating this `highconf_v1` contract in place.
+
 ## Calibration Checklist for Closure
 
 Before closing `bd-3v1cs`, run this checklist and record evidence paths in bead comments:
