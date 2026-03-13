@@ -112,8 +112,8 @@ fn parse_accept_encoding(header: &str) -> Vec<QualityValue> {
 /// 2. For each server-supported encoding, find its quality:
 ///    - Exact match on encoding token.
 ///    - Wildcard `*` match if no exact match.
-///    - Default quality of 1.0 if not mentioned (except identity which
-///      defaults to acceptable).
+///    - `identity` defaults to q=1.0 unless explicitly excluded by
+///      `identity;q=0` or `*;q=0` without a more specific `identity` entry.
 /// 3. Filter out q=0 (explicitly rejected).
 /// 4. Return the encoding with highest quality (ties broken by server
 ///    preference order).
@@ -153,20 +153,23 @@ pub fn negotiate_encoding(
     for &encoding in supported {
         let token = encoding.as_token();
 
-        // Find explicit quality for this encoding
-        let quality = preferences
+        let explicit_quality = preferences
             .iter()
             .find(|q| q.encoding == token)
-            .map(|q| q.quality)
-            .or(wildcard_quality)
-            .unwrap_or_else(|| {
-                // Not mentioned and no wildcard: identity is implicitly acceptable
-                if encoding == ContentEncoding::Identity {
-                    1.0
-                } else {
+            .map(|q| q.quality);
+
+        let quality = match encoding {
+            ContentEncoding::Identity => explicit_quality.unwrap_or_else(|| {
+                // RFC 9110: identity remains acceptable by default unless it is
+                // explicitly refused via identity;q=0 or a zero-quality wildcard.
+                if matches!(wildcard_quality, Some(q) if q <= 0.0) {
                     0.0
+                } else {
+                    1.0
                 }
-            });
+            }),
+            _ => explicit_quality.or(wildcard_quality).unwrap_or(0.0),
+        };
 
         // q=0 means explicitly rejected
         if quality <= 0.0 {
@@ -250,15 +253,7 @@ impl IdentityDecompressor {
 
 impl Decompressor for IdentityDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
-        self.total += input.len();
-        if let Some(max) = self.max_size {
-            if self.total > max {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "decompressed size exceeds limit",
-                ));
-            }
-        }
+        update_decompressed_total(&mut self.total, input.len(), self.max_size)?;
         output.extend_from_slice(input);
         Ok(())
     }
@@ -361,15 +356,7 @@ impl Decompressor for GzipDecompressor {
         let mut decoder = flate2::read::GzDecoder::new(input);
         let mut buf = Vec::new();
         decoder.read_to_end(&mut buf)?;
-        self.total += buf.len();
-        if let Some(max) = self.max_size {
-            if self.total > max {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "decompressed size exceeds limit",
-                ));
-            }
-        }
+        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
         output.extend_from_slice(&buf);
         Ok(())
     }
@@ -470,15 +457,7 @@ impl Decompressor for DeflateDecompressor {
         let mut decoder = flate2::read::DeflateDecoder::new(input);
         let mut buf = Vec::new();
         decoder.read_to_end(&mut buf)?;
-        self.total += buf.len();
-        if let Some(max) = self.max_size {
-            if self.total > max {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "decompressed size exceeds limit",
-                ));
-            }
-        }
+        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
         output.extend_from_slice(&buf);
         Ok(())
     }
@@ -528,6 +507,29 @@ pub fn accept_encoding_from_headers(headers: &[(String, String)]) -> Option<&str
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
         .map(|(_, value)| value.as_str())
+}
+
+fn update_decompressed_total(
+    total: &mut usize,
+    added: usize,
+    max_size: Option<usize>,
+) -> io::Result<()> {
+    let next_total = total.checked_add(added).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decompressed size exceeds limit",
+        )
+    })?;
+    if let Some(max) = max_size {
+        if next_total > max {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "decompressed size exceeds limit",
+            ));
+        }
+    }
+    *total = next_total;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -713,6 +715,20 @@ mod tests {
         assert_eq!(best, Some(ContentEncoding::Gzip));
     }
 
+    #[test]
+    fn negotiate_identity_beats_nonzero_wildcard() {
+        let supported = &[ContentEncoding::Brotli, ContentEncoding::Identity];
+        let best = negotiate_encoding("*;q=0.5", supported);
+        assert_eq!(best, Some(ContentEncoding::Identity));
+    }
+
+    #[test]
+    fn negotiate_zero_wildcard_rejects_implicit_identity() {
+        let supported = &[ContentEncoding::Identity];
+        let best = negotiate_encoding("*;q=0", supported);
+        assert_eq!(best, None);
+    }
+
     // ====================================================================
     // Identity compressor tests
     // ====================================================================
@@ -759,6 +775,19 @@ mod tests {
         // One more byte exceeds
         let result = dec.decompress(b"x", &mut output);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn identity_decompressor_overflow_is_rejected() {
+        let mut dec = IdentityDecompressor {
+            max_size: None,
+            total: usize::MAX,
+        };
+        let mut output = Vec::new();
+        let result = dec.decompress(b"x", &mut output);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(output.is_empty());
     }
 
     // ====================================================================
@@ -936,6 +965,25 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_decompressor_overflow_is_rejected() {
+        let mut comp = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(b"x", &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = GzipDecompressor {
+            max_size: None,
+            total: usize::MAX,
+        };
+        let mut decompressed = Vec::new();
+        let result = dec.decompress(&compressed, &mut decompressed);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(decompressed.is_empty());
+    }
+
     // ====================================================================
     // Deflate compressor/decompressor tests
     // ====================================================================
@@ -992,6 +1040,25 @@ mod tests {
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_decompressor_overflow_is_rejected() {
+        let mut comp = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(b"x", &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = DeflateDecompressor {
+            max_size: None,
+            total: usize::MAX,
+        };
+        let mut decompressed = Vec::new();
+        let result = dec.decompress(&compressed, &mut decompressed);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(decompressed.is_empty());
     }
 
     #[cfg(feature = "compression")]
