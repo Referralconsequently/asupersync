@@ -201,11 +201,12 @@ pub enum CastOverflowPolicy {
     #[default]
     Reject,
 
-    /// Drop the oldest unprocessed message to make room for the new one.
+    /// Drop the oldest queued cast to make room for the new cast.
     ///
     /// The dropped message is traced for observability. This is useful for
     /// "latest-value-wins" patterns (e.g., sensor readings, UI state updates)
-    /// where stale data is less valuable than fresh data.
+    /// where stale casts are less valuable than fresh data. Calls and info
+    /// messages are never evicted by cast backpressure.
     DropOldest,
 }
 
@@ -595,14 +596,14 @@ pub trait GenServer: Send + 'static {
 /// making "silent reply drop" structurally impossible.
 pub struct Reply<R> {
     cx: Cx,
-    permit: TrackedOneshotPermit<R>,
+    permit: Option<TrackedOneshotPermit<R>>,
 }
 
 impl<R: Send + 'static> Reply<R> {
     fn new(cx: &Cx, permit: TrackedOneshotPermit<R>) -> Self {
         Self {
             cx: cx.clone(),
-            permit,
+            permit: Some(permit),
         }
     }
 
@@ -610,8 +611,12 @@ impl<R: Send + 'static> Reply<R> {
     ///
     /// Consumes the reply handle. If the caller has dropped (e.g., timed out),
     /// the obligation is aborted cleanly (no panic).
-    pub fn send(self, value: R) -> ReplyOutcome {
-        match self.permit.send(value) {
+    pub fn send(mut self, value: R) -> ReplyOutcome {
+        let permit = self
+            .permit
+            .take()
+            .expect("Reply::send called after reply was already consumed");
+        match permit.send(value) {
             Ok(proof) => {
                 self.cx.trace("gen_server::reply_committed");
                 ReplyOutcome::Committed(proof)
@@ -630,22 +635,43 @@ impl<R: Send + 'static> Reply<R> {
     /// Use this when the server intentionally chooses not to reply (e.g.,
     /// delegating to another process). Returns an [`AbortedProof`].
     #[must_use]
-    pub fn abort(self) -> AbortedProof<SendPermit> {
+    pub fn abort(mut self) -> AbortedProof<SendPermit> {
         self.cx.trace("gen_server::reply_aborted");
-        self.permit.abort()
+        self.permit
+            .take()
+            .expect("Reply::abort called after reply was already consumed")
+            .abort()
     }
 
     /// Check if the caller is still waiting for a reply.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.permit.is_closed()
+        self.permit
+            .as_ref()
+            .is_some_and(TrackedOneshotPermit::is_closed)
+    }
+}
+
+impl<R> Drop for Reply<R> {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+
+        if std::thread::panicking() {
+            // Preserve the original panic instead of detonating the reply
+            // drop-bomb during unwind.
+            let _ = permit.abort();
+        } else {
+            drop(permit);
+        }
     }
 }
 
 impl<R> std::fmt::Debug for Reply<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reply")
-            .field("pending", &!self.permit.is_closed())
+            .field("pending", &self.permit.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -944,7 +970,7 @@ impl<S: GenServer> GenServerHandle<S> {
     ///
     /// Applies the server's [`CastOverflowPolicy`] when the mailbox is full:
     /// - `Reject`: returns `CastError::Full`
-    /// - `DropOldest`: evicts the oldest message and enqueues the new one
+    /// - `DropOldest`: evicts the oldest queued cast and enqueues the new one
     pub fn try_cast(&self, msg: S::Cast) -> Result<(), CastError> {
         if matches!(
             self.state.load(),
@@ -961,13 +987,10 @@ impl<S: GenServer> GenServerHandle<S> {
                 mpsc::SendError::Full(_) => CastError::Full,
             }),
             CastOverflowPolicy::DropOldest => {
-                match self.sender.send_evict_oldest(envelope) {
-                    Ok(Some(evicted)) => {
-                        // If the evicted message was a Call, abort the reply
-                        // obligation to prevent an obligation-token-leak panic.
-                        if let Envelope::Call { reply_permit, .. } = evicted {
-                            let _aborted = reply_permit.abort();
-                        }
+                match self.sender.send_evict_oldest_where(envelope, |queued| {
+                    matches!(queued, Envelope::Cast { .. })
+                }) {
+                    Ok(Some(_evicted)) => {
                         // Trace the eviction so lossy drops are observable.
                         if let Some(cx) = Cx::current() {
                             cx.trace("gen_server::cast_evicted_oldest");
@@ -1263,13 +1286,12 @@ impl<S: GenServer> GenServerRef<S> {
                 }
                 mpsc::SendError::Full(_) => CastError::Full,
             }),
-            CastOverflowPolicy::DropOldest => match self.sender.send_evict_oldest(envelope) {
+            CastOverflowPolicy::DropOldest => match self
+                .sender
+                .send_evict_oldest_where(envelope, |queued| matches!(queued, Envelope::Cast { .. }))
+            {
                 Ok(Some(evicted)) => {
-                    // If the evicted message was a Call, abort the reply
-                    // obligation to prevent an obligation-token-leak panic.
-                    if let Envelope::Call { reply_permit, .. } = evicted {
-                        let _aborted = reply_permit.abort();
-                    }
+                    debug_assert!(matches!(evicted, Envelope::Cast { .. }));
                     if let Some(cx) = Cx::current() {
                         cx.trace("gen_server::cast_evicted_oldest");
                     }
@@ -3289,26 +3311,23 @@ mod tests {
         crate::test_complete!("gen_server_ref_drop_oldest_reserved_slots_returns_full");
     }
 
-    /// DropOldest eviction of a Call envelope must abort the reply obligation
-    /// instead of leaking it. Before the fix, dropping an evicted Call caused
-    /// an "OBLIGATION TOKEN LEAKED" panic.
+    /// DropOldest is cast-scoped: a queued Call must not be evicted by a later cast.
     #[test]
-    fn gen_server_drop_oldest_evicting_call_aborts_obligation() {
-        init_test("gen_server_drop_oldest_evicting_call_aborts_obligation");
+    fn gen_server_drop_oldest_preserves_queued_call_and_returns_full() {
+        init_test("gen_server_drop_oldest_preserves_queued_call_and_returns_full");
 
-        let mut state = RuntimeState::new();
-        let root = state.create_root_region(Budget::INFINITE);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let root = runtime.state.create_root_region(Budget::INFINITE);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
 
-        // Capacity 1 so we can fill it with one message.
         let (handle, stored) = scope
-            .spawn_gen_server(&mut state, &cx, DropOldestCounter { count: 0 }, 1)
+            .spawn_gen_server(&mut runtime.state, &cx, DropOldestCounter { count: 0 }, 1)
             .unwrap();
-        state.store_spawned_task(handle.task_id(), stored);
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
 
-        // Manually enqueue a Call envelope so it sits in the mailbox.
-        let (reply_tx, _reply_rx) = session::tracked_oneshot::<u64>();
+        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<u64>();
         let reply_permit = reply_tx.reserve(&cx);
         let call_envelope: Envelope<DropOldestCounter> = Envelope::Call {
             request: CounterCall::Get,
@@ -3316,11 +3335,52 @@ mod tests {
         };
         handle.sender.try_send(call_envelope).unwrap();
 
-        // Now try_cast with DropOldest should evict the Call and abort its
-        // reply obligation cleanly — no panic.
-        handle.try_cast(TaggedCast::Set(99)).unwrap();
+        let err = handle.try_cast(TaggedCast::Set(99)).unwrap_err();
+        assert!(matches!(err, CastError::Full), "expected Full, got {err:?}");
 
-        crate::test_complete!("gen_server_drop_oldest_evicting_call_aborts_obligation");
+        handle.stop();
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+
+        let recv = futures_lite::future::block_on(reply_rx.recv(&cx));
+        assert_eq!(
+            recv,
+            Ok(0),
+            "preserved queued call should still be serviced, got {recv:?}"
+        );
+
+        crate::test_complete!("gen_server_drop_oldest_preserves_queued_call_and_returns_full");
+    }
+
+    #[test]
+    fn gen_server_drop_oldest_preserves_queued_info_and_returns_full() {
+        init_test("gen_server_drop_oldest_preserves_queued_info_and_returns_full");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, DropOldestCounter { count: 0 }, 1)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        let info = SystemMsg::timeout(TimeoutMsg::new(Time::from_secs(1), 7));
+        handle
+            .sender
+            .try_send(Envelope::Info { msg: info })
+            .expect("queue info");
+
+        let err = handle.try_cast(TaggedCast::Set(99)).unwrap_err();
+        assert!(matches!(err, CastError::Full), "expected Full, got {err:?}");
+
+        handle.stop();
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+
+        crate::test_complete!("gen_server_drop_oldest_preserves_queued_info_and_returns_full");
     }
 
     #[test]
@@ -4665,6 +4725,84 @@ mod tests {
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_reply_linearity_abort_is_clean");
+    }
+
+    #[test]
+    #[allow(clippy::items_after_statements)]
+    fn conformance_panicking_handle_call_returns_join_error_without_double_panic() {
+        #[derive(Debug)]
+        struct PanicOnCall;
+
+        impl GenServer for PanicOnCall {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: (),
+                _reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                std::panic::panic_any("intentional handle_call panic");
+            }
+        }
+
+        init_test("conformance_panicking_handle_call_returns_join_error_without_double_panic");
+
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let (mut handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, PanicOnCall, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        let (mut client_handle, client_stored) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                server_ref.call(&cx, ()).await
+            })
+            .unwrap();
+        let client_task_id = client_handle.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, client_stored);
+
+        {
+            let mut sched = runtime.scheduler.lock();
+            sched.schedule(server_task_id, 0);
+            sched.schedule(client_task_id, 0);
+        }
+        runtime.run_until_idle();
+        {
+            let mut sched = runtime.scheduler.lock();
+            sched.schedule(server_task_id, 0);
+            sched.schedule(client_task_id, 0);
+        }
+        runtime.run_until_idle();
+
+        let join = futures_lite::future::block_on(handle.join(&cx));
+        assert!(
+            matches!(join, Err(JoinError::Panicked(_))),
+            "panicking call handler should surface JoinError::Panicked"
+        );
+
+        let client_result =
+            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        assert!(
+            matches!(client_result, Err(CallError::NoReply)),
+            "caller should observe closed reply after panic, got {client_result:?}"
+        );
+
+        crate::test_complete!(
+            "conformance_panicking_handle_call_returns_join_error_without_double_panic"
+        );
     }
 
     /// On-stop processes remaining casts before completing (drain semantics).

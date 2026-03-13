@@ -285,6 +285,25 @@ impl<T> Sender<T> {
     /// This is used by the `DropOldest` backpressure policy. The evicted
     /// message is returned so callers can trace or log the drop.
     pub fn send_evict_oldest(&self, value: T) -> Result<Option<T>, SendError<T>> {
+        self.send_evict_oldest_where(value, |_| true)
+    }
+
+    /// Sends a value, evicting the oldest queued message that matches `predicate`
+    /// if the channel is full.
+    ///
+    /// Returns `Ok(None)` if the value was sent without eviction,
+    /// `Ok(Some(evicted))` if a matching queued message was evicted to make room,
+    /// `Err(SendError::Full(value))` if the channel is full but no matching queued
+    /// message is evictable, or `Err(SendError::Disconnected(value))` if the
+    /// receiver has dropped.
+    pub fn send_evict_oldest_where<F>(
+        &self,
+        value: T,
+        mut predicate: F,
+    ) -> Result<Option<T>, SendError<T>>
+    where
+        F: FnMut(&T) -> bool,
+    {
         let mut inner = self.shared.inner.lock();
 
         if self.shared.receiver_dropped.load(Ordering::Relaxed) {
@@ -293,11 +312,18 @@ impl<T> Sender<T> {
 
         let evicted = if inner.has_capacity(self.shared.capacity) {
             None
-        } else if let Some(oldest) = inner.queue.pop_front() {
-            // Evict the oldest committed message (not a reserved slot).
-            Some(oldest)
+        } else if let Some(index) = inner.queue.iter().position(&mut predicate) {
+            // Evict the oldest committed message (not a reserved slot) that the
+            // caller explicitly allows us to drop.
+            Some(
+                inner
+                    .queue
+                    .remove(index)
+                    .expect("position() returned a valid queue index"),
+            )
         } else {
-            // All capacity consumed by reserved slots — nothing to evict.
+            // Either all capacity is consumed by reserved slots, or every queued
+            // value is protected by the caller's predicate.
             return Err(SendError::Full(value));
         };
 
@@ -1446,6 +1472,49 @@ mod tests {
 
         permit.abort();
         crate::test_complete!("send_evict_oldest_evicts_committed_not_reserved");
+    }
+
+    #[test]
+    fn send_evict_oldest_where_skips_protected_messages() {
+        init_test("send_evict_oldest_where_skips_protected_messages");
+        let (tx, mut rx) = channel::<i32>(2);
+
+        tx.try_send(10).expect("send 10");
+        tx.try_send(20).expect("send 20");
+
+        let result = tx.send_evict_oldest_where(30, |value| *value == 20);
+        crate::assert_with_log!(
+            matches!(result, Ok(Some(20))),
+            "evicted matching value",
+            "Ok(Some(20))",
+            format!("{:?}", result)
+        );
+
+        let first = block_on(rx.recv(&test_cx())).expect("recv 10");
+        let second = block_on(rx.recv(&test_cx())).expect("recv 30");
+        crate::assert_with_log!(first == 10, "first recv preserved", 10, first);
+        crate::assert_with_log!(second == 30, "second recv new value", 30, second);
+        crate::test_complete!("send_evict_oldest_where_skips_protected_messages");
+    }
+
+    #[test]
+    fn send_evict_oldest_where_returns_full_without_match() {
+        init_test("send_evict_oldest_where_returns_full_without_match");
+        let (tx, mut rx) = channel::<i32>(1);
+
+        tx.try_send(10).expect("send 10");
+
+        let result = tx.send_evict_oldest_where(20, |value| *value == 99);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Full(20))),
+            "full without matching eviction candidate",
+            "Err(Full(20))",
+            format!("{:?}", result)
+        );
+
+        let preserved = block_on(rx.recv(&test_cx())).expect("recv preserved");
+        crate::assert_with_log!(preserved == 10, "preserved queued value", 10, preserved);
+        crate::test_complete!("send_evict_oldest_where_returns_full_without_match");
     }
 
     #[test]
