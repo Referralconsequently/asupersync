@@ -7,6 +7,12 @@
 //! Bead: asupersync-2b4jj.6.7
 
 #![allow(missing_docs)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::redundant_closure_for_method_calls)]
+#![allow(clippy::manual_string_new)]
+#![allow(clippy::useless_vec)]
 #![cfg(feature = "cli")]
 
 use serde::Deserialize;

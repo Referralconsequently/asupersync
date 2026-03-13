@@ -7,6 +7,9 @@
 //! Bead: asupersync-2b4jj.6.9
 
 #![allow(missing_docs)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(clippy::all)]
 #![cfg(feature = "cli")]
 
 use asupersync::cli::doctor::{
@@ -465,7 +468,7 @@ fn golden_manifest_records_sorted() {
         .map(|r| r.artifact_id.as_str())
         .collect();
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(
         ids, sorted,
         "Manifest records must be lexically sorted by artifact_id"
@@ -528,7 +531,7 @@ fn golden_manifest_linked_artifacts_sorted() {
     for record in &manifest.records {
         let linked = &record.linked_artifacts;
         let mut sorted = linked.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(
             linked, &sorted,
@@ -702,7 +705,7 @@ fn manifest_record_ordering_invariant() {
         },
     ];
 
-    let mut sorted = records.clone();
+    let mut sorted = records;
     sorted.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
 
     assert_eq!(sorted[0].artifact_id, "a-record");

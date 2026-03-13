@@ -6,6 +6,10 @@
 //! Bead: asupersync-2b4jj.6.5
 
 #![allow(missing_docs)]
+#![allow(clippy::needless_raw_string_hashes)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::suboptimal_flops)]
+#![allow(clippy::float_cmp)]
 #![cfg(feature = "cli")]
 
 use std::collections::{BTreeSet, HashSet};

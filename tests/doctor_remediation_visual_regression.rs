@@ -8,6 +8,9 @@
 //! Bead: asupersync-2b4jj.6.1
 
 #![allow(missing_docs)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(clippy::all)]
 #![cfg(feature = "cli")]
 
 use asupersync::cli::doctor::{
@@ -330,7 +333,7 @@ fn fixture_pack_ids_lexically_sorted() {
         .map(|f| f.fixture_id.as_str())
         .collect();
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(ids, sorted, "Fixture IDs must be lexically sorted");
 }
 
@@ -540,7 +543,7 @@ fn golden_manifest_records_sorted() {
         .map(|r| r.artifact_id.as_str())
         .collect();
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(
         ids, sorted,
         "Manifest records must be lexically sorted by artifact_id"
@@ -590,7 +593,7 @@ fn golden_manifest_linked_artifacts_sorted() {
     for record in &manifest.records {
         let linked = &record.linked_artifacts;
         let mut sorted = linked.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(
             linked, &sorted,
@@ -738,7 +741,7 @@ fn remediation_manifest_ordering_invariant() {
         },
     ];
 
-    let mut sorted = records.clone();
+    let mut sorted = records;
     sorted.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
     assert_eq!(sorted[0].artifact_id, "a-record");
     assert_eq!(sorted[1].artifact_id, "z-record");
@@ -775,7 +778,7 @@ fn trust_delta_computation_determinism() {
         (100, 0, -100),
     ];
     for (before, after, expected_delta) in &cases {
-        let delta = *after as i16 - *before as i16;
+        let delta = i16::from(*after) - i16::from(*before);
         assert_eq!(
             delta, *expected_delta,
             "Trust delta mismatch: before={before}, after={after}"
@@ -793,12 +796,10 @@ fn confidence_shift_determinism() {
         (-1, "degraded"),
     ];
     for (delta, expected_shift) in &cases {
-        let shift = if *delta > 0 {
-            "improved"
-        } else if *delta < 0 {
-            "degraded"
-        } else {
-            "stable"
+        let shift = match (*delta).cmp(&0) {
+            std::cmp::Ordering::Greater => "improved",
+            std::cmp::Ordering::Less => "degraded",
+            std::cmp::Ordering::Equal => "stable",
         };
         assert_eq!(
             shift, *expected_shift,
@@ -879,7 +880,7 @@ fn scorecard_entries_sorted_by_scenario_id() {
         make_scorecard_entry("scenario-a", 60, 80, vec![]),
         make_scorecard_entry("scenario-b", 70, 70, vec![]),
     ];
-    let mut sorted = entries.clone();
+    let mut sorted = entries;
     sorted.sort_by(|a, b| a.scenario_id.cmp(&b.scenario_id));
     assert_eq!(sorted[0].scenario_id, "scenario-a");
     assert_eq!(sorted[1].scenario_id, "scenario-b");
@@ -920,7 +921,7 @@ fn state_reducer_preview_to_approved() {
         "checkpoint_rollback_ready",
         "checkpoint_apply_authorization",
     ];
-    let approved: Vec<String> = checkpoints.iter().map(|s| s.to_string()).collect();
+    let approved: Vec<String> = checkpoints.iter().map(std::string::ToString::to_string).collect();
 
     // All checkpoints approved => transition allowed
     let all_approved = checkpoints
@@ -1201,7 +1202,7 @@ fn e2e_artifact_manifest_construction() {
         .map(|r| r.artifact_id.as_str())
         .collect();
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(ids, sorted, "E2E manifest records must be lexically sorted");
 
     // Roundtrip
@@ -1219,13 +1220,11 @@ fn make_scorecard_entry(
     trust_after: u8,
     unresolved: Vec<String>,
 ) -> RemediationVerificationScorecardEntry {
-    let delta = trust_after as i16 - trust_before as i16;
-    let shift = if delta > 0 {
-        "improved"
-    } else if delta < 0 {
-        "degraded"
-    } else {
-        "stable"
+    let delta = i16::from(trust_after) - i16::from(trust_before);
+    let shift = match delta.cmp(&0) {
+        std::cmp::Ordering::Greater => "improved",
+        std::cmp::Ordering::Less => "degraded",
+        std::cmp::Ordering::Equal => "stable",
     };
     RemediationVerificationScorecardEntry {
         entry_id: format!("entry-{scenario_id}"),

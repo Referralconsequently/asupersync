@@ -137,6 +137,7 @@ fn mixed_artifacts_fixture() -> Vec<RuntimeArtifact> {
     ]
 }
 
+#[allow(clippy::too_many_lines)]
 fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
     let run_id = format!("run-{}", fixture.fixture_id);
     let scenario_id = fixture.fixture_id.clone();
