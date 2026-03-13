@@ -7,6 +7,7 @@
 //! Bead: asupersync-2b4jj.6.2
 
 #![allow(missing_docs)]
+#![allow(dead_code)]
 #![cfg(feature = "cli")]
 
 use serde::Deserialize;
@@ -121,6 +122,7 @@ fn evaluate_gate(threshold: u64, measured: u64) -> &'static str {
     }
 }
 
+#[allow(clippy::cast_possible_wrap)]
 fn compute_headroom(threshold: u64, measured: u64) -> i32 {
     if threshold == 0 {
         return 0;
@@ -532,7 +534,7 @@ fn gate_report_evaluations_sorted() {
         .map(|e| e.gate_id.as_str())
         .collect();
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(ids, sorted, "Gate evaluations must be sorted by gate_id");
 }
 
@@ -545,7 +547,7 @@ fn gate_report_metrics_sorted() {
         .map(|m| m.metric_id.as_str())
         .collect();
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(ids, sorted, "Metrics must be sorted by metric_id");
 }
 

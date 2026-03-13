@@ -532,10 +532,9 @@ impl TraceWriter {
     }
 
     fn update_event_count(&mut self) -> TraceFileResult<()> {
-        let file = self.writer.get_mut();
-        file.seek(SeekFrom::Start(self.event_count_pos))?;
-        file.write_all(&self.event_count.to_le_bytes())?;
-        file.flush()?;
+        self.writer.seek(SeekFrom::Start(self.event_count_pos))?;
+        self.writer.write_all(&self.event_count.to_le_bytes())?;
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -731,8 +730,14 @@ impl TraceWriter {
 impl Drop for TraceWriter {
     fn drop(&mut self) {
         if !self.finished {
+            #[cfg(feature = "trace-compression")]
+            if self.config.compression.is_compressed() {
+                let _ = self.flush_compressed_chunk();
+            }
+
             // Best-effort: try to flush but don't panic
             let _ = self.writer.flush();
+            self.update_event_count_best_effort();
         }
     }
 }

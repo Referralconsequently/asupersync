@@ -26,7 +26,7 @@ pub struct AsupersyncRuntime {
 }
 
 impl AsupersyncRuntime {
-    /// Create a new AsupersyncRuntime bound to the given context.
+    /// Create a new `AsupersyncRuntime` bound to the given context.
     #[must_use]
     pub fn new(cx: &Cx) -> Self {
         Self {
@@ -80,8 +80,7 @@ where
             }
 
             match future.as_mut().poll(poll_cx) {
-                Poll::Ready(CancelResult::Completed(value))
-                | Poll::Ready(CancelResult::CancellationIgnored(value)) => Poll::Ready(Some(value)),
+                Poll::Ready(CancelResult::Completed(value) | CancelResult::CancellationIgnored(value)) => Poll::Ready(Some(value)),
                 Poll::Ready(CancelResult::Cancelled) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             }

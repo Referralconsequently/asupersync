@@ -7,6 +7,7 @@
 //! Bead: asupersync-2b4jj.6.8
 
 #![allow(missing_docs)]
+#![allow(dead_code)]
 #![cfg(feature = "cli")]
 
 use serde::Deserialize;
@@ -199,11 +200,11 @@ fn evaluate_sustained_budget(
         for metric in &post_warmup {
             let (value, threshold) = match policy.metric.as_str() {
                 "latency_p99_ms" => {
-                    let threshold = envelope.map(|e| e.latency_p99_ms).unwrap_or(u64::MAX);
+                    let threshold = envelope.map_or(u64::MAX, |e| e.latency_p99_ms);
                     (metric.latency_p99_ms, threshold)
                 }
                 "memory_peak_mb" => {
-                    let threshold = envelope.map(|e| e.memory_ceiling_mb).unwrap_or(u64::MAX);
+                    let threshold = envelope.map_or(u64::MAX, |e| e.memory_ceiling_mb);
                     (metric.memory_peak_mb, threshold)
                 }
                 "error_rate_bps" => {
@@ -339,7 +340,7 @@ fn doctor_stress_soak_catalog_contract_versions() {
 #[test]
 fn doctor_stress_soak_catalog_profile_modes() {
     let catalog = load_catalog();
-    let mut modes = catalog.profile_modes.clone();
+    let mut modes = catalog.profile_modes;
     modes.sort();
     assert_eq!(modes, PROFILE_MODES);
 }
@@ -701,7 +702,7 @@ fn doctor_stress_soak_smoke_report_runs_lexically_ordered() {
     let report = load_smoke_report();
     let scenario_ids: Vec<&str> = report.runs.iter().map(|r| r.scenario_id.as_str()).collect();
     let mut sorted = scenario_ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(
         scenario_ids, sorted,
         "Runs must be ordered by scenario_id lexically"
@@ -803,7 +804,7 @@ fn doctor_stress_soak_artifact_index_has_three_classes() {
             .map(|a| a.artifact_class.as_str())
             .collect();
         let mut sorted_classes = classes.clone();
-        sorted_classes.sort();
+        sorted_classes.sort_unstable();
         assert_eq!(
             sorted_classes,
             ARTIFACT_CLASSES.to_vec(),
@@ -1007,7 +1008,7 @@ fn doctor_stress_soak_contract_validates() {
     assert_eq!(catalog.logging_contract_version, "doctor-logging-v1");
 
     // Profile modes
-    let mut modes = catalog.profile_modes.clone();
+    let mut modes = catalog.profile_modes;
     modes.sort();
     assert_eq!(modes, PROFILE_MODES);
 
@@ -1341,7 +1342,6 @@ fn doctor_stress_soak_warmup_checkpoints_are_excluded() {
     let (pass, violations) = evaluate_sustained_budget(&run, &policy, &[], &[]);
     assert!(
         pass,
-        "Warmup checkpoint violations should be excluded, but got: {:?}",
-        violations
+        "Warmup checkpoint violations should be excluded, but got: {violations:?}"
     );
 }
