@@ -36,6 +36,7 @@ pub struct Throttle<S> {
     stream: S,
     period: Duration,
     last_yield: Option<Time>,
+    done: bool,
     time_getter: fn() -> Time,
 }
 
@@ -51,6 +52,7 @@ impl<S> Throttle<S> {
             stream,
             period,
             last_yield: None,
+            done: false,
             time_getter,
         }
     }
@@ -81,6 +83,9 @@ impl<S: Stream> Stream for Throttle<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
+        if *this.done {
+            return Poll::Ready(None);
+        }
         let mut suppressed = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -104,7 +109,10 @@ impl<S: Stream> Stream for Throttle<S> {
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.done = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -323,5 +331,50 @@ mod tests {
             MAX_SUPPRESSED_DRAIN_PER_POLL + 1
         );
         crate::test_complete!("throttle_yields_after_suppression_budget_on_always_ready_stream");
+    }
+
+    #[derive(Debug, Default)]
+    struct OneThenDoneThenPanicStream {
+        yielded_once: bool,
+        completed: bool,
+    }
+
+    impl Stream for OneThenDoneThenPanicStream {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.yielded_once {
+                self.yielded_once = true;
+                return Poll::Ready(Some(7));
+            }
+
+            assert!(
+                !self.completed,
+                "throttle inner stream repolled after completion"
+            );
+            self.completed = true;
+            Poll::Ready(None)
+        }
+    }
+
+    #[test]
+    fn throttle_does_not_repoll_exhausted_upstream() {
+        init_test("throttle_does_not_repoll_exhausted_upstream");
+        set_test_time(0);
+        let mut stream = Throttle::with_time_getter(
+            OneThenDoneThenPanicStream::default(),
+            Duration::from_secs(1),
+            test_time,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(7))
+        );
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("throttle_does_not_repoll_exhausted_upstream");
     }
 }

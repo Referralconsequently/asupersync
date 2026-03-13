@@ -5,7 +5,7 @@
 //! given the same e-graph structure.
 
 use super::certificate::{CertificateVersion, PlanHash};
-use super::{EClassId, EGraph, ENode, PlanDag, PlanId};
+use super::{EClassId, EGraph, ENode, PlanDag, PlanId, PlanNode};
 use std::collections::BTreeMap;
 
 // ===========================================================================
@@ -352,8 +352,68 @@ impl ExtractionCertificate {
             });
         }
 
+        let actual_cost = dag_plan_cost(dag);
+        if self.cost != actual_cost {
+            return Err(ExtractionVerifyError::CostMismatch {
+                expected: self.cost,
+                actual: actual_cost,
+            });
+        }
+
         Ok(())
     }
+}
+
+fn dag_plan_cost(dag: &PlanDag) -> PlanCost {
+    fn visit(dag: &PlanDag, id: PlanId, memo: &mut BTreeMap<PlanId, PlanCost>) -> PlanCost {
+        if let Some(&cost) = memo.get(&id) {
+            return cost;
+        }
+
+        let cost = match dag.node(id) {
+            Some(PlanNode::Leaf { label }) => {
+                let mut cost = PlanCost::LEAF;
+                if label.starts_with("obl:") {
+                    cost.obligation_pressure = 1;
+                }
+                cost
+            }
+            Some(PlanNode::Join { children }) => {
+                let mut cost = PlanCost::ZERO;
+                for child in children {
+                    cost = cost.add(visit(dag, *child, memo));
+                }
+                cost.allocations = cost.allocations.saturating_add(1);
+                cost
+            }
+            Some(PlanNode::Race { children }) => {
+                let mut cost = PlanCost::ZERO;
+                for child in children {
+                    cost = cost.add(visit(dag, *child, memo));
+                }
+                cost.cancel_checkpoints = cost.cancel_checkpoints.saturating_add(1);
+                cost.allocations = cost.allocations.saturating_add(1);
+                cost
+            }
+            Some(PlanNode::Timeout { child, .. }) => {
+                let mut cost = visit(dag, *child, memo);
+                cost.allocations = cost.allocations.saturating_add(1);
+                cost.critical_path = cost.critical_path.saturating_add(1);
+                cost
+            }
+            None => PlanCost::ZERO,
+        };
+
+        memo.insert(id, cost);
+        cost
+    }
+
+    let Some(root) = dag.root() else {
+        return PlanCost::ZERO;
+    };
+
+    let mut memo = BTreeMap::new();
+    visit(dag, root, &mut memo)
 }
 
 /// Error from extraction verification.
@@ -379,6 +439,13 @@ pub enum ExtractionVerifyError {
         expected: usize,
         /// Actual count.
         actual: usize,
+    },
+    /// Extracted cost does not match the plan DAG.
+    CostMismatch {
+        /// Expected cost recorded in the certificate.
+        expected: PlanCost,
+        /// Actual cost recomputed from the DAG.
+        actual: PlanCost,
     },
 }
 
@@ -598,6 +665,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn certificate_cost_mismatch_is_rejected() {
+        init_test();
+        let mut eg = EGraph::new();
+        let a = eg.add_leaf("a");
+        let b = eg.add_leaf("b");
+        let join = eg.add_join(vec![a, b]);
+
+        let mut extractor = Extractor::new(&mut eg);
+        let (dag, mut cert) = extractor.extract(join);
+
+        cert.cost.allocations = cert.cost.allocations.saturating_add(1);
+
+        let result = cert.verify(&dag);
+        assert!(matches!(
+            result,
+            Err(ExtractionVerifyError::CostMismatch { .. })
+        ));
+    }
+
     // Pure data-type tests (wave 37 – CyanBarn)
 
     #[test]
@@ -691,6 +778,10 @@ mod tests {
             expected: 5,
             actual: 3,
         };
+        let e4 = ExtractionVerifyError::CostMismatch {
+            expected: PlanCost::ZERO,
+            actual: PlanCost::LEAF,
+        };
 
         let dbg1 = format!("{e1:?}");
         assert!(dbg1.contains("VersionMismatch"));
@@ -698,6 +789,8 @@ mod tests {
         assert!(dbg2.contains("HashMismatch"));
         let dbg3 = format!("{e3:?}");
         assert!(dbg3.contains("NodeCountMismatch"));
+        let dbg4 = format!("{e4:?}");
+        assert!(dbg4.contains("CostMismatch"));
 
         // Clone + PartialEq
         let e1c = e1.clone();

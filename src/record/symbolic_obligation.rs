@@ -222,6 +222,8 @@ struct ObligationInner {
     created_at: Time,
     /// Description for debugging.
     description: Option<String>,
+    /// Optional registry mirror for state synchronization.
+    registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
 }
 
 // ─── SymbolicObligation ─────────────────────────────────────────────────────
@@ -257,6 +259,7 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
+        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
     ) -> Self {
         let total_symbols = params.total_source_symbols();
 
@@ -271,6 +274,7 @@ impl SymbolicObligation {
                 progress: FulfillmentProgress::new(total_symbols),
                 created_at,
                 description: None,
+                registry_by_id,
             }),
             resolved: false,
         }
@@ -284,6 +288,7 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
+        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
     ) -> Self {
         Self {
             state: Arc::new(ObligationInner {
@@ -296,6 +301,7 @@ impl SymbolicObligation {
                 progress: FulfillmentProgress::new(1),
                 created_at,
                 description: Some(format!("symbol {symbol_id}")),
+                registry_by_id,
             }),
             resolved: false,
         }
@@ -310,6 +316,7 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
+        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
     ) -> Self {
         Self {
             state: Arc::new(ObligationInner {
@@ -322,6 +329,7 @@ impl SymbolicObligation {
                 progress: FulfillmentProgress::new(expected_count),
                 created_at,
                 description: None,
+                registry_by_id,
             }),
             resolved: false,
         }
@@ -336,6 +344,7 @@ impl SymbolicObligation {
         holder: TaskId,
         region: RegionId,
         created_at: Time,
+        registry_by_id: Option<Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>>,
     ) -> Self {
         Self {
             state: Arc::new(ObligationInner {
@@ -348,6 +357,7 @@ impl SymbolicObligation {
                 progress: FulfillmentProgress::new(min_symbols),
                 created_at,
                 description: None,
+                registry_by_id,
             }),
             resolved: false,
         }
@@ -407,6 +417,19 @@ impl SymbolicObligation {
         self.state.created_at
     }
 
+    fn sync_registry_state(&self, state: SymbolicObligationState) {
+        if let Some(by_id) = &self.state.registry_by_id {
+            if let Some(entry) = by_id.write().get_mut(&self.id()) {
+                entry.state = state;
+            }
+        }
+    }
+
+    fn set_state(&self, state: SymbolicObligationState) {
+        *self.state.state.write() = state;
+        self.sync_registry_state(state);
+    }
+
     /// Marks progress on partial fulfillment.
     ///
     /// Call this as symbols are sent/received to track progress.
@@ -417,6 +440,8 @@ impl SymbolicObligation {
         let mut state = self.state.state.write();
         if *state == SymbolicObligationState::Reserved {
             *state = SymbolicObligationState::InProgress;
+            drop(state);
+            self.sync_registry_state(SymbolicObligationState::InProgress);
         }
     }
 
@@ -427,6 +452,8 @@ impl SymbolicObligation {
         let mut state = self.state.state.write();
         if *state == SymbolicObligationState::Reserved {
             *state = SymbolicObligationState::InProgress;
+            drop(state);
+            self.sync_registry_state(SymbolicObligationState::InProgress);
         }
     }
 
@@ -438,7 +465,7 @@ impl SymbolicObligation {
     pub fn commit(mut self) {
         assert!(self.is_pending(), "obligation already resolved");
 
-        *self.state.state.write() = SymbolicObligationState::Committed;
+        self.set_state(SymbolicObligationState::Committed);
         self.resolved = true;
     }
 
@@ -452,7 +479,7 @@ impl SymbolicObligation {
     pub fn abort(mut self) {
         assert!(self.is_pending(), "obligation already resolved");
 
-        *self.state.state.write() = SymbolicObligationState::Aborted;
+        self.set_state(SymbolicObligationState::Aborted);
         self.resolved = true;
     }
 
@@ -469,7 +496,7 @@ impl SymbolicObligation {
 
     /// Marks the obligation as leaked (internal use by runtime).
     pub(crate) fn mark_leaked(&self) {
-        *self.state.state.write() = SymbolicObligationState::Leaked;
+        self.set_state(SymbolicObligationState::Leaked);
     }
 
     /// Creates an obligation for testing.
@@ -487,6 +514,7 @@ impl SymbolicObligation {
                 progress: FulfillmentProgress::new(total),
                 created_at: Time::ZERO,
                 description: None,
+                registry_by_id: None,
             }),
             resolved: false,
         }
@@ -547,7 +575,7 @@ pub struct ObligationSummary {
 // ─── SymbolicObligationRegistry ─────────────────────────────────────────────
 
 /// Entry in the obligation registry.
-struct ObligationEntry {
+pub(crate) struct ObligationEntry {
     id: ObligationId,
     kind: SymbolicObligationKind,
     object_id: ObjectId,
@@ -567,7 +595,7 @@ type RegionSlot = Option<(RegionId, Vec<ObligationId>)>;
 /// runtime to detect leaked obligations and check region quiescence.
 pub struct SymbolicObligationRegistry {
     /// Obligations by ID.
-    by_id: RwLock<HashMap<ObligationId, ObligationEntry>>,
+    by_id: Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>,
     /// Obligations by object ID.
     by_object: RwLock<HashMap<ObjectId, Vec<ObligationId>>>,
     /// Obligations by holder task (arena-slot indexed).
@@ -583,7 +611,7 @@ impl SymbolicObligationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            by_id: RwLock::new(HashMap::new()),
+            by_id: Arc::new(RwLock::new(HashMap::new())),
             by_object: RwLock::new(HashMap::new()),
             by_holder: RwLock::new(Vec::new()),
             by_region: RwLock::new(Vec::new()),
@@ -601,8 +629,15 @@ impl SymbolicObligationRegistry {
         now: Time,
     ) -> SymbolicObligation {
         let id = self.allocate_id();
-        let obligation =
-            SymbolicObligation::new_send_object(id, object_id, params, holder, region, now);
+        let obligation = SymbolicObligation::new_send_object(
+            id,
+            object_id,
+            params,
+            holder,
+            region,
+            now,
+            Some(Arc::clone(&self.by_id)),
+        );
         self.register(
             id,
             SymbolicObligationKind::SendObject,
@@ -623,7 +658,14 @@ impl SymbolicObligationRegistry {
         now: Time,
     ) -> SymbolicObligation {
         let id = self.allocate_id();
-        let obligation = SymbolicObligation::new_send_symbol(id, symbol_id, holder, region, now);
+        let obligation = SymbolicObligation::new_send_symbol(
+            id,
+            symbol_id,
+            holder,
+            region,
+            now,
+            Some(Arc::clone(&self.by_id)),
+        );
         self.register(
             id,
             SymbolicObligationKind::SendSymbol,
@@ -645,8 +687,15 @@ impl SymbolicObligationRegistry {
         now: Time,
     ) -> SymbolicObligation {
         let id = self.allocate_id();
-        let obligation =
-            SymbolicObligation::new_acknowledge(id, object_id, expected_count, holder, region, now);
+        let obligation = SymbolicObligation::new_acknowledge(
+            id,
+            object_id,
+            expected_count,
+            holder,
+            region,
+            now,
+            Some(Arc::clone(&self.by_id)),
+        );
         self.register(
             id,
             SymbolicObligationKind::AcknowledgeReceipt,
@@ -668,8 +717,15 @@ impl SymbolicObligationRegistry {
         now: Time,
     ) -> SymbolicObligation {
         let id = self.allocate_id();
-        let obligation =
-            SymbolicObligation::new_decode(id, object_id, min_symbols, holder, region, now);
+        let obligation = SymbolicObligation::new_decode(
+            id,
+            object_id,
+            min_symbols,
+            holder,
+            region,
+            now,
+            Some(Arc::clone(&self.by_id)),
+        );
         self.register(
             id,
             SymbolicObligationKind::DecodeObject,
@@ -1033,11 +1089,10 @@ mod tests {
         assert_eq!(pending[0].kind, SymbolicObligationKind::SendObject);
 
         // Commit resolves - update registry state.
-        let oid = obligation.id();
         obligation.commit();
-        registry.update_state(oid, SymbolicObligationState::Committed);
 
         assert!(!registry.has_pending_in_region(region));
+        assert!(registry.pending_in_region(region).is_empty());
     }
 
     #[test]
@@ -1056,18 +1111,15 @@ mod tests {
         assert_eq!(registry.obligations_for_object(object).len(), 2);
         assert!(registry.has_pending_in_region(region));
 
-        let o1_id = o1.id();
-        let o2_id = o2.id();
         o1.commit();
-        registry.update_state(o1_id, SymbolicObligationState::Committed);
 
         // Still has pending because o2 is unresolved.
         assert!(registry.has_pending_in_region(region));
 
         o2.abort();
-        registry.update_state(o2_id, SymbolicObligationState::Aborted);
 
         assert!(!registry.has_pending_in_region(region));
+        assert!(registry.pending_in_region(region).is_empty());
     }
 
     #[test]
@@ -1081,9 +1133,18 @@ mod tests {
         assert_eq!(obligation.kind(), SymbolicObligationKind::DecodeObject);
         assert_eq!(obligation.progress().total, 4);
 
+        let pending = registry.pending_in_region(region);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].state, SymbolicObligationState::Reserved);
+
         obligation.fulfill_many(4);
+        let pending = registry.pending_in_region(region);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].state, SymbolicObligationState::InProgress);
+
         assert!(obligation.progress().complete);
         obligation.commit();
+        assert!(!registry.has_pending_in_region(region));
     }
 
     #[test]
@@ -1101,6 +1162,7 @@ mod tests {
         assert_eq!(obligation.progress().total, 8);
 
         obligation.abort();
+        assert!(!registry.has_pending_in_region(region));
     }
 
     #[test]
