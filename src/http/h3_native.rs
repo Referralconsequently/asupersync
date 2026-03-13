@@ -114,18 +114,18 @@ pub enum H3UniStreamType {
     QpackEncoder,
     /// QPACK decoder stream.
     QpackDecoder,
+    /// Unknown stream type — RFC 9114 §6.2 requires ignoring unknown types.
+    Unknown(u64),
 }
 
 impl H3UniStreamType {
-    fn decode(stream_type: u64) -> Result<Self, H3NativeError> {
+    fn decode(stream_type: u64) -> Self {
         match stream_type {
-            H3_STREAM_TYPE_CONTROL => Ok(Self::Control),
-            H3_STREAM_TYPE_PUSH => Ok(Self::Push),
-            H3_STREAM_TYPE_QPACK_ENCODER => Ok(Self::QpackEncoder),
-            H3_STREAM_TYPE_QPACK_DECODER => Ok(Self::QpackDecoder),
-            _ => Err(H3NativeError::StreamProtocol(
-                "unknown unidirectional stream type",
-            )),
+            H3_STREAM_TYPE_CONTROL => Self::Control,
+            H3_STREAM_TYPE_PUSH => Self::Push,
+            H3_STREAM_TYPE_QPACK_ENCODER => Self::QpackEncoder,
+            H3_STREAM_TYPE_QPACK_DECODER => Self::QpackDecoder,
+            other => Self::Unknown(other),
         }
     }
 }
@@ -791,6 +791,60 @@ pub fn qpack_decode_response_field_section(
     header_fields_to_response_head(&fields)
 }
 
+/// Validate that a header field name contains only valid characters per
+/// RFC 9110 §5.1 and is lowercase per HTTP/3 requirements (RFC 9114 §4.2).
+fn validate_header_name(name: &str) -> Result<(), H3NativeError> {
+    if name.is_empty() {
+        return Err(H3NativeError::InvalidFrame("empty header field name"));
+    }
+    for &b in name.as_bytes() {
+        match b {
+            // RFC 9110 token characters (subset: ALPHA / DIGIT / specials)
+            b'a'..=b'z'
+            | b'0'..=b'9'
+            | b':'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~' => {}
+            b'A'..=b'Z' => {
+                return Err(H3NativeError::InvalidFrame(
+                    "header field name must be lowercase in HTTP/3",
+                ));
+            }
+            _ => {
+                return Err(H3NativeError::InvalidFrame(
+                    "header field name contains invalid character",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that a header field value does not contain null bytes, CR, or LF.
+fn validate_header_value(value: &str) -> Result<(), H3NativeError> {
+    for &b in value.as_bytes() {
+        if b == 0 || b == b'\r' || b == b'\n' {
+            return Err(H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn header_fields_to_request_head(
     fields: &[(String, String)],
 ) -> Result<H3RequestHead, H3NativeError> {
@@ -799,6 +853,8 @@ fn header_fields_to_request_head(
     let mut saw_regular_headers = false;
 
     for (name, value) in fields {
+        validate_header_name(name)?;
+        validate_header_value(value)?;
         if name.starts_with(':') {
             if saw_regular_headers {
                 return Err(H3NativeError::InvalidRequestPseudoHeader(
@@ -864,6 +920,8 @@ fn header_fields_to_response_head(
     let mut saw_regular_headers = false;
 
     for (name, value) in fields {
+        validate_header_name(name)?;
+        validate_header_value(value)?;
         if name.starts_with(':') {
             if saw_regular_headers {
                 return Err(H3NativeError::InvalidResponsePseudoHeader(
@@ -986,6 +1044,11 @@ fn qpack_decode_string(
     prefix_len: u8,
     input: &[u8],
 ) -> Result<(String, usize), H3NativeError> {
+    if prefix_len >= 8 {
+        return Err(H3NativeError::InvalidFrame(
+            "qpack string prefix length must be less than 8",
+        ));
+    }
     let huffman_bit = 1u8 << prefix_len;
     if (first & huffman_bit) != 0 {
         return Err(H3NativeError::InvalidFrame(
@@ -1011,9 +1074,23 @@ fn qpack_static_name(index: u64) -> Option<&'static str> {
 }
 
 fn qpack_static_entry(index: u64) -> Option<(&'static str, &'static str)> {
+    // RFC 9204 Appendix A — complete QPACK static table (indices 0–98).
     match index {
         0 => Some((":authority", "")),
         1 => Some((":path", "/")),
+        2 => Some(("age", "0")),
+        3 => Some(("content-disposition", "")),
+        4 => Some(("content-length", "0")),
+        5 => Some(("cookie", "")),
+        6 => Some(("date", "")),
+        7 => Some(("etag", "")),
+        8 => Some(("if-modified-since", "")),
+        9 => Some(("if-none-match", "")),
+        10 => Some(("last-modified", "")),
+        11 => Some(("link", "")),
+        12 => Some(("location", "")),
+        13 => Some(("referer", "")),
+        14 => Some(("set-cookie", "")),
         15 => Some((":method", "CONNECT")),
         16 => Some((":method", "DELETE")),
         17 => Some((":method", "GET")),
@@ -1028,6 +1105,46 @@ fn qpack_static_entry(index: u64) -> Option<(&'static str, &'static str)> {
         26 => Some((":status", "304")),
         27 => Some((":status", "404")),
         28 => Some((":status", "503")),
+        29 => Some(("accept", "*/*")),
+        30 => Some(("accept", "application/dns-message")),
+        31 => Some(("accept-encoding", "gzip, deflate, br")),
+        32 => Some(("accept-ranges", "bytes")),
+        33 => Some(("access-control-allow-headers", "cache-control")),
+        34 => Some(("access-control-allow-headers", "content-type")),
+        35 => Some(("access-control-allow-origin", "*")),
+        36 => Some(("cache-control", "max-age=0")),
+        37 => Some(("cache-control", "max-age=2592000")),
+        38 => Some(("cache-control", "max-age=604800")),
+        39 => Some(("cache-control", "no-cache")),
+        40 => Some(("cache-control", "no-store")),
+        41 => Some(("cache-control", "public, max-age=31536000")),
+        42 => Some(("content-encoding", "br")),
+        43 => Some(("content-encoding", "gzip")),
+        44 => Some(("content-type", "application/dns-message")),
+        45 => Some(("content-type", "application/javascript")),
+        46 => Some(("content-type", "application/json")),
+        47 => Some(("content-type", "application/x-www-form-urlencoded")),
+        48 => Some(("content-type", "image/gif")),
+        49 => Some(("content-type", "image/jpeg")),
+        50 => Some(("content-type", "image/png")),
+        51 => Some(("content-type", "text/css")),
+        52 => Some(("content-type", "text/html; charset=utf-8")),
+        53 => Some(("content-type", "text/plain")),
+        54 => Some(("content-type", "text/plain;charset=utf-8")),
+        55 => Some(("range", "bytes=0-")),
+        56 => Some(("strict-transport-security", "max-age=31536000")),
+        57 => Some((
+            "strict-transport-security",
+            "max-age=31536000; includesubdomains",
+        )),
+        58 => Some((
+            "strict-transport-security",
+            "max-age=31536000; includesubdomains; preload",
+        )),
+        59 => Some(("vary", "accept-encoding")),
+        60 => Some(("vary", "origin")),
+        61 => Some(("x-content-type-options", "nosniff")),
+        62 => Some(("x-xss-protection", "1; mode=block")),
         63 => Some((":status", "100")),
         64 => Some((":status", "204")),
         65 => Some((":status", "206")),
@@ -1037,6 +1154,36 @@ fn qpack_static_entry(index: u64) -> Option<(&'static str, &'static str)> {
         69 => Some((":status", "421")),
         70 => Some((":status", "425")),
         71 => Some((":status", "500")),
+        72 => Some(("accept-language", "")),
+        73 => Some(("access-control-allow-credentials", "FALSE")),
+        74 => Some(("access-control-allow-credentials", "TRUE")),
+        75 => Some(("access-control-allow-headers", "*")),
+        76 => Some(("access-control-allow-methods", "get")),
+        77 => Some(("access-control-allow-methods", "get, post, options")),
+        78 => Some(("access-control-allow-methods", "options")),
+        79 => Some(("access-control-expose-headers", "content-length")),
+        80 => Some(("access-control-request-headers", "content-type")),
+        81 => Some(("access-control-request-method", "get")),
+        82 => Some(("access-control-request-method", "post")),
+        83 => Some(("alt-svc", "clear")),
+        84 => Some(("authorization", "")),
+        85 => Some((
+            "content-security-policy",
+            "script-src 'none'; object-src 'none'; base-uri 'none'",
+        )),
+        86 => Some(("early-data", "1")),
+        87 => Some(("expect-ct", "")),
+        88 => Some(("forwarded", "")),
+        89 => Some(("if-range", "")),
+        90 => Some(("origin", "")),
+        91 => Some(("purpose", "prefetch")),
+        92 => Some(("server", "")),
+        93 => Some(("timing-allow-origin", "*")),
+        94 => Some(("upgrade-insecure-requests", "1")),
+        95 => Some(("user-agent", "")),
+        96 => Some(("x-forwarded-for", "")),
+        97 => Some(("x-frame-options", "deny")),
+        98 => Some(("x-frame-options", "sameorigin")),
         _ => None,
     }
 }
@@ -1267,7 +1414,7 @@ impl H3ConnectionState {
                 "unidirectional stream type requires unidirectional stream id",
             ));
         }
-        let kind = H3UniStreamType::decode(stream_type)?;
+        let kind = H3UniStreamType::decode(stream_type);
         if self.uni_stream_types.contains_key(&stream_id) {
             return Err(H3NativeError::StreamProtocol(
                 "unidirectional stream type already set",
@@ -1301,6 +1448,10 @@ impl H3ConnectionState {
             H3UniStreamType::Push => {
                 self.push_streams.entry(stream_id).or_default();
             }
+            H3UniStreamType::Unknown(_) => {
+                // RFC 9114 §6.2: unknown stream types are accepted and
+                // their data is discarded by the caller.
+            }
         }
         self.uni_stream_types.insert(stream_id, kind);
         Ok(kind)
@@ -1328,6 +1479,10 @@ impl H3ConnectionState {
             H3UniStreamType::QpackEncoder | H3UniStreamType::QpackDecoder => Err(
                 H3NativeError::StreamProtocol("qpack streams carry instructions, not h3 frames"),
             ),
+            H3UniStreamType::Unknown(_) => {
+                // RFC 9114 §6.2: data on unknown stream types is discarded.
+                Ok(())
+            }
         }
     }
 
@@ -1837,31 +1992,16 @@ mod tests {
 
     #[test]
     fn h3_uni_stream_type_decode_all_known() {
-        assert_eq!(
-            H3UniStreamType::decode(0x00).unwrap(),
-            H3UniStreamType::Control
-        );
-        assert_eq!(
-            H3UniStreamType::decode(0x01).unwrap(),
-            H3UniStreamType::Push
-        );
-        assert_eq!(
-            H3UniStreamType::decode(0x02).unwrap(),
-            H3UniStreamType::QpackEncoder
-        );
-        assert_eq!(
-            H3UniStreamType::decode(0x03).unwrap(),
-            H3UniStreamType::QpackDecoder
-        );
+        assert_eq!(H3UniStreamType::decode(0x00), H3UniStreamType::Control);
+        assert_eq!(H3UniStreamType::decode(0x01), H3UniStreamType::Push);
+        assert_eq!(H3UniStreamType::decode(0x02), H3UniStreamType::QpackEncoder);
+        assert_eq!(H3UniStreamType::decode(0x03), H3UniStreamType::QpackDecoder);
     }
 
     #[test]
-    fn h3_uni_stream_type_decode_unknown_rejects() {
-        let err = H3UniStreamType::decode(0xFF).expect_err("must fail");
-        assert_eq!(
-            err,
-            H3NativeError::StreamProtocol("unknown unidirectional stream type")
-        );
+    fn h3_uni_stream_type_decode_unknown_accepted() {
+        let kind = H3UniStreamType::decode(0xFF);
+        assert_eq!(kind, H3UniStreamType::Unknown(0xFF));
     }
 
     #[test]
@@ -2624,9 +2764,9 @@ mod tests {
 
     #[test]
     fn qpack_wire_decode_rejects_unknown_static_index() {
-        // Field section prefix (RIC=0, base=0), then indexed static with index=72
-        // encoded as 63 + continuation byte 9.
-        let wire = [0x00u8, 0x00, 0xFF, 0x09];
+        // Field section prefix (RIC=0, base=0), then indexed static with index=99
+        // encoded as 63 + continuation byte 36.
+        let wire = [0x00u8, 0x00, 0xFF, 0x24];
         let err = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect_err("reject");
         assert_eq!(
             err,
@@ -2726,6 +2866,166 @@ mod tests {
             H3NativeError::InvalidResponsePseudoHeader(
                 "response must not include request pseudo headers"
             )
+        );
+    }
+
+    // --- 7. Audit fixes: QPACK static table, header validation, unknown uni streams ---
+
+    #[test]
+    fn qpack_static_table_entries_2_through_14_present() {
+        // These were previously missing, causing interop failures.
+        assert_eq!(qpack_static_entry(2), Some(("age", "0")));
+        assert_eq!(qpack_static_entry(4), Some(("content-length", "0")));
+        assert_eq!(qpack_static_entry(5), Some(("cookie", "")));
+        assert_eq!(qpack_static_entry(6), Some(("date", "")));
+        assert_eq!(qpack_static_entry(12), Some(("location", "")));
+        assert_eq!(qpack_static_entry(14), Some(("set-cookie", "")));
+    }
+
+    #[test]
+    fn qpack_static_table_entries_29_through_62_present() {
+        assert_eq!(qpack_static_entry(29), Some(("accept", "*/*")));
+        assert_eq!(
+            qpack_static_entry(31),
+            Some(("accept-encoding", "gzip, deflate, br"))
+        );
+        assert_eq!(
+            qpack_static_entry(46),
+            Some(("content-type", "application/json"))
+        );
+        assert_eq!(qpack_static_entry(53), Some(("content-type", "text/plain")));
+        assert_eq!(qpack_static_entry(59), Some(("vary", "accept-encoding")));
+        assert_eq!(
+            qpack_static_entry(62),
+            Some(("x-xss-protection", "1; mode=block"))
+        );
+    }
+
+    #[test]
+    fn qpack_static_table_entries_72_through_98_present() {
+        assert_eq!(qpack_static_entry(72), Some(("accept-language", "")));
+        assert_eq!(qpack_static_entry(83), Some(("alt-svc", "clear")));
+        assert_eq!(qpack_static_entry(90), Some(("origin", "")));
+        assert_eq!(qpack_static_entry(95), Some(("user-agent", "")));
+        assert_eq!(
+            qpack_static_entry(98),
+            Some(("x-frame-options", "sameorigin"))
+        );
+        // Index 99 does not exist.
+        assert_eq!(qpack_static_entry(99), None);
+    }
+
+    #[test]
+    fn header_name_rejects_uppercase() {
+        let err = validate_header_name("Content-Type").expect_err("must reject uppercase");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("header field name must be lowercase in HTTP/3")
+        );
+    }
+
+    #[test]
+    fn header_name_rejects_null_byte() {
+        let err = validate_header_name("x-\0-bad").expect_err("must reject null");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("header field name contains invalid character")
+        );
+    }
+
+    #[test]
+    fn header_name_rejects_space() {
+        let err = validate_header_name("x bad").expect_err("must reject space");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("header field name contains invalid character")
+        );
+    }
+
+    #[test]
+    fn header_name_accepts_valid_token() {
+        validate_header_name("content-type").expect("valid");
+        validate_header_name("x-custom_header.1").expect("valid");
+        validate_header_name(":method").expect("pseudo header valid");
+    }
+
+    #[test]
+    fn header_value_rejects_crlf() {
+        let err = validate_header_value("value\r\ninjected").expect_err("must reject CRLF");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)"
+            )
+        );
+    }
+
+    #[test]
+    fn header_value_rejects_null() {
+        let err = validate_header_value("value\0null").expect_err("must reject null");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)"
+            )
+        );
+    }
+
+    #[test]
+    fn header_value_accepts_normal_text() {
+        validate_header_value("application/json").expect("valid");
+        validate_header_value("").expect("empty is valid");
+        validate_header_value("value with spaces and tabs\tare ok").expect("valid");
+    }
+
+    #[test]
+    fn unknown_uni_stream_type_accepted_and_data_ignored() {
+        let mut c = H3ConnectionState::new();
+        let kind = c
+            .on_remote_uni_stream_type(2, 0x42)
+            .expect("unknown type must be accepted per RFC 9114 §6.2");
+        assert_eq!(kind, H3UniStreamType::Unknown(0x42));
+        // Data on unknown streams is silently discarded.
+        c.on_uni_stream_frame(2, &H3Frame::Data(vec![1, 2, 3]))
+            .expect("data on unknown stream must be accepted");
+    }
+
+    #[test]
+    fn request_decode_rejects_uppercase_header_name() {
+        let fields = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+            (":path".to_string(), "/".to_string()),
+            ("Accept".to_string(), "*/*".to_string()),
+        ];
+        let err = header_fields_to_request_head(&fields).expect_err("must reject uppercase");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("header field name must be lowercase in HTTP/3")
+        );
+    }
+
+    #[test]
+    fn response_decode_rejects_crlf_in_header_value() {
+        let fields = vec![
+            (":status".to_string(), "200".to_string()),
+            ("x-injected".to_string(), "foo\r\nbar".to_string()),
+        ];
+        let err = header_fields_to_response_head(&fields).expect_err("must reject CRLF");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "header field value contains forbidden character (NUL, CR, or LF)"
+            )
+        );
+    }
+
+    #[test]
+    fn qpack_decode_string_rejects_prefix_len_8() {
+        let err = qpack_decode_string(0xFF, 8, &[]).expect_err("must reject prefix_len=8");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack string prefix length must be less than 8")
         );
     }
 }

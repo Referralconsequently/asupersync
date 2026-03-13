@@ -928,10 +928,26 @@ impl MySqlConnectOptions {
             ("root".to_string(), None, auth_host)
         };
 
-        // Split host:port
-        let (host, port) = host_port
-            .rsplit_once(':')
-            .map_or((host_port, 3306), |(h, p)| (h, p.parse().unwrap_or(3306)));
+        // Split host:port (with IPv6 bracket support: [::1]:3306)
+        let (host, port) = if host_port.starts_with('[') {
+            // IPv6 literal: [addr]:port or [addr]
+            if let Some((bracketed, rest)) = host_port.split_once(']') {
+                let addr = &bracketed[1..]; // strip leading '['
+                let port = rest
+                    .strip_prefix(':')
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(3306);
+                (addr, port)
+            } else {
+                return Err(MySqlError::InvalidUrl(
+                    "unclosed IPv6 bracket in host".to_string(),
+                ));
+            }
+        } else {
+            host_port
+                .rsplit_once(':')
+                .map_or((host_port, 3306), |(h, p)| (h, p.parse().unwrap_or(3306)))
+        };
 
         let mut connect_timeout = None;
         let mut ssl_mode = SslMode::Disabled;
@@ -1072,11 +1088,18 @@ impl MySqlConnection {
             );
         }
 
-        // Connect to the server
+        // Connect to the server (applying connect_timeout if configured).
         let addr = format!("{}:{}", options.host, options.port);
-        let stream = match TcpStream::connect(addr).await {
-            Ok(s) => s,
-            Err(e) => return Outcome::Err(MySqlError::Io(e)),
+        let stream = if let Some(timeout) = options.connect_timeout {
+            match TcpStream::connect_timeout(addr, timeout).await {
+                Ok(s) => s,
+                Err(e) => return Outcome::Err(MySqlError::Io(e)),
+            }
+        } else {
+            match TcpStream::connect(addr).await {
+                Ok(s) => s,
+                Err(e) => return Outcome::Err(MySqlError::Io(e)),
+            }
         };
 
         let mut conn = Self {
@@ -1526,7 +1549,9 @@ impl MySqlConnection {
             let flags = reader.read_u16_le()?;
             let decimals = reader.read_byte()?;
 
-            indices.insert(name.clone(), i);
+            // Only store the first occurrence so duplicate column names
+            // don't silently shadow earlier columns.
+            indices.entry(name.clone()).or_insert(i);
             columns.push(MySqlColumn {
                 catalog,
                 schema,
@@ -2855,5 +2880,31 @@ mod tests {
         let opts = MySqlConnectOptions::parse("mysql://user@localhost/db").unwrap();
         assert_eq!(opts.ssl_mode, SslMode::Disabled);
         assert_eq!(opts.connect_timeout, None);
+    }
+
+    #[test]
+    fn test_connect_options_ipv6_bracketed_host() {
+        let opts = MySqlConnectOptions::parse("mysql://user:pass@[::1]:3307/testdb").unwrap();
+        assert_eq!(opts.host, "::1");
+        assert_eq!(opts.port, 3307);
+        assert_eq!(opts.database.as_deref(), Some("testdb"));
+        assert_eq!(opts.user, "user");
+    }
+
+    #[test]
+    fn test_connect_options_ipv6_bracketed_host_no_port() {
+        let opts = MySqlConnectOptions::parse("mysql://user@[::1]/testdb").unwrap();
+        assert_eq!(opts.host, "::1");
+        assert_eq!(opts.port, 3306);
+        assert_eq!(opts.database.as_deref(), Some("testdb"));
+    }
+
+    #[test]
+    fn test_connect_options_ipv6_unclosed_bracket_error() {
+        let err = MySqlConnectOptions::parse("mysql://user@[::1:3306/db").unwrap_err();
+        match err {
+            MySqlError::InvalidUrl(msg) => assert!(msg.contains("bracket"), "{msg}"),
+            other => panic!("expected InvalidUrl, got {other:?}"),
+        }
     }
 }
