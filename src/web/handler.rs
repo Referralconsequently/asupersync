@@ -203,7 +203,7 @@ where
 {
     #[inline]
     fn call(&self, _req: Request) -> Response {
-        run_async_handler((self.func)(Cx::for_testing()))
+        run_async_handler((self.func)(Cx::for_request()))
     }
 }
 
@@ -236,7 +236,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        run_async_handler((self.func)(Cx::for_testing(), t1))
+        run_async_handler((self.func)(Cx::for_request(), t1))
     }
 }
 
@@ -270,7 +270,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        run_async_handler((self.func)(Cx::for_testing(), t1, t2))
+        run_async_handler((self.func)(Cx::for_request(), t1, t2))
     }
 }
 
@@ -305,7 +305,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        run_async_handler((self.func)(Cx::for_testing(), t1, t2, t3))
+        run_async_handler((self.func)(Cx::for_request(), t1, t2, t3))
     }
 }
 
