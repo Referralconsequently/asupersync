@@ -165,10 +165,12 @@ fn format_error_body(
 ) -> (String, &'static str) {
     match format {
         ErrorFormat::Json => {
+            let escaped = serde_json::to_string(message)
+                .unwrap_or_else(|_| r#""Internal Server Error""#.to_string());
             let body = format!(
-                r#"{{"error":{{"status":{},"message":"{}"}}}}"#,
+                r#"{{"error":{{"status":{},"message":{}}}}}"#,
                 status.as_u16(),
-                message.replace('\\', "\\\\").replace('"', "\\\""),
+                escaped,
             );
             (body, "application/json")
         }
@@ -201,6 +203,56 @@ fn error_format_from_accept(accept: &str) -> ErrorFormat {
         Some(MediaType::HTML) => ErrorFormat::Html,
         _ => ErrorFormat::Plain,
     }
+}
+
+fn default_error_message(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "Bad Request",
+        StatusCode::UNAUTHORIZED => "Unauthorized",
+        StatusCode::FORBIDDEN => "Forbidden",
+        StatusCode::NOT_FOUND => "Not Found",
+        StatusCode::METHOD_NOT_ALLOWED => "Method Not Allowed",
+        StatusCode::CONFLICT => "Conflict",
+        StatusCode::PAYLOAD_TOO_LARGE => "Payload Too Large",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "Unsupported Media Type",
+        StatusCode::UNPROCESSABLE_ENTITY => "Unprocessable Entity",
+        StatusCode::TOO_MANY_REQUESTS => "Too Many Requests",
+        StatusCode::CLIENT_CLOSED_REQUEST => "Client Closed Request",
+        StatusCode::INTERNAL_SERVER_ERROR => "Internal Server Error",
+        StatusCode::NOT_IMPLEMENTED => "Not Implemented",
+        StatusCode::BAD_GATEWAY => "Bad Gateway",
+        StatusCode::SERVICE_UNAVAILABLE => "Service Unavailable",
+        StatusCode::GATEWAY_TIMEOUT => "Gateway Timeout",
+        _ if status.is_client_error() => "Client Error",
+        _ if status.is_server_error() => "Internal Server Error",
+        _ => "Error",
+    }
+}
+
+fn error_message_from_response(resp: &Response, expose_details: bool) -> String {
+    if expose_details {
+        if let Ok(message) = std::str::from_utf8(&resp.body) {
+            let trimmed = message.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    default_error_message(resp.status).to_string()
+}
+
+fn format_error_response(mut resp: Response, accept: &str, expose_details: bool) -> Response {
+    if !(resp.status.is_client_error() || resp.status.is_server_error()) {
+        return resp;
+    }
+
+    let format = error_format_from_accept(accept);
+    let message = error_message_from_response(&resp, expose_details);
+    let (body, content_type) = format_error_body(resp.status, &message, format);
+    resp.body = body.into_bytes().into();
+    resp.set_header("content-type", content_type);
+    resp
 }
 
 // ─── ErrorHandlerMiddleware ──────────────────────────────────────────────────
@@ -279,18 +331,21 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
         };
 
         match result {
-            Ok(resp) => resp,
+            Ok(resp) => format_error_response(resp, &accept, self.config.expose_details),
             Err(_panic) => {
-                let format = error_format_from_accept(&accept);
                 let message = if self.config.expose_details {
                     "Internal Server Error: handler panicked"
                 } else {
                     "Internal Server Error"
                 };
-                let (body, content_type) =
-                    format_error_body(StatusCode::INTERNAL_SERVER_ERROR, message, format);
-                Response::new(StatusCode::INTERNAL_SERVER_ERROR, body.into_bytes())
-                    .header("content-type", content_type)
+                format_error_response(
+                    Response::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        message.as_bytes().to_vec(),
+                    ),
+                    &accept,
+                    self.config.expose_details,
+                )
             }
         }
     }
@@ -316,6 +371,16 @@ mod tests {
 
     fn panicking_handler() -> &'static str {
         panic!("test panic");
+    }
+
+    fn not_found_handler() -> StatusCode {
+        StatusCode::NOT_FOUND
+    }
+
+    fn detailed_bad_request_handler() -> Response {
+        Response::new(StatusCode::BAD_REQUEST, b"missing tenant\nline 2".to_vec())
+            .header("x-request-id", "req-123")
+            .header("content-type", "text/plain; charset=utf-8")
     }
 
     // ====================================================================
@@ -465,6 +530,16 @@ mod tests {
     }
 
     #[test]
+    fn format_error_json_escapes_control_characters() {
+        let (body, _) = format_error_body(
+            StatusCode::BAD_REQUEST,
+            "bad \"input\"\nwith\ttabs",
+            ErrorFormat::Json,
+        );
+        assert!(body.contains(r#"bad \"input\"\nwith\ttabs"#));
+    }
+
+    #[test]
     fn error_format_from_accept_json() {
         assert_eq!(
             error_format_from_accept("application/json"),
@@ -556,6 +631,54 @@ mod tests {
         let resp = mw.call(make_request_accepting("text/plain"));
         let body = std::str::from_utf8(&resp.body).unwrap();
         assert!(body.contains("panicked"));
+    }
+
+    #[test]
+    fn error_handler_formats_client_errors_using_accept_header() {
+        let mw = ErrorHandlerMiddleware::new(
+            FnHandler::new(not_found_handler),
+            ErrorHandlerConfig::default(),
+        );
+        let resp = mw.call(make_request_accepting("application/json"));
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(body.contains("\"status\":404"));
+        assert!(body.contains("Not Found"));
+    }
+
+    #[test]
+    fn error_handler_preserves_non_content_headers_when_formatting_errors() {
+        let mw = ErrorHandlerMiddleware::new(
+            FnHandler::new(detailed_bad_request_handler),
+            ErrorHandlerConfig::default(),
+        );
+        let resp = mw.call(make_request_accepting("text/html"));
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(resp.headers.get("x-request-id").unwrap(), "req-123");
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(body.contains("<html>"));
+        assert!(body.contains("400"));
+        assert!(!body.contains("missing tenant"));
+    }
+
+    #[test]
+    fn error_handler_exposes_existing_error_details_in_development() {
+        let mw = ErrorHandlerMiddleware::new(
+            FnHandler::new(detailed_bad_request_handler),
+            ErrorHandlerConfig::development(),
+        );
+        let resp = mw.call(make_request_accepting("application/json"));
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(body.contains(r"missing tenant\nline 2"));
     }
 
     #[test]
