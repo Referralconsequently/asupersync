@@ -243,13 +243,13 @@ fn golden_arena_insert_remove_cycle() {
 fn golden_runtime_state_region_lifecycle() {
     let mut state = RuntimeState::new();
 
-    let _r1 = state.create_root_region(Budget::INFINITE);
-    let r2 = state.create_root_region(
+    let r1 = state.create_root_region(Budget::INFINITE);
+    let r2 = state.create_child_region(r1,
         Budget::new()
             .with_deadline(Time::from_secs(10))
             .with_poll_quota(5000),
-    );
-    let _r3 = state.create_root_region(Budget::INFINITE);
+    ).unwrap();
+    let _r3 = state.create_child_region(r1, Budget::INFINITE).unwrap();
 
     let cancelled = state.cancel_request(r2, &CancelReason::timeout(), None);
 
@@ -864,13 +864,13 @@ fn run_deterministic_workload(seed: u64) -> u64 {
     let config = LabConfig::new(seed).max_steps(10_000);
     let mut lab = LabRuntime::new(config);
 
-    let _r1 = lab.state.create_root_region(Budget::INFINITE);
-    let r2 = lab.state.create_root_region(
+    let r1 = lab.state.create_root_region(Budget::INFINITE);
+    let r2 = lab.state.create_child_region(r1,
         Budget::new()
             .with_deadline(Time::from_secs(5))
             .with_poll_quota(1000),
-    );
-    let _r3 = lab.state.create_root_region(Budget::INFINITE);
+    ).unwrap();
+    let _r3 = lab.state.create_child_region(r1, Budget::INFINITE).unwrap();
 
     let _ = lab.state.cancel_request(r2, &CancelReason::timeout(), None);
 
