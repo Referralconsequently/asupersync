@@ -1286,11 +1286,15 @@ mod tests {
 
         let _ = poll_body(&mut body);
 
-        for _ in 0..10_000 {
+        for i in 0..10_000 {
             if finished.load(Ordering::SeqCst) {
                 break;
             }
-            std::thread::yield_now();
+            if i % 100 == 99 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::thread::yield_now();
+            }
         }
         assert!(finished.load(Ordering::SeqCst));
 
