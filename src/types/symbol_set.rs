@@ -369,7 +369,13 @@ impl SymbolSet {
             let total = progress.total();
             let raw = (f64::from(k) * config.overhead_factor).ceil();
             let minimum_threshold = k_usize.saturating_add(config.min_overhead);
-            if !raw.is_finite() || raw.is_sign_negative() {
+            if raw.is_nan() {
+                return total >= minimum_threshold;
+            }
+            if raw.is_sign_positive() && !raw.is_finite() {
+                return false;
+            }
+            if raw.is_sign_negative() {
                 return total >= minimum_threshold;
             }
             #[allow(clippy::cast_sign_loss)]
@@ -675,6 +681,20 @@ mod tests {
 
         let _ = set.insert(test_symbol(0, 14, 4));
         assert!(set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_does_not_reach_with_infinite_overhead_before_all_sources_arrive() {
+        let config = ThresholdConfig::new(f64::INFINITY, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        assert!(!set.set_block_k(0, 10));
+
+        let _ = set.insert(test_symbol(0, 0, 4));
+        for esi in 1..=64 {
+            let _ = set.insert(test_symbol(0, esi, 4));
+        }
+
+        assert!(!set.threshold_reached(0));
     }
 
     // =========================================================================

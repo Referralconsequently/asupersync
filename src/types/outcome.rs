@@ -659,7 +659,7 @@ impl<E: fmt::Display> fmt::Display for OutcomeError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Err(e) => write!(f, "{e}"),
-            Self::Cancelled(r) => write!(f, "cancelled: {r:?}"),
+            Self::Cancelled(r) => write!(f, "cancelled: {r}"),
             Self::Panicked(p) => write!(f, "{p}"),
         }
     }
@@ -1080,6 +1080,15 @@ mod tests {
         let error: OutcomeError<&str> = OutcomeError::Cancelled(CancelReason::default());
         let display = format!("{error}");
         assert!(display.contains("cancelled"));
+    }
+
+    #[test]
+    fn outcome_error_display_cancelled_uses_human_readable_reason() {
+        let error: OutcomeError<&str> =
+            OutcomeError::Cancelled(CancelReason::timeout().with_message("budget elapsed"));
+        let display = format!("{error}");
+        assert_eq!(display, "cancelled: timeout: budget elapsed");
+        assert!(!display.contains("CancelReason"));
     }
 
     #[test]
