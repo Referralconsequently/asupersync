@@ -2967,6 +2967,7 @@ impl ThreeLaneWorker {
             if is_local {
                 Waker::from(Arc::new(ThreeLaneLocalWaker {
                     task_id,
+                    priority,
                     wake_state: Arc::clone(&wake_state),
                     local: Arc::clone(&self.local),
                     local_ready: Arc::clone(&self.local_ready),
@@ -3344,6 +3345,9 @@ impl Wake for ThreeLaneWaker {
 
 struct ThreeLaneLocalWaker {
     task_id: TaskId,
+    /// Cached priority so cancelled local tasks fall back to their base
+    /// priority instead of 0 when `cancel_reason` is not yet set.
+    priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     local: Arc<Mutex<PriorityScheduler>>,
     local_ready: Arc<LocalReadyQueue>,
@@ -3359,7 +3363,7 @@ impl ThreeLaneLocalWaker {
             let is_cancelling = self.fast_cancel.load(Ordering::Relaxed);
 
             if is_cancelling {
-                let mut priority = 0;
+                let mut priority = self.priority;
                 if let Some(inner) = self.cx_inner.upgrade() {
                     let guard = inner.read();
                     if let Some(reason) = &guard.cancel_reason {
@@ -6091,6 +6095,7 @@ mod tests {
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
+            priority: 0,
             wake_state: Arc::clone(&wake_state),
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
@@ -6131,6 +6136,7 @@ mod tests {
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
+            priority: 0,
             wake_state: Arc::clone(&wake_state),
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
