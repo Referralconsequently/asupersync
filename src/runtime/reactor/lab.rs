@@ -394,6 +394,26 @@ impl LabReactor {
         }
     }
 
+    /// Returns a snapshot of global chaos statistics accumulated by this reactor.
+    #[must_use]
+    pub fn chaos_stats(&self) -> ChaosStats {
+        self.inner
+            .lock()
+            .chaos
+            .as_ref()
+            .map_or_else(ChaosStats::new, |chaos| chaos.stats.clone())
+    }
+
+    /// Returns the last global chaos I/O error kind injected by this reactor.
+    #[must_use]
+    pub fn last_io_error_kind(&self) -> Option<io::ErrorKind> {
+        self.inner
+            .lock()
+            .chaos
+            .as_ref()
+            .and_then(|chaos| chaos.last_io_error_kind)
+    }
+
     /// Checks if the reactor has been woken.
     ///
     /// Clears the wake flag and returns its previous value.
@@ -1594,12 +1614,21 @@ mod tests {
         let event = events.iter().next().expect("event");
         crate::assert_with_log!(event.is_error(), "event is error", true, event.is_error());
 
-        let last_kind = reactor
-            .inner
-            .lock()
-            .chaos
-            .as_ref()
-            .and_then(|chaos| chaos.last_io_error_kind);
+        let stats = reactor.chaos_stats();
+        crate::assert_with_log!(
+            stats.io_errors == 1,
+            "io error count",
+            1u64,
+            stats.io_errors
+        );
+        crate::assert_with_log!(
+            stats.decision_points == 1,
+            "decision points",
+            1u64,
+            stats.decision_points
+        );
+
+        let last_kind = reactor.last_io_error_kind();
         crate::assert_with_log!(
             last_kind == Some(io::ErrorKind::TimedOut),
             "last error kind",
@@ -1642,11 +1671,39 @@ mod tests {
             .map(|te| te.time)
             .expect("delayed event");
 
+        let delayed_stats = reactor.chaos_stats();
+        crate::assert_with_log!(
+            delayed_stats.delays == 1,
+            "delay count",
+            1u64,
+            delayed_stats.delays
+        );
+        crate::assert_with_log!(
+            delayed_stats.decision_points == 1,
+            "decision points after delay",
+            1u64,
+            delayed_stats.decision_points
+        );
+
         reactor.advance_time_to(delayed_at);
         events.clear();
         reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         let count = events.iter().count();
         crate::assert_with_log!(count == 1, "delayed event delivered", 1usize, count);
+
+        let final_stats = reactor.chaos_stats();
+        crate::assert_with_log!(
+            final_stats.delays == 1,
+            "final delay count",
+            1u64,
+            final_stats.delays
+        );
+        crate::assert_with_log!(
+            final_stats.decision_points == 2,
+            "decision points after delivery",
+            2u64,
+            final_stats.decision_points
+        );
         crate::test_complete!("io_chaos_delays_events");
     }
 
@@ -1684,18 +1741,8 @@ mod tests {
         let ready_b = events_b.iter().next().expect("event").ready;
         crate::assert_with_log!(ready_a == ready_b, "ready matches", ready_b, ready_a);
 
-        let last_a = reactor_a
-            .inner
-            .lock()
-            .chaos
-            .as_ref()
-            .and_then(|chaos| chaos.last_io_error_kind);
-        let last_b = reactor_b
-            .inner
-            .lock()
-            .chaos
-            .as_ref()
-            .and_then(|chaos| chaos.last_io_error_kind);
+        let last_a = reactor_a.last_io_error_kind();
+        let last_b = reactor_b.last_io_error_kind();
         crate::assert_with_log!(last_a == last_b, "last error kind", last_b, last_a);
         crate::test_complete!("io_chaos_is_deterministic_with_same_seed");
     }

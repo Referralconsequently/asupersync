@@ -665,6 +665,8 @@ pub struct LabRuntime {
     chaos_rng: Option<ChaosRng>,
     /// Statistics about chaos injections.
     chaos_stats: ChaosStats,
+    /// Reactor chaos statistics already folded into `chaos_stats`.
+    seen_reactor_chaos_stats: ChaosStats,
     /// Replay recorder for deterministic trace capture.
     replay_recorder: TraceRecorder,
     /// Optional deadline monitor for warning callbacks.
@@ -723,6 +725,7 @@ impl LabRuntime {
             steps: 0,
             chaos_rng,
             chaos_stats: ChaosStats::new(),
+            seen_reactor_chaos_stats: ChaosStats::new(),
             replay_recorder,
             deadline_monitor: None,
             oracles: OracleSuite::new(),
@@ -772,7 +775,7 @@ impl LabRuntime {
         crate::trace::dpor::detect_hb_races(&self.state.trace.snapshot())
     }
 
-    /// Returns a reference to the chaos statistics.
+    /// Returns aggregated chaos statistics for both task-side and reactor-side injection.
     #[must_use]
     pub fn chaos_stats(&self) -> &ChaosStats {
         &self.chaos_stats
@@ -1708,6 +1711,7 @@ impl LabRuntime {
                 "lab runtime io_driver poll failed"
             );
         }
+        self.sync_reactor_chaos_stats();
     }
 
     /// Injects chaos before polling a task.
@@ -1783,7 +1787,32 @@ impl LabRuntime {
         if let Some(count) = wakeup_count {
             self.chaos_stats.record_wakeup_storm(count as u64);
             self.inject_spurious_wakes(task_id, priority, count);
+        } else {
+            self.chaos_stats.record_no_injection();
         }
+    }
+
+    fn sync_reactor_chaos_stats(&mut self) {
+        let current = self.lab_reactor.chaos_stats();
+        let previous = &self.seen_reactor_chaos_stats;
+        let delta = ChaosStats {
+            cancellations: current.cancellations.saturating_sub(previous.cancellations),
+            delays: current.delays.saturating_sub(previous.delays),
+            total_delay: current.total_delay.saturating_sub(previous.total_delay),
+            io_errors: current.io_errors.saturating_sub(previous.io_errors),
+            wakeup_storms: current.wakeup_storms.saturating_sub(previous.wakeup_storms),
+            spurious_wakeups: current
+                .spurious_wakeups
+                .saturating_sub(previous.spurious_wakeups),
+            budget_exhaustions: current
+                .budget_exhaustions
+                .saturating_sub(previous.budget_exhaustions),
+            decision_points: current
+                .decision_points
+                .saturating_sub(previous.decision_points),
+        };
+        self.chaos_stats.merge(&delta);
+        self.seen_reactor_chaos_stats = current;
     }
 
     fn reschedule_after_chaos_skip(&self, task_id: TaskId) {
@@ -2426,6 +2455,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lab::chaos::ChaosConfig;
     use crate::record::TaskRecord;
     use crate::record::{ObligationAbortReason, ObligationKind};
     use crate::runtime::deadline_monitor::{AdaptiveDeadlineConfig, WarningReason};
@@ -2564,6 +2594,91 @@ mod tests {
         );
         crate::assert_with_log!(saw_ready, "io ready trace recorded", true, saw_ready);
         crate::test_complete!("lab_runtime_records_io_ready_trace");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lab_runtime_chaos_stats_include_reactor_io_error_injections() {
+        init_test("lab_runtime_chaos_stats_include_reactor_io_error_injections");
+
+        let config = LabConfig::new(7).with_chaos(
+            ChaosConfig::new(7)
+                .with_io_error_probability(1.0)
+                .with_io_error_kinds(vec![std::io::ErrorKind::TimedOut]),
+        );
+        let mut runtime = LabRuntime::new(config);
+        let handle = runtime.state.io_driver_handle().expect("io driver");
+        let waker = noop_waker();
+        let source = TestFdSource;
+
+        let registration = handle
+            .register(&source, Interest::READABLE, waker)
+            .expect("register source");
+        let token = registration.token();
+
+        runtime
+            .lab_reactor()
+            .inject_event(token, Event::readable(token), Duration::ZERO);
+        runtime.step_for_test();
+
+        let stats = runtime.chaos_stats();
+        crate::assert_with_log!(
+            stats.io_errors == 1,
+            "io errors aggregated",
+            1u64,
+            stats.io_errors
+        );
+        crate::assert_with_log!(
+            stats.decision_points == 1,
+            "reactor decision points aggregated",
+            1u64,
+            stats.decision_points
+        );
+        crate::assert_with_log!(
+            runtime.lab_reactor().last_io_error_kind() == Some(std::io::ErrorKind::TimedOut),
+            "reactor last error kind surfaced",
+            Some(std::io::ErrorKind::TimedOut),
+            runtime.lab_reactor().last_io_error_kind()
+        );
+
+        crate::test_complete!("lab_runtime_chaos_stats_include_reactor_io_error_injections");
+    }
+
+    #[test]
+    fn pending_task_without_wakeup_storm_still_counts_chaos_decision_point() {
+        init_test("pending_task_without_wakeup_storm_still_counts_chaos_decision_point");
+
+        let config =
+            LabConfig::new(99).with_chaos(ChaosConfig::new(99).with_wakeup_storm_probability(0.0));
+        let mut runtime = LabRuntime::new(config);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {
+                std::future::pending::<()>().await;
+            })
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+
+        runtime.step_for_test();
+
+        let stats = runtime.chaos_stats();
+        crate::assert_with_log!(
+            stats.decision_points == 1,
+            "pending-task decision point counted",
+            1u64,
+            stats.decision_points
+        );
+        crate::assert_with_log!(
+            stats.wakeup_storms == 0,
+            "no wakeup storm recorded",
+            0u64,
+            stats.wakeup_storms
+        );
+
+        crate::test_complete!(
+            "pending_task_without_wakeup_storm_still_counts_chaos_decision_point"
+        );
     }
 
     #[test]
