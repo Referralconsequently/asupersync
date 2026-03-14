@@ -1547,7 +1547,7 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
     if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
-        if src_a.len() < 32 && src_b.len() < 32 {
+        if src_a.len().min(src_b.len()) < 32 {
             (dispatch.add_slice)(dst_a, src_a);
             (dispatch.add_slice)(dst_b, src_b);
             return;
@@ -1562,7 +1562,7 @@ pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
     if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
-        if src_a.len() < 16 && src_b.len() < 16 {
+        if src_a.len().min(src_b.len()) < 16 {
             (dispatch.add_slice)(dst_a, src_a);
             (dispatch.add_slice)(dst_b, src_b);
             return;
@@ -2018,8 +2018,12 @@ pub fn gf256_addmul_slices2(
     }
     let dispatch = dispatch();
     if c == Gf256::ONE {
-        (dispatch.add_slice)(dst_a, src_a);
-        (dispatch.add_slice)(dst_b, src_b);
+        if should_use_dual_addmul_fused(dst_a.len(), dst_b.len()) {
+            gf256_add_slices2(dst_a, src_a, dst_b, src_b);
+        } else {
+            (dispatch.add_slice)(dst_a, src_a);
+            (dispatch.add_slice)(dst_b, src_b);
+        }
         return;
     }
     if !should_use_dual_addmul_fused(dst_a.len(), dst_b.len()) {
@@ -3229,6 +3233,44 @@ mod tests {
         assert_eq!(accum_right, expected_right, "{context}");
     }
 
+    #[test]
+    fn addmul_slices2_with_one_matches_two_independent_add_slice_calls() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        for &(len_a, len_b, scenario) in &[
+            (7usize, 95usize, "left-short-tiny"),
+            (95usize, 31usize, "right-short-avx2-window"),
+            (79usize, 149usize, "wide-fused-window"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "addmul_slices2_with_one_matches_two_independent_add_slice_calls",
+                replay_ref,
+            );
+
+            let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(13)) as u8).collect();
+            let src_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(17)) as u8).collect();
+            let mut accum_left: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(19)) as u8).collect();
+            let mut accum_right: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(23)) as u8).collect();
+            let mut expected_left = accum_left.clone();
+            let mut expected_right = accum_right.clone();
+
+            gf256_addmul_slices2(
+                &mut accum_left,
+                &src_a,
+                &mut accum_right,
+                &src_b,
+                Gf256::ONE,
+            );
+            gf256_add_slice(&mut expected_left, &src_a);
+            gf256_add_slice(&mut expected_right, &src_b);
+
+            assert_eq!(accum_left, expected_left, "{scenario}: {context}");
+            assert_eq!(accum_right, expected_right, "{scenario}: {context}");
+        }
+    }
+
     #[cfg(all(
         feature = "simd-intrinsics",
         any(target_arch = "x86", target_arch = "x86_64")
@@ -3525,6 +3567,39 @@ mod tests {
 
         assert_eq!(accum_left, expected_left, "{context}");
         assert_eq!(accum_right, expected_right, "{context}");
+    }
+
+    #[test]
+    fn add_slices2_shorter_lane_below_simd_width_matches_two_independent_add_slice_calls() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        for &(len_a, len_b, scenario) in &[
+            (7usize, 95usize, "left-short-tiny"),
+            (95usize, 7usize, "right-short-tiny"),
+            (31usize, 95usize, "left-short-avx2-window"),
+            (95usize, 31usize, "right-short-avx2-window"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "add_slices2_shorter_lane_below_simd_width_matches_two_independent_add_slice_calls",
+                replay_ref,
+            );
+
+            let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(3)) as u8).collect();
+            let src_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(5)) as u8).collect();
+            let mut accum_left: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(7)) as u8).collect();
+            let mut accum_right: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(11)) as u8).collect();
+            let mut expected_left = accum_left.clone();
+            let mut expected_right = accum_right.clone();
+
+            gf256_add_slices2(&mut accum_left, &src_a, &mut accum_right, &src_b);
+            gf256_add_slice(&mut expected_left, &src_a);
+            gf256_add_slice(&mut expected_right, &src_b);
+
+            assert_eq!(accum_left, expected_left, "{scenario}: {context}");
+            assert_eq!(accum_right, expected_right, "{scenario}: {context}");
+        }
     }
 
     #[test]

@@ -368,6 +368,31 @@ fn validate_gf256_bit_exactness(scenario: &Gf256BenchScenario, src: &[u8], c_val
         addmul_right_actual, addmul_right_expected,
         "{addmul2_ctx} mismatch on lane_b"
     );
+
+    // Validate the c==1 addmul fast path against sequential add_slice calls.
+    let mut addmul_one_left_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_2001);
+    let mut addmul_one_right_actual =
+        deterministic_bytes(scenario.len, scenario.seed ^ 0xBEEF_2002);
+    let mut addmul_one_left_expected = addmul_one_left_actual.clone();
+    let mut addmul_one_right_expected = addmul_one_right_actual.clone();
+    gf256_addmul_slices2(
+        &mut addmul_one_left_actual,
+        src,
+        &mut addmul_one_right_actual,
+        &src2,
+        Gf256::ONE,
+    );
+    gf256_add_slice(&mut addmul_one_left_expected, src);
+    gf256_add_slice(&mut addmul_one_right_expected, &src2);
+    let addmul_one_ctx = gf256_bench_context(scenario, "addmul_slices2_c1_bit_exact");
+    assert_eq!(
+        addmul_one_left_actual, addmul_one_left_expected,
+        "{addmul_one_ctx} mismatch on lane_a"
+    );
+    assert_eq!(
+        addmul_one_right_actual, addmul_one_right_expected,
+        "{addmul_one_ctx} mismatch on lane_b"
+    );
 }
 
 fn gf256_scenarios() -> [Gf256BenchScenario; 5] {
@@ -695,6 +720,40 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                         std::hint::black_box(&mut dst_b),
                         std::hint::black_box(&src_b),
                         std::hint::black_box(c_val),
+                    );
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("addmul_slices2_c1_auto", &label),
+            &scenario,
+            |b, _| {
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFE_C001);
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_0303);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0404);
+                b.iter(|| {
+                    gf256_addmul_slices2(
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(&src),
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
+                        std::hint::black_box(Gf256::ONE),
+                    );
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("addmul_slices2_c1_sequential", &label),
+            &scenario,
+            |b, _| {
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFE_C001);
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_0303);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0404);
+                b.iter(|| {
+                    gf256_add_slice(std::hint::black_box(&mut dst_a), std::hint::black_box(&src));
+                    gf256_add_slice(
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
                     );
                 });
             },
