@@ -319,6 +319,10 @@ impl RegionSnapshot {
         let metadata_len = cursor.read_u32()?;
         let metadata = cursor.read_exact(metadata_len as usize)?.to_vec();
 
+        if cursor.remaining() != 0 {
+            return Err(SnapshotError::TrailingBytes(cursor.remaining()));
+        }
+
         Ok(Self {
             region_id,
             state,
@@ -397,6 +401,8 @@ pub enum SnapshotError {
     InvalidString,
     /// Invalid optional/presence marker (must be 0 or 1).
     InvalidPresenceFlag(u8),
+    /// Extra bytes remained after decoding a supposedly complete snapshot.
+    TrailingBytes(usize),
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -409,6 +415,9 @@ impl std::fmt::Display for SnapshotError {
             Self::InvalidString => write!(f, "invalid UTF-8 in snapshot"),
             Self::InvalidPresenceFlag(flag) => {
                 write!(f, "invalid presence flag: {flag} (expected 0 or 1)")
+            }
+            Self::TrailingBytes(count) => {
+                write!(f, "snapshot contains {count} trailing byte(s)")
             }
         }
     }
@@ -771,6 +780,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rejects_trailing_bytes() {
+        let mut bytes = create_test_snapshot().to_bytes();
+        bytes.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+
+        let result = RegionSnapshot::from_bytes(&bytes);
+        assert_eq!(result.unwrap_err(), SnapshotError::TrailingBytes(3));
+    }
+
+    #[test]
     fn snapshot_huge_task_count_with_truncated_payload_returns_eof() {
         // Corrupt task_count in an otherwise valid header to emulate a crafted
         // payload that claims an enormous number of tasks but provides no body.
@@ -963,6 +981,9 @@ mod tests {
 
         let err = SnapshotError::InvalidPresenceFlag(7);
         assert!(err.to_string().contains("invalid presence flag"));
+
+        let err = SnapshotError::TrailingBytes(3);
+        assert!(err.to_string().contains("trailing byte"));
     }
 
     #[test]
@@ -1055,6 +1076,7 @@ mod tests {
             SnapshotError::UnexpectedEof,
             SnapshotError::InvalidString,
             SnapshotError::InvalidPresenceFlag(2),
+            SnapshotError::TrailingBytes(1),
         ];
         for err in &errors {
             let dbg = format!("{err:?}");
