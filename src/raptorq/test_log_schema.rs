@@ -522,8 +522,11 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     }
 
     // Seed must be present and numeric
-    if value_missing_or_null(&value, "seed") {
-        violations.push("missing required field: seed".to_string());
+    match value.get("seed") {
+        Some(seed) if seed.as_u64().is_some() => {}
+        Some(seed) if seed.is_null() => violations.push("missing required field: seed".to_string()),
+        Some(_) => violations.push("seed must be an unsigned integer".to_string()),
+        None => violations.push("missing required field: seed".to_string()),
     }
 
     // Repro command must be present and use rch like the E2E contract.
@@ -553,29 +556,39 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     }
 
     if let Some(decode_stats) = value.get("decode_stats") {
-        for field in &[
-            "k",
-            "loss_pct",
-            "dropped",
-            "peeled",
-            "inactivated",
-            "gauss_ops",
-            "pivots",
-            "peel_queue_pushes",
-            "peel_queue_pops",
-            "peel_frontier_peak",
-            "dense_core_rows",
-            "dense_core_cols",
-            "dense_core_dropped_rows",
-            "fallback_reason",
-            "hard_regime_activated",
-            "hard_regime_branch",
-            "hard_regime_fallbacks",
-            "conservative_fallback_reason",
-        ] {
-            if value_missing_or_null(decode_stats, field) {
-                violations.push(format!("decode_stats.{field} is missing or null"));
+        if decode_stats.is_object() {
+            for field in &[
+                "k",
+                "loss_pct",
+                "dropped",
+                "peeled",
+                "inactivated",
+                "gauss_ops",
+                "pivots",
+                "peel_queue_pushes",
+                "peel_queue_pops",
+                "peel_frontier_peak",
+                "dense_core_rows",
+                "dense_core_cols",
+                "dense_core_dropped_rows",
+                "hard_regime_fallbacks",
+            ] {
+                validate_decode_stats_unsigned_integer_field(decode_stats, field, &mut violations);
             }
+            for field in &[
+                "fallback_reason",
+                "hard_regime_branch",
+                "conservative_fallback_reason",
+            ] {
+                validate_decode_stats_string_field(decode_stats, field, &mut violations);
+            }
+            validate_decode_stats_bool_field(
+                decode_stats,
+                "hard_regime_activated",
+                &mut violations,
+            );
+        } else {
+            violations.push("decode_stats must be an object".to_string());
         }
     }
 
@@ -585,6 +598,51 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
 /// Helper: check if a field is missing or null in a JSON value.
 fn value_missing_or_null(parent: &serde_json::Value, field: &str) -> bool {
     parent.get(field).is_none_or(serde_json::Value::is_null)
+}
+
+fn validate_decode_stats_unsigned_integer_field(
+    decode_stats: &serde_json::Value,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    match decode_stats.get(field) {
+        Some(value) if value.as_u64().is_some() => {}
+        Some(value) if value.is_null() => {
+            violations.push(format!("decode_stats.{field} is missing or null"));
+        }
+        Some(_) => violations.push(format!("decode_stats.{field} must be an unsigned integer")),
+        None => violations.push(format!("decode_stats.{field} is missing or null")),
+    }
+}
+
+fn validate_decode_stats_string_field(
+    decode_stats: &serde_json::Value,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    match decode_stats.get(field) {
+        Some(value) if value.as_str().is_some() => {}
+        Some(value) if value.is_null() => {
+            violations.push(format!("decode_stats.{field} is missing or null"));
+        }
+        Some(_) => violations.push(format!("decode_stats.{field} must be a string")),
+        None => violations.push(format!("decode_stats.{field} is missing or null")),
+    }
+}
+
+fn validate_decode_stats_bool_field(
+    decode_stats: &serde_json::Value,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    match decode_stats.get(field) {
+        Some(value) if value.is_boolean() => {}
+        Some(value) if value.is_null() => {
+            violations.push(format!("decode_stats.{field} is missing or null"));
+        }
+        Some(_) => violations.push(format!("decode_stats.{field} must be a boolean")),
+        None => violations.push(format!("decode_stats.{field} is missing or null")),
+    }
 }
 
 // ============================================================================
@@ -794,6 +852,108 @@ mod tests {
                 .iter()
                 .any(|v| v.contains("unrecognized outcome")),
             "should flag unrecognized outcome"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_non_numeric_seed() {
+        let mut entry = serde_json::to_value(UnitLogEntry::new(
+            "RQ-U-SEED-TYPE",
+            42,
+            "k=8,symbol_size=32",
+            "replay:rq-u-seed-type-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_non_numeric_seed -- --nocapture",
+            "ok",
+        ))
+        .expect("serialize to value");
+        entry["seed"] = json!("forty-two");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("seed must be an unsigned integer")),
+            "should reject non-numeric seed types: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_non_object_decode_stats() {
+        let mut entry = serde_json::to_value(UnitLogEntry::new(
+            "RQ-U-DECODE-STATS-OBJECT",
+            42,
+            "k=8,symbol_size=32",
+            "replay:rq-u-decode-stats-object-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_non_object_decode_stats -- --nocapture",
+            "ok",
+        ))
+        .expect("serialize to value");
+        entry["decode_stats"] = json!(["not", "an", "object"]);
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("decode_stats must be an object")),
+            "should reject non-object decode_stats payloads: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_type_invalid_decode_stats_fields() {
+        let mut entry = serde_json::to_value(
+            UnitLogEntry::new(
+                "RQ-U-DECODE-STATS-TYPES",
+                42,
+                "k=8,symbol_size=32",
+                "replay:rq-u-decode-stats-types-v1",
+                "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_type_invalid_decode_stats_fields -- --nocapture",
+                "decode_failure",
+            )
+            .with_decode_stats(UnitDecodeStats {
+                k: 8,
+                loss_pct: 25,
+                dropped: 2,
+                peeled: 6,
+                inactivated: 1,
+                gauss_ops: 12,
+                pivots: 4,
+                peel_queue_pushes: 9,
+                peel_queue_pops: 9,
+                peel_frontier_peak: 3,
+                dense_core_rows: 4,
+                dense_core_cols: 4,
+                dense_core_dropped_rows: 1,
+                fallback_reason: String::new(),
+                hard_regime_activated: false,
+                hard_regime_branch: "markowitz".to_string(),
+                hard_regime_fallbacks: 0,
+                conservative_fallback_reason: String::new(),
+            }),
+        )
+        .expect("serialize to value");
+        entry["decode_stats"]["k"] = json!("eight");
+        entry["decode_stats"]["hard_regime_activated"] = json!("false");
+        entry["decode_stats"]["fallback_reason"] = json!(7);
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("decode_stats.k must be an unsigned integer")),
+            "should reject non-numeric decode_stats.k: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("decode_stats.hard_regime_activated must be a boolean")),
+            "should reject non-boolean hard_regime_activated: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("decode_stats.fallback_reason must be a string")),
+            "should reject non-string fallback_reason: {violations:?}"
         );
     }
 

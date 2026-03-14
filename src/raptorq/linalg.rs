@@ -217,15 +217,41 @@ pub struct SparseRow {
 impl SparseRow {
     /// Creates a new sparse row from entries.
     ///
-    /// Entries should be sorted by index and have unique indices.
-    /// Zero-valued entries are filtered out.
+    /// Entries may be unsorted and may contain duplicates; duplicate indices
+    /// are canonicalized by GF(256) addition and zero-valued results are
+    /// removed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any entry index is out of bounds for `len`.
     #[must_use]
     pub fn new(entries: Vec<(usize, Gf256)>, len: usize) -> Self {
-        // Filter zeros and ensure sorted
-        let mut filtered: Vec<_> = entries.into_iter().filter(|(_, v)| !v.is_zero()).collect();
+        let mut filtered: Vec<_> = entries
+            .into_iter()
+            .filter_map(|(index, value)| {
+                assert!(
+                    index < len,
+                    "sparse row index out of range: {index} >= {len}"
+                );
+                (!value.is_zero()).then_some((index, value))
+            })
+            .collect();
         filtered.sort_by_key(|(i, _)| *i);
+
+        let mut canonical: Vec<(usize, Gf256)> = Vec::with_capacity(filtered.len());
+        for (index, value) in filtered {
+            match canonical.last_mut() {
+                Some((last_index, last_value)) if *last_index == index => {
+                    *last_value += value;
+                    if last_value.is_zero() {
+                        canonical.pop();
+                    }
+                }
+                _ => canonical.push((index, value)),
+            }
+        }
         Self {
-            entries: filtered,
+            entries: canonical,
             len,
         }
     }
@@ -247,6 +273,10 @@ impl SparseRow {
         if value.is_zero() {
             Self::zeros(len)
         } else {
+            assert!(
+                index < len,
+                "sparse row index out of range: {index} >= {len}"
+            );
             Self {
                 entries: vec![(index, value)],
                 len,
@@ -1141,6 +1171,36 @@ mod tests {
         let scaled = row.scale(c);
         assert_eq!(scaled.get(0), Gf256::new(2) * c);
         assert_eq!(scaled.get(2), Gf256::new(3) * c);
+    }
+
+    #[test]
+    fn sparse_row_new_canonicalizes_duplicate_indices() {
+        let row = SparseRow::new(
+            vec![
+                (3, Gf256::new(7)),
+                (1, Gf256::new(5)),
+                (1, Gf256::new(5)),
+                (1, Gf256::new(3)),
+            ],
+            5,
+        );
+
+        assert_eq!(row.nonzero_count(), 2);
+        assert_eq!(row.get(1), Gf256::new(3));
+        assert_eq!(row.get(3), Gf256::new(7));
+        assert_eq!(row.to_dense().as_slice(), &[0, 3, 0, 7, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "sparse row index out of range")]
+    fn sparse_row_new_rejects_out_of_range_indices() {
+        let _ = SparseRow::new(vec![(4, Gf256::new(1))], 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "sparse row index out of range")]
+    fn sparse_row_singleton_rejects_out_of_range_indices() {
+        let _ = SparseRow::singleton(4, Gf256::new(1), 4);
     }
 
     // -- Slice operations --

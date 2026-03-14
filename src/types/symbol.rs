@@ -430,12 +430,12 @@ impl ObjectParams {
 
     /// Calculates the minimum number of symbols needed for decoding.
     ///
-    /// For RaptorQ, you need at least K symbols to decode (where K is
-    /// the number of source symbols), though having slightly more
-    /// improves decoding probability.
+    /// `ObjectParams` describes the entire encoded object, so the minimum
+    /// decode threshold is the total source-symbol count across all source
+    /// blocks, not the per-block `K`.
     #[must_use]
     pub const fn min_symbols_for_decode(&self) -> u32 {
-        self.symbols_per_block as u32
+        self.total_source_symbols()
     }
 
     /// Calculates the total number of source symbols across all blocks.
@@ -600,6 +600,7 @@ mod tests {
             64, // 64 symbols per block
         );
 
+        assert_eq!(params.min_symbols_for_decode(), 256);
         assert_eq!(params.total_source_symbols(), 256);
     }
 
