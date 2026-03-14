@@ -277,6 +277,31 @@ impl ObligationLedger {
         duration
     }
 
+    /// Aborts an obligation by ID.
+    ///
+    /// This is intended for external drain and recovery paths that enumerate
+    /// pending obligations by ID after the original linear token is no longer
+    /// available to the caller.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the obligation was already resolved or does not exist.
+    pub fn abort_by_id(
+        &mut self,
+        id: ObligationId,
+        now: Time,
+        reason: ObligationAbortReason,
+    ) -> u64 {
+        let record = self
+            .obligations
+            .get_mut(&id)
+            .expect("obligation not found in ledger");
+        let duration = record.abort(now, reason);
+        self.stats.total_aborted += 1;
+        self.stats.pending = self.stats.pending.saturating_sub(1);
+        duration
+    }
+
     /// Marks an obligation as leaked (runtime detected the holder completed
     /// without resolving).
     ///
@@ -324,7 +349,11 @@ impl ObligationLedger {
             .count()
     }
 
-    /// Returns IDs of all pending obligations for a region (for cancellation drain).
+    /// Returns IDs of all pending obligations for a region.
+    ///
+    /// Callers performing cancellation drain can feed the returned IDs into
+    /// [`abort_by_id`](Self::abort_by_id) to resolve them deterministically
+    /// without needing to recover the original linear tokens.
     #[must_use]
     pub fn pending_ids_for_region(&self, region: RegionId) -> Vec<ObligationId> {
         self.obligations
@@ -407,9 +436,10 @@ impl ObligationLedger {
     ///
     /// # Panics
     ///
-    /// Panics if any obligations are still pending. Reset is only valid after
-    /// all live obligations have reached a terminal state; otherwise it would
-    /// silently hide active obligations from pending and leak accounting.
+    /// Panics if any obligations are still pending or leaked. Reset is only
+    /// valid once every obligation has been resolved cleanly (committed or
+    /// aborted); otherwise it would silently hide active obligations or erase
+    /// leak diagnostics.
     ///
     /// The obligation generation counter is intentionally preserved so
     /// post-reset acquisitions continue to get fresh IDs.
@@ -417,6 +447,10 @@ impl ObligationLedger {
         assert!(
             !self.obligations.values().any(ObligationRecord::is_pending),
             "cannot reset obligation ledger with pending obligations"
+        );
+        assert!(
+            !self.obligations.values().any(ObligationRecord::is_leaked),
+            "cannot reset obligation ledger with leaked obligations"
         );
         self.obligations.clear();
         self.stats = LedgerStats::default();
@@ -787,6 +821,52 @@ mod tests {
     }
 
     #[test]
+    fn reset_panics_if_leaked_obligation_exists() {
+        init_test("reset_panics_if_leaked_obligation_exists");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let leaked = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let leaked_id = leaked.id();
+        ledger.mark_leaked(leaked_id, Time::from_nanos(5));
+
+        let reset = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ledger.reset()));
+        crate::assert_with_log!(reset.is_err(), "reset rejected", true, reset.is_err());
+
+        let stats = ledger.stats();
+        crate::assert_with_log!(stats.pending == 0, "pending preserved", 0, stats.pending);
+        crate::assert_with_log!(
+            stats.total_leaked == 1,
+            "leaked preserved",
+            1,
+            stats.total_leaked
+        );
+        crate::assert_with_log!(
+            !stats.is_clean(),
+            "still not clean",
+            false,
+            stats.is_clean()
+        );
+
+        let leaks = ledger.check_leaks();
+        crate::assert_with_log!(
+            !leaks.is_clean(),
+            "leak report still non-clean",
+            false,
+            leaks.is_clean()
+        );
+        crate::assert_with_log!(leaks.leaked.len() == 1, "leak count", 1, leaks.leaked.len());
+        crate::assert_with_log!(
+            leaks.leaked[0].id == leaked_id,
+            "leaked id tracked",
+            leaked_id,
+            leaks.leaked[0].id
+        );
+        crate::test_complete!("reset_panics_if_leaked_obligation_exists");
+    }
+
+    #[test]
     fn reset_does_not_reuse_ids_after_clean_reset() {
         init_test("reset_does_not_reuse_ids_after_clean_reset");
         let mut ledger = ObligationLedger::new();
@@ -951,7 +1031,7 @@ mod tests {
         crate::assert_with_log!(pending_ids.len() == 3, "drain ids", 3, pending_ids.len());
 
         for id in &pending_ids {
-            ledger.mark_leaked(*id, drain_time);
+            ledger.abort_by_id(*id, drain_time, ObligationAbortReason::Cancel);
         }
 
         // Region should now be clean.
@@ -961,11 +1041,18 @@ mod tests {
         let stats = ledger.stats();
         crate::assert_with_log!(stats.pending == 0, "global pending", 0, stats.pending);
         crate::assert_with_log!(
-            stats.total_leaked == 3,
-            "leaked count",
+            stats.total_aborted == 3,
+            "aborted count",
             3,
+            stats.total_aborted
+        );
+        crate::assert_with_log!(
+            stats.total_leaked == 0,
+            "leaked count",
+            0,
             stats.total_leaked
         );
+        crate::assert_with_log!(stats.is_clean(), "ledger clean", true, stats.is_clean());
         crate::test_complete!("cancel_drain_aborts_all_region_obligations");
     }
 
@@ -1059,11 +1146,14 @@ mod tests {
         // Drain in the deterministic order returned by pending_ids_for_region.
         let drain_time = Time::from_nanos(100);
         for id in &ids {
-            ledger.mark_leaked(*id, drain_time);
+            ledger.abort_by_id(*id, drain_time, ObligationAbortReason::Cancel);
         }
 
         let is_clean = ledger.is_region_clean(region);
         crate::assert_with_log!(is_clean, "clean after ordered drain", true, is_clean);
+        let stats = ledger.stats();
+        crate::assert_with_log!(stats.total_aborted == 3, "aborted", 3, stats.total_aborted);
+        crate::assert_with_log!(stats.total_leaked == 0, "leaked", 0, stats.total_leaked);
         crate::test_complete!("drain_ordering_is_deterministic");
     }
 
@@ -1122,7 +1212,48 @@ mod tests {
             ObligationState::Aborted,
             record.state
         );
+        crate::assert_with_log!(
+            record.abort_reason == Some(ObligationAbortReason::Cancel),
+            "abort reason",
+            Some(ObligationAbortReason::Cancel),
+            record.abort_reason
+        );
         crate::test_complete!("abort_reason_preserved_in_record");
+    }
+
+    #[test]
+    fn abort_by_id_supports_cancel_drain_without_leak_accounting() {
+        init_test("abort_by_id_supports_cancel_drain_without_leak_accounting");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id = token.id();
+
+        let duration = ledger.abort_by_id(id, Time::from_nanos(25), ObligationAbortReason::Cancel);
+        crate::assert_with_log!(duration == 25, "duration", 25, duration);
+
+        let record = ledger.get(id).expect("record exists");
+        crate::assert_with_log!(
+            record.state == ObligationState::Aborted,
+            "state aborted",
+            ObligationState::Aborted,
+            record.state
+        );
+        crate::assert_with_log!(
+            record.abort_reason == Some(ObligationAbortReason::Cancel),
+            "abort reason",
+            Some(ObligationAbortReason::Cancel),
+            record.abort_reason
+        );
+
+        let stats = ledger.stats();
+        crate::assert_with_log!(stats.total_aborted == 1, "aborted", 1, stats.total_aborted);
+        crate::assert_with_log!(stats.total_leaked == 0, "leaked", 0, stats.total_leaked);
+        crate::assert_with_log!(stats.pending == 0, "pending", 0, stats.pending);
+        crate::assert_with_log!(stats.is_clean(), "clean", true, stats.is_clean());
+        crate::test_complete!("abort_by_id_supports_cancel_drain_without_leak_accounting");
     }
 
     // =========================================================================
