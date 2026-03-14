@@ -1006,20 +1006,18 @@ impl ResponseBuilder {
     }
 }
 
-/// Percent-encode a byte that is not unreserved per RFC 3986.
-fn percent_encode_byte(byte: u8) -> String {
-    format!("%{byte:02X}")
-}
-
 /// Percent-encode a string for use in URL query parameters.
 fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+    let mut out = String::with_capacity(input.len() + input.len() / 4);
     for byte in input.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(byte as char);
             }
-            _ => out.push_str(&percent_encode_byte(byte)),
+            _ => {
+                use std::fmt::Write;
+                write!(out, "%{byte:02X}").expect("write to string shouldn't fail");
+            }
         }
     }
     out
