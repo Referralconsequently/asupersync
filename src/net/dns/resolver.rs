@@ -30,6 +30,9 @@ use crate::types::Time;
 #[derive(Debug, Clone)]
 pub struct ResolverConfig {
     /// Nameservers to use (empty = use system resolvers).
+    ///
+    /// Phase 0 lookup implementation uses `std::net::ToSocketAddrs`, so
+    /// explicit nameservers are not yet supported and fail closed.
     pub nameservers: Vec<SocketAddr>,
     /// Enable caching.
     pub cache_enabled: bool,
@@ -158,6 +161,17 @@ impl Resolver {
     /// Returns addresses suitable for connecting to the host.
     /// Results are cached according to TTL.
     pub async fn lookup_ip(&self, host: &str) -> Result<LookupIp, DnsError> {
+        // Literal IPs do not require resolver selection.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(LookupIp::new(vec![ip], Duration::from_secs(0)));
+        }
+
+        if !self.config.nameservers.is_empty() {
+            return Err(DnsError::NotImplemented(
+                "custom nameservers in Phase 0 resolver",
+            ));
+        }
+
         // Check cache first
         if self.config.cache_enabled {
             if let Some(cached) = self.cache.get_ip(host) {
@@ -182,11 +196,6 @@ impl Resolver {
     /// This function is cancel-safe. If the future is dropped, the underlying
     /// DNS query continues on the blocking pool but the result is discarded.
     async fn do_lookup_ip(&self, host: &str) -> Result<LookupIp, DnsError> {
-        // If it's already an IP address, return it directly
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            return Ok(LookupIp::new(vec![ip], Duration::from_secs(0)));
-        }
-
         // Validate hostname
         if host.is_empty() || host.len() > 253 {
             return Err(DnsError::InvalidHost(host.to_string()));
@@ -649,6 +658,51 @@ mod tests {
         let empty = cloudflare.nameservers.is_empty();
         crate::assert_with_log!(!empty, "cloudflare nameservers", false, empty);
         crate::test_complete!("resolver_config_presets");
+    }
+
+    #[test]
+    fn resolver_custom_nameservers_fail_closed() {
+        init_test("resolver_custom_nameservers_fail_closed");
+
+        let resolver = Resolver::with_config(ResolverConfig::google());
+        let result = future::block_on(async { resolver.lookup_ip("localhost").await });
+        let not_implemented = matches!(
+            result,
+            Err(DnsError::NotImplemented(
+                "custom nameservers in Phase 0 resolver"
+            ))
+        );
+        crate::assert_with_log!(
+            not_implemented,
+            "custom nameserver path rejected until explicit resolver transport exists",
+            true,
+            not_implemented
+        );
+
+        crate::test_complete!("resolver_custom_nameservers_fail_closed");
+    }
+
+    #[test]
+    fn resolver_custom_nameservers_still_allow_ip_passthrough() {
+        init_test("resolver_custom_nameservers_still_allow_ip_passthrough");
+
+        let resolver = Resolver::with_config(ResolverConfig::google());
+        let result = future::block_on(async { resolver.lookup_ip("127.0.0.1").await });
+        crate::assert_with_log!(
+            result.is_ok(),
+            "literal IP passthrough",
+            true,
+            result.is_ok()
+        );
+
+        let lookup = result.unwrap();
+        let len = lookup.len();
+        crate::assert_with_log!(len == 1, "len", 1, len);
+        let first = lookup.first().unwrap();
+        let expected = "127.0.0.1".parse::<IpAddr>().unwrap();
+        crate::assert_with_log!(first == expected, "addr", expected, first);
+
+        crate::test_complete!("resolver_custom_nameservers_still_allow_ip_passthrough");
     }
 
     #[test]
