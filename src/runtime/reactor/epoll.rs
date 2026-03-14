@@ -347,28 +347,39 @@ impl Reactor for EpollReactor {
         // interpreted correctly (target closed vs reactor poller invalid).
         let fd_still_valid = unsafe { fcntl(info.raw_fd, F_GETFD) } != -1;
 
-        // Remove from epoll. If the fd was already closed or removed by the kernel,
-        // treat it as already deregistered from reactor bookkeeping perspective.
-        let result = match self.poller.delete(borrowed_fd) {
-            Ok(()) => Ok(()),
+        // Remove from epoll. Only drop bookkeeping once the source is
+        // definitely gone from the kernel or the target fd itself is already
+        // closed. Keeping the entry on hard failures preserves accurate retry
+        // semantics for Registration::deregister().
+        match self.poller.delete(borrowed_fd) {
+            Ok(()) => {
+                if let Some(info) = state.tokens.remove(&token) {
+                    state.fds.remove(&info.raw_fd);
+                }
+                drop(state);
+                Ok(())
+            }
             Err(err) => match err.raw_os_error() {
-                Some(libc::ENOENT) => Ok(()),
-                // Treat EBADF as benign only when the target fd itself is closed.
-                Some(libc::EBADF) if !fd_still_valid => Ok(()),
-                _ => Err(err),
+                Some(libc::ENOENT) => {
+                    if let Some(info) = state.tokens.remove(&token) {
+                        state.fds.remove(&info.raw_fd);
+                    }
+                    drop(state);
+                    Ok(())
+                }
+                Some(libc::EBADF) if !fd_still_valid => {
+                    if let Some(info) = state.tokens.remove(&token) {
+                        state.fds.remove(&info.raw_fd);
+                    }
+                    drop(state);
+                    Ok(())
+                }
+                _ => {
+                    drop(state);
+                    Err(err)
+                }
             },
-        };
-
-        // Always clean up bookkeeping so the FD number can be reused.
-        // If the kernel epoll state is out of sync, leaking the map entry
-        // is worse because it permanently blocks any future registration
-        // of this OS-reused FD number.
-        if let Some(info) = state.tokens.remove(&token) {
-            state.fds.remove(&info.raw_fd);
         }
-        drop(state);
-
-        result
     }
 
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
@@ -977,6 +988,81 @@ mod tests {
             reactor.registration_count()
         );
         crate::test_complete!("deregister_closed_fd_is_best_effort");
+    }
+
+    #[test]
+    fn deregister_hard_delete_failure_preserves_bookkeeping_for_retry() {
+        init_test("deregister_hard_delete_failure_preserves_bookkeeping_for_retry");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let token = Token::new(78);
+        let registered_fd = sock1.as_raw_fd();
+        reactor
+            .register(&sock1, token, Interest::READABLE)
+            .expect("register failed");
+
+        let poller_fd = reactor.poller.as_raw_fd();
+        let saved_poller_fd = dup_fd_at_least(poller_fd, FD_REUSE_TEST_MIN_FD);
+        let close_result = unsafe { libc::close(poller_fd) };
+        crate::assert_with_log!(close_result == 0, "close poller fd", 0, close_result);
+
+        let err = reactor
+            .deregister(token)
+            .expect_err("deregister should fail when epoll fd is closed");
+        let errno = err
+            .raw_os_error()
+            .expect("closed poller should preserve errno");
+        crate::assert_with_log!(
+            errno == libc::EBADF,
+            "closed poller reports EBADF",
+            libc::EBADF,
+            errno
+        );
+
+        let state = reactor.state.lock();
+        crate::assert_with_log!(
+            state.tokens.contains_key(&token),
+            "token bookkeeping preserved after hard delete failure",
+            true,
+            state.tokens.contains_key(&token)
+        );
+        crate::assert_with_log!(
+            state.fds.get(&registered_fd) == Some(&token),
+            "fd bookkeeping preserved after hard delete failure",
+            true,
+            state.fds.get(&registered_fd) == Some(&token)
+        );
+        drop(state);
+
+        let restore_result = unsafe { libc::dup2(saved_poller_fd, poller_fd) };
+        crate::assert_with_log!(
+            restore_result == poller_fd,
+            "restore poller fd",
+            poller_fd,
+            restore_result
+        );
+        let close_saved = unsafe { libc::close(saved_poller_fd) };
+        crate::assert_with_log!(close_saved == 0, "close saved poller fd", 0, close_saved);
+
+        reactor
+            .deregister(token)
+            .expect("retry deregister after poller restore failed");
+        let state = reactor.state.lock();
+        crate::assert_with_log!(
+            !state.tokens.contains_key(&token),
+            "token bookkeeping removed after successful retry",
+            false,
+            state.tokens.contains_key(&token)
+        );
+        crate::assert_with_log!(
+            !state.fds.contains_key(&registered_fd),
+            "fd bookkeeping removed after successful retry",
+            true,
+            !state.fds.contains_key(&registered_fd)
+        );
+        drop(state);
+        crate::test_complete!("deregister_hard_delete_failure_preserves_bookkeeping_for_retry");
     }
 
     #[test]

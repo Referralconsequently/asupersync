@@ -274,20 +274,27 @@ impl Reactor for KqueueReactor {
         // interpreted correctly (target closed vs poller invalid).
         let fd_still_valid = unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } != -1;
 
-        // Remove from kqueue
-        let result = match self.poller.delete(&borrowed_fd) {
-            Ok(()) => Ok(()),
+        // Remove from kqueue. Only drop bookkeeping once the source is
+        // definitely gone from the kernel or the target fd itself is already
+        // closed. Keeping the entry on hard failures preserves accurate retry
+        // semantics for Registration::deregister().
+        match self.poller.delete(&borrowed_fd) {
+            Ok(()) => {
+                regs.remove(&token);
+                Ok(())
+            }
             Err(err) => match err.raw_os_error() {
-                Some(libc::ENOENT) => Ok(()),
-                Some(libc::EBADF) if !fd_still_valid => Ok(()),
+                Some(libc::ENOENT) => {
+                    regs.remove(&token);
+                    Ok(())
+                }
+                Some(libc::EBADF) if !fd_still_valid => {
+                    regs.remove(&token);
+                    Ok(())
+                }
                 _ => Err(err),
             },
-        };
-
-        // Always clean up bookkeeping so the FD number can be reused.
-        regs.remove(&token);
-
-        result
+        }
     }
 
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
@@ -750,6 +757,64 @@ mod tests {
             reactor.registration_count()
         );
         crate::test_complete!("kqueue_deregister_closed_fd_is_best_effort");
+    }
+
+    #[test]
+    fn deregister_hard_delete_failure_preserves_bookkeeping_for_retry() {
+        init_test("kqueue_deregister_hard_delete_failure_preserves_bookkeeping_for_retry");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let token = Token::new(78);
+        reactor
+            .register(&sock1, token, Interest::READABLE)
+            .expect("register failed");
+
+        let poller_fd = reactor.poller.as_raw_fd();
+        let saved_poller_fd = dup(poller_fd).expect("dup poller fd failed");
+        let close_result = unsafe { libc::close(poller_fd) };
+        crate::assert_with_log!(close_result == 0, "close poller fd", 0, close_result);
+
+        let err = reactor
+            .deregister(token)
+            .expect_err("deregister should fail when poller fd is closed");
+        let errno = err
+            .raw_os_error()
+            .expect("poller close failure should preserve errno");
+        crate::assert_with_log!(
+            errno == libc::EBADF,
+            "closed poller reports EBADF",
+            libc::EBADF,
+            errno
+        );
+        crate::assert_with_log!(
+            reactor.registration_count() == 1,
+            "registration kept after hard delete failure",
+            1usize,
+            reactor.registration_count()
+        );
+
+        let restore_result = unsafe { libc::dup2(saved_poller_fd, poller_fd) };
+        crate::assert_with_log!(
+            restore_result == poller_fd,
+            "restore poller fd",
+            poller_fd,
+            restore_result
+        );
+        close(saved_poller_fd).expect("close saved poller fd failed");
+
+        reactor
+            .deregister(token)
+            .expect("retry deregister after poller restore failed");
+        crate::assert_with_log!(
+            reactor.registration_count() == 0,
+            "registration removed after successful retry",
+            0usize,
+            reactor.registration_count()
+        );
+        crate::test_complete!(
+            "kqueue_deregister_hard_delete_failure_preserves_bookkeeping_for_retry"
+        );
     }
 
     #[test]
