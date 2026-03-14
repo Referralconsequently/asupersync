@@ -745,8 +745,9 @@ fn suppress_response_body_for_head(resp: &mut Response) {
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
     let had_transfer_encoding = remove_header(resp, "transfer-encoding");
+    let _ = remove_header(resp, "trailer");
 
-    if !has_content_length && (had_transfer_encoding || body_len != 0) {
+    if body_len != 0 || (!has_content_length && had_transfer_encoding) {
         replace_or_insert_header(resp, "Content-Length", body_len.to_string());
     }
 
@@ -892,9 +893,11 @@ mod tests {
             }
 
             self.gated_polls += 1;
+            let written_so_far = self.written.lock().unwrap().clone();
             assert!(
                 self.gated_polls < 8,
-                "request body stayed gated because the server never emitted the expected interim response"
+                "request body stayed gated because the server never emitted the expected interim response; wrote so far: {:?}",
+                String::from_utf8_lossy(&written_so_far)
             );
             cx.waker().wake_by_ref();
             Poll::Pending
@@ -1124,6 +1127,7 @@ mod tests {
     #[test]
     fn suppress_response_body_for_head_replaces_chunked_framing() {
         let mut resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Trailer", "X-Trace")
             .with_header("Transfer-Encoding", "chunked")
             .with_trailer("X-Trace", "abc123");
 
@@ -1131,7 +1135,19 @@ mod tests {
 
         assert!(resp.body.is_empty());
         assert!(resp.trailers.is_empty());
+        assert_eq!(resp.header_value("trailer"), None);
         assert_eq!(resp.header_value("transfer-encoding"), None);
+        assert_eq!(resp.header_value("content-length"), Some("5"));
+    }
+
+    #[test]
+    fn suppress_response_body_for_head_normalizes_stale_content_length() {
+        let mut resp =
+            Response::new(200, "OK", b"hello".to_vec()).with_header("Content-Length", "999");
+
+        suppress_response_body_for_head(&mut resp);
+
+        assert!(resp.body.is_empty());
         assert_eq!(resp.header_value("content-length"), Some("5"));
     }
 
