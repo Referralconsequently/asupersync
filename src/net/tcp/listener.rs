@@ -254,6 +254,9 @@ impl TcpListener {
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
                 Ok(InterestRegistrationMode::FallbackPoll)
             }
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                Ok(InterestRegistrationMode::FallbackPoll)
+            }
             Err(err) => Err(err),
         }
     }

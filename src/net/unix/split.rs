@@ -89,6 +89,26 @@ impl AsyncWrite for WriteHalf<'_> {
         }
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let mut inner = self.inner;
+        match inner.write_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut inner = self.inner;
         match inner.flush() {
@@ -285,6 +305,10 @@ impl UnixStreamInner {
                 crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Ok(())
+            }
             Err(err) => Err(err),
         };
         drop(guard);
@@ -476,13 +500,35 @@ impl AsyncWrite for OwnedWriteHalf {
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(e) = self.inner.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(e));
+                if let Err(err) = self.inner.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
                 }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
         }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let inner: &net::UnixStream = &self.inner.stream;
+        match (&*inner).write_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.inner.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

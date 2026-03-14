@@ -409,6 +409,11 @@ impl UnixStream {
                 crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                drop(registration);
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Ok(())
+            }
             Err(err) => {
                 drop(registration);
                 Err(err)

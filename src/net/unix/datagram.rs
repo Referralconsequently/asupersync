@@ -296,6 +296,10 @@ impl UnixDatagram {
                 crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Ok(())
+            }
             Err(err) => Err(err),
         }
     }
