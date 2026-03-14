@@ -143,6 +143,7 @@ fn stop_named_server(
         let mut guard = named_handle_slot.lock();
         let handle = guard.as_mut().ok_or("counter handle missing at shutdown")?;
         handle.stop();
+        drop(guard);
     }
 
     {
@@ -157,6 +158,7 @@ fn stop_named_server(
     let handle = guard.as_mut().ok_or("counter handle missing at release")?;
     let mut registry_guard = registry.lock();
     handle.release_name(&mut registry_guard, now)?;
+    drop(guard);
 
     Ok(())
 }

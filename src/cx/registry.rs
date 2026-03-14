@@ -2920,6 +2920,32 @@ mod tests {
     }
 
     #[test]
+    fn unregister_owned_and_grant_rejects_stale_lease_identity() {
+        init_test("unregister_owned_and_grant_rejects_stale_lease_identity");
+
+        let mut reg = NameRegistry::new();
+        let mut current = reg
+            .register("svc", tid(1), rid(0), Time::from_secs(10))
+            .unwrap();
+        let mut stale = NameLease::new("svc", tid(1), rid(0), Time::from_secs(5));
+
+        assert_eq!(
+            reg.unregister_owned_and_grant(&stale, Time::from_secs(12)),
+            Err(NameLeaseError::PermissionDenied {
+                name: "svc".to_string(),
+            }),
+        );
+        assert_eq!(reg.whereis("svc"), Some(tid(1)));
+
+        reg.unregister_owned_and_grant(&current, Time::from_secs(12))
+            .unwrap();
+        current.release().unwrap();
+        stale.abort().unwrap();
+
+        crate::test_complete!("unregister_owned_and_grant_rejects_stale_lease_identity");
+    }
+
+    #[test]
     fn collision_wait_expired_waiter_not_granted() {
         init_test("collision_wait_expired_waiter_not_granted");
 

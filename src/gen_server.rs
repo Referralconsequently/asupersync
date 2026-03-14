@@ -2206,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::items_after_statements)]
+    #[allow(clippy::items_after_statements, clippy::too_many_lines)]
     fn gen_server_spawn_inherits_full_child_cx_capabilities() {
         use crate::cx::registry::RegistryHandle;
         use crate::evidence_sink::{CollectorSink, EvidenceSink};
