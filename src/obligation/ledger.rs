@@ -148,6 +148,26 @@ impl Default for ObligationLedger {
 }
 
 impl ObligationLedger {
+    fn record_for_token_mut(&mut self, token: &ObligationToken) -> &mut ObligationRecord {
+        let record = self
+            .obligations
+            .get_mut(&token.id)
+            .expect("obligation not found in ledger");
+        assert_eq!(
+            record.kind, token.kind,
+            "obligation token kind does not match ledger record"
+        );
+        assert_eq!(
+            record.holder, token.holder,
+            "obligation token holder does not match ledger record"
+        );
+        assert_eq!(
+            record.region, token.region,
+            "obligation token region does not match ledger record"
+        );
+        record
+    }
+
     /// Creates an empty ledger.
     #[must_use]
     pub fn new() -> Self {
@@ -229,10 +249,7 @@ impl ObligationLedger {
     /// Panics if the obligation was already resolved or does not exist.
     #[allow(clippy::needless_pass_by_value)] // Token consumed intentionally to prevent reuse
     pub fn commit(&mut self, token: ObligationToken, now: Time) -> u64 {
-        let record = self
-            .obligations
-            .get_mut(&token.id)
-            .expect("obligation not found in ledger");
+        let record = self.record_for_token_mut(&token);
         let duration = record.commit(now);
         self.stats.total_committed += 1;
         self.stats.pending = self.stats.pending.saturating_sub(1);
@@ -253,10 +270,7 @@ impl ObligationLedger {
         now: Time,
         reason: ObligationAbortReason,
     ) -> u64 {
-        let record = self
-            .obligations
-            .get_mut(&token.id)
-            .expect("obligation not found in ledger");
+        let record = self.record_for_token_mut(&token);
         let duration = record.abort(now, reason);
         self.stats.total_aborted += 1;
         self.stats.pending = self.stats.pending.saturating_sub(1);
@@ -390,9 +404,21 @@ impl ObligationLedger {
     }
 
     /// Resets the ledger to empty state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any obligations are still pending. Reset is only valid after
+    /// all live obligations have reached a terminal state; otherwise it would
+    /// silently hide active obligations from pending and leak accounting.
+    ///
+    /// The obligation generation counter is intentionally preserved so
+    /// post-reset acquisitions continue to get fresh IDs.
     pub fn reset(&mut self) {
+        assert!(
+            !self.obligations.values().any(ObligationRecord::is_pending),
+            "cannot reset obligation ledger with pending obligations"
+        );
         self.obligations.clear();
-        self.next_gen = 0;
         self.stats = LedgerStats::default();
     }
 
@@ -715,6 +741,74 @@ mod tests {
             stats.total_acquired
         );
         crate::test_complete!("reset_clears_everything");
+    }
+
+    #[test]
+    fn reset_panics_if_pending_obligation_exists() {
+        init_test("reset_panics_if_pending_obligation_exists");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let stale = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let stale_id = stale.id();
+
+        let reset = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ledger.reset()));
+        crate::assert_with_log!(reset.is_err(), "reset rejected", true, reset.is_err());
+
+        let pending = ledger.pending_count();
+        crate::assert_with_log!(pending == 1, "pending preserved", 1, pending);
+
+        let leaks = ledger.check_leaks();
+        crate::assert_with_log!(
+            !leaks.is_clean(),
+            "leak report still non-clean",
+            false,
+            leaks.is_clean()
+        );
+        crate::assert_with_log!(leaks.leaked.len() == 1, "leak count", 1, leaks.leaked.len());
+        crate::assert_with_log!(
+            leaks.leaked[0].id == stale_id,
+            "stale id tracked",
+            stale_id,
+            leaks.leaked[0].id
+        );
+
+        let region_leaks = ledger.check_region_leaks(region);
+        crate::assert_with_log!(
+            !region_leaks.is_clean(),
+            "region leak report still non-clean",
+            false,
+            region_leaks.is_clean()
+        );
+
+        ledger.commit(stale, Time::from_nanos(2));
+        crate::test_complete!("reset_panics_if_pending_obligation_exists");
+    }
+
+    #[test]
+    fn reset_does_not_reuse_ids_after_clean_reset() {
+        init_test("reset_does_not_reuse_ids_after_clean_reset");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let old = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let old_id = old.id();
+        ledger.commit(old, Time::from_nanos(1));
+
+        ledger.reset();
+
+        let fresh = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(2));
+        crate::assert_with_log!(
+            fresh.id() != old_id,
+            "fresh id differs",
+            true,
+            fresh.id() != old_id
+        );
+
+        ledger.commit(fresh, Time::from_nanos(3));
+        crate::test_complete!("reset_does_not_reuse_ids_after_clean_reset");
     }
 
     // ---- Deterministic iteration -----------------------------------------
