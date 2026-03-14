@@ -184,14 +184,18 @@ impl GradedObligation {
 
 impl Drop for GradedObligation {
     fn drop(&mut self) {
-        // In lab/debug mode: panic to surface the bug immediately.
-        // In production: this could log+metric instead of panicking.
-        assert!(
-            self.resolved,
-            "OBLIGATION LEAKED: {} obligation '{}' was dropped without being resolved. \
-             Call .resolve(Resolution::Commit) or .resolve(Resolution::Abort) before scope exit.",
-            self.kind, self.description,
-        );
+        if !self.resolved {
+            if std::thread::panicking() {
+                return;
+            }
+            // In lab/debug mode: panic to surface the bug immediately.
+            // In production: this could log+metric instead of panicking.
+            panic!(
+                "OBLIGATION LEAKED: {} obligation '{}' was dropped without being resolved. \
+                 Call .resolve(Resolution::Commit) or .resolve(Resolution::Abort) before scope exit.",
+                self.kind, self.description,
+            );
+        }
     }
 }
 
@@ -344,15 +348,19 @@ impl GradedScope {
 
 impl Drop for GradedScope {
     fn drop(&mut self) {
-        assert!(
-            self.closed || self.outstanding() == 0,
-            "SCOPE LEAKED: scope '{}' dropped with {} outstanding obligation(s) \
-             ({} reserved, {} resolved). Call .close() before scope exit.",
-            self.label,
-            self.outstanding(),
-            self.reserved,
-            self.resolved,
-        );
+        if !self.closed && self.outstanding() > 0 {
+            if std::thread::panicking() {
+                return;
+            }
+            panic!(
+                "SCOPE LEAKED: scope '{}' dropped with {} outstanding obligation(s) \
+                 ({} reserved, {} resolved). Call .close() before scope exit.",
+                self.label,
+                self.outstanding(),
+                self.reserved,
+                self.resolved,
+            );
+        }
     }
 }
 
@@ -617,13 +625,17 @@ impl<K: TokenKind> ObligationToken<K> {
 
 impl<K: TokenKind> Drop for ObligationToken<K> {
     fn drop(&mut self) {
-        assert!(
-            !self.armed,
-            "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
-             Call .commit() or .abort() before scope exit.",
-            K::obligation_kind(),
-            self.description,
-        );
+        if self.armed {
+            if std::thread::panicking() {
+                return;
+            }
+            panic!(
+                "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
+                 Call .commit() or .abort() before scope exit.",
+                K::obligation_kind(),
+                self.description,
+            );
+        }
     }
 }
 

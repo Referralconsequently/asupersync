@@ -359,12 +359,16 @@ impl std::fmt::Debug for AppHandle {
 
 impl Drop for AppHandle {
     fn drop(&mut self) {
-        assert!(
-            self.resolved,
-            "APP HANDLE LEAKED: app `{}` (region {:?}) was dropped without stop() or join(). \
-             Call stop(), join(), or into_raw() to resolve.",
-            self.name, self.root_region
-        );
+        if !self.resolved {
+            if std::thread::panicking() {
+                return;
+            }
+            panic!(
+                "APP HANDLE LEAKED: app `{}` (region {:?}) was dropped without stop() or join(). \
+                 Call stop(), join(), or into_raw() to resolve.",
+                self.name, self.root_region
+            );
+        }
     }
 }
 
