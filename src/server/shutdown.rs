@@ -332,11 +332,32 @@ impl ShutdownSignal {
 
     /// Triggers an immediate stop (skips drain phase).
     ///
+    /// This transitions directly to [`ShutdownPhase::ForceClosing`], records a
+    /// zero-length drain deadline at the current time, and wakes drain waiters.
+    /// Call [`mark_stopped`](Self::mark_stopped) once all connections have
+    /// actually closed to reach the terminal [`ShutdownPhase::Stopped`] phase.
+    ///
     /// Useful for hard shutdowns or test scenarios.
     pub fn trigger_immediate(&self) {
+        if self.phase() == ShutdownPhase::Stopped {
+            self.state.controller.shutdown();
+            self.state.phase_notify.notify_waiters();
+            return;
+        }
+        let now = self.current_time();
+        self.state
+            .drain_deadline
+            .store(now.as_nanos(), Ordering::Release);
+        self.state.has_drain_deadline.store(true, Ordering::Release);
+        if !self.state.has_drain_start.load(Ordering::Acquire) {
+            self.state
+                .drain_start
+                .store(now.as_nanos(), Ordering::Release);
+            self.state.has_drain_start.store(true, Ordering::Release);
+        }
         self.state
             .phase
-            .store(ShutdownPhase::Stopped as u8, Ordering::Release);
+            .store(ShutdownPhase::ForceClosing as u8, Ordering::Release);
         self.state.controller.shutdown();
         self.state.phase_notify.notify_waiters();
     }
@@ -601,12 +622,58 @@ mod tests {
         signal.trigger_immediate();
 
         crate::assert_with_log!(
+            signal.phase() == ShutdownPhase::ForceClosing,
+            "force-closing immediately",
+            ShutdownPhase::ForceClosing,
+            signal.phase()
+        );
+        crate::assert_with_log!(
+            !signal.is_stopped(),
+            "not stopped until mark_stopped",
+            false,
+            signal.is_stopped()
+        );
+        crate::test_complete!("trigger_immediate_skips_drain");
+    }
+
+    #[test]
+    fn trigger_immediate_records_force_close_metadata_without_prior_drain() {
+        init_test("trigger_immediate_records_force_close_metadata_without_prior_drain");
+        set_test_time(123);
+        let signal = ShutdownSignal::with_time_getter(test_time);
+
+        signal.trigger_immediate();
+
+        crate::assert_with_log!(
+            signal.drain_start() == Some(Time::from_nanos(123)),
+            "immediate start uses injected clock",
+            Some(Time::from_nanos(123)),
+            signal.drain_start()
+        );
+        crate::assert_with_log!(
+            signal.drain_deadline() == Some(Time::from_nanos(123)),
+            "immediate deadline is current time",
+            Some(Time::from_nanos(123)),
+            signal.drain_deadline()
+        );
+        crate::test_complete!("trigger_immediate_records_force_close_metadata_without_prior_drain");
+    }
+
+    #[test]
+    fn trigger_immediate_does_not_regress_stopped_phase() {
+        init_test("trigger_immediate_does_not_regress_stopped_phase");
+        let signal = ShutdownSignal::new();
+        signal.mark_stopped();
+
+        signal.trigger_immediate();
+
+        crate::assert_with_log!(
             signal.phase() == ShutdownPhase::Stopped,
-            "stopped immediately",
+            "stopped phase preserved",
             ShutdownPhase::Stopped,
             signal.phase()
         );
-        crate::test_complete!("trigger_immediate_skips_drain");
+        crate::test_complete!("trigger_immediate_does_not_regress_stopped_phase");
     }
 
     #[test]
@@ -764,12 +831,12 @@ mod tests {
                 signal2.trigger_immediate();
             });
 
-            signal.wait_for_phase(ShutdownPhase::Stopped).await;
+            signal.wait_for_phase(ShutdownPhase::ForceClosing).await;
             let new_phase = signal.phase();
             crate::assert_with_log!(
-                new_phase == ShutdownPhase::Stopped,
+                new_phase == ShutdownPhase::ForceClosing,
                 "phase after immediate",
-                ShutdownPhase::Stopped,
+                ShutdownPhase::ForceClosing,
                 new_phase
             );
 
