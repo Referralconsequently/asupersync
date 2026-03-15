@@ -60,14 +60,13 @@ where
         // so we spin with yield_now().
         let mut pending_item = item;
         loop {
+            if cx.checkpoint().is_err() {
+                return Err(SendError::Cancelled(pending_item));
+            }
             match sender.try_send(pending_item) {
                 Ok(()) => break,
                 Err(SendError::Full(val)) => {
                     pending_item = val;
-                    // Check cancellation before yielding
-                    if let Err(_e) = cx.checkpoint() {
-                        return Err(SendError::Disconnected(pending_item));
-                    }
                     yield_now().await;
                 }
                 Err(e) => return Err(e),
@@ -219,5 +218,93 @@ mod tests {
         );
 
         crate::test_complete!("forward_yields_after_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn forward_cancelled_before_first_send_returns_unsent_item() {
+        init_test("forward_cancelled_before_first_send_returns_unsent_item");
+        let cx: Cx = Cx::for_testing();
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
+        let stream = iter(vec![10, 20, 30]);
+
+        cx.set_cancel_requested(true);
+
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = future.as_mut().poll(&mut task_cx);
+        let cancelled = matches!(poll, std::task::Poll::Ready(Err(SendError::Cancelled(10))));
+        crate::assert_with_log!(
+            cancelled,
+            "cancellation returns first unsent item",
+            true,
+            cancelled
+        );
+
+        let receiver_empty = rx.try_recv().is_err();
+        crate::assert_with_log!(
+            receiver_empty,
+            "no items forwarded after pre-send cancellation",
+            true,
+            receiver_empty
+        );
+
+        crate::test_complete!("forward_cancelled_before_first_send_returns_unsent_item");
+    }
+
+    #[test]
+    fn forward_full_path_reports_cancelled_not_disconnected() {
+        init_test("forward_full_path_reports_cancelled_not_disconnected");
+        let cx: Cx = Cx::for_testing();
+        let (tx, mut rx) = mpsc::channel::<i32>(1);
+        let stream = iter(vec![1, 2]);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woke))));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+
+        let first_poll = future.as_mut().poll(&mut task_cx);
+        let first_pending = matches!(first_poll, std::task::Poll::Pending);
+        crate::assert_with_log!(
+            first_pending,
+            "first poll blocks on full channel",
+            true,
+            first_pending
+        );
+
+        let first_item = rx.try_recv();
+        let first_forwarded = matches!(first_item, Ok(1));
+        crate::assert_with_log!(
+            first_forwarded,
+            "first item forwarded",
+            true,
+            first_forwarded
+        );
+
+        cx.set_cancel_requested(true);
+
+        let second_poll = future.as_mut().poll(&mut task_cx);
+        let cancelled = matches!(
+            second_poll,
+            std::task::Poll::Ready(Err(SendError::Cancelled(2)))
+        );
+        crate::assert_with_log!(
+            cancelled,
+            "full-path cancellation preserves cancelled error kind",
+            true,
+            cancelled
+        );
+
+        let no_extra_item = rx.try_recv().is_err();
+        crate::assert_with_log!(
+            no_extra_item,
+            "second item not forwarded after cancellation",
+            true,
+            no_extra_item
+        );
+
+        crate::test_complete!("forward_full_path_reports_cancelled_not_disconnected");
     }
 }

@@ -191,8 +191,8 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
     /// - `Poll::Pending` if neither has occurred yet
     pub fn poll_with_time(
         &mut self,
-        now: Time,
         cx: &mut Context<'_>,
+        now: Time,
     ) -> Poll<Result<F::Output, Elapsed>> {
         if self.completed {
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
@@ -563,7 +563,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Time is before deadline, future is ready
-        let result = t.poll_with_time(Time::from_secs(5), &mut cx);
+        let result = t.poll_with_time(&mut cx, Time::from_secs(5));
         let ready = matches!(result, Poll::Ready(Ok(42)));
         crate::assert_with_log!(ready, "ready ok", true, ready);
         crate::test_complete!("poll_with_time_future_completes");
@@ -577,7 +577,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Time is past deadline
-        let result = t.poll_with_time(Time::from_secs(15), &mut cx);
+        let result = t.poll_with_time(&mut cx, Time::from_secs(15));
         let elapsed = matches!(result, Poll::Ready(Err(_)));
         crate::assert_with_log!(elapsed, "elapsed", true, elapsed);
 
@@ -600,7 +600,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Time is before deadline, future is pending
-        let result = t.poll_with_time(Time::from_secs(5), &mut cx);
+        let result = t.poll_with_time(&mut cx, Time::from_secs(5));
         crate::assert_with_log!(result.is_pending(), "pending", true, result.is_pending());
         crate::test_complete!("poll_with_time_pending");
     }
@@ -613,7 +613,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Time is exactly at deadline
-        let result = t.poll_with_time(Time::from_secs(10), &mut cx);
+        let result = t.poll_with_time(&mut cx, Time::from_secs(10));
         let elapsed = matches!(result, Poll::Ready(Err(_)));
         crate::assert_with_log!(elapsed, "elapsed at deadline", true, elapsed);
         crate::test_complete!("poll_with_time_at_exact_deadline");
@@ -627,7 +627,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Even at time zero, deadline is reached
-        let result = t.poll_with_time(Time::ZERO, &mut cx);
+        let result = t.poll_with_time(&mut cx, Time::ZERO);
         let elapsed = matches!(result, Poll::Ready(Err(_)));
         crate::assert_with_log!(elapsed, "elapsed at zero", true, elapsed);
         crate::test_complete!("poll_with_time_zero_deadline");
@@ -639,11 +639,11 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let first = t.poll_with_time(Time::from_secs(5), &mut cx);
+        let first = t.poll_with_time(&mut cx, Time::from_secs(5));
         assert!(matches!(first, Poll::Ready(Ok(42))));
 
         // Fail-closed: repoll returns Elapsed instead of panicking
-        let repoll = t.poll_with_time(Time::from_secs(6), &mut cx);
+        let repoll = t.poll_with_time(&mut cx, Time::from_secs(6));
         assert!(matches!(repoll, Poll::Ready(Err(_))));
     }
 
@@ -658,17 +658,17 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        assert!(t.poll_with_time(Time::from_secs(0), &mut cx).is_pending());
+        assert!(t.poll_with_time(&mut cx, Time::from_secs(0)).is_pending());
 
-        let elapsed = t.poll_with_time(Time::from_secs(10), &mut cx);
+        let elapsed = t.poll_with_time(&mut cx, Time::from_secs(10));
         assert!(matches!(elapsed, Poll::Ready(Err(_))));
 
         // Fail-closed: repoll returns Elapsed instead of panicking
-        let repoll = t.poll_with_time(Time::from_secs(11), &mut cx);
+        let repoll = t.poll_with_time(&mut cx, Time::from_secs(11));
         assert!(matches!(repoll, Poll::Ready(Err(_))));
 
         t.reset(Time::from_secs(20));
-        let resumed = t.poll_with_time(Time::from_secs(12), &mut cx);
+        let resumed = t.poll_with_time(&mut cx, Time::from_secs(12));
         assert!(matches!(resumed, Poll::Ready(Ok("done"))));
     }
 
@@ -757,19 +757,19 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // t=0: pending
-        let pending = t.poll_with_time(Time::ZERO, &mut cx).is_pending();
+        let pending = t.poll_with_time(&mut cx, Time::ZERO).is_pending();
         crate::assert_with_log!(pending, "pending at t=0", true, pending);
 
         // t=2: still pending
-        let pending = t.poll_with_time(Time::from_secs(2), &mut cx).is_pending();
+        let pending = t.poll_with_time(&mut cx, Time::from_secs(2)).is_pending();
         crate::assert_with_log!(pending, "pending at t=2", true, pending);
 
         // t=4: still pending
-        let pending = t.poll_with_time(Time::from_secs(4), &mut cx).is_pending();
+        let pending = t.poll_with_time(&mut cx, Time::from_secs(4)).is_pending();
         crate::assert_with_log!(pending, "pending at t=4", true, pending);
 
         // t=5: timeout!
-        let result = t.poll_with_time(Time::from_secs(5), &mut cx);
+        let result = t.poll_with_time(&mut cx, Time::from_secs(5));
         let elapsed = matches!(result, Poll::Ready(Err(_)));
         crate::assert_with_log!(elapsed, "elapsed at t=5", true, elapsed);
         crate::test_complete!("simulated_timeout_scenario");
@@ -788,15 +788,15 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Poll 1: pending
-        let pending = t.poll_with_time(Time::from_secs(1), &mut cx).is_pending();
+        let pending = t.poll_with_time(&mut cx, Time::from_secs(1)).is_pending();
         crate::assert_with_log!(pending, "pending at t=1", true, pending);
 
         // Poll 2: pending
-        let pending = t.poll_with_time(Time::from_secs(2), &mut cx).is_pending();
+        let pending = t.poll_with_time(&mut cx, Time::from_secs(2)).is_pending();
         crate::assert_with_log!(pending, "pending at t=2", true, pending);
 
         // Poll 3: ready!
-        let result = t.poll_with_time(Time::from_secs(3), &mut cx);
+        let result = t.poll_with_time(&mut cx, Time::from_secs(3));
         let ready = matches!(result, Poll::Ready(Ok("done")));
         crate::assert_with_log!(ready, "ready at t=3", true, ready);
         crate::test_complete!("simulated_success_scenario");

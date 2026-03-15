@@ -106,6 +106,7 @@ pub trait SymbolStreamExt: SymbolStream {
         CollectToSetFuture {
             stream: self,
             set,
+            count: 0,
             completed: false,
         }
     }
@@ -198,6 +199,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for NextFuture<'_, S> {
 pub struct CollectToSetFuture<'a, S: ?Sized> {
     stream: &'a mut S,
     set: &'a mut SymbolSet,
+    count: usize,
     completed: bool,
 }
 
@@ -215,7 +217,9 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
         loop {
             match Pin::new(&mut *this.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(symbol))) => {
-                    this.set.insert(symbol.into_symbol());
+                    if this.set.insert(symbol.into_symbol()) {
+                        this.count = this.count.saturating_add(1);
+                    }
                     collected_this_poll += 1;
                     if collected_this_poll >= COLLECT_TO_SET_COOPERATIVE_BUDGET {
                         cx.waker().wake_by_ref();
@@ -228,7 +232,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
                 }
                 Poll::Ready(None) => {
                     this.completed = true;
-                    return Poll::Ready(Ok(this.set.len()));
+                    return Poll::Ready(Ok(this.count));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -972,6 +976,48 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_to_set_counts_only_new_insertions_into_prepopulated_set() {
+        init_test("test_collect_to_set_counts_only_new_insertions_into_prepopulated_set");
+        let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(2)]);
+        let mut set = SymbolSet::new();
+        set.insert(create_symbol(1).into_symbol());
+
+        let count = future::block_on(async { stream.collect_to_set(&mut set).await.unwrap() });
+
+        crate::assert_with_log!(count == 1, "one new symbol inserted", 1usize, count);
+        crate::assert_with_log!(
+            set.len() == 2,
+            "set contains both unique symbols",
+            2usize,
+            set.len()
+        );
+        crate::test_complete!(
+            "test_collect_to_set_counts_only_new_insertions_into_prepopulated_set"
+        );
+    }
+
+    #[test]
+    fn test_collect_to_set_duplicate_only_stream_reports_zero_new_insertions() {
+        init_test("test_collect_to_set_duplicate_only_stream_reports_zero_new_insertions");
+        let mut stream = VecStream::new(vec![create_symbol(7), create_symbol(7)]);
+        let mut set = SymbolSet::new();
+        set.insert(create_symbol(7).into_symbol());
+
+        let count = future::block_on(async { stream.collect_to_set(&mut set).await.unwrap() });
+
+        crate::assert_with_log!(
+            count == 0,
+            "duplicate-only stream adds nothing new",
+            0usize,
+            count
+        );
+        crate::assert_with_log!(set.len() == 1, "set size unchanged", 1usize, set.len());
+        crate::test_complete!(
+            "test_collect_to_set_duplicate_only_stream_reports_zero_new_insertions"
+        );
+    }
+
+    #[test]
     fn test_collect_to_set_repoll_after_completion_fails_closed() {
         init_test("test_collect_to_set_repoll_after_completion_fails_closed");
         let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(1), create_symbol(2)]);
@@ -1051,9 +1097,9 @@ mod tests {
             let mut future = Pin::new(&mut future);
             let second = future.as_mut().poll(&mut context);
             crate::assert_with_log!(
-                matches!(second, Poll::Ready(Ok(count)) if count == total),
+                matches!(second, Poll::Ready(Ok(count)) if count == 5),
                 "second poll completes collection",
-                total,
+                5,
                 second
             );
         }

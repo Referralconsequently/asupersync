@@ -92,10 +92,22 @@ impl<S: Stream> Stream for Peekable<S> {
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
-        match std::mem::replace(this.peeked, PeekSlot::Empty) {
-            PeekSlot::Item(item) => Poll::Ready(Some(item)),
+        match this.peeked {
+            PeekSlot::Item(_) => {
+                if let PeekSlot::Item(item) = std::mem::replace(this.peeked, PeekSlot::Empty) {
+                    Poll::Ready(Some(item))
+                } else {
+                    unreachable!()
+                }
+            }
             PeekSlot::Exhausted => Poll::Ready(None),
-            PeekSlot::Empty => this.stream.as_mut().poll_next(cx),
+            PeekSlot::Empty => {
+                let poll = this.stream.as_mut().poll_next(cx);
+                if matches!(poll, Poll::Ready(None)) {
+                    *this.peeked = PeekSlot::Exhausted;
+                }
+                poll
+            }
         }
     }
 
