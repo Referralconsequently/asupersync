@@ -441,7 +441,17 @@ impl ObjectParams {
     /// Calculates the total number of source symbols across all blocks.
     #[must_use]
     pub const fn total_source_symbols(&self) -> u32 {
-        (self.source_blocks as u32) * (self.symbols_per_block as u32)
+        if self.symbol_size == 0 || self.object_size == 0 {
+            return 0;
+        }
+
+        let sym_size = self.symbol_size as u64;
+        let total = self.object_size.div_ceil(sym_size);
+        if total > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            total as u32
+        }
     }
 
     /// Creates object parameters for testing.
