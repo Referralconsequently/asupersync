@@ -222,7 +222,18 @@ impl SymbolPool {
     }
 
     /// Returns a buffer to the pool.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the buffer's size does not match the pool's configured symbol size.
     pub fn deallocate(&mut self, buffer: SymbolBuffer) {
+        assert_eq!(
+            buffer.len(),
+            usize::from(self.config.symbol_size),
+            "Cannot deallocate buffer of size {} into pool of size {}",
+            buffer.len(),
+            self.config.symbol_size
+        );
         if self.allocated > 0 {
             self.allocated -= 1;
         }

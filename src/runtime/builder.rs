@@ -2233,11 +2233,9 @@ mod tests {
             let io_key = event.token.0 as u64;
             let interest_bits = interest.unwrap_or(event.ready).bits();
             if seen.insert(io_key) {
-                let seq = trace.next_seq();
-                trace.push_event(TraceEvent::io_requested(seq, now, io_key, interest_bits));
+                trace.record_event(|seq| TraceEvent::io_requested(seq, now, io_key, interest_bits));
             }
-            let seq = trace.next_seq();
-            trace.push_event(TraceEvent::io_ready(seq, now, io_key, event.ready.bits()));
+            trace.record_event(|seq| TraceEvent::io_ready(seq, now, io_key, event.ready.bits()));
         });
 
         let runtime_counts = parity_counts(state.trace.snapshot());

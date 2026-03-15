@@ -327,11 +327,26 @@ impl<S> BufferedSink<S> {
     }
 }
 
+impl<S: SymbolSink + Unpin> BufferedSink<S> {
+    /// Detect terminal inner-sink failures without collapsing valid buffering.
+    ///
+    /// When the local buffer still has capacity, `BufferedSink` should keep
+    /// accepting items through transient inner backpressure, but it must fail
+    /// closed if the inner sink has already entered a terminal error state.
+    fn poll_inner_terminal_error(&mut self, cx: &mut Context<'_>) -> Option<SinkError> {
+        match Pin::new(&mut self.inner).poll_ready(cx) {
+            Poll::Ready(Err(err)) => Some(err),
+            Poll::Ready(Ok(())) | Poll::Pending => None,
+        }
+    }
+}
+
 impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
         if this.buffer.len() < this.capacity {
-            Poll::Ready(Ok(()))
+            this.poll_inner_terminal_error(cx)
+                .map_or(Poll::Ready(Ok(())), |err| Poll::Ready(Err(err)))
         } else {
             // Try to flush
             Pin::new(this).poll_flush(cx)
@@ -344,9 +359,16 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
         symbol: AuthenticatedSymbol,
     ) -> Poll<Result<(), SinkError>> {
         let this = self.as_mut().get_mut();
+
+        // Reject sends immediately if the inner sink is in a terminal error state,
+        // even if we have local buffer capacity.
+        if let Some(err) = this.poll_inner_terminal_error(cx) {
+            return Poll::Ready(Err(err));
+        }
+
         if this.buffer.len() >= this.capacity {
             // Must flush first
-            match Pin::new(this).poll_flush(cx) {
+            match Pin::new(&mut *this).poll_flush(cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
@@ -1120,7 +1142,10 @@ mod tests {
         init_test("test_buffered_sink_ready_pending_when_inner_not_ready");
         let inner = TrackingSink::new({
             let mut state = TrackingSinkState::new();
-            state.ready_after = 1;
+            // The terminal-error probe in poll_send's poll_ready path consumes
+            // one poll_ready call on the inner. Set ready_after=2 so the inner
+            // is still not ready when the full-buffer flush attempts to drain.
+            state.ready_after = 2;
             state
         });
         let mut buffered = BufferedSink::new(inner, 1);
@@ -1149,6 +1174,105 @@ mod tests {
             buffered.buffer.len()
         );
         crate::test_complete!("test_buffered_sink_ready_pending_when_inner_not_ready");
+    }
+
+    #[test]
+    fn test_buffered_sink_ready_errors_when_inner_closed() {
+        init_test("test_buffered_sink_ready_errors_when_inner_closed");
+        let inner = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.closed = true;
+            state
+        });
+        let mut buffered = BufferedSink::new(inner, 2);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let ready = Pin::new(&mut buffered).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Ready(Err(SinkError::Closed))),
+            "closed inner fails poll_ready",
+            true,
+            matches!(ready, Poll::Ready(Err(SinkError::Closed)))
+        );
+        crate::assert_with_log!(
+            buffered.buffer.is_empty(),
+            "buffer remains empty",
+            true,
+            buffered.buffer.is_empty()
+        );
+        crate::test_complete!("test_buffered_sink_ready_errors_when_inner_closed");
+    }
+
+    #[test]
+    fn test_buffered_sink_send_future_rejects_closed_inner_without_buffering() {
+        init_test("test_buffered_sink_send_future_rejects_closed_inner_without_buffering");
+        let inner = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.closed = true;
+            state
+        });
+        let mut buffered = BufferedSink::new(inner, 2);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        {
+            let mut send = buffered.send(create_symbol(13));
+            let poll = Pin::new(&mut send).poll(&mut context);
+            crate::assert_with_log!(
+                matches!(poll, Poll::Ready(Err(SinkError::Closed))),
+                "closed inner fails send future",
+                true,
+                matches!(poll, Poll::Ready(Err(SinkError::Closed)))
+            );
+        }
+        crate::assert_with_log!(
+            buffered.buffer.is_empty(),
+            "symbol not stranded in buffer",
+            true,
+            buffered.buffer.is_empty()
+        );
+        crate::test_complete!(
+            "test_buffered_sink_send_future_rejects_closed_inner_without_buffering"
+        );
+    }
+
+    #[test]
+    fn test_buffered_sink_ready_still_buffers_through_transient_inner_pending() {
+        init_test("test_buffered_sink_ready_still_buffers_through_transient_inner_pending");
+        let inner = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            state.ready_after = 1;
+            state
+        });
+        let mut buffered = BufferedSink::new(inner, 2);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let ready = Pin::new(&mut buffered).poll_ready(&mut context);
+        crate::assert_with_log!(
+            matches!(ready, Poll::Ready(Ok(()))),
+            "transient inner pending still permits buffering",
+            true,
+            matches!(ready, Poll::Ready(Ok(())))
+        );
+
+        let send = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(14));
+        crate::assert_with_log!(
+            matches!(send, Poll::Ready(Ok(()))),
+            "send buffers symbol despite transient backpressure",
+            true,
+            matches!(send, Poll::Ready(Ok(())))
+        );
+        crate::assert_with_log!(
+            buffered.buffer.len() == 1,
+            "symbol buffered locally",
+            1usize,
+            buffered.buffer.len()
+        );
+        crate::test_complete!(
+            "test_buffered_sink_ready_still_buffers_through_transient_inner_pending"
+        );
     }
 
     #[test]

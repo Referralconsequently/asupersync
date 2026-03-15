@@ -271,7 +271,6 @@ impl<T> Sender<T> {
             return Err(SendError::Closed(value));
         }
 
-        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
         let _old_value = {
             let mut guard = self.inner.value.write();
             let old = std::mem::replace(&mut guard.0, value);
@@ -280,7 +279,7 @@ impl<T> Sender<T> {
             old
         };
 
-        if receiver_count != 0 {
+        if self.inner.receiver_count.load(Ordering::Acquire) != 0 {
             self.inner.wake_all_waiters();
         }
 
@@ -312,7 +311,6 @@ impl<T> Sender<T> {
             return Err(ModifyError);
         }
 
-        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
         {
             let mut guard = self.inner.value.write();
             f(&mut guard.0);
@@ -320,7 +318,7 @@ impl<T> Sender<T> {
             self.inner.version.store(guard.1, Ordering::Release);
         }
 
-        if receiver_count != 0 {
+        if self.inner.receiver_count.load(Ordering::Acquire) != 0 {
             self.inner.wake_all_waiters();
         }
 

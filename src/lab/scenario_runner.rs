@@ -369,19 +369,17 @@ impl ScenarioRunner {
                 FaultAction::ClockSkew => "clock_skew",
                 FaultAction::ClockReset => "clock_reset",
             };
-            let seq = runtime.state.next_trace_seq();
             let now = runtime.now();
-            runtime
-                .state
-                .trace
-                .push_event(crate::trace::TraceEvent::user_trace(
+            runtime.state.record_trace_event(|seq| {
+                crate::trace::TraceEvent::user_trace(
                     seq,
                     now,
                     format!(
                         "fault:{action_name}:{}",
                         Self::fault_args_summary(&fault.args)
                     ),
-                ));
+                )
+            });
             injected += 1;
         }
 
