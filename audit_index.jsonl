@@ -604,3 +604,6 @@
 {"file":"src/signal/graceful.rs","lines":0,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/http/h1/server.rs","lines":0,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/cx/registry.rs","lines":0,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/types/symbol.rs","lines":746,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"HIGH: total_source_symbols() overcounted for multi-block partial last blocks (source_blocks*symbols_per_block vs ceil(object_size/symbol_size))"}
+{"file":"src/trace/certificate.rs","lines":546,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Proof-carrying trace certificates with incremental hash, balance checks, cancel ordering verification"}
+{"file":"src/lab/oracle/finalizer.rs","lines":444,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Finalizer oracle checking region-close-implies-all-finalizers-ran invariant"}
