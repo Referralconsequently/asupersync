@@ -44,7 +44,7 @@ wins.
 | Context or capability | Live status | Evidence | Current reading |
 |------|-------------|----------|-----------------|
 | Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported | `packages/browser/src/index.ts` accepts DOM browser hosts; `asupersync-browser-core/src/lib.rs` drives `fetch` through `window.fetch(...)` and WebSocket through `web_sys::WebSocket` | This is the canonical shipped direct-runtime lane today. |
-| Dedicated worker bootstrap environment | Feasible, but not yet shipped end-to-end | `packages/browser/src/index.ts` now treats `DedicatedWorkerGlobalScope` as supported, but `asupersync-browser-core/src/lib.rs` still returns a permanent error when `web_sys::window()` is unavailable inside `run_browser_fetch(...)` | Worker detection is promoted ahead of worker-safe browser I/O. Treat this lane as partially promoted rather than fully shipped. |
+| Dedicated worker bootstrap environment | Direct-runtime supported for `@asupersync/browser` when required worker Web APIs are present | `packages/browser/src/index.ts` accepts `DedicatedWorkerGlobalScope`, and `asupersync-browser-core/src/lib.rs` now routes fetch through `window` or `WorkerGlobalScope` | Dedicated workers are now a shipped Browser Edition lane for the browser SDK; keep service/shared workers and framework adapters distinguished from this direct bootstrap path. |
 | Service worker / shared worker | Bridge-only today | `packages/browser/src/index.ts` only admits a DOM window or dedicated worker global; there is no service/shared-worker host contract in `asupersync-browser-core` | Keep these lanes on explicit message/data boundaries until lifecycle and host contracts are promoted deliberately. |
 | React client-rendered tree | Direct-runtime supported | `packages/react/src/index.ts` delegates to `detectBrowserRuntimeSupport()` and only blesses client-rendered React trees | React is a thin adapter over the browser SDK, not an independent runtime lane. |
 | React SSR / Node render path | Bridge-only | `packages/react/src/index.ts` fails closed when browser support fails and tells callers to move into client-rendered trees | Runtime creation belongs in the hydrated client tree. |
@@ -52,8 +52,8 @@ wins.
 | Next.js server component / route handler / Node server | Bridge-only | `packages/next/src/index.ts` maps these environments to `use_server_bridge` and marks direct runtime unsupported | Keep Browser Edition handles out of server execution paths. |
 | Next.js edge runtime | Bridge-only | `packages/next/src/index.ts` maps `edge_runtime` to `use_edge_bridge` and `directRuntimeSupported: false` | Edge Web API subsets are not treated as direct Browser Edition execution authority. |
 | Durable browser storage: `localStorage` | Guarded optional | `src/io/browser_storage.rs` registers a wasm `LocalStorageHostBackend`, but the JS/TS packages do not expose a public Browser Edition storage API | The capability exists below the package layer and still needs productization. |
-| Durable browser storage: IndexedDB | Feasible, but not yet shipped | `src/io/cap.rs` and `src/io/browser_storage.rs` model `StorageBackend::IndexedDb`, but only `LocalStorageHostBackend` is registered for wasm | IndexedDB is represented in policy and tests, not in a shipped host-backed browser package surface. |
-| Browser-native transport: `fetch` + WebSocket | Direct-runtime supported on the main thread | `asupersync-browser-core/src/lib.rs` exports `fetch_request`, `websocket_open`, `websocket_send`, `websocket_recv`, and `websocket_close` | This is the live browser I/O envelope today. |
+| Durable browser storage: IndexedDB | Feasible, but not yet shipped | `src/io/browser_storage.rs` has a complete `IndexedDbHostBackend` with `set`/`get`/`clear`/`list_keys` via `web_sys::IdbFactory` (worker-compatible); `src/io/cap.rs` has full policy validation | Rust host backend is complete; the gap is only in the public JS/TS package surface (no `BrowserStorage` export). |
+| Browser-native transport: `fetch` + WebSocket | Direct-runtime supported on the main thread and in dedicated workers | `asupersync-browser-core/src/lib.rs` exports `fetch_request`, `websocket_open`, `websocket_send`, `websocket_recv`, and `websocket_close`, and the fetch host now accepts `window` or `WorkerGlobalScope` | This is the live browser I/O envelope today for supported browser SDK hosts. |
 | Browser-native transport: WebTransport | Feasible, but not yet shipped | `src/io/cap.rs` defines `BrowserTransportKind::WebTransport`, but there is no matching browser-core host implementation or JS/TS package export | The capability policy exists ahead of a real runtime lane. |
 | Rust-authored Asupersync consumer compiled to `wasm32-unknown-unknown` | Feasible, but not yet shipped | `docs/WASM.md` documents this path as architecturally plausible but not public, documented, or tested end-to-end | The semantic core is portable, but there is no public Rust-facing browser bootstrap contract yet. |
 | SharedArrayBuffer / multi-worker browser offload | Feasible, but not yet shipped | `src/runtime/config.rs` defines `BrowserWorkerOffloadConfig`, while `docs/WASM.md` still treats threaded WASM as a future phase gated on cross-origin isolation | Parallel browser execution remains scaffolded policy, not a shipped runtime lane. |
@@ -61,19 +61,18 @@ wins.
 
 ### Most Important Live-Tree Contradictions
 
-1. Dedicated-worker diagnostics have moved ahead of dedicated-worker host I/O.
-   `packages/browser/src/index.ts` now classifies `DedicatedWorkerGlobalScope`
-   as supported, but `asupersync-browser-core/src/lib.rs` still hard-requires
-   `web_sys::window()` for `fetch`. Until the host layer is finished, the live
-   tree cannot honestly call worker direct runtime fully shipped.
-2. Browser storage is modeled more deeply than it is productized. The Rust
-   layer has explicit policy and a wasm `localStorage` host backend in
-   `src/io/browser_storage.rs`, but the published JS/TS package stack still has
-   no first-class storage API.
-3. IndexedDB and WebTransport exist in capability vocabulary before they exist
-   as shipped browser runtime lanes. `src/io/cap.rs` and related policy code
-   know about them, but `asupersync-browser-core` and the JS packages do not
-   currently expose matching end-user implementations.
+1. Dedicated-worker direct runtime is now a shipped browser SDK lane, but it
+   is still narrower than the broader worker story. `packages/browser/src/index.ts`
+   and `asupersync-browser-core/src/lib.rs` now admit dedicated-worker
+   bootstrap + fetch hosting, while service/shared workers remain bridge-only
+   and framework adapters still target client-rendered browser trees.
+2. Browser storage has complete Rust host backends for both `localStorage`
+   and `IndexedDB` in `src/io/browser_storage.rs`, plus a full policy layer
+   in `src/io/cap.rs`. The published JS/TS package stack still has no
+   first-class storage API — the gap is packaging, not implementation.
+3. WebTransport exists in the capability vocabulary (`src/io/cap.rs`) before
+   it exists as a shipped browser runtime lane. `asupersync-browser-core`
+   and the JS packages do not currently expose a WebTransport host binding.
 
 ---
 

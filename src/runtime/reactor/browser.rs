@@ -7,15 +7,17 @@
 //!
 //! # Current Status
 //!
-//! This backend maintains deterministic registration bookkeeping plus a
-//! host-readiness pending-event queue:
+//! This backend provides both deterministic registration bookkeeping and
+//! real browser host listener wiring:
 //!
 //! - `wake()` acts as a pure wakeup signal and never invents readiness
 //! - `poll()` drains pending events in bounded batches
 //! - repeated host readiness notifications are coalesced when configured
-//!
-//! Browser host-source wiring can enqueue readiness via [`BrowserReactor::notify_ready`]
-//! while direct listener registration remains a follow-on integration.
+//! - [`BrowserReactor::register_message_port`] and
+//!   [`BrowserReactor::register_broadcast_channel`] attach real
+//!   `wasm_bindgen` closure listeners that deliver events via
+//!   [`BrowserReactor::notify_ready`]
+//! - deregistration detaches host listeners and cleans up closures
 //!
 //! # Browser Event Model
 //!
@@ -74,8 +76,8 @@ impl Default for BrowserReactorConfig {
 ///
 /// Browser reactor implementation preserving the [`Reactor`] trait contract
 /// for browser environments. It maintains deterministic registration
-/// bookkeeping and wake-driven pending-event draining while host callback
-/// wiring lands in follow-on integration work.
+/// bookkeeping and wake-driven pending-event draining, with real host
+/// listener wiring for MessagePort and BroadcastChannel sources.
 ///
 /// # Usage
 ///
