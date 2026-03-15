@@ -260,6 +260,48 @@ cargo test -p frankenlab
 
 ---
 
+## Audit Index — Avoiding Duplicate Audits
+
+`audit_index.jsonl` in the project root tracks every file that has been audited, by whom, when, and the verdict. **Check it before starting an audit batch** to avoid re-auditing files.
+
+### Querying the index
+
+```bash
+# Check if a file has been audited
+grep '"src/util/arena.rs"' audit_index.jsonl
+
+# List all files with bugs found
+grep '"FIXED"' audit_index.jsonl | jq -r .file
+
+# Count audited files
+wc -l audit_index.jsonl
+
+# Find unaudited .rs files (compare against src/)
+comm -23 <(find src -name '*.rs' | sort) <(jq -r .file audit_index.jsonl | sort) | head -20
+```
+
+### Adding entries
+
+After completing an audit batch, append entries:
+
+```bash
+echo '{"file":"src/foo/bar.rs","lines":500,"batch":378,"date":"2026-03-15","agent":"YourName","verdict":"SOUND","bugs":0,"notes":""}' >> audit_index.jsonl
+```
+
+**Fields:**
+| Field | Description |
+|-------|-------------|
+| `file` | Path relative to project root (`src/...`) |
+| `lines` | Line count at audit time (0 for diff audits) |
+| `batch` | Audit batch number |
+| `date` | ISO date of the audit |
+| `agent` | Agent name who performed the audit |
+| `verdict` | `SOUND` (no bugs) or `FIXED` (bugs found and fixed) |
+| `bugs` | Number of bugs found |
+| `notes` | Brief description of bugs, or empty string |
+
+---
+
 ## Third-Party Library Usage
 
 If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices.
