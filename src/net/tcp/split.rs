@@ -8,11 +8,11 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cx::Cx;
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use parking_lot::Mutex;
-use std::io;
+use std::io::{self, IoSliceMut};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Write};
 #[cfg(target_arch = "wasm32")]
@@ -95,6 +95,37 @@ impl AsyncRead for ReadHalf<'_> {
     ) -> Poll<io::Result<()>> {
         let _ = (self, cx, buf);
         browser_tcp_poll_unsupported("ReadHalf::poll_read")
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AsyncReadVectored for ReadHalf<'_> {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let mut inner = self.inner;
+        match inner.read_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncReadVectored for ReadHalf<'_> {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let _ = (self, cx, bufs);
+        browser_tcp_poll_unsupported("ReadHalf::poll_read_vectored")
     }
 }
 
@@ -635,6 +666,39 @@ impl AsyncRead for OwnedReadHalf {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl AsyncReadVectored for OwnedReadHalf {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let inner: &net::TcpStream = &self.inner.stream;
+        match (&*inner).read_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.inner.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncReadVectored for OwnedReadHalf {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let _ = (self, cx, bufs);
+        browser_tcp_poll_unsupported("OwnedReadHalf::poll_read_vectored")
+    }
+}
+
 /// Owned write half of a split TCP stream.
 ///
 /// This can be sent to another task and properly participates in reactor
@@ -812,6 +876,7 @@ impl std::error::Error for ReuniteError {}
 mod tests {
     use super::*;
     use crate::cx::Cx;
+    use crate::io::AsyncReadVectored;
     use crate::net::tcp::stream::TcpStream;
     use crate::runtime::io_driver::IoDriverHandle;
     use crate::runtime::reactor::{Events, Reactor, Source, Token};
@@ -819,7 +884,7 @@ mod tests {
     use crate::types::{Budget, RegionId, TaskId};
     use parking_lot::Mutex;
     use std::collections::HashMap;
-    use std::io::Write;
+    use std::io::{IoSliceMut, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
@@ -1004,6 +1069,69 @@ mod tests {
         crate::test_complete!("borrowed_split_read_write");
     }
 
+    fn read_vectored_payload<R: AsyncReadVectored + Unpin>(reader: &mut R, payload: &[u8]) {
+        let mut first = [0u8; 3];
+        let mut second = [0u8; 3];
+        assert_eq!(payload.len(), first.len() + second.len());
+        let mut total = 0usize;
+        let mut attempts = 0usize;
+
+        while total < payload.len() {
+            attempts += 1;
+            assert!(attempts <= 32, "vectored split read did not become ready");
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let polled = if total < first.len() {
+                let offset = total;
+                let mut bufs = [
+                    IoSliceMut::new(&mut first[offset..]),
+                    IoSliceMut::new(&mut second),
+                ];
+                Pin::new(&mut *reader).poll_read_vectored(&mut cx, &mut bufs)
+            } else {
+                let offset = total - first.len();
+                let mut bufs = [IoSliceMut::new(&mut second[offset..])];
+                Pin::new(&mut *reader).poll_read_vectored(&mut cx, &mut bufs)
+            };
+
+            match polled {
+                Poll::Ready(Ok(0)) => panic!("vectored split read reached EOF early"),
+                Poll::Ready(Ok(n)) => total += n,
+                Poll::Ready(Err(err)) => panic!("vectored split read failed: {err}"),
+                Poll::Pending => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+
+        let mut combined = [0u8; 6];
+        combined[..first.len()].copy_from_slice(&first);
+        combined[first.len()..].copy_from_slice(&second);
+        crate::assert_with_log!(
+            combined.as_slice() == payload,
+            "vectored split read preserves payload",
+            payload,
+            combined
+        );
+    }
+
+    #[test]
+    fn borrowed_split_read_half_supports_vectored_reads() {
+        init_test("borrowed_split_read_half_supports_vectored_reads");
+
+        let payload = b"vector";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        client.set_nonblocking(true).expect("nonblocking");
+        let (mut server, _) = listener.accept().expect("accept");
+        let mut read_half = ReadHalf::new(&client);
+
+        server.write_all(payload).expect("write payload");
+        read_vectored_payload(&mut read_half, payload);
+
+        crate::test_complete!("borrowed_split_read_half_supports_vectored_reads");
+    }
+
     #[test]
     fn owned_split_creates_pair() {
         init_test("owned_split_creates_pair");
@@ -1021,6 +1149,25 @@ mod tests {
         crate::assert_with_log!(same_inner, "halves share inner", true, same_inner);
 
         crate::test_complete!("owned_split_creates_pair");
+    }
+
+    #[test]
+    fn owned_split_read_half_supports_vectored_reads() {
+        init_test("owned_split_read_half_supports_vectored_reads");
+
+        let payload = b"vector";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let stream = TcpStream::from_std(client).expect("wrap stream");
+        let (mut read_half, _write_half) = stream.into_split();
+        let (mut server, _) = listener.accept().expect("accept");
+
+        server.write_all(payload).expect("write payload");
+        read_vectored_payload(&mut read_half, payload);
+
+        crate::test_complete!("owned_split_read_half_supports_vectored_reads");
     }
 
     #[test]

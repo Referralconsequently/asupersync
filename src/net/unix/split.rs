@@ -4,11 +4,11 @@
 //! [`UnixStream`](super::UnixStream) into separate read and write handles.
 
 use crate::cx::Cx;
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use parking_lot::Mutex;
-use std::io::{self, Read, Write};
+use std::io::{self, IoSliceMut, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net;
 use std::pin::Pin;
@@ -45,6 +45,24 @@ impl AsyncRead for ReadHalf<'_> {
                 buf.advance(n);
                 Poll::Ready(Ok(()))
             }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+impl AsyncReadVectored for ReadHalf<'_> {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let mut inner = self.inner;
+        match inner.read_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 crate::net::tcp::stream::fallback_rewake(cx);
                 Poll::Pending
@@ -450,6 +468,26 @@ impl AsyncRead for OwnedReadHalf {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Err(e) = self.inner.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(e));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+impl AsyncReadVectored for OwnedReadHalf {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let inner: &net::UnixStream = &self.inner.stream;
+        match (&*inner).read_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.inner.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
                 }
                 Poll::Pending
             }
