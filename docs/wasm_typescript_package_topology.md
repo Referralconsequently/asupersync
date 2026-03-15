@@ -60,7 +60,7 @@ runtime/capability inventory lives in `docs/wasm_api_surface_census.md`.
 | Call site or environment | Package posture today | Package guidance |
 |---|---|---|
 | Browser main thread | Direct runtime is supported | `@asupersync/browser` is the default; `@asupersync/react` and `@asupersync/next` client paths layer on top of the same browser runtime lane. |
-| Dedicated worker bootstrap module | Diagnostics are promoted, but end-to-end browser I/O is not finished | `@asupersync/browser` recognizes `DedicatedWorkerGlobalScope`, but browser-core host code still has main-thread assumptions such as `web_sys::window()` for `fetch`. Treat worker support as an active promotion lane, not as full parity. |
+| Dedicated worker bootstrap module | Direct runtime is supported for `@asupersync/browser` | `@asupersync/browser` recognizes `DedicatedWorkerGlobalScope`, and browser-core host fetch now supports `window` or `WorkerGlobalScope`. Treat this as the dedicated-worker Browser Edition lane; service/shared workers still have no direct-runtime package surface. |
 | Service worker / shared worker | No direct-runtime package surface yet | Keep these environments on explicit message/data boundaries until a worker-specific host contract is shipped. |
 | React client-rendered tree | Direct runtime is supported | Use `@asupersync/react` only from client-rendered trees; it intentionally inherits the browser runtime boundary. |
 | React SSR / Node render path | Bridge-only | Do not initialize Browser Edition during SSR; move runtime creation into the client tree. |

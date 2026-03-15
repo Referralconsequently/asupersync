@@ -12,8 +12,10 @@ import {
   createBrowserRuntime,
   detectBrowserRuntimeSupport,
   formatOutcomeFailure,
+  type BrowserRuntimeSupportClass,
   type BrowserRuntimeSupportDiagnostics,
   type BrowserRuntimeOptions,
+  type BrowserRuntimeSupportReason,
   type AbiFailure,
   type Outcome,
 } from "@asupersync/browser";
@@ -21,6 +23,13 @@ import {
 export * from "@asupersync/browser";
 
 export type NextRuntimeTarget = "client" | "server" | "edge";
+export type NextRuntimeSupportReason =
+  | BrowserRuntimeSupportReason
+  | "bridge_only_server_target"
+  | "bridge_only_edge_target";
+export type NextRuntimeSupportClass =
+  | BrowserRuntimeSupportClass
+  | "bridge_only";
 export type NextBootstrapPhase =
   | "server_rendered"
   | "hydrating"
@@ -43,9 +52,14 @@ export type NextBootstrapRecoveryAction =
   | "retry_runtime_init";
 
 export interface NextRuntimeSupportDiagnostics
-  extends Omit<BrowserRuntimeSupportDiagnostics, "packageName"> {
+  extends Omit<
+    BrowserRuntimeSupportDiagnostics,
+    "packageName" | "reason" | "supportClass"
+  > {
   packageName: "@asupersync/next";
   target: NextRuntimeTarget;
+  reason: NextRuntimeSupportReason;
+  supportClass: NextRuntimeSupportClass;
 }
 
 export interface NextBootstrapSnapshot {
@@ -631,16 +645,24 @@ export function detectNextRuntimeSupport(
 ): NextRuntimeSupportDiagnostics {
   const browserDiagnostics = detectBrowserRuntimeSupport();
   if (target !== "client") {
+    const isServerTarget = target === "server";
     return {
       ...browserDiagnostics,
       supported: false,
       packageName: "@asupersync/next",
       target,
-      reason: "missing_browser_dom",
-      message: `Direct Browser Edition runtime execution is unsupported in Next ${target} runtimes.`,
+      supportClass: "bridge_only",
+      reason: isServerTarget
+        ? "bridge_only_server_target"
+        : "bridge_only_edge_target",
+      message: isServerTarget
+        ? "Next server runtimes are bridge-only for direct Browser Edition execution."
+        : "Next edge runtimes are bridge-only for direct Browser Edition execution.",
       guidance: [
         "Move BrowserRuntime creation into a client component or browser-only module.",
-        `Use bridge-only adapters rather than direct @asupersync/browser runtime calls in Next ${target} code.`,
+        isServerTarget
+          ? "Use the Next server bridge helpers to serialize work across the server/browser boundary."
+          : "Use the Next edge bridge helpers to serialize work across the edge/browser boundary.",
       ],
     };
   }

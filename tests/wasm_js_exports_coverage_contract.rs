@@ -266,11 +266,18 @@ fn browser_src_index_defines_unsupported_runtime_diagnostics() {
 }
 
 #[test]
-fn browser_src_index_pins_runtime_support_reason_taxonomy_and_capabilities() {
+fn browser_src_index_pins_runtime_support_taxonomy_and_capabilities() {
     let content = read_source("packages/browser/src/index.ts");
     for marker in [
+        "export type BrowserRuntimeSupportClass =",
+        "\"direct_runtime_supported\"",
+        "\"unsupported\"",
+        "export type BrowserRuntimeContext =",
+        "\"browser_main_thread\"",
+        "\"dedicated_worker\"",
+        "\"unknown\"",
         "\"missing_global_this\"",
-        "\"missing_browser_dom\"",
+        "\"unsupported_runtime_context\"",
         "\"missing_webassembly\"",
         "\"supported\"",
         "\"[object DedicatedWorkerGlobalScope]\"",
@@ -296,6 +303,10 @@ fn browser_src_index_requires_actionable_guidance_and_structured_error_payloads(
         "prefer @asupersync/next bridge-only adapters instead of direct BrowserRuntime creation.",
         "Move BrowserRuntime creation into a browser main-thread entrypoint or a dedicated worker bootstrap module.",
         "Use a browser/runtime with WebAssembly enabled before initializing Browser Edition.",
+        "supportClass: \"unsupported\"",
+        "supportClass: \"direct_runtime_supported\"",
+        "@asupersync/browser dedicated-worker runtime prerequisites are available.",
+        "@asupersync/browser browser main-thread runtime prerequisites are available.",
         "error.code = BROWSER_UNSUPPORTED_RUNTIME_CODE;",
         "error.diagnostics = diagnostics;",
         "`${diagnostics.packageName}: ${diagnostics.message} ${diagnostics.guidance.join(\" \")}`",
@@ -417,10 +428,17 @@ fn next_src_index_pins_client_server_and_edge_runtime_guidance() {
     let content = read_source("packages/next/src/index.ts");
     for marker in [
         "export type NextRuntimeTarget = \"client\" | \"server\" | \"edge\";",
+        "export type NextRuntimeSupportReason =",
+        "export type NextRuntimeSupportClass =",
         "target !== \"client\"",
-        "Direct Browser Edition runtime execution is unsupported in Next ${target} runtimes.",
+        "supportClass: \"bridge_only\"",
+        "\"bridge_only_server_target\"",
+        "\"bridge_only_edge_target\"",
+        "Next server runtimes are bridge-only for direct Browser Edition execution.",
+        "Next edge runtimes are bridge-only for direct Browser Edition execution.",
         "Move BrowserRuntime creation into a client component or browser-only module.",
-        "Use bridge-only adapters rather than direct @asupersync/browser runtime calls in Next ${target} code.",
+        "Use the Next server bridge helpers to serialize work across the server/browser boundary.",
+        "Use the Next edge bridge helpers to serialize work across the edge/browser boundary.",
         "Import @asupersync/next from client components only.",
         "error.code = NEXT_UNSUPPORTED_RUNTIME_CODE;",
         "error.diagnostics = diagnostics;",
@@ -428,6 +446,27 @@ fn next_src_index_pins_client_server_and_edge_runtime_guidance() {
         assert!(
             content.contains(marker),
             "next src/index.ts must preserve runtime-target diagnostic marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn wasm_docs_pin_authoritative_support_matrix_and_diagnostic_taxonomy() {
+    let content = read_source("docs/WASM.md");
+    for marker in [
+        "## Authoritative Support Matrix (live tree)",
+        "`supportClass: \"direct_runtime_supported\" | \"unsupported\"`",
+        "`runtimeContext: \"browser_main_thread\" | \"dedicated_worker\" | \"unknown\"`",
+        "`supportClass: \"bridge_only\"`",
+        "| Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported |",
+        "| Dedicated Web Worker (`DedicatedWorkerGlobalScope`) | Direct-runtime supported |",
+        "| Node / SSR / edge direct runtime via `@asupersync/browser` | Impossible for direct browser runtime; bridge-only or unsupported |",
+        "| Rust-authored `wasm32-unknown-unknown` consumer path | Direct-runtime feasible but not yet shipped |",
+        "| Multi-worker / `SharedArrayBuffer` parallel execution | Guarded optional, not shipped |",
+    ] {
+        assert!(
+            content.contains(marker),
+            "docs/WASM.md must preserve authoritative browser-matrix marker: {marker}"
         );
     }
 }

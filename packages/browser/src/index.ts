@@ -145,15 +145,26 @@ export interface BrowserCapabilitySnapshot {
   hasWindow: boolean;
 }
 
+export type BrowserRuntimeSupportClass =
+  | "direct_runtime_supported"
+  | "unsupported";
+
+export type BrowserRuntimeContext =
+  | "browser_main_thread"
+  | "dedicated_worker"
+  | "unknown";
+
 export type BrowserRuntimeSupportReason =
   | "missing_global_this"
-  | "missing_browser_dom"
+  | "unsupported_runtime_context"
   | "missing_webassembly"
   | "supported";
 
 export interface BrowserRuntimeSupportDiagnostics {
   supported: boolean;
   packageName: "@asupersync/browser";
+  supportClass: BrowserRuntimeSupportClass;
+  runtimeContext: BrowserRuntimeContext;
   reason: BrowserRuntimeSupportReason;
   message: string;
   guidance: string[];
@@ -188,6 +199,19 @@ function isDedicatedWorkerGlobal(
   );
 }
 
+function browserRuntimeContext(
+  globalObject: Record<string, unknown> | undefined,
+  capabilities: BrowserCapabilitySnapshot,
+): BrowserRuntimeContext {
+  if (isDedicatedWorkerGlobal(globalObject)) {
+    return "dedicated_worker";
+  }
+  if (capabilities.hasWindow && capabilities.hasDocument) {
+    return "browser_main_thread";
+  }
+  return "unknown";
+}
+
 export function detectBrowserRuntimeSupport(
   globalObject:
     | Record<string, unknown>
@@ -196,6 +220,7 @@ export function detectBrowserRuntimeSupport(
     : undefined,
 ): BrowserRuntimeSupportDiagnostics {
   const capabilities = browserCapabilitySnapshot(globalObject);
+  const runtimeContext = browserRuntimeContext(globalObject, capabilities);
   const sharedGuidance = [
     "Load @asupersync/browser only in browser main-thread or dedicated-worker boundaries.",
     "For Next.js server or edge code, prefer @asupersync/next bridge-only adapters instead of direct BrowserRuntime creation.",
@@ -205,6 +230,8 @@ export function detectBrowserRuntimeSupport(
     return {
       supported: false,
       packageName: "@asupersync/browser",
+      supportClass: "unsupported",
+      runtimeContext,
       reason: "missing_global_this",
       message:
         "@asupersync/browser requires a browser-like globalThis to create or enter runtime scopes.",
@@ -213,14 +240,13 @@ export function detectBrowserRuntimeSupport(
     };
   }
 
-  if (
-    (!capabilities.hasWindow || !capabilities.hasDocument) &&
-    !isDedicatedWorkerGlobal(globalObject)
-  ) {
+  if (runtimeContext === "unknown") {
     return {
       supported: false,
       packageName: "@asupersync/browser",
-      reason: "missing_browser_dom",
+      supportClass: "unsupported",
+      runtimeContext,
+      reason: "unsupported_runtime_context",
       message:
         "@asupersync/browser direct runtime APIs are unsupported outside a browser main-thread or dedicated worker environment.",
       guidance: [
@@ -235,6 +261,8 @@ export function detectBrowserRuntimeSupport(
     return {
       supported: false,
       packageName: "@asupersync/browser",
+      supportClass: "unsupported",
+      runtimeContext,
       reason: "missing_webassembly",
       message:
         "@asupersync/browser requires WebAssembly support in the current browser runtime.",
@@ -249,8 +277,13 @@ export function detectBrowserRuntimeSupport(
   return {
     supported: true,
     packageName: "@asupersync/browser",
+    supportClass: "direct_runtime_supported",
+    runtimeContext,
     reason: "supported",
-    message: "@asupersync/browser runtime prerequisites are available.",
+    message:
+      runtimeContext === "dedicated_worker"
+        ? "@asupersync/browser dedicated-worker runtime prerequisites are available."
+        : "@asupersync/browser browser main-thread runtime prerequisites are available.",
     guidance: [],
     capabilities,
   };

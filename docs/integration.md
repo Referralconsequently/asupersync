@@ -343,8 +343,9 @@ Non-goals and fail-closed guardrails:
   partial direct execution
 - no transfer of live browser runtime handles (`BrowserRuntime`, region/task
   handles, cancellation tokens) across client/server boundaries
-- no claim that browser-worker direct runtime is currently supported until the
-  shipped package guards and validation lanes are updated together
+- no claim that service/shared-worker direct runtime or guarded parallel
+  worker lanes are supported before their host contracts, package diagnostics,
+  and validation lanes are promoted together
 - no support promise for native-only modules or native database/transport
   surfaces in Browser Edition
 - no documentation that suggests `@asupersync/next` server or edge code can

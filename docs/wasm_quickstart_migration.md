@@ -58,7 +58,7 @@ environment or must be used through a bridge-only boundary.
 | Runtime context | Direct Browser Edition runtime | Guidance |
 |---|---|---|
 | Browser main thread (client-hydrated app) | Supported | Use one canonical browser profile and capability-scoped APIs |
-| Browser worker context (when required Web APIs are present) | Supported with feature parity checks | Run profile checks and keep deterministic evidence artifacts |
+| Dedicated worker context (when required Web APIs are present) | Supported for direct Browser Edition runtime | Bootstrap through a dedicated-worker module, run profile checks, and keep deterministic evidence artifacts |
 | Node.js server runtime | Bridge-only | Keep runtime execution in browser boundary; call server logic over explicit RPC/API seams |
 | Next.js server components / route handlers | Bridge-only | Do not run browser runtime core in server contexts |
 | Edge/serverless runtimes (non-browser Web API subsets) | Bridge-only unless explicitly validated | Treat missing APIs as unsupported-runtime diagnostics, not partial support |

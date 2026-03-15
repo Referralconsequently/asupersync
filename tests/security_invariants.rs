@@ -8,12 +8,12 @@
 use asupersync::bytes::BytesMut;
 use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder, Settings, SettingsBuilder};
 use asupersync::io::{
-    BrowserEntropyIoCap, BrowserHostApiIoCap, BrowserStorageAdapter, BrowserStorageIoCap,
-    BrowserTimeIoCap, BrowserTransportAuthority, BrowserTransportCancellationPolicy,
-    BrowserTransportIoCap, BrowserTransportKind, BrowserTransportPolicyError,
-    BrowserTransportReconnectPolicy, BrowserTransportRequest, BrowserTransportSupport,
-    EntropyAuthority, EntropyIoCap, EntropyOperation, EntropyPolicyError, EntropyRequest,
-    EntropySourceKind, FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest,
+    BrowserEntropyIoCap, BrowserHostApiIoCap, BrowserMessageError, BrowserStorageAdapter,
+    BrowserStorageIoCap, BrowserTimeIoCap, BrowserTransportAuthority,
+    BrowserTransportCancellationPolicy, BrowserTransportIoCap, BrowserTransportKind,
+    BrowserTransportPolicyError, BrowserTransportReconnectPolicy, BrowserTransportRequest,
+    BrowserTransportSupport, EntropyAuthority, EntropyIoCap, EntropyOperation, EntropyPolicyError,
+    EntropyRequest, EntropySourceKind, FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest,
     HostApiAuthority, HostApiIoCap, HostApiPolicyError, HostApiRequest, HostApiSurface,
     StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap, StorageOperation,
     StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy, StorageRequest, TimeAuthority,
@@ -545,6 +545,7 @@ mod browser_host_authority_security {
             HostApiAuthority::deny_all()
                 .grant_surface(HostApiSurface::Crypto)
                 .grant_surface(HostApiSurface::Performance)
+                .grant_surface(HostApiSurface::MessageChannel)
                 .grant_surface(HostApiSurface::TimeoutScheduler),
             true,
         )
@@ -624,10 +625,67 @@ mod browser_host_authority_security {
     }
 
     #[test]
+    fn invariant_host_api_authority_default_denies_message_channel_surface() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::default(), false);
+        let request = HostApiRequest::new(HostApiSurface::MessageChannel);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(HostApiPolicyError::SurfaceDenied(
+                HostApiSurface::MessageChannel
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_host_api_authority_denies_message_channel_degraded_mode_without_grant() {
+        let cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all().grant_surface(HostApiSurface::MessageChannel),
+            true,
+        );
+        let request = HostApiRequest::new(HostApiSurface::MessageChannel).with_degraded_mode();
+        assert_eq!(
+            cap.authorize(&request),
+            Err(HostApiPolicyError::DegradedModeDenied(
+                HostApiSurface::MessageChannel
+            ))
+        );
+    }
+
+    #[test]
     fn invariant_host_api_authority_allows_explicit_grants() {
         let cap = strict_host_api_cap();
         let request = HostApiRequest::new(HostApiSurface::TimeoutScheduler);
         assert_eq!(cap.authorize(&request), Ok(()));
+    }
+
+    #[test]
+    fn invariant_host_api_authority_allows_message_channel_explicit_grant() {
+        let cap = strict_host_api_cap();
+        let request = HostApiRequest::new(HostApiSurface::MessageChannel);
+        assert_eq!(cap.authorize(&request), Ok(()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn invariant_native_message_wrappers_require_degraded_mode_grant() {
+        let strict_cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all().grant_surface(HostApiSurface::MessageChannel),
+            true,
+        );
+        assert!(matches!(
+            strict_cap.open_message_channel(),
+            Err(BrowserMessageError::Policy(
+                HostApiPolicyError::DegradedModeDenied(HostApiSurface::MessageChannel)
+            ))
+        ));
+
+        let degraded_cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::MessageChannel)
+                .with_degraded_mode_allowed(),
+            true,
+        );
+        assert!(degraded_cap.open_message_channel().is_ok());
     }
 }
 

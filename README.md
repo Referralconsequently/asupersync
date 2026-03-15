@@ -1322,12 +1322,14 @@ applications via `wasm-bindgen`.
 
 ### What works today
 
-- **JS/TS consumers on the browser main thread**: install
-  `@asupersync/browser` (or framework-specific packages
-  `@asupersync/react`, `@asupersync/next`) and use structured scopes,
-  cancel-correct fetch, WebSocket management, and four-valued outcomes from
-  JavaScript. The shipped direct-runtime path today requires a real browser
-  `window` + `document` + `WebAssembly` environment.
+- **JS/TS consumers on the browser main thread or in a dedicated worker**:
+  install `@asupersync/browser` for direct Browser Edition runtime access.
+  The shipped direct-runtime lane today supports a real browser
+  `window` + `document` + `WebAssembly` environment and dedicated workers when
+  the required worker Web APIs are present.
+- **Framework adapters on the browser main thread**: `@asupersync/react` and
+  `@asupersync/next` remain client-rendered browser adapters layered on top of
+  the same Browser Edition runtime boundary.
 - **Core invariants preserved**: no orphan tasks, cancel-correctness,
   obligation accounting, and region-close-implies-quiescence all hold in
   the browser runtime.
@@ -1340,10 +1342,10 @@ applications via `wasm-bindgen`.
   Asupersync's `Cx`/scopes/combinators and compiling it to wasm32 is
   architecturally feasible (the semantic core is target-agnostic) but
   is not yet promoted as a supported public API lane.
-- **Dedicated worker / service worker direct runtime**: the shipped browser
-  package currently fails closed outside the main-thread DOM environment.
-  Dedicated workers are a feasible next lane, but they are not a shipped
-  direct-runtime target yet.
+- **Service worker / shared worker direct runtime**: the shipped browser
+  package does not expose these as direct-runtime lanes yet. Keep them on
+  explicit message/data boundaries until a worker-specific host contract is
+  promoted deliberately.
 - **Multi-threaded WASM**: the browser runtime is single-threaded.
   A future phase may add `SharedArrayBuffer` + Web Worker parallelism,
   but this requires cross-origin isolation headers that many deployments
@@ -1387,8 +1389,8 @@ architecture diagrams, crate map, and known limitations.
 | Distributed runtime (remote tasks, sagas, leases, recovery) | ✅ Implemented |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (Lean coverage artifacts + TLA+ export) | ✅ Implemented |
-| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread consumers (single-threaded, event-loop-driven) |
-| Dedicated worker / service worker direct runtime | Deferred; not yet shipped |
+| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
+| Service worker / shared worker direct runtime | Deferred; not yet shipped |
 | Rust-to-WASM compilation path | Feasible, but not yet a public supported lane |
 
 ### What Asupersync Doesn't Do
@@ -1462,7 +1464,7 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
 | [`asupersync_v4_api_skeleton.rs`](./asupersync_v4_api_skeleton.rs) | **API Skeleton**: Rust types and signatures |
 | [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract, support matrix, and fail-closed boundary guidance |
-| [`docs/WASM.md`](./docs/WASM.md) | **Browser Edition Overview**: what works (JS consumers), what doesn't (Rust-to-WASM), architectural boundary, runtime model, known limitations, and future phases |
+| [`docs/WASM.md`](./docs/WASM.md) | **Browser Edition Overview**: what works today (browser main thread + dedicated-worker `@asupersync/browser`), what remains deferred (service/shared worker direct runtime, Rust-to-WASM public lane), architectural boundary, runtime model, known limitations, and future phases |
 | [`docs/wasm_quickstart_migration.md`](./docs/wasm_quickstart_migration.md) | **Browser Quickstart + Migration**: deterministic onboarding commands, migration anti-pattern map, deferred-surface fallback guidance |
 | [`docs/wasm_canonical_examples.md`](./docs/wasm_canonical_examples.md) | **Browser Canonical Examples**: vanilla/TypeScript/React/Next scenario catalog with deterministic repro commands and artifact pointers |
 | [`docs/wasm_troubleshooting_compendium.md`](./docs/wasm_troubleshooting_compendium.md) | **Browser Troubleshooting Cookbook**: unsupported-runtime recovery paths, failure recipes, and deterministic verification commands |
