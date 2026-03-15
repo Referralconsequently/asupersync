@@ -232,20 +232,16 @@ impl<T: Clone> FaultSender<T> {
 
         if should_reorder {
             self.record_reorder();
-            let needs_flush = {
+            let value = {
                 let mut buffer = self.reorder_buffer.lock();
-                buffer.push(value);
-                buffer.len() >= self.config.reorder_buffer_size
+                if buffer.len() + 1 < self.config.reorder_buffer_size {
+                    buffer.push(value);
+                    drop(buffer);
+                    return Ok(());
+                }
+                value
             };
-            if needs_flush {
-                // Auto-flush is best-effort. If flush fails, `flush()` has
-                // already re-queued undelivered messages, including this one.
-                // Returning `Err(value)` here would hand ownership back while
-                // the same value is still buffered, which can duplicate on
-                // caller retry.
-                let _ = self.flush(cx).await;
-            }
-            return Ok(());
+            return self.auto_flush_including_current(cx, value).await;
         }
 
         // Clone before send only if duplication is needed.
@@ -262,6 +258,175 @@ impl<T: Clone> FaultSender<T> {
         if let Some(dup) = duplicate {
             if self.inner.send(cx, dup).await.is_ok() {
                 self.record_duplication();
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
+    async fn auto_flush_including_current(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
+        enum AutoFlushItem<T> {
+            Buffered(T),
+            Current(T),
+        }
+
+        impl<T> AutoFlushItem<T> {
+            fn into_value(self) -> T {
+                match self {
+                    Self::Buffered(value) | Self::Current(value) => value,
+                }
+            }
+        }
+
+        struct AutoFlushGuard<'a, T> {
+            buffer: &'a parking_lot::Mutex<Vec<T>>,
+            pending: std::collections::VecDeque<AutoFlushItem<T>>,
+            current: Option<AutoFlushItem<T>>,
+        }
+
+        impl<T> AutoFlushGuard<'_, T> {
+            fn take_current_value(&mut self) -> Option<T> {
+                match self.current.take() {
+                    Some(AutoFlushItem::Current(value)) => return Some(value),
+                    Some(item) => self.current = Some(item),
+                    None => {}
+                }
+
+                let current_idx = self
+                    .pending
+                    .iter()
+                    .position(|item| matches!(item, AutoFlushItem::Current(_)))?;
+
+                match self.pending.remove(current_idx) {
+                    Some(AutoFlushItem::Current(value)) => Some(value),
+                    Some(AutoFlushItem::Buffered(_)) => unreachable!("matched current item"),
+                    None => None,
+                }
+            }
+        }
+
+        impl<T> Drop for AutoFlushGuard<'_, T> {
+            fn drop(&mut self) {
+                let mut to_restore = Vec::new();
+                if let Some(item) = self.current.take() {
+                    to_restore.push(item.into_value());
+                }
+                to_restore.extend(self.pending.drain(..).map(AutoFlushItem::into_value));
+                if !to_restore.is_empty() {
+                    let mut buf = self.buffer.lock();
+                    buf.extend(to_restore);
+                }
+            }
+        }
+
+        let mut messages = {
+            let mut buffer = self.reorder_buffer.lock();
+            let buffered = std::mem::replace(
+                &mut *buffer,
+                Vec::with_capacity(self.config.reorder_buffer_size),
+            );
+            let mut messages = Vec::with_capacity(buffered.len() + 1);
+            messages.extend(buffered.into_iter().map(AutoFlushItem::Buffered));
+            messages.push(AutoFlushItem::Current(value));
+            messages
+        };
+
+        {
+            let mut rng = self.rng.lock();
+            shuffle_vec(&mut messages, &mut rng);
+        }
+
+        let flush_context = format!("buffer_size_{}", messages.len());
+        let mut guard = AutoFlushGuard {
+            buffer: &self.reorder_buffer,
+            pending: messages.into(),
+            current: None,
+        };
+        let mut flush_recorded = false;
+
+        while let Some(item) = guard.pending.pop_front() {
+            guard.current = Some(item);
+
+            let permit = match self.inner.reserve(cx).await {
+                Ok(p) => p,
+                Err(SendError::Disconnected(())) => {
+                    if let Some(value) = guard.take_current_value() {
+                        return Err(SendError::Disconnected(value));
+                    }
+                    return Ok(());
+                }
+                Err(SendError::Cancelled(())) => {
+                    if let Some(value) = guard.take_current_value() {
+                        return Err(SendError::Cancelled(value));
+                    }
+                    return Ok(());
+                }
+                Err(SendError::Full(())) => {
+                    if let Some(value) = guard.take_current_value() {
+                        return Err(SendError::Full(value));
+                    }
+                    return Ok(());
+                }
+            };
+
+            let Some(current_item) = guard.current.take() else {
+                continue;
+            };
+
+            match current_item {
+                AutoFlushItem::Buffered(msg) => match permit.try_send(msg) {
+                    Ok(()) => {
+                        if !flush_recorded {
+                            emit_fault_evidence(
+                                &*self.evidence_sink,
+                                self.next_evidence_ts(),
+                                "reorder_flush",
+                                &flush_context,
+                            );
+                            self.stat_reorder_flushes.fetch_add(1, Ordering::Relaxed);
+                            flush_recorded = true;
+                        }
+                        self.record_sent();
+                    }
+                    Err(SendError::Disconnected(value)) => {
+                        guard.current = Some(AutoFlushItem::Buffered(value));
+                        if let Some(current) = guard.take_current_value() {
+                            return Err(SendError::Disconnected(current));
+                        }
+                        return Ok(());
+                    }
+                    Err(SendError::Cancelled(value)) => {
+                        guard.current = Some(AutoFlushItem::Buffered(value));
+                        if let Some(current) = guard.take_current_value() {
+                            return Err(SendError::Cancelled(current));
+                        }
+                        return Ok(());
+                    }
+                    Err(SendError::Full(value)) => {
+                        guard.current = Some(AutoFlushItem::Buffered(value));
+                        if let Some(current) = guard.take_current_value() {
+                            return Err(SendError::Full(current));
+                        }
+                        return Ok(());
+                    }
+                },
+                AutoFlushItem::Current(msg) => match permit.try_send(msg) {
+                    Ok(()) => {
+                        if !flush_recorded {
+                            emit_fault_evidence(
+                                &*self.evidence_sink,
+                                self.next_evidence_ts(),
+                                "reorder_flush",
+                                &flush_context,
+                            );
+                            self.stat_reorder_flushes.fetch_add(1, Ordering::Relaxed);
+                            flush_recorded = true;
+                        }
+                        self.record_sent();
+                    }
+                    Err(err) => return Err(err),
+                },
             }
         }
 
@@ -526,6 +691,15 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    fn test_waker() -> Waker {
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        Waker::from(Arc::new(NoopWaker))
     }
 
     #[test]
@@ -856,6 +1030,59 @@ mod tests {
     }
 
     #[test]
+    fn auto_flush_returns_disconnected_for_triggering_message() {
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 1);
+        let (fault_tx, rx) = fault_channel::<u32>(1, config, sink);
+        let cx = test_cx();
+
+        block_on(fault_tx.inner().send(&cx, 99)).expect("fill underlying channel");
+
+        let waker = test_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut send_fut = Box::pin(fault_tx.send(&cx, 123));
+        assert!(matches!(
+            send_fut.as_mut().poll(&mut task_cx),
+            Poll::Pending
+        ));
+
+        drop(rx);
+
+        assert!(matches!(
+            send_fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::Disconnected(123)))
+        ));
+        assert_eq!(fault_tx.buffered_count(), 0);
+    }
+
+    #[test]
+    fn auto_flush_returns_cancelled_for_triggering_message() {
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 1);
+        let (fault_tx, _rx) = fault_channel::<u32>(1, config, sink);
+        let cx = test_cx();
+
+        block_on(fault_tx.inner().send(&cx, 99)).expect("fill underlying channel");
+
+        let send_cx = test_cx();
+        let waker = test_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut send_fut = Box::pin(fault_tx.send(&send_cx, 123));
+        assert!(matches!(
+            send_fut.as_mut().poll(&mut task_cx),
+            Poll::Pending
+        ));
+
+        send_cx.set_cancel_requested(true);
+
+        assert!(matches!(
+            send_fut.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(SendError::Cancelled(123)))
+        ));
+        assert_eq!(fault_tx.buffered_count(), 0);
+    }
+
+    #[test]
     fn cancelled_send_returns_error_without_buffering() {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         let config = FaultChannelConfig::new(42).with_reorder(1.0, 1);
@@ -914,8 +1141,7 @@ mod tests {
 
     #[test]
     fn duplication_evidence_only_recorded_after_successful_delivery() {
-        let collector = Arc::new(CollectorSink::new());
-        let sink: Arc<dyn EvidenceSink> = collector.clone();
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         // Duplication enabled, reorder disabled so duplication path is taken.
         let config = FaultChannelConfig::new(42).with_duplication(1.0);
         let (fault_tx, rx) = fault_channel::<u32>(8, config, sink);
