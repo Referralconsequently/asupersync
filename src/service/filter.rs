@@ -160,15 +160,13 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        if !self.ready_observed {
-            return FilterFuture::not_ready();
-        }
-
-        if (self.predicate)(&req) {
+        if !(self.predicate)(&req) {
+            FilterFuture::rejected()
+        } else if !self.ready_observed {
+            FilterFuture::not_ready()
+        } else {
             self.ready_observed = false;
             FilterFuture::inner(self.inner.call(req))
-        } else {
-            FilterFuture::rejected()
         }
     }
 }
@@ -501,6 +499,50 @@ mod tests {
             calls.load(Ordering::SeqCst)
         );
         crate::test_complete!("filter_call_without_poll_ready_returns_not_ready");
+    }
+
+    #[test]
+    fn filter_rejected_call_without_poll_ready_returns_rejected() {
+        init_test("filter_rejected_call_without_poll_ready_returns_rejected");
+        let ready_polls = Arc::new(AtomicUsize::new(0));
+        let available = Arc::new(AtomicUsize::new(0));
+        let inner = StrictReservingService::new(Arc::clone(&ready_polls), Arc::clone(&available));
+        let mut filter = Filter::new(inner, |x: &i32| *x > 0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut rejected = filter.call(-7);
+        let rejected_result = Pin::new(&mut rejected).poll(&mut cx);
+        let rejected_ok = matches!(rejected_result, Poll::Ready(Err(FilterError::Rejected)));
+        crate::assert_with_log!(
+            rejected_ok,
+            "rejected request short-circuits without poll_ready",
+            true,
+            rejected_ok
+        );
+        crate::assert_with_log!(
+            ready_polls.load(Ordering::SeqCst) == 0,
+            "rejected request never polls inner readiness",
+            0,
+            ready_polls.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            available.load(Ordering::SeqCst) == 0,
+            "inner backpressure state remains untouched",
+            0,
+            available.load(Ordering::SeqCst)
+        );
+
+        let mut accepted = filter.call(7);
+        let accepted_result = Pin::new(&mut accepted).poll(&mut cx);
+        let accepted_not_ready = matches!(accepted_result, Poll::Ready(Err(FilterError::NotReady)));
+        crate::assert_with_log!(
+            accepted_not_ready,
+            "accepted requests still require an explicit readiness observation",
+            true,
+            accepted_not_ready
+        );
+        crate::test_complete!("filter_rejected_call_without_poll_ready_returns_rejected");
     }
 
     #[test]

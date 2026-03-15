@@ -139,6 +139,15 @@ pub trait Strategy: fmt::Debug + Send + Sync {
     /// Returns `None` if no backends are available.
     fn pick(&self, loads: &[u64]) -> Option<usize>;
 
+    /// Returns whether `index` is a backend this strategy is allowed to select.
+    ///
+    /// `call_balanced()` uses this during readiness fallback probing so
+    /// strategy-level exclusion rules continue to hold even when the first
+    /// picked backend is not immediately ready.
+    fn permits_index(&self, index: usize, loads: &[u64]) -> bool {
+        index < loads.len()
+    }
+
     /// Reconciles strategy topology state with an already-materialized backend set.
     ///
     /// This is used during constructor-time initialization, where the balancer
@@ -335,6 +344,19 @@ impl Strategy for Weighted {
         drop(state);
 
         Some(best_idx)
+    }
+
+    fn permits_index(&self, index: usize, loads: &[u64]) -> bool {
+        if index >= loads.len() {
+            return false;
+        }
+
+        self.state
+            .lock()
+            .weights
+            .get(index)
+            .copied()
+            .is_some_and(|weight| weight > 0)
     }
 
     fn sync_backend_count(&self, count: usize) {
@@ -601,6 +623,9 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
 
         for offset in 0..backend_handles.len() {
             let candidate_idx = (idx + offset) % backend_handles.len();
+            if !self.strategy.permits_index(candidate_idx, &loads) {
+                continue;
+            }
             let backend = &backend_handles[candidate_idx];
             let mut svc = backend.service.lock();
 
@@ -1400,6 +1425,49 @@ mod tests {
         crate::test_complete!(
             "lb_call_balanced_reports_no_ready_when_strategy_declines_all_backends"
         );
+    }
+
+    #[test]
+    fn lb_call_balanced_skips_zero_weight_ready_backend_during_weighted_fallback() {
+        init_test("lb_call_balanced_skips_zero_weight_ready_backend_during_weighted_fallback");
+        let lb = LoadBalancer::new(
+            Weighted::new(vec![1, 0, 1]),
+            vec![
+                ReadyArmService::pending(),
+                ReadyArmService::new(11),
+                ReadyArmService::new(22),
+            ],
+        );
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("fallback should skip zero-weight backend and reach selectable ready backend");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(22))));
+        assert_eq!(lb.loads(), vec![0, 0, 0]);
+        crate::test_complete!(
+            "lb_call_balanced_skips_zero_weight_ready_backend_during_weighted_fallback"
+        );
+    }
+
+    #[test]
+    fn lb_call_balanced_rejects_only_ready_zero_weight_backend() {
+        init_test("lb_call_balanced_rejects_only_ready_zero_weight_backend");
+        let lb = LoadBalancer::new(
+            Weighted::new(vec![1, 0]),
+            vec![ReadyArmService::pending(), ReadyArmService::new(17)],
+        );
+
+        let err = lb
+            .call_balanced(7)
+            .expect_err("zero-weight backend must remain unselectable during fallback");
+
+        assert!(matches!(err, LoadBalanceError::NoReadyBackends));
+        assert_eq!(lb.loads(), vec![0, 0]);
+        crate::test_complete!("lb_call_balanced_rejects_only_ready_zero_weight_backend");
     }
 
     #[test]
