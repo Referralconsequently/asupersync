@@ -332,20 +332,17 @@ impl TimeoutConfig {
 /// 2. `timeout!` returns immediately (sleep cleanup is fast)
 #[macro_export]
 macro_rules! timeout {
-    // Basic syntax: timeout!(duration, future)
+    // Basic syntax: timeout!(duration, future) requires ambient context, but 
+    // for now we require explicit cx in asupersync. We provide a dummy 
+    // implementation that panics to enforce cx passing.
     ($duration:expr, $future:expr) => {{
-        // Placeholder: in real implementation, this races against sleep
-        let _ = $duration;
-        let _ = $future;
+        unimplemented!("timeout! requires a Cx context: timeout!(cx, duration, future)")
     }};
 
     // With explicit cx: timeout!(cx, duration, future)
-    ($cx:expr, $duration:expr, $future:expr) => {{
-        // Placeholder: in real implementation, this races against sleep using cx
-        let _ = $cx;
-        let _ = $duration;
-        let _ = $future;
-    }};
+    ($cx:expr, $duration:expr, $future:expr) => {
+        $crate::time::TimeoutFuture::after($cx.time(), $duration, $future)
+    };
 }
 
 /// Joins multiple futures, short-circuiting on the first error.

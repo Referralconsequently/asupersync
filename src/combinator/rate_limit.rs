@@ -188,8 +188,6 @@ pub struct RateLimitMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RejectionReason {
     Timeout,
-    /// Tombstone for entries that have been fully processed and removed by the caller.
-    Consumed,
 }
 
 /// Result of a queue entry: None = waiting, Some(Ok(())) = granted, Some(Err(reason)) = rejected.
@@ -594,15 +592,6 @@ impl RateLimiter {
 
         let mut queue = self.wait_queue.write();
 
-        // Garbage collect tombstones from the front
-        while let Some(front) = queue.front() {
-            if front.result == Some(Err(RejectionReason::Consumed)) {
-                queue.pop_front();
-            } else {
-                break;
-            }
-        }
-
         let mut state = self.state.lock();
         self.refill_inner(&mut state, now_millis);
 
@@ -735,20 +724,18 @@ impl RateLimiter {
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
-            let entry = &mut queue[idx];
-            match entry.result {
+            match queue[idx].result {
                 Some(Ok(())) => {
-                    entry.result = Some(Err(RejectionReason::Consumed));
+                    queue.remove(idx);
                     Ok(true)
                 }
                 Some(Err(RejectionReason::Timeout)) => {
+                    let entry = queue.remove(idx).expect("must exist");
                     let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
-                    entry.result = Some(Err(RejectionReason::Consumed));
                     Err(RateLimitError::Timeout {
                         waited: Duration::from_millis(wait_ms),
                     })
                 }
-                Some(Err(RejectionReason::Consumed)) => Err(RateLimitError::Cancelled),
                 None => Ok(false),
             }
         } else {
@@ -765,11 +752,10 @@ impl RateLimiter {
 
         let mut queue = self.wait_queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
-            let entry = &mut queue[idx];
+            let entry = queue.remove(idx).expect("must exist");
             let previous_result = entry.result;
             let cost = entry.cost;
             let enqueued_at_millis = entry.enqueued_at_millis;
-            entry.result = Some(Err(RejectionReason::Consumed));
             drop(queue);
 
             if previous_result == Some(Ok(())) {
@@ -1722,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_timeout_behind_granted_zombie_is_removed() {
+    fn checked_timeout_behind_granted_is_immediately_removed() {
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
             period: Duration::from_millis(100),
@@ -1746,16 +1732,15 @@ mod tests {
         assert!(matches!(result, Err(RateLimitError::Timeout { .. })));
         assert_eq!(
             rl.wait_queue.read().len(),
-            2,
-            "timed-out entry should be tombstoned behind the unconsumed granted entry"
+            1,
+            "timed-out entry is immediately removed; only the unconsumed granted entry remains"
         );
 
         let _ = rl.check_entry(id1, timeout_time);
-        let _ = rl.process_queue(timeout_time);
         assert_eq!(
             rl.wait_queue.read().len(),
             0,
-            "both entries should be garbage collected once the front is consumed"
+            "granted entry removed on claim"
         );
     }
 
