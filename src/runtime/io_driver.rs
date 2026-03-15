@@ -1947,6 +1947,12 @@ mod tests {
         reactor.release_poll();
         join.join().expect("poll thread should join");
         drop(reg);
+        crate::assert_with_log!(
+            driver.is_empty(),
+            "registration cleaned up after rearm test",
+            true,
+            driver.is_empty()
+        );
 
         crate::test_complete!("io_registration_rearm_wakes_inflight_poll");
     }

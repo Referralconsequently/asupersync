@@ -441,6 +441,7 @@ mod tests {
     use std::io::{self, Read, Write};
     use std::os::unix::io::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicI32, Ordering};
     use std::time::{Duration, Instant};
 
     fn init_test(name: &str) {
@@ -496,6 +497,12 @@ mod tests {
     // Prefer a very high descriptor so fd-reuse tests avoid low-numbered
     // process-wide fds used by unrelated concurrent tests.
     const FD_REUSE_TEST_MIN_FD: RawFd = 50_000;
+    const FD_REUSE_TEST_FD_STRIDE: RawFd = 64;
+    static NEXT_FD_REUSE_TEST_MIN_FD: AtomicI32 = AtomicI32::new(FD_REUSE_TEST_MIN_FD);
+
+    fn next_fd_reuse_test_min_fd() -> RawFd {
+        NEXT_FD_REUSE_TEST_MIN_FD.fetch_add(FD_REUSE_TEST_FD_STRIDE, Ordering::Relaxed)
+    }
 
     fn dup_fd_at_least(fd: RawFd, min_fd: RawFd) -> RawFd {
         // Some test hosts run with low RLIMIT_NOFILE values where high minima
@@ -1031,6 +1038,7 @@ mod tests {
         init_test("deregister_delete_failure_preserves_bookkeeping_for_retry");
         let reactor = EpollReactor::new().expect("failed to create reactor");
         let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+        let fd_reuse_min = next_fd_reuse_test_min_fd();
 
         let token = Token::new(78);
         let registered_fd = sock1.as_raw_fd();
@@ -1039,9 +1047,9 @@ mod tests {
             .expect("register failed");
 
         let poller_fd = reactor.poller.as_raw_fd();
-        let saved_poller_fd = dup_fd_at_least(poller_fd, FD_REUSE_TEST_MIN_FD);
+        let saved_poller_fd = dup_fd_at_least(poller_fd, fd_reuse_min);
         let mut poller_restore = FdRestoreGuard::new(poller_fd, saved_poller_fd);
-        let replacement_fd = dup_fd_at_least(sock1.as_raw_fd(), FD_REUSE_TEST_MIN_FD);
+        let replacement_fd = dup_fd_at_least(sock1.as_raw_fd(), fd_reuse_min);
         let replace_result = unsafe { libc::dup2(replacement_fd, poller_fd) };
         crate::assert_with_log!(
             replace_result == poller_fd,
@@ -1119,7 +1127,8 @@ mod tests {
         init_test("modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse");
         let reactor = EpollReactor::new().expect("failed to create reactor");
         let (old_sock, _old_peer) = UnixStream::pair().expect("failed to create unix stream pair");
-        let stale_fd = dup_fd_at_least(old_sock.as_raw_fd(), FD_REUSE_TEST_MIN_FD);
+        let fd_reuse_min = next_fd_reuse_test_min_fd();
+        let stale_fd = dup_fd_at_least(old_sock.as_raw_fd(), fd_reuse_min);
         let stale_source = RawFdSource(stale_fd);
         let stale_token = Token::new(89);
         reactor
@@ -1212,7 +1221,8 @@ mod tests {
         init_test("reused_fd_cannot_register_under_new_token_until_stale_token_removed");
         let reactor = EpollReactor::new().expect("failed to create reactor");
         let (old_sock, _old_peer) = UnixStream::pair().expect("failed to create unix stream pair");
-        let stale_fd = dup_fd_at_least(old_sock.as_raw_fd(), FD_REUSE_TEST_MIN_FD);
+        let fd_reuse_min = next_fd_reuse_test_min_fd();
+        let stale_fd = dup_fd_at_least(old_sock.as_raw_fd(), fd_reuse_min);
         let stale_source = RawFdSource(stale_fd);
         let stale_token = Token::new(87);
         reactor
