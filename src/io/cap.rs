@@ -1113,8 +1113,12 @@ pub enum HostApiSurface {
     TimeoutScheduler,
     /// Repeating timers (`setInterval` style).
     IntervalScheduler,
-    /// Worker/message channel bridging.
+    /// Worker/message channel bridging (`MessageChannel` constructor).
     MessageChannel,
+    /// Explicit `MessagePort` communication (transferred or created).
+    MessagePort,
+    /// Broadcast messaging across same-origin contexts (`BroadcastChannel`).
+    BroadcastChannel,
 }
 
 /// Request envelope for host API authority checks.
@@ -1198,6 +1202,15 @@ impl HostApiAuthority {
             self.allowed_surfaces.push(surface);
         }
         self
+    }
+
+    /// Grants authority for all browser messaging surfaces (MessageChannel,
+    /// MessagePort, BroadcastChannel).
+    #[must_use]
+    pub fn grant_messaging(self) -> Self {
+        self.grant_surface(HostApiSurface::MessageChannel)
+            .grant_surface(HostApiSurface::MessagePort)
+            .grant_surface(HostApiSurface::BroadcastChannel)
     }
 
     /// Enables degraded-mode fallback behavior.
@@ -2822,5 +2835,65 @@ mod tests {
             StorageConsistencyPolicy::ImmediateReadAfterWrite
         );
         assert_eq!(storage_cap.redaction_policy(), redaction);
+    }
+
+    // ── Messaging capability tests (bead asupersync-1n453.3) ──────
+
+    #[test]
+    fn messaging_authority_grant_covers_all_three_surfaces() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::deny_all().grant_messaging(), false);
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::MessageChannel)),
+            Ok(())
+        );
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::MessagePort)),
+            Ok(())
+        );
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::BroadcastChannel)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn messaging_surfaces_denied_by_default() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::deny_all(), false);
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::MessagePort)),
+            Err(HostApiPolicyError::SurfaceDenied(
+                HostApiSurface::MessagePort
+            ))
+        );
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::BroadcastChannel)),
+            Err(HostApiPolicyError::SurfaceDenied(
+                HostApiSurface::BroadcastChannel
+            ))
+        );
+    }
+
+    #[test]
+    fn individual_messaging_surface_grants_are_independent() {
+        let cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all().grant_surface(HostApiSurface::MessagePort),
+            false,
+        );
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::MessagePort)),
+            Ok(())
+        );
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::BroadcastChannel)),
+            Err(HostApiPolicyError::SurfaceDenied(
+                HostApiSurface::BroadcastChannel
+            ))
+        );
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::MessageChannel)),
+            Err(HostApiPolicyError::SurfaceDenied(
+                HostApiSurface::MessageChannel
+            ))
+        );
     }
 }
