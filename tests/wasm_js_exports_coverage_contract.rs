@@ -256,7 +256,7 @@ fn browser_src_index_defines_unsupported_runtime_diagnostics() {
         "export function createUnsupportedRuntimeError",
         "export function assertBrowserRuntimeSupport",
         "ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME",
-        "client-hydrated browser boundaries",
+        "browser main-thread or dedicated-worker boundaries",
     ] {
         assert!(
             content.contains(marker),
@@ -273,6 +273,7 @@ fn browser_src_index_pins_runtime_support_reason_taxonomy_and_capabilities() {
         "\"missing_browser_dom\"",
         "\"missing_webassembly\"",
         "\"supported\"",
+        "\"[object DedicatedWorkerGlobalScope]\"",
         "hasAbortController",
         "hasDocument",
         "hasFetch",
@@ -291,9 +292,9 @@ fn browser_src_index_pins_runtime_support_reason_taxonomy_and_capabilities() {
 fn browser_src_index_requires_actionable_guidance_and_structured_error_payloads() {
     let content = read_source("packages/browser/src/index.ts");
     for marker in [
-        "Load @asupersync/browser only in client-hydrated browser boundaries.",
+        "Load @asupersync/browser only in browser main-thread or dedicated-worker boundaries.",
         "prefer @asupersync/next bridge-only adapters instead of direct BrowserRuntime creation.",
-        "Move BrowserRuntime creation behind a browser-only entrypoint.",
+        "Move BrowserRuntime creation into a browser main-thread entrypoint or a dedicated worker bootstrap module.",
         "Use a browser/runtime with WebAssembly enabled before initializing Browser Edition.",
         "error.code = BROWSER_UNSUPPORTED_RUNTIME_CODE;",
         "error.diagnostics = diagnostics;",
@@ -309,6 +310,24 @@ fn browser_src_index_requires_actionable_guidance_and_structured_error_payloads(
         2,
         "browser runtime creation and scope entry must both guard unsupported runtimes"
     );
+}
+
+#[test]
+fn browser_core_fetch_bridge_supports_window_or_worker_hosts() {
+    let content = read_source("asupersync-browser-core/src/lib.rs");
+    for marker in [
+        "WorkerGlobalScope",
+        "web_sys::window()",
+        "js_sys::global().dyn_into::<WorkerGlobalScope>()",
+        "window.fetch_with_str_and_init(url, init)",
+        "worker.fetch_with_str_and_init(url, init)",
+        "window or WorkerGlobalScope fetch host is not available in this host context",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser-core src/lib.rs must preserve worker fetch-host marker: {marker}"
+        );
+    }
 }
 
 #[test]

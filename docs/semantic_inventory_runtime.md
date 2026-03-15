@@ -162,7 +162,7 @@ Source base: `src/` (~377K lines, 499 files)
 - **Intent**: All obligations are committed or aborted by region close; none are silently dropped.
 - **Primary citation**: `src/obligation/leak_check.rs:301-334` (`LeakChecker` static analysis over structured IR).
 - **Runtime enforcement**: `src/record/region.rs:690-698` (`is_quiescent` checks `pending_obligations == 0`).
-- **Oracle**: lab runtime `obligation_leak_oracle()` checks at test completion.
+- **Oracle**: lab runtime `OracleSuite` feeds `LabRunReport::oracle_report`, which includes obligation-leak checks at test completion.
 - **Charter ref**: SEM-INV-005
 
 ### inv.obligation.linear

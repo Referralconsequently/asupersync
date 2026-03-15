@@ -40,7 +40,7 @@ fn t(nanos: u64) -> Time {
 }
 
 fn push_trace(runtime: &LabRuntime, kind: TraceEventKind, data: TraceData, time: Time) {
-    let seq = runtime.state.next_trace_seq();
+    let seq = runtime.state.trace.next_seq();
     runtime
         .state
         .trace

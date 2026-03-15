@@ -141,7 +141,7 @@ via `web-sys` and `wasm-bindgen-futures`.
 The current browser runtime model (Phase 1) is:
 
 - **Single-threaded**: all Asupersync tasks run on the browser main thread
-  (or a single Web Worker).
+  or inside a single dedicated Web Worker.
 - **Cooperative**: the scheduler yields back to the JS event loop between
   scheduling steps to avoid blocking the UI thread.
 - **Event-loop driven**: browser timer APIs, `fetch` completions, and
@@ -171,7 +171,10 @@ The current browser runtime model (Phase 1) is:
 - **No process/signal handling**: the `process` and `signal` modules are
   native-only.
 - **No multi-threading by default**: the Phase 1 browser runtime is
-  single-threaded. True parallelism requires Web Workers (see below).
+  single-threaded. Supported direct-runtime lanes are the browser main thread
+  and a single dedicated Web Worker; service-worker/shared-worker lanes remain
+  deferred. True parallelism requires additional workers plus the Phase 2
+  model below.
 
 ### Cross-origin isolation for SharedArrayBuffer
 

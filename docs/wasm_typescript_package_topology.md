@@ -52,6 +52,23 @@ Practical package-selection rule:
 3. Move up to `@asupersync/react` or `@asupersync/next` when framework boundary
    diagnostics matter more than raw package minimalism.
 
+## Live Support Matrix Snapshot (2026-03-15 / `asupersync-1tte9`)
+
+Use this as the package-facing summary of the live support boundary. The fuller
+runtime/capability inventory lives in `docs/wasm_api_surface_census.md`.
+
+| Call site or environment | Package posture today | Package guidance |
+|---|---|---|
+| Browser main thread | Direct runtime is supported | `@asupersync/browser` is the default; `@asupersync/react` and `@asupersync/next` client paths layer on top of the same browser runtime lane. |
+| Dedicated worker bootstrap module | Diagnostics are promoted, but end-to-end browser I/O is not finished | `@asupersync/browser` recognizes `DedicatedWorkerGlobalScope`, but browser-core host code still has main-thread assumptions such as `web_sys::window()` for `fetch`. Treat worker support as an active promotion lane, not as full parity. |
+| Service worker / shared worker | No direct-runtime package surface yet | Keep these environments on explicit message/data boundaries until a worker-specific host contract is shipped. |
+| React client-rendered tree | Direct runtime is supported | Use `@asupersync/react` only from client-rendered trees; it intentionally inherits the browser runtime boundary. |
+| React SSR / Node render path | Bridge-only | Do not initialize Browser Edition during SSR; move runtime creation into the client tree. |
+| Next `client_hydrated` | Direct runtime is supported | `@asupersync/next` is valid here and should create runtime state only after hydration. |
+| Next `client_ssr` | Bridge/defer only | Defer runtime initialization until the browser hydrates. |
+| Next server / edge | Bridge-only | Use the explicit `use_server_bridge` / `use_edge_bridge` fallbacks instead of direct Browser Edition execution. |
+| Plain Node / SSR / non-browser test process | Not a Browser Edition direct-runtime target | Use native `asupersync` or explicit bridge seams rather than catching unsupported-runtime errors and continuing. |
+
 ## Rust Crate Layout and Artifact Provenance
 
 The TypeScript package topology is layered over a separate Rust crate layout.
@@ -147,7 +164,9 @@ Any symbol owner outside the declared package topology fails policy.
 These are the practical rules users need after initial setup:
 
 1. `BrowserRuntime` (or `RuntimeHandle` at the low level) is the ownership root.
-   Create it in a supported browser client boundary and close it explicitly.
+   Create it only in a boundary that is actually classified as
+   direct-runtime-supported in the live matrix above, then close it
+   explicitly.
 2. Region creation is structured. Enter scopes/regions from a runtime or parent
    region instead of inventing detached task roots.
 3. Task, fetch, and websocket work should be opened from region scope. Keep

@@ -49,51 +49,56 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 
 ## Quick Example
 
+Current API note: the structured-concurrency surface is explicit today. Child
+regions take `&mut RuntimeState`, a parent `&Cx`, and an explicit policy.
+
 ```rust
-use asupersync::{Cx, Scope, Outcome, Budget};
+use asupersync::{Cx, Error, LabConfig, LabRuntime, Outcome, Scope};
+use asupersync::runtime::{RegionCreateError, RuntimeState};
+use asupersync::types::policy::FailFast;
 
-// Structured concurrency: scope guarantees quiescence
-async fn main_task(cx: &mut Cx) -> Outcome<(), Error> {
-    cx.region(|scope| async {
-        // Spawn owned tasks - they cannot orphan
-        scope.spawn(worker_a);
-        scope.spawn(worker_b);
+// Structured concurrency: a child region closes to quiescence before returning.
+async fn main_task(
+    scope: &Scope<'_>,
+    state: &mut RuntimeState,
+    cx: &Cx,
+) -> Result<Outcome<(), Error>, RegionCreateError> {
+    scope
+        .region(state, cx, FailFast, |child, state| async move {
+            child
+                .spawn(state, cx, |task_cx| async move { worker_a(&task_cx).await })
+                .expect("spawn worker_a");
+            child
+                .spawn(state, cx, |task_cx| async move { worker_b(&task_cx).await })
+                .expect("spawn worker_b");
 
-        // When scope exits: waits for BOTH tasks,
-        // runs finalizers, resolves obligations
-    }).await;
+            Outcome::ok(())
+        })
+        .await
+}
 
-    // Guaranteed: nothing from inside is still running
+// Cancellation is a protocol, not a flag.
+async fn worker_a(cx: &Cx) -> Outcome<(), Error> {
+    cx.checkpoint()?;
+    // Do cancel-safe work here, e.g. reserve()/send() on a channel.
     Outcome::ok(())
 }
 
-// Cancellation is a protocol, not a flag
-async fn worker_a(cx: &mut Cx) -> Outcome<(), Error> {
-    loop {
-        // Checkpoint for cancellation - explicit, not implicit
-        cx.checkpoint()?;
-
-        // Two-phase send: cancel-safe
-        let permit = tx.reserve(cx).await?;  // Can cancel here
-        permit.send(message);                 // Linear: must happen
-    }
+async fn worker_b(cx: &Cx) -> Outcome<(), Error> {
+    cx.checkpoint()?;
+    Outcome::ok(())
 }
 
-// Lab runtime: deterministic testing
+// Lab runtime: deterministic testing uses explicit run reports.
 #[test]
 fn test_cancellation_is_bounded() {
-    let lab = LabRuntime::new(LabConfig::default().seed(42));
+    let mut lab = LabRuntime::new(LabConfig::new(42));
 
-    lab.run(|cx| async {
-        // Same seed = same execution = reproducible bugs
-        cx.region(|scope| async {
-            scope.spawn(task_under_test);
-        }).await
-    });
+    // Enqueue work into `lab.state` / `lab.scheduler`, then drive to quiescence.
+    let report = lab.run_until_quiescent_with_report();
 
-    // Oracles verify invariants
-    assert!(lab.obligation_leak_oracle().is_ok());
-    assert!(lab.quiescence_oracle().is_ok());
+    assert!(report.oracle_report.all_passed());
+    assert!(report.invariant_violations.is_empty());
 }
 ```
 
@@ -210,11 +215,28 @@ Tasks don't float free. Every task is owned by a region. Regions form a tree. Wh
 spawn(async { /* orphaned? cancelled? who knows */ });
 
 // Asupersync: scope guarantees quiescence
-scope.region(|sub| async {
-    sub.spawn(task_a);
-    sub.spawn(task_b);
-}).await;
-// ← guaranteed: nothing from inside is still running
+scope
+    .region(
+        &mut state,
+        &cx,
+        asupersync::types::policy::FailFast,
+        |sub, state| async move {
+            sub.spawn(state, &cx, |task_cx| async move {
+                task_cx.checkpoint()?;
+                Outcome::ok(())
+            })
+                .expect("spawn task_a");
+            sub.spawn(state, &cx, |task_cx| async move {
+                task_cx.checkpoint()?;
+                Outcome::ok(())
+            })
+                .expect("spawn task_b");
+            Outcome::ok(())
+        },
+    )
+    .await
+    .expect("create child region");
+// ← guaranteed: nothing from inside is still running once the child region closes
 ```
 
 ### 2. Cancellation as a First-Class Protocol
@@ -1300,10 +1322,12 @@ applications via `wasm-bindgen`.
 
 ### What works today
 
-- **JS/TS consumers**: install `@asupersync/browser` (or framework-specific
-  packages `@asupersync/react`, `@asupersync/next`) and use structured
-  scopes, cancel-correct fetch, WebSocket management, and four-valued
-  outcomes from JavaScript.
+- **JS/TS consumers on the browser main thread**: install
+  `@asupersync/browser` (or framework-specific packages
+  `@asupersync/react`, `@asupersync/next`) and use structured scopes,
+  cancel-correct fetch, WebSocket management, and four-valued outcomes from
+  JavaScript. The shipped direct-runtime path today requires a real browser
+  `window` + `document` + `WebAssembly` environment.
 - **Core invariants preserved**: no orphan tasks, cancel-correctness,
   obligation accounting, and region-close-implies-quiescence all hold in
   the browser runtime.
@@ -1315,7 +1339,11 @@ applications via `wasm-bindgen`.
 - **Rust-to-WASM compilation**: writing async Rust code that uses
   Asupersync's `Cx`/scopes/combinators and compiling it to wasm32 is
   architecturally feasible (the semantic core is target-agnostic) but
-  is not documented, tested, or exposed as a public API path.
+  is not yet promoted as a supported public API lane.
+- **Dedicated worker / service worker direct runtime**: the shipped browser
+  package currently fails closed outside the main-thread DOM environment.
+  Dedicated workers are a feasible next lane, but they are not a shipped
+  direct-runtime target yet.
 - **Multi-threaded WASM**: the browser runtime is single-threaded.
   A future phase may add `SharedArrayBuffer` + Web Worker parallelism,
   but this requires cross-origin isolation headers that many deployments
@@ -1359,8 +1387,9 @@ architecture diagrams, crate map, and known limitations.
 | Distributed runtime (remote tasks, sagas, leases, recovery) | ✅ Implemented |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (Lean coverage artifacts + TLA+ export) | ✅ Implemented |
-| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented (single-threaded, event-loop-driven) |
-| Rust-to-WASM compilation path | Planned (semantic core is portable, runtime API not yet exposed) |
+| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread consumers (single-threaded, event-loop-driven) |
+| Dedicated worker / service worker direct runtime | Deferred; not yet shipped |
+| Rust-to-WASM compilation path | Feasible, but not yet a public supported lane |
 
 ### What Asupersync Doesn't Do
 

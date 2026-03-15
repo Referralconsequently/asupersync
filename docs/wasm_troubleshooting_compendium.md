@@ -131,14 +131,14 @@ Evidence to capture:
 Expected operator action:
 
 - keep `@asupersync/browser` direct runtime creation in a real browser
-  main-thread entrypoint
+  main-thread entrypoint or a dedicated worker bootstrap module
 - keep `@asupersync/react` direct runtime usage inside client-rendered React
   trees only
 - keep `@asupersync/next` server and edge code on bridge-only adapters and move
   runtime creation into a client component or browser-only module
-- do not treat browser-worker, Node.js, or SSR contexts as implicitly supported
-  direct-runtime lanes unless the support matrix and package guards are promoted
-  together
+- do not treat service-worker/shared-worker, Node.js, or SSR contexts as
+  implicitly supported direct-runtime lanes unless the support matrix and
+  package guards are promoted together
 
 ### C. Package Artifact and Consumer Build Failures
 

@@ -49,7 +49,7 @@ Missing evidence blocks sign-off unless an explicit waiver is recorded.
 | E2.1 | Verify that cancel during operation produces `Outcome::Cancelled` (not data loss) |
 | E2.2 | Verify cleanup budget is respected |
 | E2.3 | Verify two-phase operations (reserve/commit) are cancel-safe |
-| E2.4 | Lab oracle suite passes: `obligation_leak_oracle`, `quiescence_oracle` |
+| E2.4 | `LabRuntime::run_until_quiescent_with_report()` passes, including obligation-leak and quiescence checks |
 | Artifact | LabRuntime test output with oracle results |
 
 ### E3 — Deterministic Replay Traces

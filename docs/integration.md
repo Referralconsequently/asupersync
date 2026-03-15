@@ -289,7 +289,8 @@ an aspirational roadmap.
 | Environment | Current posture | Direct runtime allowed | Canonical package surface | Shipped diagnostic contract | Required action |
 |---|---|---|---|---|---|
 | Browser main thread (`window` + `document` + `WebAssembly`) | supported | yes | `@asupersync/browser`, `@asupersync/react`, `@asupersync/next` client target | `reason = "supported"` | create runtime/scope handles here |
-| Browser worker / service worker | deferred and currently unsupported | no | none yet | `@asupersync/browser` reports `reason = "missing_browser_dom"` because the current guard requires a DOM window/document | keep direct runtime on the browser main thread; use explicit message/data boundaries until a worker lane is validated and promoted |
+| Browser dedicated worker (`DedicatedWorkerGlobalScope` + `WebAssembly`) | supported | yes | `@asupersync/browser` | `reason = "supported"` | create runtime/scope handles inside a dedicated-worker bootstrap module |
+| Browser service worker / shared worker | deferred and currently unsupported | no | none yet | `@asupersync/browser` reports `reason = "missing_browser_dom"` because the current guard accepts only a DOM window or dedicated worker global | keep these lanes on explicit message/data boundaries until their host contracts are validated and promoted |
 | React client-rendered tree in a browser | supported | yes | `@asupersync/react` | `assertReactRuntimeSupport()` returns success only when browser prerequisites are present | import and create runtime from client-rendered components only |
 | React SSR / Node render path | bridge-only | no | `@asupersync/react` bridge-only usage only | `REACT_UNSUPPORTED_RUNTIME_CODE` with browser-derived reason/guidance | move runtime creation to the client tree and keep SSR on serialized data/bridge boundaries |
 | Next.js client component | supported | yes | `@asupersync/next` with `target = "client"` | `assertNextRuntimeSupport("client")` succeeds only when browser prerequisites are present | import from client components only |
@@ -302,8 +303,7 @@ an aspirational roadmap.
 Hard prerequisites enforced today by `detectBrowserRuntimeSupport(...)`:
 
 - browser-like `globalThis`
-- `window`
-- `document`
+- either `window` + `document` or a `DedicatedWorkerGlobalScope`
 - `WebAssembly`
 
 Capability snapshot fields emitted alongside unsupported-runtime diagnostics:
@@ -323,7 +323,7 @@ Shipped unsupported-runtime error contract:
 
 | Package | Error code | Typical unsupported trigger | Correct fallback |
 |---|---|---|---|
-| `@asupersync/browser` | `ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME` | missing `globalThis`, DOM window/document, or `WebAssembly` | load the package from a browser-only entrypoint or use a server/client bridge |
+| `@asupersync/browser` | `ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME` | missing `globalThis`, a supported browser host (`window`/`document` or dedicated worker), or `WebAssembly` | load the package from a browser main-thread entrypoint, a dedicated worker bootstrap module, or use a server/client bridge |
 | `@asupersync/react` | `ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME` | SSR or React usage outside a client-rendered browser tree | keep direct runtime creation inside the client tree |
 | `@asupersync/next` | `ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME` | `target = "server"` / `target = "edge"` or missing browser prerequisites in client code | move runtime creation into a client component and keep server/edge code bridge-only |
 
