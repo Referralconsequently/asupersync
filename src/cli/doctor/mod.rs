@@ -17918,10 +17918,15 @@ fn parse_package_name(manifest: &str, member_relative: &str, log: &mut ScanLog) 
         // Extract the scalar string value from `name = "crate_name"`.
         // Do NOT use parse_string_array_literal here — it expects array syntax
         // with brackets and would always set malformed=true for scalar fields.
-        let value_part = trimmed
-            .trim_start_matches("name")
-            .trim_start_matches('=')
-            .trim();
+        let Some((_, value_part)) = trimmed.split_once('=') else {
+            log.warn(
+                "member_scan",
+                "malformed package name field in Cargo.toml".to_string(),
+                Some(member_relative.to_string()),
+            );
+            continue;
+        };
+        let value_part = value_part.trim();
         if let Some(stripped) = value_part.strip_prefix('"') {
             if let Some(name) = stripped.split('"').next() {
                 if !name.is_empty() {
