@@ -629,14 +629,41 @@ impl SharedLabHandle {
         }
 
         if i_am_joiner {
-            let mut handle = self
-                .inner
+            struct Guard<'a> {
+                inner: &'a SharedLabInner,
+                handle: Option<TaskHandle<BTreeSet<String>>>,
+            }
+            impl Drop for Guard<'_> {
+                fn drop(&mut self) {
+                    if let Some(h) = self.handle.take() {
+                        *self.inner.handle.lock() = Some(h);
+                        // If we didn't finish, revert state to Empty so someone else can join
+                        let mut state = self.inner.state.lock();
+                        if matches!(*state, LabJoinState::InFlight) {
+                            *state = LabJoinState::Empty;
+                        }
+                    }
+                }
+            }
+
+            let mut guard = Guard {
+                inner: &self.inner,
+                handle: Some(
+                    self.inner
+                        .handle
+                        .lock()
+                        .take()
+                        .expect("join handle available"),
+                ),
+            };
+
+            let result = guard
                 .handle
-                .lock()
-                .take()
-                .expect("join handle available");
-            let result = handle.join(&cx).await.unwrap_or_default();
-            *self.inner.handle.lock() = Some(handle);
+                .as_mut()
+                .unwrap()
+                .join(&cx)
+                .await
+                .unwrap_or_default();
             *self.inner.state.lock() = LabJoinState::Ready(result.clone());
             result
         } else {
@@ -927,7 +954,10 @@ fn spawn_lab_race(
             if cx.checkpoint().is_err() {
                 return BTreeSet::new();
             }
-            lab_yield_once().await;
+            let now = cx
+                .timer_driver()
+                .map_or_else(crate::time::wall_now, |d| d.now());
+            crate::time::sleep(now, std::time::Duration::from_millis(10)).await;
         };
 
         // Cancel losers deterministically before draining them.
