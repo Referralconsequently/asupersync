@@ -2203,10 +2203,7 @@ impl LabScheduler {
     /// Returns true if no tasks are currently scheduled.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let empty = self.scheduled.is_empty();
-        if !empty {
-        }
-        empty
+        self.scheduled.is_empty()
     }
 
     /// Returns the configured cancel streak limit for lab scheduling.

@@ -31,10 +31,10 @@
 //! let response = bridge.call(&cx, request).await?;
 //! ```
 
+use asupersync::sync::Mutex;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 /// Wraps a `tower::Service` for use as an Asupersync-style service.
@@ -68,7 +68,7 @@ impl<S, Request> FromTower<S, Request> {
     ///
     /// Panics if the internal mutex is poisoned.
     pub fn into_inner(self) -> S {
-        self.inner.into_inner().expect("FromTower lock poisoned")
+        self.inner.into_inner()
     }
 }
 
@@ -100,28 +100,32 @@ where
     ) -> Result<S::Response, BridgeError<S::Error>> {
         // Phase 1: Poll readiness and dispatch.
         // Tower's contract requires call() after a successful poll_ready(), both
-        // under the same &mut self. We hold the lock for the synchronous poll +
-        // call, then drop it before awaiting the response future.
-        //
-        // We use poll_fn but drive it with a single-poll loop that releases
-        // the lock between retries to avoid holding MutexGuard across an await.
+        // under the same &mut self. We hold an async mutex lock across the
+        // poll_ready loop to ensure exclusive access to the service and prevent
+        // waker overwrites from concurrent callers.
         let mut request = Some(request);
+        let mut svc_guard = self
+            .inner
+            .lock(cx)
+            .await
+            .map_err(|_| BridgeError::Cancelled)?;
+
         let response_future = std::future::poll_fn(|task_cx| {
-            let mut svc = self.inner.lock().expect("FromTower lock poisoned");
             let _cx_guard = asupersync::Cx::set_current(Some(cx.clone()));
 
-            match svc.poll_ready(task_cx) {
+            match svc_guard.poll_ready(task_cx) {
                 Poll::Ready(Ok(())) => {
                     // SAFETY: request is Some until first Ready, and poll_fn
                     // stops polling after the first Ready return.
                     let req = request.take().expect("request already consumed");
-                    Poll::Ready(Ok(svc.call(req)))
+                    Poll::Ready(Ok(svc_guard.call(req)))
                 }
                 Poll::Ready(Err(e)) => Poll::Ready(Err(BridgeError::Readiness(e))),
                 Poll::Pending => Poll::Pending,
             }
         })
         .await?;
+        drop(svc_guard);
 
         // Phase 2: Await the response future with Cx installed on each poll,
         // and support cancellation.
