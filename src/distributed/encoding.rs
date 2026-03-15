@@ -7,8 +7,9 @@ use crate::config::EncodingConfig as PipelineEncodingConfig;
 use crate::encoding::EncodingPipeline;
 use crate::types::Time;
 use crate::types::resource::{PoolConfig, SymbolPool};
-use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
+use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::util::DetRng;
+use std::cmp::min;
 
 use super::snapshot::RegionSnapshot;
 
@@ -85,41 +86,49 @@ impl StateEncoder {
             return Err(EncodingError::EmptyData);
         }
 
-        let params = self.calculate_params(data.len(), object_id)?;
-        let pipeline_config = PipelineEncodingConfig {
-            repair_overhead: f64::from(self.config.repair_overhead),
-            max_block_size: data.len(),
-            symbol_size: self.config.symbol_size,
-            encoding_parallelism: 1,
-            decoding_parallelism: 1,
-        };
-        let pool = SymbolPool::new(PoolConfig::default());
-        let mut pipeline = EncodingPipeline::new(pipeline_config, pool);
-        let repair_override = self.config.min_repair_symbols as usize;
+        let layout = derive_block_layout(
+            data.len(),
+            self.config.symbol_size,
+            self.config.max_source_blocks,
+        )?;
+        let params = self.calculate_params(data.len(), object_id, layout)?;
         let mut symbols = Vec::new();
+        let mut total_source = 0usize;
+        let mut total_repair = 0usize;
+        let repair_distribution = distribute_repairs(
+            usize::from(self.config.min_repair_symbols),
+            usize::from(layout.source_blocks),
+        );
 
-        for encoded in pipeline.encode_with_repair(object_id, &data, repair_override) {
-            let symbol = encoded
-                .map_err(|err| EncodingError::Pipeline(err.to_string()))?
-                .into_symbol();
-            symbols.push(symbol);
+        for (block, &repairs) in repair_distribution.iter().enumerate().take(usize::from(layout.source_blocks)) {
+            let (block_start, block_end) = block_bounds(block, layout.max_block_size, data.len());
+            for symbol in self.encode_block_symbols(
+                object_id,
+                block,
+                &data[block_start..block_end],
+                self.config.symbol_size,
+                repairs,
+            )? {
+                match symbol.kind() {
+                    SymbolKind::Source => total_source += 1,
+                    SymbolKind::Repair => total_repair += 1,
+                }
+                symbols.push(symbol);
+            }
         }
 
-        let stats = pipeline.stats();
-        let source_count = u16::try_from(stats.source_symbols).map_err(|_| {
-            EncodingError::SymbolCountOverflow {
+        let source_count =
+            u16::try_from(total_source).map_err(|_| EncodingError::SymbolCountOverflow {
                 field: "source_count",
-                value: stats.source_symbols,
+                value: total_source,
                 max: usize::from(u16::MAX),
-            }
-        })?;
-        let repair_count = u16::try_from(stats.repair_symbols).map_err(|_| {
-            EncodingError::SymbolCountOverflow {
+            })?;
+        let repair_count =
+            u16::try_from(total_repair).map_err(|_| EncodingError::SymbolCountOverflow {
                 field: "repair_count",
-                value: stats.repair_symbols,
+                value: total_repair,
                 max: usize::from(u16::MAX),
-            }
-        })?;
+            })?;
 
         Ok(EncodedState {
             params,
@@ -145,29 +154,63 @@ impl StateEncoder {
             return Err(EncodingError::NoSourceSymbols);
         }
         let data = rebuild_source_bytes(state);
-        let total_repairs = state.repair_count as usize + count as usize;
-        let pipeline_config = PipelineEncodingConfig {
-            repair_overhead: f64::from(self.config.repair_overhead),
-            max_block_size: data.len(),
-            symbol_size: state.params.symbol_size,
-            encoding_parallelism: 1,
-            decoding_parallelism: 1,
-        };
-        let pool = SymbolPool::new(PoolConfig::default());
-        let mut pipeline = EncodingPipeline::new(pipeline_config, pool);
-        let mut repairs = Vec::with_capacity(count as usize);
-        let skip = state.source_count as usize + state.repair_count as usize;
-
-        for (idx, encoded) in pipeline
-            .encode_with_repair(state.params.object_id, &data, total_repairs)
-            .enumerate()
-        {
-            let symbol = encoded
-                .map_err(|err| EncodingError::Pipeline(err.to_string()))?
-                .into_symbol();
-            if idx >= skip {
-                repairs.push(symbol);
+        let layout = derive_block_layout(
+            data.len(),
+            state.params.symbol_size,
+            state.params.source_blocks,
+        )?;
+        let source_blocks = usize::from(layout.source_blocks);
+        let additional_repairs = distribute_repairs(count as usize, source_blocks);
+        let mut existing_repairs = vec![0usize; source_blocks];
+        for symbol in state.repair_symbols() {
+            let block = usize::from(symbol.id().sbn());
+            if block >= source_blocks {
+                return Err(EncodingError::Pipeline(format!(
+                    "repair symbol block {block} exceeds declared source_blocks {source_blocks}"
+                )));
             }
+            existing_repairs[block] += 1;
+        }
+
+        let mut repairs = Vec::with_capacity(count as usize);
+        for block in 0..source_blocks {
+            let extra = additional_repairs[block];
+            if extra == 0 {
+                continue;
+            }
+
+            let (block_start, block_end) = block_bounds(block, layout.max_block_size, data.len());
+            let block_bytes = &data[block_start..block_end];
+            let block_source_count = block_bytes
+                .len()
+                .div_ceil(usize::from(state.params.symbol_size));
+            let requested_repairs = existing_repairs[block] + extra;
+            let first_new_repair_esi = u32::try_from(block_source_count + existing_repairs[block])
+                .map_err(|_| EncodingError::SymbolCountOverflow {
+                    field: "first_new_repair_esi",
+                    value: block_source_count + existing_repairs[block],
+                    max: u32::MAX as usize,
+                })?;
+
+            for symbol in self.encode_block_symbols(
+                state.params.object_id,
+                block,
+                block_bytes,
+                state.params.symbol_size,
+                requested_repairs,
+            )? {
+                if symbol.kind().is_repair() && symbol.id().esi() >= first_new_repair_esi {
+                    repairs.push(symbol);
+                }
+            }
+        }
+
+        if repairs.len() != count as usize {
+            return Err(EncodingError::Pipeline(format!(
+                "generated {} repair symbols, expected {}",
+                repairs.len(),
+                count
+            )));
         }
 
         Ok(repairs)
@@ -177,15 +220,8 @@ impl StateEncoder {
         &self,
         data_size: usize,
         object_id: ObjectId,
+        layout: BlockLayout,
     ) -> Result<ObjectParams, EncodingError> {
-        let symbol_size = self.config.symbol_size as usize;
-        let symbols_needed = data_size.div_ceil(symbol_size);
-        let symbols_per_block =
-            u16::try_from(symbols_needed).map_err(|_| EncodingError::SymbolCountOverflow {
-                field: "symbols_per_block",
-                value: symbols_needed,
-                max: usize::from(u16::MAX),
-            })?;
         let object_size = u64::try_from(data_size)
             .map_err(|_| EncodingError::ObjectSizeOverflow { size: data_size })?;
 
@@ -193,9 +229,49 @@ impl StateEncoder {
             object_id,
             object_size,
             self.config.symbol_size,
-            1, // source_blocks
-            symbols_per_block,
+            layout.source_blocks,
+            layout.symbols_per_block,
         ))
+    }
+
+    fn encode_block_symbols(
+        &self,
+        object_id: ObjectId,
+        block: usize,
+        block_bytes: &[u8],
+        symbol_size: u16,
+        repair_count: usize,
+    ) -> Result<Vec<Symbol>, EncodingError> {
+        let pipeline_config = PipelineEncodingConfig {
+            repair_overhead: f64::from(self.config.repair_overhead),
+            max_block_size: block_bytes.len(),
+            symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let pool = SymbolPool::new(PoolConfig::default());
+        let mut pipeline = EncodingPipeline::new(pipeline_config, pool);
+        let block_sbn = u8::try_from(block).map_err(|_| EncodingError::SymbolCountOverflow {
+            field: "source_blocks",
+            value: block,
+            max: usize::from(u8::MAX),
+        })?;
+        let mut symbols = Vec::new();
+
+        for encoded in pipeline.encode_with_repair(object_id, block_bytes, repair_count) {
+            let symbol = encoded
+                .map_err(|err| EncodingError::Pipeline(err.to_string()))?
+                .into_symbol();
+            let kind = symbol.kind();
+            let esi = symbol.id().esi();
+            symbols.push(Symbol::new(
+                SymbolId::new(object_id, block_sbn, esi),
+                symbol.into_data(),
+                kind,
+            ));
+        }
+
+        Ok(symbols)
     }
 }
 
@@ -268,6 +344,11 @@ impl EncodedState {
 pub enum EncodingError {
     /// Snapshot serialized to empty data.
     EmptyData,
+    /// Configuration is invalid or inconsistent.
+    InvalidConfig {
+        /// Reason for the invalid configuration.
+        reason: String,
+    },
     /// No source symbols available.
     NoSourceSymbols,
     /// A symbol count exceeded representable bounds.
@@ -292,6 +373,7 @@ impl std::fmt::Display for EncodingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyData => write!(f, "snapshot serialized to empty data"),
+            Self::InvalidConfig { reason } => write!(f, "invalid encoding config: {reason}"),
             Self::NoSourceSymbols => write!(f, "no source symbols available"),
             Self::SymbolCountOverflow { field, value, max } => {
                 write!(f, "{field} overflow: value={value}, max={max}")
@@ -305,6 +387,74 @@ impl std::fmt::Display for EncodingError {
 }
 
 impl std::error::Error for EncodingError {}
+
+#[derive(Debug, Clone, Copy)]
+struct BlockLayout {
+    max_block_size: usize,
+    source_blocks: u8,
+    symbols_per_block: u16,
+}
+
+fn derive_block_layout(
+    data_size: usize,
+    symbol_size: u16,
+    max_source_blocks: u8,
+) -> Result<BlockLayout, EncodingError> {
+    if data_size == 0 {
+        return Err(EncodingError::EmptyData);
+    }
+    if symbol_size == 0 {
+        return Err(EncodingError::InvalidConfig {
+            reason: "symbol_size must be non-zero".to_string(),
+        });
+    }
+    if max_source_blocks == 0 {
+        return Err(EncodingError::InvalidConfig {
+            reason: "max_source_blocks must be non-zero".to_string(),
+        });
+    }
+
+    let symbol_size = usize::from(symbol_size);
+    let total_symbols = data_size.div_ceil(symbol_size);
+    let requested_blocks = usize::from(max_source_blocks).min(total_symbols.max(1));
+    let symbols_per_block = total_symbols.div_ceil(requested_blocks);
+    let max_block_size = symbols_per_block
+        .checked_mul(symbol_size)
+        .ok_or(EncodingError::ObjectSizeOverflow { size: data_size })?;
+    let source_blocks = u8::try_from(data_size.div_ceil(max_block_size)).map_err(|_| {
+        EncodingError::SymbolCountOverflow {
+            field: "source_blocks",
+            value: data_size.div_ceil(max_block_size),
+            max: usize::from(u8::MAX),
+        }
+    })?;
+    let symbols_per_block =
+        u16::try_from(symbols_per_block).map_err(|_| EncodingError::SymbolCountOverflow {
+            field: "symbols_per_block",
+            value: symbols_per_block,
+            max: usize::from(u16::MAX),
+        })?;
+
+    Ok(BlockLayout {
+        max_block_size,
+        source_blocks,
+        symbols_per_block,
+    })
+}
+
+fn distribute_repairs(total: usize, blocks: usize) -> Vec<usize> {
+    let base = total / blocks;
+    let remainder = total % blocks;
+    (0..blocks)
+        .map(|block| base + usize::from(block < remainder))
+        .collect()
+}
+
+fn block_bounds(block: usize, max_block_size: usize, data_len: usize) -> (usize, usize) {
+    let start = block * max_block_size;
+    let end = min(start + max_block_size, data_len);
+    (start, end)
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -341,6 +491,18 @@ mod tests {
             parent: None,
             metadata: vec![],
         }
+    }
+
+    fn create_large_snapshot(min_serialized_size: usize) -> RegionSnapshot {
+        let mut snapshot = create_test_snapshot();
+        let initial_len = snapshot.to_bytes().len();
+        if initial_len < min_serialized_size {
+            snapshot.metadata.resize(min_serialized_size - initial_len, 0xAB);
+            while snapshot.to_bytes().len() < min_serialized_size {
+                snapshot.metadata.push(0xAB);
+            }
+        }
+        snapshot
     }
 
     fn rebuild_source_bytes(encoded: &EncodedState) -> Vec<u8> {
@@ -460,6 +622,66 @@ mod tests {
         for symbol in &additional {
             assert!(symbol.kind().is_repair());
         }
+    }
+
+    #[test]
+    fn encode_honors_max_source_blocks_for_large_snapshot() {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 0,
+            max_source_blocks: 2,
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(17));
+        let snapshot = create_large_snapshot(56_404);
+
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+
+        assert_eq!(encoded.params.source_blocks, 2);
+        assert!(encoded.symbols.iter().any(|symbol| symbol.id().sbn() == 1));
+        assert_eq!(usize::from(encoded.source_count) * 128, encoded.original_size.next_multiple_of(128));
+    }
+
+    #[test]
+    fn encode_multiblock_keeps_total_repair_budget() {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 3,
+            max_source_blocks: 2,
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(19));
+        let snapshot = create_large_snapshot(56_404);
+
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+
+        assert_eq!(encoded.params.source_blocks, 2);
+        assert_eq!(encoded.repair_count, 3);
+        assert_eq!(encoded.repair_symbols().count(), 3);
+        assert!(
+            encoded
+                .repair_symbols()
+                .any(|symbol| symbol.id().sbn() == 1)
+        );
+    }
+
+    #[test]
+    fn generate_additional_repair_preserves_multiblock_layout_and_total_count() {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 0,
+            max_source_blocks: 2,
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(23));
+        let snapshot = create_large_snapshot(56_404);
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+
+        let additional = encoder.generate_repair(&encoded, 5).unwrap();
+
+        assert_eq!(additional.len(), 5);
+        assert!(additional.iter().all(|symbol| symbol.kind().is_repair()));
+        assert!(additional.iter().any(|symbol| symbol.id().sbn() == 1));
     }
 
     #[test]
