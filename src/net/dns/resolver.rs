@@ -759,7 +759,7 @@ mod tests {
 
         let resolver = Resolver::with_time_getter(
             ResolverConfig {
-                timeout: Duration::ZERO,
+                timeout: Duration::from_secs(5),
                 happy_eyeballs: true,
                 ..Default::default()
             },
@@ -768,7 +768,10 @@ mod tests {
         resolver.cache.put_ip(
             "dual.test",
             &LookupIp::new(
-                vec!["::1".parse().unwrap(), "127.0.0.1".parse().unwrap()],
+                vec![
+                    "2001:db8::1".parse().unwrap(),
+                    "198.51.100.1".parse().unwrap(),
+                ],
                 Duration::from_mins(5),
             ),
         );
@@ -785,7 +788,7 @@ mod tests {
             first.is_pending()
         );
 
-        set_test_time(1_000_000_000);
+        set_test_time(15_000_000_000);
         let second = Future::poll(future.as_mut(), &mut cx);
         let timed_out = matches!(second, Poll::Ready(Err(DnsError::Timeout)));
         crate::assert_with_log!(

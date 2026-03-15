@@ -286,7 +286,7 @@ struct RaceConnections {
 impl RaceConnections {
     fn new(futures: Vec<ConnectFuture>, deadline: Time, time_getter: fn() -> Time) -> Self {
         let pending = futures.len();
-        let timeout_sleep = Sleep::new(deadline);
+        let timeout_sleep = Sleep::with_time_getter(deadline, time_getter);
         Self {
             futures: futures.into_iter().map(Some).collect(),
             pending,
