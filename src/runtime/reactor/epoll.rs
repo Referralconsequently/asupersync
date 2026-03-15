@@ -457,6 +457,42 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FdRestoreGuard {
+        target_fd: RawFd,
+        saved_fd: Option<RawFd>,
+    }
+
+    impl FdRestoreGuard {
+        fn new(target_fd: RawFd, saved_fd: RawFd) -> Self {
+            Self {
+                target_fd,
+                saved_fd: Some(saved_fd),
+            }
+        }
+
+        fn restore(&mut self) -> (i32, i32) {
+            let saved_fd = self
+                .saved_fd
+                .take()
+                .expect("restore guard must hold a saved fd");
+            let restore_result = unsafe { libc::dup2(saved_fd, self.target_fd) };
+            let close_saved = unsafe { libc::close(saved_fd) };
+            (restore_result, close_saved)
+        }
+    }
+
+    impl Drop for FdRestoreGuard {
+        fn drop(&mut self) {
+            let Some(saved_fd) = self.saved_fd.take() else {
+                return;
+            };
+
+            let _ = unsafe { libc::dup2(saved_fd, self.target_fd) };
+            let _ = unsafe { libc::close(saved_fd) };
+        }
+    }
+
     // Prefer a very high descriptor so fd-reuse tests avoid low-numbered
     // process-wide fds used by unrelated concurrent tests.
     const FD_REUSE_TEST_MIN_FD: RawFd = 50_000;
@@ -991,8 +1027,8 @@ mod tests {
     }
 
     #[test]
-    fn deregister_hard_delete_failure_preserves_bookkeeping_for_retry() {
-        init_test("deregister_hard_delete_failure_preserves_bookkeeping_for_retry");
+    fn deregister_delete_failure_preserves_bookkeeping_for_retry() {
+        init_test("deregister_delete_failure_preserves_bookkeeping_for_retry");
         let reactor = EpollReactor::new().expect("failed to create reactor");
         let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
 
@@ -1004,19 +1040,33 @@ mod tests {
 
         let poller_fd = reactor.poller.as_raw_fd();
         let saved_poller_fd = dup_fd_at_least(poller_fd, FD_REUSE_TEST_MIN_FD);
-        let close_result = unsafe { libc::close(poller_fd) };
-        crate::assert_with_log!(close_result == 0, "close poller fd", 0, close_result);
+        let mut poller_restore = FdRestoreGuard::new(poller_fd, saved_poller_fd);
+        let replacement_fd = dup_fd_at_least(sock1.as_raw_fd(), FD_REUSE_TEST_MIN_FD);
+        let replace_result = unsafe { libc::dup2(replacement_fd, poller_fd) };
+        crate::assert_with_log!(
+            replace_result == poller_fd,
+            "replace poller fd with non-epoll descriptor",
+            poller_fd,
+            replace_result
+        );
+        let close_replacement = unsafe { libc::close(replacement_fd) };
+        crate::assert_with_log!(
+            close_replacement == 0,
+            "close duplicated replacement fd",
+            0,
+            close_replacement
+        );
 
         let err = reactor
             .deregister(token)
-            .expect_err("deregister should fail when epoll fd is closed");
+            .expect_err("deregister should fail when poller fd is replaced");
         let errno = err
             .raw_os_error()
-            .expect("closed poller should preserve errno");
+            .expect("poller replacement should preserve errno");
         crate::assert_with_log!(
-            errno == libc::EBADF,
-            "closed poller reports EBADF",
-            libc::EBADF,
+            errno != libc::ENOENT && errno != libc::EBADF,
+            "non-epoll replacement yields hard delete failure",
+            "errno != ENOENT && errno != EBADF",
             errno
         );
 
@@ -1035,14 +1085,13 @@ mod tests {
         );
         drop(state);
 
-        let restore_result = unsafe { libc::dup2(saved_poller_fd, poller_fd) };
+        let (restore_result, close_saved) = poller_restore.restore();
         crate::assert_with_log!(
             restore_result == poller_fd,
             "restore poller fd",
             poller_fd,
             restore_result
         );
-        let close_saved = unsafe { libc::close(saved_poller_fd) };
         crate::assert_with_log!(close_saved == 0, "close saved poller fd", 0, close_saved);
 
         reactor

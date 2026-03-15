@@ -359,6 +359,42 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FdRestoreGuard {
+        target_fd: RawFd,
+        saved_fd: Option<RawFd>,
+    }
+
+    impl FdRestoreGuard {
+        fn new(target_fd: RawFd, saved_fd: RawFd) -> Self {
+            Self {
+                target_fd,
+                saved_fd: Some(saved_fd),
+            }
+        }
+
+        fn restore(&mut self) -> (i32, i32) {
+            let saved_fd = self
+                .saved_fd
+                .take()
+                .expect("restore guard must hold a saved fd");
+            let restore_result = unsafe { libc::dup2(saved_fd, self.target_fd) };
+            let close_saved = unsafe { libc::close(saved_fd) };
+            (restore_result, close_saved)
+        }
+    }
+
+    impl Drop for FdRestoreGuard {
+        fn drop(&mut self) {
+            let Some(saved_fd) = self.saved_fd.take() else {
+                return;
+            };
+
+            let _ = unsafe { libc::dup2(saved_fd, self.target_fd) };
+            let _ = unsafe { libc::close(saved_fd) };
+        }
+    }
+
     #[test]
     fn create_reactor() {
         init_test("kqueue_create_reactor");
@@ -772,6 +808,7 @@ mod tests {
 
         let poller_fd = reactor.poller.as_raw_fd();
         let saved_poller_fd = dup(poller_fd).expect("dup poller fd failed");
+        let mut poller_restore = FdRestoreGuard::new(poller_fd, saved_poller_fd);
         let close_result = unsafe { libc::close(poller_fd) };
         crate::assert_with_log!(close_result == 0, "close poller fd", 0, close_result);
 
@@ -794,14 +831,14 @@ mod tests {
             reactor.registration_count()
         );
 
-        let restore_result = unsafe { libc::dup2(saved_poller_fd, poller_fd) };
+        let (restore_result, close_saved) = poller_restore.restore();
         crate::assert_with_log!(
             restore_result == poller_fd,
             "restore poller fd",
             poller_fd,
             restore_result
         );
-        close(saved_poller_fd).expect("close saved poller fd failed");
+        crate::assert_with_log!(close_saved == 0, "close saved poller fd", 0, close_saved);
 
         reactor
             .deregister(token)
