@@ -773,7 +773,10 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
     where
         T: 'static,
     {
-        let mut collected = Vec::new();
+        let mut header = None;
+        let mut pipeline = None;
+        let mut inner_size = 0;
+
         while let Some(result) = stream.next().await {
             let symbol = result.map_err(|err| DecodingError::InconsistentMetadata {
                 sbn: 0,
@@ -785,9 +788,83 @@ impl<T: DeserializeOwned> TypedDecoder<T> {
                     details: err.to_string(),
                 }
             })?;
-            collected.push(typed);
+
+            let current = validate_header::<T>(&typed, self.format)?;
+            if let Some(expected) = header {
+                if current != expected {
+                    return Err(DecodingError::InconsistentMetadata {
+                        sbn: typed.symbol().sbn(),
+                        details: "typed symbol header mismatch".to_string(),
+                    });
+                }
+            } else {
+                inner_size = inner_symbol_size(self.config.symbol_size).map_err(|reason| {
+                    DecodingError::InconsistentMetadata {
+                        sbn: 0,
+                        details: reason,
+                    }
+                })?;
+                let mut current_pipeline =
+                    DecodingPipeline::new(inner_config(&self.config, inner_size));
+                current_pipeline.set_object_params(object_params_for_payload(
+                    typed.symbol().object_id(),
+                    u64::from(current.payload_len),
+                    inner_size,
+                    self.config.max_block_size,
+                ))?;
+                header = Some(current);
+                pipeline = Some(current_pipeline);
+            }
+
+            let is_complete = {
+                let pipeline =
+                    pipeline
+                        .as_mut()
+                        .ok_or_else(|| DecodingError::InconsistentMetadata {
+                            sbn: typed.symbol().sbn(),
+                            details: "typed stream pipeline not initialized".to_string(),
+                        })?;
+                feed_typed_symbol(pipeline, typed, inner_size)?;
+                pipeline.is_complete()
+            };
+
+            if is_complete {
+                let payload = pipeline
+                    .take()
+                    .ok_or_else(|| DecodingError::InconsistentMetadata {
+                        sbn: 0,
+                        details: "typed stream pipeline disappeared before completion".to_string(),
+                    })?
+                    .into_data()?;
+                let header = header.ok_or_else(|| DecodingError::InconsistentMetadata {
+                    sbn: 0,
+                    details: "typed stream header missing at completion".to_string(),
+                })?;
+                return self
+                    .deserializer
+                    .deserialize(&payload, header.format)
+                    .map_err(|err| DecodingError::InconsistentMetadata {
+                        sbn: 0,
+                        details: err.to_string(),
+                    });
+            }
         }
-        self.decode(collected)
+
+        let header = header.ok_or_else(|| DecodingError::InconsistentMetadata {
+            sbn: 0,
+            details: "no symbols provided".to_string(),
+        })?;
+        let pipeline = pipeline.ok_or_else(|| DecodingError::InconsistentMetadata {
+            sbn: 0,
+            details: "typed stream pipeline missing at end of stream".to_string(),
+        })?;
+        let payload = pipeline.into_data()?;
+        self.deserializer
+            .deserialize(&payload, header.format)
+            .map_err(|err| DecodingError::InconsistentMetadata {
+                sbn: 0,
+                details: err.to_string(),
+            })
     }
 }
 
@@ -917,8 +994,13 @@ fn object_id_from_bytes<T: 'static>(bytes: &[u8]) -> ObjectId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::error::StreamError;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct Demo {
@@ -940,6 +1022,39 @@ mod tests {
     struct Nested {
         inner: Box<Option<Self>>,
         value: f64,
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
+    }
+
+    struct ReadyThenPendingStream {
+        items: std::vec::IntoIter<AuthenticatedSymbol>,
+    }
+
+    impl ReadyThenPendingStream {
+        fn new(items: Vec<AuthenticatedSymbol>) -> Self {
+            Self {
+                items: items.into_iter(),
+            }
+        }
+    }
+
+    impl SymbolStream for ReadyThenPendingStream {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            self.items
+                .next()
+                .map_or(Poll::Pending, |item| Poll::Ready(Some(Ok(item))))
+        }
     }
 
     #[test]
@@ -975,7 +1090,7 @@ mod tests {
         let symbols = encoder.encode(object_id, &value).expect("encode");
         assert!(!symbols.is_empty());
 
-        let mut decoder = TypedDecoder::with_config(
+        let mut decoder: TypedDecoder<Demo> = TypedDecoder::with_config(
             DecodingConfig {
                 symbol_size: 64,
                 max_block_size: 128,
@@ -1016,7 +1131,7 @@ mod tests {
             SerializationFormat::Bincode,
         );
 
-        let mut decoder = TypedDecoder::with_config(
+        let mut decoder: TypedDecoder<u64> = TypedDecoder::with_config(
             DecodingConfig {
                 symbol_size: 64,
                 max_block_size: 512,
@@ -1034,6 +1149,61 @@ mod tests {
             .expect("encode");
         let decoded = decoder.decode(symbols).expect("decode");
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn typed_decoder_stream_returns_once_object_is_complete_before_eof() {
+        let value: u64 = 42;
+
+        let mut encoder = TypedEncoder::with_config(
+            EncodingConfig {
+                symbol_size: 64,
+                max_block_size: 512,
+                repair_overhead: 1.05,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            SerializationFormat::Bincode,
+        );
+
+        let mut decoder: TypedDecoder<u64> = TypedDecoder::with_config(
+            DecodingConfig {
+                symbol_size: 64,
+                max_block_size: 512,
+                repair_overhead: 1.05,
+                min_overhead: 0,
+                max_buffered_symbols: 0,
+                block_timeout: std::time::Duration::from_secs(1),
+                verify_auth: false,
+            },
+            SerializationFormat::Bincode,
+        );
+
+        let symbols = encoder
+            .encode(ObjectId::new_for_test(11), &value)
+            .expect("encode");
+        assert!(
+            !symbols.is_empty(),
+            "test requires at least one encoded symbol for the object"
+        );
+
+        let auth_symbols = symbols
+            .into_iter()
+            .map(|symbol| {
+                AuthenticatedSymbol::new_verified(symbol.into_symbol(), AuthenticationTag::zero())
+            })
+            .collect();
+        let mut stream = ReadyThenPendingStream::new(auth_symbols);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut future = Box::pin(decoder.decode_from_stream(&mut stream));
+
+        match Future::poll(future.as_mut(), &mut cx) {
+            Poll::Ready(Ok(actual)) => assert_eq!(actual, value),
+            other => panic!(
+                "stream decode should finish once the first object is complete, even if the stream stays open: {other:?}"
+            ),
+        }
     }
 
     #[test]

@@ -594,7 +594,7 @@ mod tests {
     fn object_params_multi_block() {
         let params = ObjectParams::new(
             ObjectId::new_for_test(1),
-            1_000_000, // 1MB object
+            327_680, // 4 full blocks * 64 symbols/block * 1280 bytes
             1280,
             4,  // 4 source blocks
             64, // 64 symbols per block
@@ -602,6 +602,20 @@ mod tests {
 
         assert_eq!(params.min_symbols_for_decode(), 256);
         assert_eq!(params.total_source_symbols(), 256);
+    }
+
+    #[test]
+    fn object_params_partial_last_block_does_not_overcount_total_symbols() {
+        let params = ObjectParams::new(
+            ObjectId::new_for_test(1),
+            326_400, // 255 symbols worth of payload at 1280 bytes each
+            1280,
+            4,
+            64,
+        );
+
+        assert_eq!(params.min_symbols_for_decode(), 255);
+        assert_eq!(params.total_source_symbols(), 255);
     }
 
     #[test]
