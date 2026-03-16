@@ -6,6 +6,7 @@ on:
     paths:
       - 'asupersync_web_demo.html'
       - 'packages/browser-core/**'
+      - 'assets/og-share-image.png'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -35,6 +36,8 @@ jobs:
           cp packages/browser-core/asupersync.js _site/packages/browser-core/
           cp packages/browser-core/asupersync_bg.wasm _site/packages/browser-core/
           cp packages/browser-core/index.js _site/packages/browser-core/
+          mkdir -p _site/assets
+          cp assets/og-share-image.png _site/assets/
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
