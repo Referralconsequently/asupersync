@@ -70,7 +70,7 @@ impl Default for DistributionConfig {
 pub struct DistributionResult {
     /// Object ID that was distributed.
     pub object_id: ObjectId,
-    /// Number of symbols distributed.
+    /// Number of symbol sends attempted across the computed replica plan.
     pub symbols_distributed: u32,
     /// Successful replica acknowledgements.
     pub acks: Vec<ReplicaAck>,
@@ -250,13 +250,11 @@ impl SymbolDistributor {
         outcomes: Vec<Outcome<ReplicaAck, ReplicaFailure>>,
         duration: Duration,
     ) -> DistributionResult {
-        self.evaluate_outcomes_with_sent(
-            encoded,
-            replicas,
-            outcomes,
-            encoded.symbols.len() as u64,
-            duration,
-        )
+        let symbols_sent_total = Self::compute_assignments(encoded, replicas)
+            .into_iter()
+            .map(|assignment| assignment.symbol_indices.len() as u64)
+            .sum();
+        self.evaluate_outcomes_with_sent(encoded, replicas, outcomes, symbols_sent_total, duration)
     }
 
     fn evaluate_outcomes_with_sent(
@@ -310,7 +308,7 @@ impl SymbolDistributor {
 
         DistributionResult {
             object_id: encoded.params.object_id,
-            symbols_distributed: u32::try_from(encoded.symbols.len()).unwrap_or(u32::MAX),
+            symbols_distributed: u32::try_from(symbols_sent_total).unwrap_or(u32::MAX),
             acks,
             failures,
             quorum_achieved: quorum_result.quorum_met,
@@ -512,6 +510,10 @@ mod tests {
             distributor.metrics.symbols_sent_total,
             expected_symbols_sent
         );
+        assert_eq!(
+            result.symbols_distributed,
+            u32::try_from(expected_symbols_sent).unwrap_or(u32::MAX)
+        );
     }
 
     #[test]
@@ -531,6 +533,34 @@ mod tests {
         // Quorum required = (0/2)+1 = 1 for Quorum level, but with 0 replicas
         // this fails because required(1) > total(0).
         assert!(!result.quorum_achieved);
+        assert_eq!(result.symbols_distributed, 0);
+    }
+
+    #[test]
+    fn evaluate_outcomes_reports_symbols_from_assignment_plan() {
+        let config = DistributionConfig::default();
+        let mut distributor = SymbolDistributor::new(config);
+        let replicas = create_test_replicas(3);
+        let encoded = create_test_encoded_state();
+        let assignments = SymbolDistributor::compute_assignments(&encoded, &replicas);
+        let expected_symbols_sent: u32 = assignments
+            .iter()
+            .map(|assignment| assignment.symbol_indices.len() as u32)
+            .sum();
+        let outcomes: Vec<Outcome<ReplicaAck, ReplicaFailure>> = assignments
+            .iter()
+            .map(|assignment| {
+                Outcome::Ok(make_ack(
+                    &assignment.replica_id,
+                    assignment.symbol_indices.len() as u32,
+                ))
+            })
+            .collect();
+
+        let result =
+            distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+
+        assert_eq!(result.symbols_distributed, expected_symbols_sent);
     }
 
     #[test]

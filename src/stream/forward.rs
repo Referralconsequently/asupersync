@@ -55,23 +55,10 @@ where
 {
     let mut sent_since_yield = 0usize;
     while let Some(item) = stream.next().await {
-        // Use try_send + yield_now to avoid blocking the executor
-        // In Phase 0/1, we might not have async blocking send that yields to executor properly
-        // so we spin with yield_now().
-        let mut pending_item = item;
-        loop {
-            if cx.checkpoint().is_err() {
-                return Err(SendError::Cancelled(pending_item));
-            }
-            match sender.try_send(pending_item) {
-                Ok(()) => break,
-                Err(SendError::Full(val)) => {
-                    pending_item = val;
-                    yield_now().await;
-                }
-                Err(e) => return Err(e),
-            }
+        if cx.checkpoint().is_err() {
+            return Err(SendError::Cancelled(item));
         }
+        sender.send(cx, item).await?;
 
         sent_since_yield += 1;
         if sent_since_yield >= FORWARD_SEND_BUDGET {

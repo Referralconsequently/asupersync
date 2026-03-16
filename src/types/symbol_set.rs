@@ -670,45 +670,65 @@ mod tests {
 
     #[test]
     fn threshold_reached_when_minimum_extra_dominates_without_double_counting() {
+        // Config: factor=1.05 → ceil(10*1.05)=11, min_overhead=3 → K+3=13
+        // threshold = max(11, 13) = 13
+        // Use fewer than K source symbols to avoid the source_symbols >= K
+        // short-circuit, then fill the rest with repair symbols.
         let config = ThresholdConfig::new(1.05, 3, 0);
         let mut set = SymbolSet::with_config(config);
         assert!(!set.set_block_k(0, 10));
 
-        let _ = set.insert(test_symbol(0, 0, 4));
-        for esi in 1..=11 {
+        // Insert 5 source + 7 repair = 12 total (threshold = 13)
+        for esi in 0..5 {
             let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        for esi in 5..12 {
+            let _ = set.insert(test_repair_symbol(0, esi, 4));
         }
         assert!(!set.threshold_reached(0));
 
-        let _ = set.insert(test_symbol(0, 12, 4));
+        // Insert 1 more repair symbol (total = 13, threshold = 13)
+        let _ = set.insert(test_repair_symbol(0, 12, 4));
         assert!(set.threshold_reached(0));
     }
 
     #[test]
     fn threshold_reached_when_factor_dominates_without_extra_increment() {
+        // Config: factor=1.5 → ceil(10*1.5)=15, min_overhead=1 → K+1=11
+        // threshold = max(15, 11) = 15
         let config = ThresholdConfig::new(1.5, 1, 0);
         let mut set = SymbolSet::with_config(config);
         assert!(!set.set_block_k(0, 10));
 
-        let _ = set.insert(test_symbol(0, 0, 4));
-        for esi in 1..=13 {
+        // Insert 5 source + 9 repair = 14 total (threshold = 15)
+        for esi in 0..5 {
             let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        for esi in 5..14 {
+            let _ = set.insert(test_repair_symbol(0, esi, 4));
         }
         assert!(!set.threshold_reached(0));
 
-        let _ = set.insert(test_symbol(0, 14, 4));
+        // Insert 1 more repair symbol (total = 15, threshold = 15)
+        let _ = set.insert(test_repair_symbol(0, 14, 4));
         assert!(set.threshold_reached(0));
     }
 
     #[test]
     fn threshold_does_not_reach_with_infinite_overhead_before_all_sources_arrive() {
+        // With infinite factor the threshold is never reached (line 375-376 returns false).
+        // Use only repair symbols beyond K to avoid source_symbols >= K short-circuit.
         let config = ThresholdConfig::new(f64::INFINITY, 0, 0);
         let mut set = SymbolSet::with_config(config);
         assert!(!set.set_block_k(0, 10));
 
-        let _ = set.insert(test_symbol(0, 0, 4));
-        for esi in 1..=64 {
+        // Insert 9 source symbols (< K, so source check doesn't trigger)
+        for esi in 0..9 {
             let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        // Insert 56 repair symbols (total = 65, but infinite threshold)
+        for esi in 9..65 {
+            let _ = set.insert(test_repair_symbol(0, esi, 4));
         }
 
         assert!(!set.threshold_reached(0));

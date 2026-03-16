@@ -423,7 +423,7 @@ pub struct ObjectParams {
     /// Size of each symbol in bytes.
     pub symbol_size: u16,
     /// Number of source blocks the object is divided into.
-    pub source_blocks: u8,
+    pub source_blocks: u16,
     /// Number of source symbols per block (K).
     pub symbols_per_block: u16,
 }
@@ -435,7 +435,7 @@ impl ObjectParams {
         object_id: ObjectId,
         object_size: u64,
         symbol_size: u16,
-        source_blocks: u8,
+        source_blocks: u16,
         symbols_per_block: u16,
     ) -> Self {
         Self {
@@ -629,6 +629,21 @@ mod tests {
             64, // 64 symbols per block
         );
 
+        assert_eq!(params.min_symbols_for_decode(), 256);
+        assert_eq!(params.total_source_symbols(), 256);
+    }
+
+    #[test]
+    fn object_params_can_represent_full_256_block_contract() {
+        let params = ObjectParams::new(
+            ObjectId::new_for_test(1),
+            327_680, // 256 blocks * 1 symbol/block * 1280 bytes
+            1280,
+            256,
+            1,
+        );
+
+        assert_eq!(params.source_blocks, 256);
         assert_eq!(params.min_symbols_for_decode(), 256);
         assert_eq!(params.total_source_symbols(), 256);
     }

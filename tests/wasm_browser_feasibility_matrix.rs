@@ -447,6 +447,39 @@ fn browser_stream_bridge_exists_as_substrate() {
     );
 }
 
+#[test]
+fn browser_message_wrappers_use_non_clobbering_event_listeners() {
+    let stream_src = read_file("src/io/browser_stream.rs");
+    for marker in [
+        "EventTarget",
+        "attach_browser_message_listeners",
+        "detach_browser_message_listeners",
+        "add_event_listener_with_callback",
+        "remove_event_listener_with_callback",
+    ] {
+        assert!(
+            stream_src.contains(marker),
+            "browser stream bridge must preserve non-clobbering listener marker: {marker}"
+        );
+    }
+
+    for legacy in [
+        "port.set_onmessage(Some(",
+        "port.set_onmessageerror(Some(",
+        "self.port.set_onmessage(None)",
+        "self.port.set_onmessageerror(None)",
+        "channel.set_onmessage(Some(",
+        "channel.set_onmessageerror(Some(",
+        "self.channel.set_onmessage(None)",
+        "self.channel.set_onmessageerror(None)",
+    ] {
+        assert!(
+            !stream_src.contains(legacy),
+            "browser stream bridge wrappers must not clobber host handler slot: {legacy}"
+        );
+    }
+}
+
 // ── Impossible for direct browser runtime ────────────────────────────
 
 #[test]

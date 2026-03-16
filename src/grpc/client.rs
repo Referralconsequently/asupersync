@@ -555,9 +555,12 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
         .split(['/', '?', '#'])
         .next()
         .ok_or_else(|| GrpcError::transport("channel URI is missing an authority"))?;
-    let host = authority
+    // Strip userinfo (RFC 3986 §3.2: authority = [userinfo "@"] host [":" port])
+    // before extracting the host, so "loopback:pw@evil.com" doesn't pass.
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    let host = host_port
         .split_once(':')
-        .map_or(authority, |(host, _)| host)
+        .map_or(host_port, |(host, _)| host)
         .trim();
     if host.is_empty() {
         return Err(GrpcError::transport("channel URI is missing a host"));
@@ -1533,6 +1536,29 @@ mod tests {
                 assert!(message.contains("loopback-only"));
             }
             other => panic!("expected transport error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_connect_rejects_userinfo_bypass() {
+        // Regression: "loopback" in userinfo must not fool the host check.
+        // RFC 3986 §3.2: authority = [userinfo "@"] host [":" port]
+        for uri in [
+            "http://loopback:pw@evil.com:80",
+            "http://loopback@evil.com",
+            "http://user:loopback@attacker.io:443/path",
+        ] {
+            let error = futures_lite::future::block_on(Channel::connect(uri))
+                .expect_err(&format!("userinfo bypass must fail: {uri}"));
+            match error {
+                GrpcError::Transport(msg) => {
+                    assert!(
+                        msg.contains("loopback-only"),
+                        "expected loopback-only error for {uri}, got: {msg}"
+                    );
+                }
+                other => panic!("expected transport error for {uri}, got: {other:?}"),
+            }
         }
     }
 }

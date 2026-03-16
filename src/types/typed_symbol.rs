@@ -958,8 +958,9 @@ fn object_params_for_payload(
     } else {
         payload_len.min(max_block_size).div_ceil(symbol_size)
     };
-    // Saturate to prevent silent truncation on extreme configurations.
-    let blocks = blocks.min(u8::MAX as usize) as u8;
+    // Preserve the full sender-side 256-block contract in metadata instead of
+    // silently compressing the boundary case to 255.
+    let blocks = blocks.min(u16::MAX as usize) as u16;
     let symbols_per_block = symbols_per_block.min(u16::MAX as usize) as u16;
     ObjectParams::new(
         object_id,
@@ -1112,6 +1113,14 @@ mod tests {
         let params = object_params_for_payload(ObjectId::new_for_test(7), 8, 37, 512);
 
         assert_eq!(params.source_blocks, 1);
+        assert_eq!(params.symbols_per_block, 1);
+    }
+
+    #[test]
+    fn object_params_for_payload_preserves_256_block_boundary() {
+        let params = object_params_for_payload(ObjectId::new_for_test(8), 256, 1, 1);
+
+        assert_eq!(params.source_blocks, 256);
         assert_eq!(params.symbols_per_block, 1);
     }
 

@@ -89,7 +89,7 @@ impl StateEncoder {
         let layout = derive_block_layout(
             data.len(),
             self.config.symbol_size,
-            self.config.max_source_blocks,
+            u16::from(self.config.max_source_blocks),
         )?;
         let params = self.calculate_params(data.len(), object_id, layout)?;
         let mut symbols = Vec::new();
@@ -395,14 +395,14 @@ impl std::error::Error for EncodingError {}
 #[derive(Debug, Clone, Copy)]
 struct BlockLayout {
     max_block_size: usize,
-    source_blocks: u8,
+    source_blocks: u16,
     symbols_per_block: u16,
 }
 
 fn derive_block_layout(
     data_size: usize,
     symbol_size: u16,
-    max_source_blocks: u8,
+    max_source_blocks: u16,
 ) -> Result<BlockLayout, EncodingError> {
     if data_size == 0 {
         return Err(EncodingError::EmptyData);
@@ -425,11 +425,11 @@ fn derive_block_layout(
     let max_block_size = symbols_per_block
         .checked_mul(symbol_size)
         .ok_or(EncodingError::ObjectSizeOverflow { size: data_size })?;
-    let source_blocks = u8::try_from(data_size.div_ceil(max_block_size)).map_err(|_| {
+    let source_blocks = u16::try_from(data_size.div_ceil(max_block_size)).map_err(|_| {
         EncodingError::SymbolCountOverflow {
             field: "source_blocks",
             value: data_size.div_ceil(max_block_size),
-            max: usize::from(u8::MAX),
+            max: usize::from(u16::MAX),
         }
     })?;
     let symbols_per_block =

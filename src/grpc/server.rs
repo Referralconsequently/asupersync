@@ -426,7 +426,8 @@ impl CallContext {
     ///
     /// Parses the `grpc-timeout` header to derive the deadline. If no
     /// timeout header is present and `default_timeout` is provided, the
-    /// default is used instead.
+    /// default is used instead. Malformed timeout values do not fall back
+    /// to the default.
     #[must_use]
     pub fn from_metadata(
         metadata: Metadata,
@@ -468,13 +469,13 @@ impl CallContext {
         peer_addr: Option<String>,
         now: Instant,
     ) -> Self {
-        let timeout = metadata
-            .get("grpc-timeout")
-            .and_then(|v| match v {
-                super::streaming::MetadataValue::Ascii(s) => parse_grpc_timeout(s),
-                super::streaming::MetadataValue::Binary(_) => None,
-            })
-            .or(default_timeout);
+        let timeout = match metadata.get("grpc-timeout") {
+            Some(super::streaming::MetadataValue::Ascii(s)) => {
+                parse_grpc_timeout(s).or(default_timeout)
+            }
+            // Binary metadata is not a valid grpc-timeout; fall back.
+            Some(super::streaming::MetadataValue::Binary(_)) | None => default_timeout,
+        };
         let deadline = timeout.and_then(|t| now.checked_add(t));
         Self {
             metadata,
@@ -965,6 +966,62 @@ mod tests {
         );
         crate::test_complete!(
             "test_call_context_time_getter_controls_deadline_helpers_without_sleep"
+        );
+    }
+
+    #[test]
+    fn test_call_context_default_timeout_applies_when_header_absent() {
+        init_test("test_call_context_default_timeout_applies_when_header_absent");
+        let now = std::time::Instant::now();
+        let fallback = std::time::Duration::from_secs(3);
+        let ctx = CallContext::from_metadata_at(Metadata::new(), Some(fallback), None, now);
+
+        let deadline = ctx.deadline();
+        crate::assert_with_log!(
+            deadline == now.checked_add(fallback),
+            "default timeout applies when grpc-timeout header is absent",
+            now.checked_add(fallback),
+            deadline
+        );
+        crate::test_complete!("test_call_context_default_timeout_applies_when_header_absent");
+    }
+
+    #[test]
+    fn test_call_context_malformed_timeout_falls_back_to_default() {
+        init_test("test_call_context_malformed_timeout_falls_back_to_default");
+        let now = std::time::Instant::now();
+        let fallback = std::time::Duration::from_secs(3);
+        let mut metadata = Metadata::new();
+        metadata.insert("grpc-timeout", "bogus");
+        let ctx = CallContext::from_metadata_at(metadata, Some(fallback), None, now);
+
+        let deadline = ctx.deadline();
+        crate::assert_with_log!(
+            deadline == now.checked_add(fallback),
+            "malformed grpc-timeout falls back to default timeout",
+            now.checked_add(fallback),
+            deadline
+        );
+        crate::test_complete!("test_call_context_malformed_timeout_falls_back_to_default");
+    }
+
+    #[test]
+    fn test_call_context_malformed_timeout_without_default_yields_no_deadline() {
+        init_test("test_call_context_malformed_timeout_without_default_yields_no_deadline");
+        let now = std::time::Instant::now();
+        let mut metadata = Metadata::new();
+        metadata.insert("grpc-timeout", "bogus");
+        let ctx = CallContext::from_metadata_at(metadata, None, None, now);
+
+        let deadline = ctx.deadline();
+        crate::assert_with_log!(
+            deadline.is_none(),
+            "malformed grpc-timeout with no default yields no deadline",
+            true,
+            deadline.is_none()
+        );
+        crate::test_complete!(
+            "test_call_context_malformed_timeout_without_default_yields_no_deadline"
         );
     }
 

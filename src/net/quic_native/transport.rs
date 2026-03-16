@@ -336,7 +336,7 @@ impl LossRecovery {
         let latest = self.rtt.latest_rtt_micros().unwrap_or(333_000);
         let smoothed = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
         let base_rtt = latest.max(smoothed);
-        ((9 * base_rtt) / 8).max(1_000)
+        (9u64.saturating_mul(base_rtt) / 8).max(1_000)
     }
 
     fn on_ack_congestion(&mut self, acked_bytes: u64) {
@@ -1506,5 +1506,25 @@ mod tests {
         assert_eq!(t.state(), QuicConnectionState::Draining);
         t.poll(6_000);
         assert_eq!(t.state(), QuicConnectionState::Closed);
+    }
+
+    #[test]
+    fn loss_delay_micros_saturates_on_extreme_rtt() {
+        // Regression: `9 * base_rtt` used to overflow when base_rtt > u64::MAX/9.
+        let mut recovery = LossRecovery::default();
+
+        // Inject an extreme RTT sample that would overflow 9*rtt.
+        recovery.rtt.update(u64::MAX / 8, 0);
+        let delay = recovery.loss_delay_micros();
+        // Should be saturated rather than panicking or wrapping.
+        assert!(
+            delay >= 1_000,
+            "loss_delay_micros must be at least the 1ms floor, got {delay}"
+        );
+        // The result should be very large since 9*saturate/8 ≈ MAX.
+        assert!(
+            delay > 1_000_000,
+            "loss_delay for extreme RTT should be large, got {delay}"
+        );
     }
 }

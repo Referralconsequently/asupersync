@@ -323,6 +323,11 @@ pub fn tuple(
     assert!(pi_count > 0, "P must be > 0");
     assert!(pi_modulus > 1, "P1 must be > 1");
     assert!(pi_modulus >= pi_count, "P1 must be >= P");
+    let expected_pi_modulus = next_prime_ge(pi_count);
+    assert!(
+        pi_modulus == expected_pi_modulus,
+        "P1 must equal smallest prime >= P (expected {expected_pi_modulus}, got {pi_modulus})"
+    );
 
     let mut linear_factor = 53_591u32.wrapping_add(997u32.wrapping_mul(systematic_index as u32));
     if linear_factor.is_multiple_of(2) {
@@ -391,6 +396,11 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
     assert!(w > 1, "W must be > 1");
     assert!(p > 0, "P must be > 0");
     assert!(p1 >= p, "P1 must be >= P");
+    let expected_p1 = next_prime_ge(p);
+    assert!(
+        p1 == expected_p1,
+        "P1 must equal smallest prime >= P (expected {expected_p1}, got {p1})"
+    );
 
     let mut out = Vec::with_capacity(tuple.d + tuple.d1);
 
@@ -616,6 +626,47 @@ mod tests {
         assert_eq!(idx.len(), t.d + t.d1);
         assert!(idx.iter().all(|i| *i < w + p));
         assert!(idx.iter().any(|i| *i >= w));
+    }
+
+    #[test]
+    fn tuple_rejects_non_canonical_prime_p1() {
+        let result = std::panic::catch_unwind(|| tuple(254, 17, 10, 13, 0));
+        assert!(
+            result.is_err(),
+            "tuple should reject larger prime P1 values that drift from RFC 6330"
+        );
+    }
+
+    #[test]
+    fn tuple_rejects_composite_p1() {
+        let result = std::panic::catch_unwind(|| tuple(254, 17, 10, 12, 0));
+        assert!(
+            result.is_err(),
+            "tuple should reject composite P1 values instead of silently drifting"
+        );
+    }
+
+    #[test]
+    fn tuple_indices_reject_non_canonical_p1() {
+        let result = std::panic::catch_unwind(|| {
+            tuple_indices(
+                LtTuple {
+                    d: 2,
+                    a: 4,
+                    b: 9,
+                    d1: 2,
+                    a1: 5,
+                    b1: 1,
+                },
+                17,
+                10,
+                13,
+            )
+        });
+        assert!(
+            result.is_err(),
+            "tuple_indices should reject non-canonical P1 values"
+        );
     }
 
     #[test]

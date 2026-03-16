@@ -78,7 +78,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{
-    BroadcastChannel, MessageChannel, MessageEvent, MessagePort, ReadableStream,
+    BroadcastChannel, EventTarget, MessageChannel, MessageEvent, MessagePort, ReadableStream,
     ReadableStreamDefaultReader, WritableStream, WritableStreamDefaultWriter,
 };
 
@@ -1563,6 +1563,53 @@ impl InMemoryMessagePortState {
 }
 
 #[cfg(target_arch = "wasm32")]
+const BROWSER_MESSAGE_EVENT: &str = "message";
+#[cfg(target_arch = "wasm32")]
+const BROWSER_MESSAGE_ERROR_EVENT: &str = "messageerror";
+
+#[cfg(target_arch = "wasm32")]
+fn attach_browser_message_listeners(
+    target: &EventTarget,
+    on_message: &wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: &wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+    message_op: &str,
+    message_error_op: &str,
+) -> Result<(), BrowserMessageError> {
+    target
+        .add_event_listener_with_callback(
+            BROWSER_MESSAGE_EVENT,
+            on_message.as_ref().unchecked_ref(),
+        )
+        .map_err(|err| browser_message_host_error(&err, message_op))?;
+
+    if let Err(err) = target.add_event_listener_with_callback(
+        BROWSER_MESSAGE_ERROR_EVENT,
+        on_message_error.as_ref().unchecked_ref(),
+    ) {
+        detach_browser_message_listeners(target, on_message, on_message_error);
+        return Err(browser_message_host_error(&err, message_error_op));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn detach_browser_message_listeners(
+    target: &EventTarget,
+    on_message: &wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: &wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+) {
+    let _ = target.remove_event_listener_with_callback(
+        BROWSER_MESSAGE_EVENT,
+        on_message.as_ref().unchecked_ref(),
+    );
+    let _ = target.remove_event_listener_with_callback(
+        BROWSER_MESSAGE_ERROR_EVENT,
+        on_message_error.as_ref().unchecked_ref(),
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
 struct WasmMessagePortState {
     port: MessagePort,
     inbox: Rc<RefCell<VecDeque<QueuedBrowserMessage>>>,
@@ -1572,7 +1619,7 @@ struct WasmMessagePortState {
 
 #[cfg(target_arch = "wasm32")]
 impl WasmMessagePortState {
-    fn new(port: &MessagePort) -> Self {
+    fn new(port: &MessagePort) -> Result<Self, BrowserMessageError> {
         let inbox = Rc::new(RefCell::new(VecDeque::new()));
 
         let inbox_for_message = Rc::clone(&inbox);
@@ -1593,16 +1640,22 @@ impl WasmMessagePortState {
                     )));
             }) as Box<dyn FnMut(MessageEvent)>);
 
-        port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-        port.set_onmessageerror(Some(on_message_error.as_ref().unchecked_ref()));
+        let target: &EventTarget = port.as_ref().unchecked_ref();
+        attach_browser_message_listeners(
+            target,
+            &on_message,
+            &on_message_error,
+            "MessagePort.addEventListener(message)",
+            "MessagePort.addEventListener(messageerror)",
+        )?;
         port.start();
 
-        Self {
+        Ok(Self {
             port: port.clone(),
             inbox,
             on_message,
             on_message_error,
-        }
+        })
     }
 
     fn send(&self, message: &BrowserMessagePayload) -> Result<(), BrowserMessageError> {
@@ -1617,8 +1670,8 @@ impl WasmMessagePortState {
     }
 
     fn close(&self) {
-        self.port.set_onmessage(None);
-        self.port.set_onmessageerror(None);
+        let target: &EventTarget = self.port.as_ref().unchecked_ref();
+        detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
         self.port.close();
     }
 }
@@ -1658,12 +1711,12 @@ impl BrowserMessagePort {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn from_host(port: &MessagePort) -> Self {
-        Self {
+    fn from_host(port: &MessagePort) -> Result<Self, BrowserMessageError> {
+        Ok(Self {
             state: BrowserMessageState::Open,
             terminal_error: None,
-            backend: BrowserMessagePortBackend::Host(WasmMessagePortState::new(port)),
-        }
+            backend: BrowserMessagePortBackend::Host(WasmMessagePortState::new(port)?),
+        })
     }
 
     /// Wrap an existing browser `MessagePort` after explicit authority checks.
@@ -1673,7 +1726,7 @@ impl BrowserMessagePort {
         port: &MessagePort,
     ) -> Result<Self, BrowserMessageError> {
         authorize_message_channel_surface(cap)?;
-        Ok(Self::from_host(port))
+        Self::from_host(port)
     }
 
     /// Returns the current wrapper state.
@@ -1806,9 +1859,11 @@ impl BrowserMessageChannelPair {
             authorize_message_channel_surface(cap)?;
             let channel = MessageChannel::new()
                 .map_err(|err| browser_message_host_error(&err, "MessageChannel::new"))?;
+            let left_port = channel.port1();
+            let right_port = channel.port2();
             return Ok(Self {
-                left: BrowserMessagePort::from_host(&channel.port1()),
-                right: BrowserMessagePort::from_host(&channel.port2()),
+                left: BrowserMessagePort::from_host(&left_port)?,
+                right: BrowserMessagePort::from_host(&right_port)?,
             });
         }
 
@@ -1972,8 +2027,14 @@ impl WasmBroadcastChannelState {
                     )));
             }) as Box<dyn FnMut(MessageEvent)>);
 
-        channel.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-        channel.set_onmessageerror(Some(on_message_error.as_ref().unchecked_ref()));
+        let target: &EventTarget = channel.as_ref().unchecked_ref();
+        attach_browser_message_listeners(
+            target,
+            &on_message,
+            &on_message_error,
+            "BroadcastChannel.addEventListener(message)",
+            "BroadcastChannel.addEventListener(messageerror)",
+        )?;
 
         Ok(Self {
             channel,
@@ -1995,8 +2056,8 @@ impl WasmBroadcastChannelState {
     }
 
     fn close(&self) {
-        self.channel.set_onmessage(None);
-        self.channel.set_onmessageerror(None);
+        let target: &EventTarget = self.channel.as_ref().unchecked_ref();
+        detach_browser_message_listeners(target, &self.on_message, &self.on_message_error);
         self.channel.close();
     }
 }
