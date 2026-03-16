@@ -353,17 +353,36 @@ impl Symbol {
         self.id.esi()
     }
 
-    /// Creates a symbol for testing purposes with minimal data.
+    /// Creates a source symbol for testing purposes.
+    ///
+    /// This default matches the common test case of constructing ordered source
+    /// sequences. When repair-kind semantics matter, tests must opt into
+    /// [`Self::new_repair_for_test`] explicitly because source-vs-repair depends
+    /// on block `K`, not on `esi == 0`.
     #[doc(hidden)]
     #[must_use]
     pub fn new_for_test(object_value: u64, sbn: u8, esi: u32, data: &[u8]) -> Self {
+        Self::new_source_for_test(object_value, sbn, esi, data)
+    }
+
+    /// Creates an explicit source symbol for testing purposes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new_source_for_test(object_value: u64, sbn: u8, esi: u32, data: &[u8]) -> Self {
         Self {
             id: SymbolId::new_for_test(object_value, sbn, esi),
-            kind: if esi == 0 {
-                SymbolKind::Source
-            } else {
-                SymbolKind::Repair
-            },
+            kind: SymbolKind::Source,
+            data: data.to_vec(),
+        }
+    }
+
+    /// Creates an explicit repair symbol for testing purposes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new_repair_for_test(object_value: u64, sbn: u8, esi: u32, data: &[u8]) -> Self {
+        Self {
+            id: SymbolId::new_for_test(object_value, sbn, esi),
+            kind: SymbolKind::Repair,
             data: data.to_vec(),
         }
     }
@@ -727,6 +746,18 @@ mod tests {
         assert_eq!(sym.object_id(), ObjectId::new_for_test(42));
         assert_eq!(sym.sbn(), 3);
         assert_eq!(sym.esi(), 7);
+    }
+
+    #[test]
+    fn symbol_test_constructor_defaults_to_source() {
+        let sym = Symbol::new_for_test(42, 3, 7, &[10, 20]);
+        assert_eq!(sym.kind(), SymbolKind::Source);
+    }
+
+    #[test]
+    fn symbol_repair_test_constructor_preserves_repair_kind() {
+        let sym = Symbol::new_repair_for_test(42, 3, 7, &[10, 20]);
+        assert_eq!(sym.kind(), SymbolKind::Repair);
     }
 
     #[test]

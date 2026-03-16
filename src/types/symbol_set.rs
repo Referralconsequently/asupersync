@@ -459,7 +459,11 @@ mod tests {
     use crate::types::Symbol;
 
     fn test_symbol(sbn: u8, esi: u32, data_len: usize) -> Symbol {
-        Symbol::new_for_test(1, sbn, esi, &vec![0u8; data_len])
+        Symbol::new_source_for_test(1, sbn, esi, &vec![0u8; data_len])
+    }
+
+    fn test_repair_symbol(sbn: u8, esi: u32, data_len: usize) -> Symbol {
+        Symbol::new_repair_for_test(1, sbn, esi, &vec![0u8; data_len])
     }
 
     #[test]
@@ -485,6 +489,19 @@ mod tests {
 
         set.set_block_k(0, 1);
         assert!(set.threshold_reached(0));
+    }
+
+    #[test]
+    fn repair_symbols_increment_repair_progress() {
+        let mut set = SymbolSet::new();
+        let symbol = test_repair_symbol(0, 99, 4);
+
+        let InsertResult::Inserted { block_progress, .. } = set.insert(symbol) else {
+            panic!("repair symbol should insert");
+        };
+
+        assert_eq!(block_progress.source_symbols, 0);
+        assert_eq!(block_progress.repair_symbols, 1);
     }
 
     #[test]
