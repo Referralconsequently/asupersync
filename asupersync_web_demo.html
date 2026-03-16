@@ -66,9 +66,21 @@
   --glow-cyan:0 0 20px rgba(6,182,212,0.3), 0 0 60px rgba(6,182,212,0.1);
   --glow-green:0 0 20px rgba(34,197,94,0.3);
   --glow-red:  0 0 20px rgba(239,68,68,0.3);
+  /* Elevation system */
+  --elevation-0: 0 1px 2px rgba(0,0,0,0.3), 0 0 0 1px rgba(0,0,0,0.2);
+  --elevation-1: 0 2px 8px -2px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
+  --elevation-2: 0 12px 32px -8px rgba(0,0,0,0.5), 0 4px 12px -4px rgba(59,130,246,0.08), 0 0 0 1px rgba(255,255,255,0.06);
+  --elevation-3: 0 24px 48px -12px rgba(0,0,0,0.6), 0 8px 24px -8px rgba(59,130,246,0.12), 0 0 0 1px rgba(255,255,255,0.08);
+  /* Stripe easing */
+  --ease-stripe: cubic-bezier(0.19, 1, 0.22, 1);
+  --dur-fast: 200ms;
+  --dur-normal: 400ms;
+  --dur-slow: 700ms;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+::selection { background: rgba(59,130,246,0.3); color: #fff; }
 
 html { scroll-behavior: smooth; scroll-padding-top: 72px; }
 
@@ -111,16 +123,17 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 /* ── Glass Cards ───────────────────────────────────────────────── */
 .card {
   background: linear-gradient(145deg, rgba(10,22,40,0.8), rgba(10,22,40,0.5));
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px) saturate(120%);
+  -webkit-backdrop-filter: blur(12px) saturate(120%);
   border: 1px solid var(--border2);
   border-radius: var(--radius-lg);
   padding: 32px;
   position: relative;
   overflow: hidden;
-  transition: border-color 0.3s, box-shadow 0.3s;
+  box-shadow: var(--elevation-1), inset 0 1px 1px rgba(255,255,255,0.05);
+  transition: all var(--dur-normal) var(--ease-stripe);
 }
-.card:hover { border-color: rgba(255,255,255,0.14); }
+.card:hover { border-color: rgba(59,130,246,0.2); box-shadow: var(--elevation-2), inset 0 1px 1px rgba(255,255,255,0.05); transform: translateY(-2px); }
 .card::before {
   content: '';
   position: absolute;
@@ -138,7 +151,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-family: var(--sans);
   font-size: 14px; font-weight: 600;
   border: none; cursor: pointer;
-  transition: all 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: all var(--dur-fast) var(--ease-stripe);
   outline: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
@@ -189,9 +202,10 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.65;
-  transition: border-color 0.3s;
+  box-shadow: var(--elevation-0);
+  transition: all var(--dur-normal) var(--ease-stripe);
 }
-.code-block:hover { border-color: rgba(255,255,255,0.14); }
+.code-block:hover { border-color: rgba(59,130,246,0.15); box-shadow: var(--elevation-1); }
 .code-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 16px;
@@ -264,9 +278,10 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-size: 13px;
   max-height: 260px;
   overflow-y: auto;
-  transition: border-color 0.3s;
+  box-shadow: var(--elevation-0);
+  transition: all var(--dur-normal) var(--ease-stripe);
 }
-.console:hover { border-color: rgba(255,255,255,0.14); }
+.console:hover { border-color: rgba(59,130,246,0.12); box-shadow: var(--elevation-1); }
 .console-header {
   padding: 8px 16px;
   background: rgba(255,255,255,0.025);
@@ -307,9 +322,10 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   padding: 24px;
   min-height: 200px;
   position: relative;
-  transition: border-color 0.3s, box-shadow 0.3s;
+  box-shadow: var(--elevation-1), inset 0 1px 1px rgba(255,255,255,0.04);
+  transition: all var(--dur-normal) var(--ease-stripe);
 }
-.viz:hover { border-color: rgba(255,255,255,0.14); box-shadow: 0 4px 24px rgba(0,0,0,0.2); }
+.viz:hover { border-color: rgba(59,130,246,0.18); box-shadow: var(--elevation-2), inset 0 1px 1px rgba(255,255,255,0.04); }
 .viz-title {
   font-size: 13px; font-weight: 600; color: var(--text3);
   text-transform: uppercase; letter-spacing: 0.08em;
@@ -365,7 +381,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   border-bottom: 1px solid var(--border);
 }
 .handle-table tbody tr:last-child td { border-bottom: none; }
-.handle-table tr { transition: background 0.15s; }
+.handle-table tr { transition: background var(--dur-fast) var(--ease-stripe); }
 .handle-table tbody tr:hover { background: rgba(59,130,246,0.04); }
 
 /* ── Progress Bar ──────────────────────────────────────────────── */
@@ -400,9 +416,11 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-family: var(--mono);
   font-size: 12px;
   border: 1px solid;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  animation: taskSlideIn 0.3s ease;
+  transition: all var(--dur-normal) var(--ease-stripe);
+  animation: taskSlideIn 0.3s var(--ease-stripe);
+  box-shadow: var(--elevation-0);
 }
+.lane-task:hover { transform: translateY(-1px); box-shadow: var(--elevation-1); }
 @keyframes taskSlideIn {
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -491,14 +509,15 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   border-radius: var(--radius);
   border: 1px solid;
   cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: all var(--dur-normal) var(--ease-stripe);
   position: relative;
   overflow: hidden;
   min-height: 88px;
+  box-shadow: var(--elevation-0);
 }
-.outcome-card:hover { transform: translateY(-3px); }
-.outcome-card:active { transform: translateY(-1px); transition-duration: 0.08s; }
-.outcome-card.selected { transform: translateY(-3px); }
+.outcome-card:hover { transform: translateY(-4px) scale(1.01); box-shadow: var(--elevation-2); }
+.outcome-card:active { transform: translateY(-1px) scale(0.99); transition-duration: 80ms; }
+.outcome-card.selected { transform: translateY(-4px) scale(1.01); box-shadow: var(--elevation-2); }
 .outcome-card .oc-icon { font-size: 20px; margin-bottom: 8px; }
 .outcome-card .oc-title { font-weight: 700; font-size: 16px; margin-bottom: 4px; }
 .outcome-card .oc-desc { font-size: 13px; opacity: 0.7; line-height: 1.4; }
@@ -765,7 +784,7 @@ input[type="text"]:focus, select:focus, textarea:focus {
 /* ── Fade-in on scroll ─────────────────────────────────────────── */
 .reveal {
   opacity: 0; transform: translateY(32px);
-  transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1), transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity var(--dur-slow) var(--ease-stripe), transform var(--dur-slow) var(--ease-stripe);
 }
 .reveal.visible {
   opacity: 1; transform: translateY(0);
@@ -789,6 +808,32 @@ input[type="text"]:focus, select:focus, textarea:focus {
 </style>
 </head>
 <body>
+
+<!-- Global SVG filter defs for glow effects across all exhibits -->
+<svg style="position:absolute;width:0;height:0;" aria-hidden="true">
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-strong" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow-marker" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3B82F6"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#22C55E"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#EF4444"/>
+    </marker>
+  </defs>
+</svg>
 
 <!-- ═══════════════════════════════════════════════════════════════
      NAVIGATION
@@ -2261,7 +2306,7 @@ function renderRegionTree() {
   for (const t of regionState.tasks) {
     const alive = t.alive;
     html += `<circle cx="${t.cx}" cy="${t.cy}" r="8" fill="${alive ? 'var(--blue)' : 'var(--text3)'}"
-      opacity="${alive ? 1 : 0.15}" class="task-dot${alive?'':' dead'}" />`;
+      opacity="${alive ? 1 : 0.15}" class="task-dot${alive?'':' dead'}" ${alive ? 'filter="url(#glow)"' : ''} />`;
     if (alive) {
       html += `<circle cx="${t.cx}" cy="${t.cy}" r="8" fill="none" stroke="var(--blue)" stroke-width="1" opacity="0.3">
         <animate attributeName="r" from="8" to="16" dur="2s" repeatCount="indefinite"/>
