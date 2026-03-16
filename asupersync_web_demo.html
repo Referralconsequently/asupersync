@@ -997,9 +997,11 @@ input[type="text"]:focus, select:focus, textarea:focus {
       <span class="exhibit-num">Exhibit 1</span>
       <h2>ABI Handshake &amp; Version Negotiation</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Before any runtime operation, the WASM module and JavaScript host perform a version handshake.
-        The ABI contract uses semantic versioning with a 64-bit fingerprint to detect drift between
-        producer (Rust/WASM) and consumer (JavaScript) at initialization time — not at failure time.
+        Most WASM libraries discover version incompatibility when something <em>crashes in production</em>.
+        Before any runtime operation, Asupersync's WASM module and JavaScript host perform a
+        <strong style="color:var(--text);">version handshake</strong> with a 64-bit fingerprint.
+        Incompatible consumers are rejected at the first API call — before any state is mutated.
+        No other browser runtime has built-in ABI version negotiation at the WASM boundary.
       </p>
     </div>
 
@@ -1056,9 +1058,11 @@ console.<span class="fn">log</span>(<span class="str">`Fingerprint: </span><span
       <span class="exhibit-num">Exhibit 2</span>
       <h2>Structured Concurrency — Region Tree</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Every task is owned by a region. Regions form a tree rooted at the runtime. When a region closes,
-        it guarantees quiescence: all children complete, all finalizers run, all obligations resolve.
-        <strong style="color:var(--text);">Click any region</strong> in the visualization to trigger cascading cancellation down the tree.
+        In tokio and async-std, <code style="color:var(--cyan)">spawn()</code> creates detached tasks with no owner.
+        In Asupersync, <strong style="color:var(--text);">every task is owned by a region</strong>. Regions form a tree
+        rooted at the runtime. When a region closes, it guarantees quiescence: all children complete, all finalizers
+        run, all obligations resolve. No orphan tasks, ever — by construction, not convention.
+        <strong style="color:var(--text);">Click any region</strong> to trigger cascading cancellation and see real WASM handles close.
       </p>
     </div>
 
@@ -1128,10 +1132,11 @@ httpRegion.<span class="fn">close</span>();</div>
       <span class="exhibit-num">Exhibit 3</span>
       <h2>Four-Valued Outcome Algebra</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Every operation returns an <code style="color:var(--cyan)">Outcome</code> — not just
-        <code>Result&lt;T,E&gt;</code>. The four variants form a severity lattice:
-        <strong style="color:var(--text);">Ok &lt; Err &lt; Cancelled &lt; Panicked</strong>.
-        Combinators aggregate by taking the worst severity, making error propagation algebraic.
+        Tokio tasks return <code style="color:var(--cyan)">Result&lt;T, JoinError&gt;</code> — two states, no algebra.
+        Asupersync has a <strong style="color:var(--text);">four-valued</strong> <code style="color:var(--cyan)">Outcome</code>
+        with a severity lattice: <strong style="color:var(--text);">Ok &lt; Err &lt; Cancelled &lt; Panicked</strong>.
+        Combinators aggregate by taking the worst severity automatically — making error propagation
+        algebraic instead of manual. No other async runtime has this.
       </p>
     </div>
 
@@ -1276,10 +1281,11 @@ httpRegion.<span class="fn">close</span>();</div>
       <span class="exhibit-num">Exhibit 5</span>
       <h2>Budget Algebra — Semiring Composition</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Cleanup budgets compose as a semiring:
-        <code style="color:var(--cyan)">combine(b1, b2)</code> takes componentwise min
-        for quotas/deadlines and max for priority. This makes "who constrains whom?" algebraic
-        instead of ad-hoc — sufficient conditions, not hopes.
+        In tokio, cleanup is best-effort — there is no "budget" concept, no compositional algebra, no guarantee
+        that nested timeouts compose correctly. Asupersync's cleanup budgets compose as a
+        <strong style="color:var(--text);">semiring</strong>: <code style="color:var(--cyan)">combine(b1, b2)</code>
+        takes componentwise min for quotas/deadlines and max for priority.
+        "Who constrains whom?" is algebraic, not ad-hoc — sufficient conditions, not hopes.
       </p>
     </div>
 
@@ -1337,9 +1343,11 @@ httpRegion.<span class="fn">close</span>();</div>
       <span class="exhibit-num">Exhibit 6</span>
       <h2>Generation Counters — Use-After-Free Prevention</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Every handle carries a <strong style="color:var(--text);">generation counter</strong>. When a slot is recycled, the generation
-        increments. Stale handles — those pointing to a recycled slot — are rejected with a precise error.
-        This prevents an entire class of bugs that plague reference-counted systems.
+        Browser APIs and most runtimes use opaque object references with no protection against use-after-free.
+        If an ID is recycled, old references <em>silently alias new state</em> — the classic ABA problem.
+        Asupersync's handles carry a <strong style="color:var(--text);">generation counter</strong> that increments
+        on every slot recycle. Stale handles are rejected with a precise error message.
+        No other browser-facing WASM runtime has this safety mechanism.
       </p>
     </div>
     <div class="grid-2 mt-4">
@@ -1397,9 +1405,12 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
       <span class="exhibit-num">Exhibit 7</span>
       <h2>Deep Cascade Close — Quiescence by Construction</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Build a real 4-level deep scope tree, spawn tasks at every level, then close a mid-level node.
-        The runtime cascades closure through <strong style="color:var(--text);">all descendants</strong> — tasks are cancelled,
-        child scopes are closed, handles are released. No orphans. No leaks. Guaranteed by the runtime.
+        In tokio, closing a "scope" means manually tracking every spawned task, connection, and timer,
+        then cleaning each one in every error path. Miss one? Resource leak.
+        In Asupersync, closing a scope <strong style="color:var(--text);">cascades through all descendants</strong> —
+        tasks are cancelled, child scopes are closed, handles are released.
+        This demo builds a real 4-level scope tree with real WASM handles, then closes a mid-level node
+        to prove zero orphans.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1437,10 +1448,12 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
       <span class="exhibit-num">Exhibit 8</span>
       <h2>Cancel is Not Enough — You Must Join</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Unlike fire-and-forget runtimes, <code style="color:var(--cyan)">task_cancel()</code> only
-        <em>requests</em> cancellation — it transitions the task to <code style="color:var(--cyan)">Cancelling</code> state.
-        The task is <strong style="color:var(--text);">still pinned</strong>. You must call <code style="color:var(--cyan)">task_join()</code>
-        to acknowledge the outcome and release the handle. This is a real protocol, not a suggestion.
+        In tokio, calling <code style="color:var(--cyan)">.abort()</code> on a JoinHandle kills the task instantly —
+        no acknowledgment, no cleanup confirmation, no protocol. The handle may or may not be safe to reuse.
+        In Asupersync, <code style="color:var(--cyan)">task_cancel()</code> only <em>requests</em> cancellation.
+        The task stays <strong style="color:var(--text);">pinned</strong>.
+        You <strong style="color:var(--text);">must</strong> call <code style="color:var(--cyan)">task_join()</code>
+        to acknowledge the outcome and release the handle. This is a real protocol enforced by the runtime.
       </p>
     </div>
     <div class="grid-2 mt-4">
@@ -1565,9 +1578,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
       <span class="exhibit-num">Exhibit 10 — Stress Test</span>
       <h2>Chaos Mode — Prove Zero Leaks Under Pressure</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Create hundreds of handles at high speed. Cancel them randomly. Close scopes with live children.
-        At the end, verify: <strong style="color:var(--text);">zero leaked handles, zero orphaned tasks, every obligation resolved.</strong>
-        This is the kind of test that exposes use-after-free, double-free, and leak bugs in other runtimes.
+        Most runtimes are never tested with random create/cancel/close sequences — the kind of chaos
+        that reveals use-after-free, double-free, and handle leak bugs.
+        This demo creates hundreds of real WASM handles at high speed, cancels them randomly,
+        closes scopes with live children, and verifies:
+        <strong style="color:var(--text);">zero leaked handles, zero orphaned tasks, every obligation resolved.</strong>
+        The structural guarantees that make this possible simply don't exist in tokio or async-std.
       </p>
     </div>
 
@@ -1631,7 +1647,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="scopefetch">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 11 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 11 — Unique to Asupersync</span>
       <h2>Scope-Bounded HTTP — Close the Region, Kill the Request</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In vanilla JavaScript, cancelling an in-flight <code style="color:var(--cyan)">fetch()</code> requires
@@ -1668,14 +1684,15 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="severity">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 12 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 12 — Unique to Asupersync</span>
       <h2>Outcome Severity Propagation — Algebraic Error Handling</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In every other runtime, when you join multiple tasks, you get back a <code>Vec&lt;Result&gt;</code>
-        and must manually figure out "did anything fail?" Asupersync's four-valued <code style="color:var(--cyan)">Outcome</code>
-        forms a <strong style="color:var(--text);">severity lattice</strong>: Ok &lt; Err &lt; Cancelled &lt; Panicked.
-        When combining outcomes, the worst severity wins automatically. This demo spawns 5 tasks with
-        different outcomes and shows the lattice composition in real-time.
+        In tokio, when you <code style="color:var(--cyan)">join_all</code> multiple tasks, you get back a
+        <code style="color:var(--cyan)">Vec&lt;Result&gt;</code> and must manually scan for errors, distinguish
+        cancellations from panics, and decide which failure is "worst." Asupersync's four-valued
+        <code style="color:var(--cyan)">Outcome</code> forms a <strong style="color:var(--text);">severity lattice</strong>:
+        Ok &lt; Err &lt; Cancelled &lt; Panicked. When combining outcomes, the worst severity wins automatically.
+        This demo spawns 5 real tasks with mixed outcomes and shows the lattice composition in real-time.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1698,7 +1715,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="forensics">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 13 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 13 — Unique to Asupersync</span>
       <h2>Cancellation Forensics — Full Attribution Chain</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         When a tokio task is cancelled, you get... nothing. The future is dropped. You have no idea
@@ -1729,13 +1746,14 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="recycling">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 14 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 14 — Unique to Asupersync</span>
       <h2>Handle Slot Recycling — LIFO Determinism Under Pressure</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Browser APIs give you opaque objects with no visibility into allocation. Asupersync exposes
+        Tokio's internal task IDs are opaque and non-deterministic — re-running the same test produces different IDs,
+        making trace replay impossible. Asupersync exposes
         <strong style="color:var(--text);">deterministic slot allocation</strong> with LIFO free-list recycling.
-        This means the same create/close sequence always produces the same slot assignments — critical for
-        deterministic replay and debugging. This demo rapidly creates and closes 40 scopes and visualizes
+        The same create/close sequence <em>always</em> produces the same slot assignments — critical for
+        deterministic replay and debugging. This demo creates and closes 40 real WASM scopes and visualizes
         which slots get reused, how generations climb, and proves the LIFO pattern.
       </p>
     </div>
@@ -1763,14 +1781,15 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="isolation">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 15 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 15 — Unique to Asupersync</span>
       <h2>Sibling Scope Isolation — No Cross-Contamination</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In an unstructured runtime, cancelling one "scope" can accidentally leak signals to siblings
-        through shared state, thread-locals, or global cancel tokens. Asupersync guarantees
-        <strong style="color:var(--text);">structural isolation</strong>: closing or cancelling one scope
-        has <em>zero effect</em> on sibling scopes. This demo creates 4 sibling scopes with tasks,
-        closes them one at a time, and proves the others remain completely unaffected.
+        In tokio, cancelling one task group can accidentally leak signals to siblings through shared
+        <code style="color:var(--cyan)">CancellationToken</code>s, thread-locals, or global state.
+        Asupersync guarantees <strong style="color:var(--text);">structural isolation</strong>:
+        closing or cancelling one scope has <em>zero effect</em> on sibling scopes.
+        This demo creates 4 real sibling scopes with tasks, closes them one at a time,
+        and <strong style="color:var(--text);">probes the living siblings</strong> after each close to prove they're completely unaffected.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1801,7 +1820,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="replay">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 16 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 16 — Unique to Asupersync</span>
       <h2>Deterministic Replay — Same Ops, Same Slots, Every Time</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         When debugging a concurrency bug in tokio or async-std, you're at the mercy of non-deterministic scheduling.
@@ -1833,7 +1852,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="leakdetect">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 17 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 17 — Unique to Asupersync</span>
       <h2>Handle Leak Detection — The Runtime Catches Your Mistakes</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         What happens when a programmer forgets to join a spawned task? In tokio, the task becomes an orphan —
@@ -1868,7 +1887,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="timeout">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 18 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 18 — Unique to Asupersync</span>
       <h2>Scope-as-Timeout — Structural Deadlines, Not Afterthoughts</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In vanilla JavaScript, implementing a timeout for a group of concurrent operations requires
@@ -1906,7 +1925,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="websocket">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 19 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 19 — Unique to Asupersync</span>
       <h2>WebSocket with Structured Cancellation</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Browser WebSockets have no concept of "ownership." You call <code style="color:var(--cyan)">new WebSocket(url)</code>,
@@ -1950,8 +1969,9 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Every exhibit above demonstrates a structural guarantee. But the real question is:
         <strong style="color:var(--text);">how much code do YOU have to write?</strong>
-        Here's the same scenario — 3 concurrent fetches with a 5-second timeout — implemented
-        both ways. Count the coordination points where bugs can hide.
+        Here's the same scenario — 3 concurrent fetches with a 5-second timeout — implemented in vanilla
+        JavaScript (22 lines, 11 coordination points where bugs hide) vs Asupersync (6 lines, 1 coordination point).
+        The difference isn't incremental — it's a different programming model entirely.
       </p>
     </div>
     <div class="grid-2 mt-4">
@@ -2021,10 +2041,11 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
       <span class="exhibit-num">Exhibit 21 — Performance</span>
       <h2>Rapid Scope Churn — How Fast Is the Runtime?</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        All these structural guarantees sound expensive. Are they? This benchmark creates and closes scopes
-        as fast as possible for 1 second, measuring <strong style="color:var(--text);">real WASM operations per second</strong>.
-        Each operation includes handle allocation, generation tracking, parent registration, and cleanup —
-        all the bookkeeping that makes structured concurrency work. The result might surprise you.
+        The common objection to structured concurrency is performance: "all that bookkeeping must be slow."
+        This benchmark measures <strong style="color:var(--text);">real WASM operations per second</strong> —
+        scope create + close cycles including handle allocation, generation tracking, parent registration,
+        and full cleanup. The result: structured concurrency at microsecond latency.
+        These are the same operations that make all 20 exhibits above possible, running at production speed.
       </p>
     </div>
     <div class="mt-4 reveal">
