@@ -665,6 +665,37 @@ input[type="text"]:focus, select:focus, textarea:focus {
   #cancel-svg { min-height: 80px; }
 }
 
+/* ── "Without This" contrast callout ───────────────────────────── */
+.callout-contrast {
+  padding: 14px 18px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.5;
+  margin-top: 12px;
+}
+.callout-contrast strong { display: block; margin-bottom: 4px; }
+.callout-danger {
+  background: rgba(239,68,68,0.06);
+  border: 1px solid rgba(239,68,68,0.15);
+}
+.callout-danger strong { color: var(--red); }
+.callout-success {
+  background: rgba(34,197,94,0.06);
+  border: 1px solid rgba(34,197,94,0.15);
+}
+.callout-success strong { color: var(--green); }
+.callout-info {
+  background: rgba(59,130,246,0.06);
+  border: 1px solid rgba(59,130,246,0.15);
+}
+.callout-info strong { color: var(--blue); }
+.callout-accent {
+  background: rgba(6,182,212,0.06);
+  border: 1px solid rgba(6,182,212,0.15);
+}
+.callout-accent strong { color: var(--cyan); }
+
 /* ── Section exhibit number ────────────────────────────────────── */
 .exhibit-num {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1076,6 +1107,10 @@ httpRegion.<span class="fn">close</span>();</div>
           <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--text3);margin-right:4px;"></span> Quiescent</span>
         </div>
       </div>
+      <div class="callout-contrast callout-danger mt-2">
+        <strong>Without structured concurrency (tokio, async-std):</strong>
+        <code style="color:var(--cyan);">tokio::spawn()</code> returns a detached <code>JoinHandle</code>. If you drop it, the task becomes an orphan — running indefinitely, holding resources, invisible to the parent scope. There is no "close region and wait for children" primitive. You must manually track every spawned task and <code>.await</code> each <code>JoinHandle</code>. Miss one? Zombie task. Forever.
+      </div>
       <div class="console mt-2" id="region-console">
         <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="region-console-dot"></span> Region Events</div>
         <div class="console-body" id="region-console-body"></div>
@@ -1340,6 +1375,10 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
             </div>
           </div>
         </div>
+        <div class="callout-contrast callout-danger mt-2">
+          <strong>Without generation counters (most runtimes):</strong>
+          When a handle/ID is recycled, old references silently alias new state. This is the classic ABA problem — you think you're talking to Task A, but the slot was recycled and you're now corrupting Task B. In production, this manifests as impossible-to-reproduce state corruption. Asupersync makes this <em>structurally impossible</em>.
+        </div>
         <div class="console mt-2" id="stale-console">
           <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="stale-console-dot"></span> Console Output</div>
           <div class="console-body" id="stale-console-body"></div>
@@ -1376,6 +1415,10 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
         <div id="cascade-tree" style="font-family: var(--mono); font-size: 13px; line-height: 2;">
           <div class="text-dim" style="text-align: center; padding: 32px 0;">Click <strong>Build Tree</strong> to create a real 4-level scope hierarchy</div>
         </div>
+      </div>
+      <div class="callout-contrast callout-danger mt-2">
+        <strong>Without cascade close (tokio, Node.js):</strong>
+        You must manually track every spawned task, every open connection, every pending timer, and ensure each one is cleaned up in every error path. Close the HTTP handler but forget the database connections it spawned? Leaked. Close the connection pool but forget a query mid-flight? Leaked. With N components, you have O(N&sup2;) cleanup coordination points. Asupersync: <code style="color:var(--cyan);">scope.close()</code> — one call, guaranteed.
       </div>
       <div class="console mt-2" id="cascade-console">
         <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="cascade-console-dot"></span> Cascade Events</div>
@@ -2449,7 +2492,7 @@ function renderOutcomeLattice(selected) {
   // Nodes
   for (const n of nodes) {
     const isSelected = selected === n.id;
-    html += `<circle cx="${n.cx}" cy="${n.cy}" r="24" fill="${isSelected ? n.color+'22' : HEX.surface}" stroke="${n.color}" stroke-width="${isSelected?2.5:1.5}"/>`;
+    html += `<circle cx="${n.cx}" cy="${n.cy}" r="24" fill="${isSelected ? n.color+'22' : HEX.surface}" stroke="${n.color}" stroke-width="${isSelected?2.5:1.5}" ${isSelected?'filter="url(#glow)"':''}/>`;
     if (isSelected) {
       html += `<circle cx="${n.cx}" cy="${n.cy}" r="24" fill="none" stroke="${n.color}" stroke-width="1" opacity="0.3"><animate attributeName="r" from="24" to="36" dur="1.5s" repeatCount="indefinite"/><animate attributeName="opacity" from="0.3" to="0" dur="1.5s" repeatCount="indefinite"/></circle>`;
     }
@@ -2562,7 +2605,7 @@ function renderCancelSM() {
     if (isActive) {
       html += `<rect x="${x-2}" y="11" width="${W+4}" height="${H+4}" rx="12" fill="none" stroke="${p.color}" stroke-width="1.5" opacity="0.4"><animate attributeName="opacity" values="0.2;0.6;0.2" dur="1.5s" repeatCount="indefinite"/></rect>`;
     }
-    html += `<rect x="${x}" y="13" width="${W}" height="${H}" rx="10" fill="${fill}" stroke="${stroke}" stroke-width="${isActive?2:1}"/>`;
+    html += `<rect x="${x}" y="13" width="${W}" height="${H}" rx="10" fill="${fill}" stroke="${stroke}" stroke-width="${isActive?2:1}" ${isActive?'filter="url(#glow)"':''}/>`;
     const lines = p.label.split('\n');
     const textFill = isActive||isPast ? '#fff' : HEX.text3;
     if (lines.length > 1) {
