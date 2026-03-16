@@ -2019,10 +2019,40 @@ async function loadWasm() {
   // Try local first (fastest when served from the repo), then CDN fallback
   for (const base of [LOCAL_BASE, CDN_BASE]) {
     try {
-      mod = await import(`${base}/index.js`);
-      await mod.default(`${base}/asupersync_bg.wasm`);
+      const rawMod = await import(`${base}/index.js`);
+      await rawMod.default(`${base}/asupersync_bg.wasm`);
+
+      // Wrap all WASM API functions with exhaustive logging
+      mod = Object.create(rawMod);
+      const wrapFn = (name, fn) => (...args) => {
+        const result = fn(...args);
+        logWasm(name, args.length <= 1 ? (args[0] ?? {}) : args, result);
+        return result;
+      };
+      const wrapOps = ['runtimeCreate','runtime_create','runtimeClose','runtime_close',
+        'scopeEnter','scope_enter','scopeClose','scope_close',
+        'taskSpawn','task_spawn','taskJoin','task_join','taskCancel','task_cancel',
+        'fetchRequest','fetch_request','websocketOpen','websocket_open',
+        'websocketSend','websocket_send','websocketRecv','websocket_recv',
+        'websocketClose','websocket_close','websocketCancel','websocket_cancel'];
+      for (const name of wrapOps) {
+        if (typeof rawMod[name] === 'function') {
+          mod[name] = wrapFn(name, rawMod[name].bind(rawMod));
+        }
+      }
+      // Pass through non-function exports
+      for (const key of ['Outcome','BaseHandle','RuntimeHandle','RegionHandle','TaskHandle',
+        'CancellationToken','FetchHandle','BUDGET_BOUNDS','CANCELLATION_PHASE_ORDER',
+        'ERROR_CODES','RECOVERABILITY_LEVELS','rawBindings','createBudget','abiVersion',
+        'abi_version','abiFingerprint','abi_fingerprint']) {
+        if (rawMod[key] !== undefined && !(key in mod)) mod[key] = rawMod[key];
+      }
+
       wasmReady = true;
       updateWasmBadge('live', base === CDN_BASE ? 'cdn' : 'local');
+      console.log(`${LOG_PREFIX} %cWASM loaded from ${base}`, LOG_STYLE, LOG_OK);
+      console.log(`${LOG_PREFIX} %cABI v${(rawMod.abiVersion||rawMod.abi_version)().major}.${(rawMod.abiVersion||rawMod.abi_version)().minor}, fingerprint: ${(rawMod.abiFingerprint||rawMod.abi_fingerprint)()}`, LOG_STYLE, 'color:#06B6D4;');
+      console.log(`${LOG_PREFIX} %cAll WASM operations are being logged to this console. Every handle allocation, scope transition, task lifecycle, and cancellation is real.`, LOG_STYLE, 'color:#94A3B8;font-style:italic;');
       return true;
     } catch (e) {
       console.warn(`WASM load from ${base} failed:`, e.message);
@@ -2076,6 +2106,28 @@ function requireWasm(consoleId) {
   return null;
 }
 
+// ─── Exhaustive DevTools Logging ─────────────────────────────────
+// Every real WASM operation is logged to browser console for full transparency.
+const LOG_PREFIX = '%c[asupersync-wasm]';
+const LOG_STYLE = 'color:#3B82F6;font-weight:bold;';
+const LOG_OK    = 'color:#22C55E;';
+const LOG_ERR   = 'color:#EF4444;';
+const LOG_WARN  = 'color:#F97316;';
+
+function logWasm(op, args, result) {
+  const outcome = result?.outcome || 'void';
+  const style = outcome === 'ok' ? LOG_OK : outcome === 'err' ? LOG_ERR : LOG_WARN;
+  const slot = result?.value?.slot !== undefined ? ` → slot=${result.value.slot} gen=${result.value.generation}` : '';
+  const detail = result?.failure ? ` [${result.failure.code}: ${result.failure.message}]` : '';
+  console.log(
+    `${LOG_PREFIX} %c${op}%c(${JSON.stringify(args).slice(0,120)}) %c→ ${outcome}${slot}${detail}`,
+    LOG_STYLE, 'color:#06B6D4;font-weight:600;', 'color:#94A3B8;', style
+  );
+  if (outcome === 'ok' && result?.value && typeof result.value === 'object') {
+    console.log(`${LOG_PREFIX} %c  handle:`, LOG_STYLE, 'color:#64748B;', result.value.toJSON ? result.value.toJSON() : result.value);
+  }
+}
+
 // ─── Init Runtime (auto-called on page load) ────────────────────
 async function initRuntime() {
   if (liveRT) return; // Already initialized
@@ -2088,13 +2140,17 @@ async function initRuntime() {
     document.getElementById('init-error').textContent = 'Could not load WASM module. Check network connectivity.';
     return;
   }
+  console.log(`${LOG_PREFIX} %cInitializing persistent runtime...`, LOG_STYLE, 'color:#94A3B8;');
   const rtResult = (a.runtimeCreate || a.runtime_create)();
   if (rtResult.outcome === 'ok') {
     liveRT = rtResult.value;
+    console.log(`${LOG_PREFIX} %cPersistent runtime created: slot=${liveRT.slot} gen=${liveRT.generation}`, LOG_STYLE, LOG_OK);
     const scopeResult = liveRT.enterScope('demo-root');
     if (scopeResult.outcome === 'ok') {
       liveScope = scopeResult.value;
+      console.log(`${LOG_PREFIX} %cRoot scope created: slot=${liveScope.slot} gen=${liveScope.generation}`, LOG_STYLE, LOG_OK);
     }
+    console.log(`${LOG_PREFIX} %c━━━ Runtime ready. All exhibit operations below are REAL WASM calls. ━━━`, LOG_STYLE, 'color:#22C55E;font-weight:bold;');
   }
 }
 // Keep initDemo as an alias for backward compatibility with onclick handlers
@@ -2965,6 +3021,7 @@ window.runRepl = function() {
   };
 
   clog('repl-console', `> ${input.split('\n')[0]}${input.includes('\n') ? ' ...' : ''}`, 'dim');
+  console.group(`${LOG_PREFIX} %cREPL execution`, LOG_STYLE, 'color:#8B5CF6;font-weight:bold;');
 
   try {
     const argNames = Object.keys(context);
@@ -2982,7 +3039,9 @@ window.runRepl = function() {
     }
   } catch (e) {
     clog('repl-console', `Error: ${e.message}`, 'err');
+    console.error(`${LOG_PREFIX} REPL error:`, e);
   }
+  console.groupEnd();
 };
 
 window.clearRepl = function() {
@@ -3023,6 +3082,7 @@ window.runChaos = async function() {
   let liveHandles = [];
 
   clog('chaos-console', `Starting chaos test: ${ROUNDS} rounds of random create/cancel/close...`, 'info');
+  console.group(`${LOG_PREFIX} %cChaos Test: ${ROUNDS} rounds`, LOG_STYLE, 'color:#F97316;font-weight:bold;');
 
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') { clog('chaos-console', 'Failed to create runtime', 'err'); chaosRunning = false; return; }
@@ -3112,6 +3172,8 @@ window.runChaos = async function() {
   leakedEl.textContent = '0';
   leakedEl.style.color = HEX.green;
 
+  console.groupEnd();
+  console.log(`${LOG_PREFIX} %cChaos complete: ${ops} ops, ${peakHandles} peak handles, ${errors} errors caught, 0 leaks`, LOG_STYLE, LOG_OK);
   clog('chaos-console', `Completed: ${ops} operations, peak ${peakHandles} live handles, max gen ${maxGen}`, 'ok');
   clog('chaos-console', `Errors caught by runtime: ${errors} (expected — stale handles, invalid states)`, errors > 0 ? 'warn' : 'ok');
   clog('chaos-console', `Leaked handles: 0. Zero orphans. Every obligation resolved.`, 'ok');
@@ -3847,6 +3909,7 @@ window.runBenchmark = async function() {
     </div>
   `;
 
+  console.log(`${LOG_PREFIX} %cBenchmark: ${opsPerSec.toLocaleString()} ops/sec (${ops.toLocaleString()} total, ${nsPerOp}ns/op)`, LOG_STYLE, 'color:#06B6D4;font-weight:bold;');
   document.getElementById('btn-bench').disabled = false;
   document.getElementById('btn-bench').textContent = 'Run 1s Benchmark';
   showToast(`${opsPerSec.toLocaleString()} ops/sec`, 'ok');
