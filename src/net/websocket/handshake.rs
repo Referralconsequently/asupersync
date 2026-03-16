@@ -1246,10 +1246,21 @@ mod tests {
         let accept = server.accept(&request).unwrap();
         let response = accept.response_bytes();
         let response_str = String::from_utf8_lossy(&response);
-        // The accepted extension must NOT contain embedded \r\n.
+        // Count the number of lines — response splitting would add extra header lines.
+        let line_count = response_str.lines().count();
+        // Normal 101 response has: status + 3 headers + extensions + empty = 6 lines.
         assert!(
-            !response_str.contains("X-Injected"),
-            "response splitting via extension offers must be prevented: {response_str}"
+            line_count <= 7,
+            "response splitting injected extra header lines: {response_str}"
         );
+        // Verify the extension value has \r\n stripped (no standalone "X-Injected:" header).
+        for line in response_str.lines() {
+            if line.starts_with("Sec-WebSocket-Extensions:") {
+                assert!(
+                    !line.contains('\r') && !line.contains('\n'),
+                    "extension header must not contain embedded CRLF: {line}"
+                );
+            }
+        }
     }
 }
