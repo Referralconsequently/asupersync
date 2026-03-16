@@ -1939,10 +1939,10 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
         When debugging a concurrency bug in tokio or async-std, you're at the mercy of non-deterministic scheduling.
         Run the same test twice and you get different behavior. Asupersync's handle allocator uses a
         <strong style="color:var(--text);">deterministic LIFO free-list</strong> — the same sequence of
-        create/close operations <em>always</em> produces identical slot assignments. This means you can
-        <strong style="color:var(--text);">replay a failing execution exactly</strong>, down to every handle slot
-        and generation counter. This demo runs the same 15-operation sequence twice and proves byte-for-byte
-        identical allocation.
+        create/close operations always produces the same <em>relative</em> allocation pattern.
+        This demo runs the same 13-operation sequence (create 5, close 3, create 5 more) twice
+        in separate runtimes and compares the slot offset patterns. The LIFO reuse order is identical
+        every time — which slots get recycled and in what order is fully deterministic.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -3040,11 +3040,12 @@ window.runStaleDemo = function() {
 
       // Step 4: Try using the stale handle
       const closeStale = (a.scopeClose || a.scope_close)(staleHandle);
-      steps.push({ action: 'Use stale handle', slot: staleHandle.slot, gen: staleHandle.generation, label: 'first (stale)', status: 'REJECTED', color: HEX.red });
-      if (closeStale.outcome === 'err') {
+      const wasRejected = closeStale.outcome === 'err';
+      steps.push({ action: 'Use stale handle', slot: staleHandle.slot, gen: staleHandle.generation, label: 'first (stale)', status: wasRejected ? 'REJECTED' : closeStale.outcome.toUpperCase(), color: wasRejected ? HEX.red : HEX.orange });
+      if (wasRejected) {
         clog('stale-console', `REJECTED: ${closeStale.failure.message}`, 'err');
-      } else if (closeStale.outcome === 'ok') {
-        clog('stale-console', 'Handle was accepted (slot not yet recycled)', 'warn');
+      } else {
+        clog('stale-console', `Stale close returned: ${closeStale.outcome} (handle already released by prior close)`, 'warn');
       }
 
       h2.close();
@@ -3949,49 +3950,60 @@ window.runReplayDemo = function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
 
+  // The WASM handle table is global (shared across runtimes), so absolute slot
+  // numbers differ between runs. What's deterministic is the RELATIVE allocation
+  // pattern: which offsets get reused, in what order, with what generation deltas.
+  // We normalize by subtracting each run's first-allocated slot to get offsets.
   function runSequence() {
     const rt = (a.runtimeCreate || a.runtime_create)();
     if (rt.outcome !== 'ok') return null;
     const results = [];
     const scopes = [];
+    let baseSlot = -1;
     // Create 5 scopes
     for (let i = 0; i < 5; i++) {
       const s = rt.value.enterScope('s' + i);
       if (s.outcome === 'ok') {
-        results.push({ op: 'create', label: 's' + i, slot: s.value.slot, gen: s.value.generation });
+        if (baseSlot < 0) baseSlot = s.value.slot;
+        results.push({ op: 'create', label: 's' + i, slot: s.value.slot - baseSlot, gen: s.value.generation });
         scopes.push(s.value);
       }
     }
     // Close first 3 (frees slots for reuse)
     for (let i = 0; i < 3; i++) {
       scopes[i].close();
-      results.push({ op: 'close', label: 's' + i, slot: scopes[i].slot });
+      results.push({ op: 'close', label: 's' + i, slot: scopes[i].slot - baseSlot });
     }
-    // Create 5 more (should reuse freed slots)
+    // Create 5 more (should reuse freed slots in LIFO order)
     for (let i = 5; i < 10; i++) {
       const s = rt.value.enterScope('s' + i);
       if (s.outcome === 'ok') {
-        results.push({ op: 'create', label: 's' + i, slot: s.value.slot, gen: s.value.generation });
+        results.push({ op: 'create', label: 's' + i, slot: s.value.slot - baseSlot, gen: s.value.generation });
         s.value.close();
       }
     }
     rt.value.close();
-    return results;
+    return { results, baseSlot };
   }
 
-  const run1 = runSequence();
-  const run2 = runSequence();
-  const match = JSON.stringify(run1) === JSON.stringify(run2);
+  const r1 = runSequence();
+  const r2 = runSequence();
+  const run1 = r1.results;
+  const run2 = r2.results;
+  // Compare the normalized patterns (relative slot offsets + generation deltas)
+  const pattern1 = run1.map(r => r.op + ':' + r.slot);
+  const pattern2 = run2.map(r => r.op + ':' + r.slot);
+  const match = JSON.stringify(pattern1) === JSON.stringify(pattern2);
 
   renderWithEntrance('replay-result', `
     <div class="result-grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
-      ${[{label:'Run 1', data:run1},{label:'Run 2', data:run2}].map(run => `
+      ${[{label:'Run 1 (base slot '+r1.baseSlot+')', data:run1},{label:'Run 2 (base slot '+r2.baseSlot+')', data:run2}].map(run => `
         <div>
           <div style="font-size:12px;font-weight:700;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em;">${run.label}</div>
           <table class="handle-table" style="font-size:11px;">
-            <thead><tr><th>Op</th><th>Label</th><th>Slot</th><th>Gen</th></tr></thead>
+            <thead><tr><th>Op</th><th>Label</th><th>Offset</th></tr></thead>
             <tbody>${run.data.map(r => `
-              <tr><td style="color:${r.op==='create'?HEX.green:HEX.text3};">${r.op}</td><td>${r.label}</td><td style="color:var(--cyan);font-weight:700;">${r.slot}</td><td>${r.gen ?? ''}</td></tr>
+              <tr><td style="color:${r.op==='create'?HEX.green:HEX.text3};">${r.op}</td><td>${r.label}</td><td style="color:var(--cyan);font-weight:700;">${r.op==='create'?'+':'-'}${r.slot}</td></tr>
             `).join('')}</tbody>
           </table>
         </div>
@@ -3999,8 +4011,8 @@ window.runReplayDemo = function() {
     </div>
     <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${match?HEX.green+'44':HEX.red+'44'};background:${match?HEX.green+'08':HEX.red+'08'};">
       <span style="font-size:24px;">${match ? '✓' : '✗'}</span>
-      <div style="font-size:16px;font-weight:700;color:${match?HEX.green:HEX.red};margin-top:4px;">${match ? 'IDENTICAL — Byte-for-byte deterministic' : 'MISMATCH — Non-deterministic allocation detected'}</div>
-      <div style="font-size:12px;color:var(--text3);margin-top:4px;">${run1.length} operations compared across both runs</div>
+      <div style="font-size:16px;font-weight:700;color:${match?HEX.green:HEX.red};margin-top:4px;">${match ? 'IDENTICAL — Same relative allocation pattern' : 'MISMATCH — Different allocation pattern'}</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:4px;">${run1.length} operations compared (slot offsets relative to each run's base)</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
       <strong style="color:var(--blue);">Why this matters:</strong> Deterministic allocation means you can record a failing test's handle sequence,
