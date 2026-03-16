@@ -124,7 +124,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   position: relative;
   overflow: hidden;
   box-shadow: var(--elevation-1), inset 0 1px 1px rgba(255,255,255,0.05);
-  transition: all var(--dur-normal) var(--ease-stripe);
+  transition: border-color var(--dur-normal) var(--ease-stripe), box-shadow var(--dur-normal) var(--ease-stripe), transform var(--dur-normal) var(--ease-stripe);
 }
 .card:hover { border-color: rgba(59,130,246,0.2); box-shadow: var(--elevation-2), inset 0 1px 1px rgba(255,255,255,0.05); transform: translateY(-2px); }
 .card::before {
@@ -144,7 +144,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-family: var(--sans);
   font-size: 14px; font-weight: 600;
   border: none; cursor: pointer;
-  transition: all var(--dur-fast) var(--ease-stripe);
+  transition: box-shadow var(--dur-fast) var(--ease-stripe), transform var(--dur-fast) var(--ease-stripe), opacity var(--dur-fast) var(--ease-stripe);
   outline: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
@@ -435,7 +435,8 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .hero-bg .glow-ring {
   position: absolute; border-radius: 50%;
   pointer-events: none;
-  will-change: transform;
+  contain: strict;
+  backface-visibility: hidden;
 }
 .hero-bg .glow-ring-1 {
   width: 60vw; height: 60vw; max-width: 700px; max-height: 700px;
@@ -460,6 +461,8 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 }
 .hero-bg .glow-orb {
   position: absolute; border-radius: 50%; pointer-events: none;
+  backface-visibility: hidden;
+  contain: strict;
 }
 .hero-bg .glow-orb-1 {
   width: 200px; height: 200px; top: 20%; right: 20%;
@@ -474,10 +477,10 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 @keyframes orbitSpin1 { 0%,100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.15); } }
 @keyframes orbitSpin2 { 0%,100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(-180deg) scale(1.12); } }
 @keyframes orbitSpin3 { 0%,100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.1); } }
-@keyframes orbFloat1 { 0%,100% { transform: scale(1); opacity: 0.12; } 50% { transform: scale(1.25); opacity: 0.2; } }
-@keyframes orbFloat2 { 0%,100% { transform: scale(1.2); opacity: 0.08; } 50% { transform: scale(1); opacity: 0.15; } }
+@keyframes orbFloat1 { 0%,100% { transform: scale(1); } 50% { transform: scale(1.25); } }
+@keyframes orbFloat2 { 0%,100% { transform: scale(1.2); } 50% { transform: scale(1); } }
 .hero-content { position: relative; z-index: 1; max-width: 800px; padding: 0 24px; }
-.hero-content > * { opacity: 0; } /* Hidden until motion stagger runs */
+.hero-content > * { opacity: 0; transition: opacity 0.3s ease; } /* Hidden until motion stagger runs */
 .hero-content.loaded > * { opacity: 1; } /* Fallback if motion fails */
 .hero h1 span { background: linear-gradient(135deg, var(--blue), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
 .hero .subtitle { font-size: clamp(1rem, 2vw, 1.3rem); color: var(--text2); margin-top: 16px; max-width: 600px; margin-left: auto; margin-right: auto; }
@@ -502,7 +505,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   border-radius: var(--radius);
   border: 1px solid;
   cursor: pointer;
-  transition: all var(--dur-normal) var(--ease-stripe);
+  transition: transform var(--dur-normal) var(--ease-stripe), box-shadow var(--dur-normal) var(--ease-stripe), border-color var(--dur-normal) var(--ease-stripe);
   position: relative;
   overflow: hidden;
   min-height: 88px;
@@ -519,11 +522,12 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .nav {
   position: fixed; top: 0; left: 0; right: 0;
   z-index: 100;
-  background: rgba(2,10,20,0.88);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(2,10,20,0.95);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
   padding: 0 24px;
+  transform: translateZ(0);
 }
 .nav-inner {
   max-width: 1100px; margin: 0 auto;
@@ -539,7 +543,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-size: 13px; font-weight: 500;
   padding: 6px 12px; border-radius: 8px;
   white-space: nowrap;
-  transition: all 0.15s;
+  transition: color 0.15s, background 0.15s;
   position: relative;
 }
 .nav-links a:hover { color: var(--text); background: rgba(255,255,255,0.05); }
@@ -557,10 +561,11 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   background: transparent;
 }
 .scroll-progress-fill {
-  height: 100%; width: 0%;
+  height: 100%; width: 100%;
   background: linear-gradient(90deg, var(--blue), var(--cyan));
-  transition: width 0.1s linear;
   border-radius: 0 1px 1px 0;
+  transform-origin: left;
+  transform: scaleX(0);
 }
 /* Mobile hamburger */
 .nav-hamburger {
@@ -910,7 +915,7 @@ input[type="text"]:focus, select:focus, textarea:focus {
 }
 
 /* ── Scroll offset for fixed nav ───────────────────────────────── */
-.section[id] { scroll-margin-top: 72px; }
+.section[id] { scroll-margin-top: 72px; contain: layout style; }
 
 /* ── Back to Top ───────────────────────────────────────────────── */
 .btn-top {
@@ -946,11 +951,13 @@ input[type="text"]:focus, select:focus, textarea:focus {
 
 /* ── Fade-in on scroll ─────────────────────────────────────────── */
 .reveal {
-  opacity: 0; transform: translateY(32px);
+  opacity: 0.01; transform: translateY(20px);
   transition: opacity var(--dur-slow) var(--ease-stripe), transform var(--dur-slow) var(--ease-stripe);
+  will-change: opacity, transform;
 }
 .reveal.visible {
   opacity: 1; transform: translateY(0);
+  will-change: auto;
 }
 
 /* ── Tooltip ───────────────────────────────────────────────────── */
@@ -4370,7 +4377,7 @@ function initMotionAnimations() {
   // Scroll progress bar driven by motion's scroll()
   const progressFill = document.getElementById('scroll-progress-fill');
   if (progressFill) {
-    scroll(animate(progressFill, { width: ['0%', '100%'] }, { ease: 'linear' }));
+    scroll(animate(progressFill, { transform: ['scaleX(0)', 'scaleX(1)'] }, { ease: 'linear' }));
   }
 
   // Hero entrance stagger
@@ -4432,14 +4439,17 @@ window.closeMobileMenu = function() {
 
 // ─── Scroll Progress + Active Nav ────────────────────────────────
 const sectionIds = ['abi','regions','outcomes','cancel','budget','stale','cascade','protocol','repl','chaos','scopefetch','severity','forensics','recycling','isolation','replay','leakdetect','timeout','websocket','comparison','benchmark'];
+// Cache nav link elements to avoid querySelectorAll on every scroll
+const navLinkEls = document.querySelectorAll('[data-section]');
+const btnTopEl = document.getElementById('btn-top');
+const scrollFillEl = document.getElementById('scroll-progress-fill');
 function updateScrollUI() {
   // Progress bar (fallback if motion library didn't load)
-  if (!motionLib) {
+  if (!motionLib && scrollFillEl) {
     const scrollTop = window.scrollY;
     const docHeight = document.documentElement.scrollHeight - window.innerHeight;
-    const pct = docHeight > 0 ? Math.min(100, (scrollTop / docHeight) * 100) : 0;
-    const fill = document.getElementById('scroll-progress-fill');
-    if (fill) fill.style.width = pct + '%';
+    const pct = docHeight > 0 ? Math.min(1, scrollTop / docHeight) : 0;
+    scrollFillEl.style.transform = 'scaleX(' + pct + ')';
   }
 
   // Active nav link
@@ -4448,15 +4458,19 @@ function updateScrollUI() {
     const el = document.getElementById(id);
     if (el && el.getBoundingClientRect().top <= 120) activeId = id;
   }
-  document.querySelectorAll('[data-section]').forEach(a => {
+  navLinkEls.forEach(a => {
     a.classList.toggle('active', a.dataset.section === activeId);
   });
 
   // Back to top button
-  const btnTop = document.getElementById('btn-top');
-  if (btnTop) btnTop.classList.toggle('visible', window.scrollY > window.innerHeight);
+  if (btnTopEl) btnTopEl.classList.toggle('visible', window.scrollY > window.innerHeight);
 }
-window.addEventListener('scroll', updateScrollUI, { passive: true });
+let scrollRafPending = false;
+window.addEventListener('scroll', () => {
+  if (scrollRafPending) return;
+  scrollRafPending = true;
+  requestAnimationFrame(() => { updateScrollUI(); scrollRafPending = false; });
+}, { passive: true });
 updateScrollUI();
 
 // Auto-init WASM on page load, then set up auto-run for exhibits
