@@ -786,3 +786,8 @@
 {"file":"src/sync/mod.rs","lines":60,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
 {"file":"src/time/mod.rs","lines":67,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
 {"file":"src/grpc/health.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"QuietBasin","verdict":"FIXED","bugs":1,"notes":"HealthWatcher missed transient same-final-state flips; added per-service watch versions and regressions for named-service and server-level round trips"}
+{"file":"src/decoding.rs","lines":0,"batch":378,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: accepted_symbols_total counter fix"}
+{"file":"src/grpc/health.rs","lines":0,"batch":378,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: per-service monotonic version for transient changes"}
+{"file":"src/server/shutdown.rs","lines":0,"batch":378,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: fetch_max prevents phase regression"}
+{"file":"src/types/symbol.rs","lines":0,"batch":378,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: explicit source/repair test constructors"}
+{"file":"src/types/symbol_set.rs","lines":0,"batch":378,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: updated test helpers for new constructors"}
