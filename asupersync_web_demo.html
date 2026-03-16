@@ -2184,6 +2184,24 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// Animated counter — REVELATION beat "Counter reveal" pattern
+// easeOutExpo: fast start, slow finish. Duration ~1.2s via RAF.
+function animateCounter(elementId, targetValue, duration = 1200) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  const start = performance.now();
+  const startVal = 0;
+  function tick(now) {
+    const t = Math.min(1, (now - start) / duration);
+    // easeOutExpo: 1 - 2^(-10t)
+    const eased = t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+    const current = Math.round(startVal + (targetValue - startVal) * eased);
+    el.textContent = current.toLocaleString();
+    if (t < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
 // Render HTML into a container with entrance animation
 function renderWithEntrance(containerId, html) {
   const el = document.getElementById(containerId);
@@ -2483,7 +2501,8 @@ function renderOutcomeCards() {
   container.innerHTML = outcomeTypes.map(o => `
     <div class="outcome-card" id="oc-${o.id}" data-id="${o.id}"
       style="border-color: ${o.color}33; background: ${o.color}08;"
-      onclick="selectOutcome('${o.id}')">
+      onclick="selectOutcome('${o.id}')" tabindex="0" role="button"
+      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectOutcome('${o.id}');}">
       <div class="oc-icon" style="color: ${o.color};">${o.icon}</div>
       <div class="oc-title" style="color: ${o.color};">${o.title}</div>
       <div class="oc-desc" style="color: var(--text2);">${o.desc}</div>
@@ -3268,6 +3287,26 @@ window.clearRepl = function() {
   clearConsole('repl-console');
   clog('repl-console', 'Cleared. Ready.', 'dim');
 };
+
+// Keyboard navigation for outcome cards (arrow keys)
+document.addEventListener('keydown', (e) => {
+  const cards = document.querySelectorAll('.outcome-card');
+  if (!cards.length) return;
+  const focused = document.activeElement;
+  if (!focused || !focused.classList.contains('outcome-card')) return;
+  const ids = ['ok', 'err', 'cancelled', 'panicked'];
+  const currentIdx = ids.indexOf(focused.dataset.id);
+  if (currentIdx < 0) return;
+  let newIdx = -1;
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') newIdx = Math.min(currentIdx + 1, ids.length - 1);
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') newIdx = Math.max(currentIdx - 1, 0);
+  if (newIdx >= 0 && newIdx !== currentIdx) {
+    e.preventDefault();
+    const newCard = document.getElementById('oc-' + ids[newIdx]);
+    if (newCard) { newCard.focus(); selectOutcome(ids[newIdx]); }
+  }
+});
+// (outcome cards get tabindex/role via renderOutcomeCards)
 
 // Ctrl+Enter to run, Tab to indent
 document.addEventListener('keydown', (e) => {
@@ -4117,7 +4156,7 @@ window.runBenchmark = async function() {
 
   renderWithEntrance('benchmark-result', `
     <div style="text-align:center;padding:24px;">
-      <div style="font-size:48px;font-weight:800;font-family:var(--mono);color:var(--cyan);">${opsPerSec.toLocaleString()}</div>
+      <div style="font-size:48px;font-weight:800;font-family:var(--mono);color:var(--cyan);" id="bench-headline">0</div>
       <div style="font-size:14px;color:var(--text3);margin-top:4px;">scope create+close operations per second</div>
       <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
         <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
@@ -4140,6 +4179,8 @@ window.runBenchmark = async function() {
     </div>
   `);
 
+  // REVELATION beat: animated counter for headline number
+  animateCounter('bench-headline', opsPerSec, 1500);
   console.log(`${LOG_PREFIX} %cBenchmark: ${opsPerSec.toLocaleString()} ops/sec (${ops.toLocaleString()} total, ${nsPerOp}ns/op)`, LOG_STYLE, 'color:#06B6D4;font-weight:bold;');
   // REVELATION beat: spring pop on the headline number
   if (motionLib) {
