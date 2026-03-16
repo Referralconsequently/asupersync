@@ -264,6 +264,10 @@ impl BrowserReactorInner {
             | Interest::PRIORITY
     }
 
+    fn disarm_oneshot(interest: Interest) -> Interest {
+        interest.remove(Self::readiness_mask())
+    }
+
     /// Enqueue readiness discovered by browser host callbacks.
     ///
     /// Host bridges (fetch completion, WebSocket events, stream callbacks)
@@ -287,7 +291,7 @@ impl BrowserReactorInner {
         // lock order used by modify()/deregister() so host callbacks cannot
         // enqueue stale readiness after a concurrent interest change/remove.
         let mut pending = self.pending_events_mut();
-        if self.config.coalesce_wakes {
+        if self.config.coalesce_wakes || interest.is_oneshot() {
             if let Some(existing) = pending.iter_mut().find(|event| event.token == token) {
                 existing.ready |= effective;
                 drop(pending);
@@ -326,7 +330,7 @@ impl BrowserReactorInner {
         continue_after_interest.wait();
 
         let mut pending = self.pending_events_mut();
-        if self.config.coalesce_wakes {
+        if self.config.coalesce_wakes || interest.is_oneshot() {
             if let Some(existing) = pending.iter_mut().find(|event| event.token == token) {
                 existing.ready |= effective;
                 drop(pending);
@@ -404,6 +408,7 @@ impl BrowserReactorInner {
     fn poll(&self, events: &mut Events) -> usize {
         events.clear();
 
+        let mut registrations = self.registrations_mut();
         let mut pending = self.pending_events_mut();
         if pending.is_empty() {
             self.wake_pending.store(false, Ordering::Release);
@@ -416,12 +421,29 @@ impl BrowserReactorInner {
             self.config.max_events_per_poll
         };
         let n = pending.len().min(batch_limit);
+        let mut oneshot_tokens = Vec::new();
         for event in pending.drain(..n) {
+            if registrations
+                .get(&event.token)
+                .is_some_and(super::interest::Interest::is_oneshot)
+                && !oneshot_tokens.contains(&event.token)
+            {
+                oneshot_tokens.push(event.token);
+            }
             events.push(event);
+        }
+
+        for token in oneshot_tokens {
+            if let Some(interest) = registrations.get_mut(&token) {
+                if interest.is_oneshot() {
+                    *interest = Self::disarm_oneshot(*interest);
+                }
+            }
         }
 
         let still_pending = !pending.is_empty();
         drop(pending);
+        drop(registrations);
         self.wake_pending.store(still_pending, Ordering::Release);
         n
     }
@@ -1072,6 +1094,74 @@ mod tests {
         let event = events.iter().next().expect("single event");
         assert!(event.is_readable());
         assert!(event.is_writable());
+    }
+
+    #[test]
+    fn browser_reactor_oneshot_disarms_after_first_delivered_event() {
+        let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        let token = Token::new(10);
+
+        reactor
+            .register(&source, token, Interest::READABLE.with_oneshot())
+            .unwrap();
+
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+
+        let mut events = Events::with_capacity(4);
+        let first = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(events.len(), 1);
+        assert!(events.iter().next().expect("single event").is_readable());
+
+        events.clear();
+        assert!(
+            !reactor.notify_ready(token, Interest::READABLE).unwrap(),
+            "oneshot token must stay disarmed until modify() re-arms it"
+        );
+        assert_eq!(reactor.poll(&mut events, Some(Duration::ZERO)).unwrap(), 0);
+
+        reactor
+            .modify(token, Interest::READABLE.with_oneshot())
+            .unwrap();
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+        assert_eq!(reactor.poll(&mut events, Some(Duration::ZERO)).unwrap(), 1);
+        assert!(events.iter().next().expect("rearmed event").is_readable());
+    }
+
+    #[test]
+    fn browser_reactor_oneshot_coalesces_duplicate_ready_notifications_even_without_coalesce() {
+        let reactor = BrowserReactor::new(BrowserReactorConfig {
+            max_events_per_poll: 64,
+            coalesce_wakes: false,
+        });
+        let source = TestFdSource;
+        let token = Token::new(12);
+
+        reactor
+            .register(
+                &source,
+                token,
+                (Interest::READABLE | Interest::WRITABLE).with_oneshot(),
+            )
+            .unwrap();
+
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+        assert!(reactor.notify_ready(token, Interest::WRITABLE).unwrap());
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 1, "oneshot tokens must yield a single delivered event");
+        let event = events.iter().next().expect("single event");
+        assert!(event.is_readable());
+        assert!(event.is_writable());
+
+        events.clear();
+        assert!(
+            !reactor.notify_ready(token, Interest::READABLE).unwrap(),
+            "oneshot token remains disarmed after delivery"
+        );
+        assert_eq!(reactor.poll(&mut events, Some(Duration::ZERO)).unwrap(), 0);
     }
 
     #[test]

@@ -188,6 +188,8 @@ pub enum WorkerOp {
     },
     /// Worker → main: worker runtime failed to initialize.
     BootstrapFailed {
+        /// Worker-assigned identifier for this runtime instance.
+        worker_id: String,
         /// Human-readable failure reason.
         reason: String,
     },
@@ -653,9 +655,9 @@ impl WorkerCoordinator {
                 self.shutdown_requested = false;
                 Ok(())
             }
-            WorkerOp::BootstrapFailed { reason } => {
+            WorkerOp::BootstrapFailed { worker_id, reason } => {
                 self.fail_nonterminal_jobs();
-                self.active_worker_id = None;
+                self.active_worker_id = Some(worker_id.clone());
                 self.worker_ready = false;
                 self.shutdown_requested = false;
                 Err(WorkerChannelError::BootstrapFailed(reason.clone()))
@@ -767,10 +769,10 @@ impl WorkerCoordinator {
 
     fn should_reset_inbound_session(&self, op: &WorkerOp) -> bool {
         match op {
-            WorkerOp::BootstrapReady { worker_id } => {
-                !self.worker_ready || self.active_worker_id.as_deref() != Some(worker_id.as_str())
+            WorkerOp::BootstrapReady { worker_id }
+            | WorkerOp::BootstrapFailed { worker_id, .. } => {
+                self.active_worker_id.as_deref() != Some(worker_id.as_str())
             }
-            WorkerOp::BootstrapFailed { .. } => !self.worker_ready,
             _ => false,
         }
     }
@@ -953,6 +955,19 @@ mod tests {
             0,
             WorkerOp::BootstrapReady {
                 worker_id: "test-worker-1".into(),
+            },
+        )
+    }
+
+    fn bootstrap_failed_envelope(seq: u64, worker_id: &str, reason: &str) -> WorkerEnvelope {
+        WorkerEnvelope::new(
+            seq,
+            seq,
+            42,
+            0,
+            WorkerOp::BootstrapFailed {
+                worker_id: worker_id.into(),
+                reason: reason.into(),
             },
         )
     }
@@ -1451,15 +1466,7 @@ mod tests {
     fn coordinator_accepts_fresh_bootstrap_after_bootstrap_failed() {
         let mut coord = WorkerCoordinator::new(42);
 
-        let failed = WorkerEnvelope::new(
-            1,
-            1,
-            42,
-            0,
-            WorkerOp::BootstrapFailed {
-                reason: "synthetic boot failure".into(),
-            },
-        );
+        let failed = bootstrap_failed_envelope(1, "failed-worker-1", "synthetic boot failure");
         assert_eq!(
             coord.handle_inbound(&failed),
             Err(WorkerChannelError::BootstrapFailed(
@@ -1481,6 +1488,39 @@ mod tests {
         coord.handle_inbound(&retry).unwrap();
         assert!(coord.is_worker_ready());
         assert_eq!(coord.last_inbound_seq_no, 1);
+    }
+
+    #[test]
+    fn coordinator_accepts_fresh_bootstrap_failed_after_live_session() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker one accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        let failed = bootstrap_failed_envelope(1, "failed-worker-2", "reboot failed to init");
+        assert_eq!(
+            coord.handle_inbound(&failed),
+            Err(WorkerChannelError::BootstrapFailed(
+                "reboot failed to init".into()
+            ))
+        );
+        assert_eq!(coord.last_inbound_seq_no, 1);
+        assert!(!coord.is_worker_ready());
+        assert_eq!(coord.job_state(1), Some(JobState::Failed));
+        assert_eq!(coord.inflight_count(), 0);
     }
 
     #[test]
@@ -1560,6 +1600,32 @@ mod tests {
                 actual: 1,
             })
         );
+    }
+
+    #[test]
+    fn coordinator_rejects_replayed_bootstrap_failed_from_same_worker_session() {
+        let mut coord = WorkerCoordinator::new(42);
+
+        let ready = WorkerEnvelope::new(
+            5,
+            5,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "stable-worker".into(),
+            },
+        );
+        coord.handle_inbound(&ready).unwrap();
+
+        let replay = bootstrap_failed_envelope(1, "stable-worker", "stale failure replay");
+        assert_eq!(
+            coord.handle_inbound(&replay),
+            Err(WorkerChannelError::InboundSequenceNotFresh {
+                last_seen: 5,
+                actual: 1,
+            })
+        );
+        assert!(coord.is_worker_ready());
     }
 
     #[test]

@@ -1520,6 +1520,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pipeline_set_object_params_accepts_full_256_block_boundary() {
+        let config = crate::config::EncodingConfig {
+            symbol_size: 8,
+            max_block_size: 8,
+            ..encoding_config()
+        };
+        let object_id = ObjectId::new_for_test(109);
+
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            ..DecodingConfig::default()
+        });
+        pipeline
+            .set_object_params(ObjectParams::new(
+                object_id,
+                u64::try_from(config.max_block_size * 256).expect("boundary object size fits u64"),
+                config.symbol_size,
+                256,
+                1,
+            ))
+            .expect("256-block metadata boundary should be representable");
+
+        assert_eq!(pipeline.progress().blocks_total, Some(256));
+    }
+
     // ---- Gap tests ----
 
     #[test]
@@ -1990,7 +2017,7 @@ mod tests {
                 object_id,
                 data.len() as u64,
                 config.symbol_size,
-                num_blocks as u8,
+                num_blocks as u16,
                 full_block_k,
             ))
             .expect("set params");
