@@ -286,8 +286,7 @@ fn artifact_vnext_surface_matrix_is_complete() {
             .expect("fail_closed_rule must be string");
         assert!(
             !support_level.is_empty(),
-            "support_level must not be empty for {:?}",
-            entry
+            "support_level must not be empty for {entry:?}",
         );
         assert!(
             lane.contains("wasm-browser-vnext-surfaces"),
@@ -295,13 +294,11 @@ fn artifact_vnext_surface_matrix_is_complete() {
         );
         assert!(
             !evidence.is_empty(),
-            "required_evidence must not be empty for {:?}",
-            entry
+            "required_evidence must not be empty for {entry:?}",
         );
         assert!(
             !fail_closed_rule.is_empty(),
-            "fail_closed_rule must not be empty for {:?}",
-            entry
+            "fail_closed_rule must not be empty for {entry:?}",
         );
     }
 }
