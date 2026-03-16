@@ -376,8 +376,10 @@ pub enum DiagnosticLevel {
 /// Transitions:
 /// ```text
 /// Created → Queued → Running → Completed
-///                      ↓
-///                CancelRequested → Draining → Finalizing → Completed
+///           ↓          ↓         ↘
+///      CancelRequested → Draining → Finalizing → Completed
+///                      ↘
+///                       Completed (cancel raced with natural completion before ack)
 ///
 /// Any non-terminal state may also transition to `Failed` if the worker
 /// session dies or is replaced before the job reaches a terminal outcome.
@@ -430,12 +432,18 @@ impl JobState {
         matches!(
             (self, next),
             (Self::Created, Self::Queued | Self::Failed)
-                | (Self::Queued, Self::Running | Self::Completed | Self::Failed)
+                | (
+                    Self::Queued,
+                    Self::Running | Self::CancelRequested | Self::Completed | Self::Failed,
+                )
                 | (
                     Self::Running,
                     Self::Completed | Self::CancelRequested | Self::Failed,
                 )
-                | (Self::CancelRequested, Self::Draining | Self::Failed)
+                | (
+                    Self::CancelRequested,
+                    Self::Completed | Self::Draining | Self::Failed,
+                )
                 | (Self::Draining, Self::Finalizing | Self::Failed)
                 | (Self::Finalizing, Self::Completed | Self::Failed)
         )
@@ -673,7 +681,10 @@ impl WorkerCoordinator {
                     .jobs
                     .get_mut(&result.job_id)
                     .ok_or(WorkerChannelError::UnknownJobId(result.job_id))?;
-                if !matches!(job.state, JobState::Queued | JobState::Running) {
+                if !matches!(
+                    job.state,
+                    JobState::Queued | JobState::Running | JobState::CancelRequested
+                ) {
                     return Err(WorkerChannelError::UnexpectedCompletionPhase {
                         job_id: result.job_id,
                         state: job.state,
@@ -1130,19 +1141,75 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_accepts_job_completed_racing_with_cancel_request() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.cancel_job(1, "test cancel".into()).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::CancelRequested));
+        let cancel_msg = coord.drain_outbox().unwrap();
+        assert!(matches!(cancel_msg.op, WorkerOp::CancelJob { .. }));
+
+        let completed = WorkerEnvelope::new(
+            3,
+            3,
+            42,
+            2,
+            WorkerOp::JobCompleted(JobResult {
+                job_id: 1,
+                outcome: JobOutcome::Ok { payload: vec![7] },
+            }),
+        );
+        coord.handle_inbound(&completed).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Completed));
+        assert_eq!(coord.inflight_count(), 0);
+        assert!(coord.drain_outbox().is_none());
+    }
+
+    #[test]
     fn coordinator_rejects_invalid_transition() {
         let mut coord = WorkerCoordinator::new(42);
         coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
         coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
         let _ = coord.drain_outbox();
 
-        // Job is Queued, cannot go directly to CancelRequested
-        // (must be Running first)
-        let result = coord.cancel_job(1, "bad cancel".into());
-        assert!(matches!(
-            result,
-            Err(WorkerChannelError::InvalidTransition { .. })
-        ));
+        coord.cancel_job(1, "cancel before running".into()).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::CancelRequested));
+        let cancel = coord.drain_outbox().unwrap();
+        assert!(matches!(cancel.op, WorkerOp::CancelJob { job_id: 1, .. }));
+    }
+
+    #[test]
+    fn coordinator_allows_cancel_before_running_snapshot() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+
+        let spawn = coord.drain_outbox().unwrap();
+        assert!(matches!(spawn.op, WorkerOp::SpawnJob(_)));
+
+        coord
+            .cancel_job(1, "cancel before worker starts".into())
+            .unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::CancelRequested));
+
+        let cancel = coord.drain_outbox().unwrap();
+        assert!(matches!(cancel.op, WorkerOp::CancelJob { job_id: 1, .. }));
     }
 
     #[test]
@@ -1645,10 +1712,12 @@ mod tests {
         assert!(JobState::Created.can_transition_to(JobState::Queued));
         assert!(JobState::Created.can_transition_to(JobState::Failed));
         assert!(JobState::Queued.can_transition_to(JobState::Running));
+        assert!(JobState::Queued.can_transition_to(JobState::CancelRequested));
         assert!(JobState::Queued.can_transition_to(JobState::Failed));
         assert!(JobState::Running.can_transition_to(JobState::Completed));
         assert!(JobState::Running.can_transition_to(JobState::CancelRequested));
         assert!(JobState::Running.can_transition_to(JobState::Failed));
+        assert!(JobState::CancelRequested.can_transition_to(JobState::Completed));
         assert!(JobState::CancelRequested.can_transition_to(JobState::Draining));
         assert!(JobState::CancelRequested.can_transition_to(JobState::Failed));
         assert!(JobState::Draining.can_transition_to(JobState::Finalizing));
@@ -1661,8 +1730,6 @@ mod tests {
         // Invalid transitions
         assert!(!JobState::Created.can_transition_to(JobState::Running));
         assert!(!JobState::Created.can_transition_to(JobState::Completed));
-        assert!(!JobState::Queued.can_transition_to(JobState::CancelRequested));
-        assert!(!JobState::CancelRequested.can_transition_to(JobState::Completed));
         assert!(!JobState::Draining.can_transition_to(JobState::Completed));
         assert!(!JobState::Completed.can_transition_to(JobState::Running));
     }
