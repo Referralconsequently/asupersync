@@ -289,6 +289,7 @@ fn event_task_id(event: &TraceEvent) -> Option<TaskId> {
         | TraceData::Cancel { task, .. }
         | TraceData::Obligation { task, .. }
         | TraceData::Futurelock { task, .. }
+        | TraceData::Worker { task, .. }
         | TraceData::Chaos {
             task: Some(task), ..
         } => Some(*task),

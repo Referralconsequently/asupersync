@@ -256,6 +256,15 @@ impl TraceEventSummary {
             } => format!(
                 "exit link_ref={link_ref} from={from} to={to} failure_vt={failure_vt} reason={reason}"
             ),
+            TraceData::Worker {
+                worker_id,
+                job_id,
+                task,
+                region,
+                obligation,
+            } => format!(
+                "worker={worker_id} job_id={job_id} task={task} region={region} obligation={obligation}"
+            ),
         }
     }
 }

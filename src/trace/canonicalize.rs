@@ -474,6 +474,12 @@ fn kind_discriminant(kind: TraceEventKind) -> u8 {
         TraceEventKind::LinkCreated => 33,
         TraceEventKind::LinkDropped => 34,
         TraceEventKind::ExitDelivered => 35,
+        // Appended to preserve existing fingerprint assignments for prior kinds.
+        TraceEventKind::WorkerCancelRequested => 36,
+        TraceEventKind::WorkerCancelAcknowledged => 37,
+        TraceEventKind::WorkerDrainStarted => 38,
+        TraceEventKind::WorkerDrainCompleted => 39,
+        TraceEventKind::WorkerFinalizeCompleted => 40,
     }
 }
 
@@ -579,6 +585,12 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
             failure_vt,
             ..
         } => (k, failure_vt.as_nanos(), pack_arena(from.0), *link_ref),
+        TraceData::Worker {
+            job_id,
+            task,
+            region,
+            ..
+        } => (k, *job_id, pack_arena(task.0), pack_arena(region.0)),
         TraceData::None => (k, 0, 0, 0),
     }
 }

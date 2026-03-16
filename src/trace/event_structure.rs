@@ -99,6 +99,7 @@ impl OwnerKey {
             | TraceData::Cancel { task, .. }
             | TraceData::Obligation { task, .. }
             | TraceData::Futurelock { task, .. }
+            | TraceData::Worker { task, .. }
             | TraceData::Chaos {
                 task: Some(task), ..
             } => Self::Task(*task),

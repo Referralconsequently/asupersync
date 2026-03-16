@@ -121,6 +121,16 @@ pub enum TraceEventKind {
     CancelRequest,
     /// Cancellation was acknowledged.
     CancelAck,
+    /// Worker-offload cancellation was requested across the browser boundary.
+    WorkerCancelRequested,
+    /// Worker-offload cancellation was acknowledged by the worker coordinator.
+    WorkerCancelAcknowledged,
+    /// Worker-offload drain phase started after cancellation acknowledgement.
+    WorkerDrainStarted,
+    /// Worker-offload drain phase completed.
+    WorkerDrainCompleted,
+    /// Worker-offload finalize phase completed.
+    WorkerFinalizeCompleted,
     /// A region began closing.
     RegionCloseBegin,
     /// A region completed closing.
@@ -184,7 +194,7 @@ impl TraceEventKind {
     ///
     /// Keep this list in sync with the enum definition and
     /// `docs/spork_deterministic_ordering.md` taxonomy section.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 41] = [
         Self::Spawn,
         Self::Schedule,
         Self::Yield,
@@ -193,6 +203,11 @@ impl TraceEventKind {
         Self::Complete,
         Self::CancelRequest,
         Self::CancelAck,
+        Self::WorkerCancelRequested,
+        Self::WorkerCancelAcknowledged,
+        Self::WorkerDrainStarted,
+        Self::WorkerDrainCompleted,
+        Self::WorkerFinalizeCompleted,
         Self::RegionCloseBegin,
         Self::RegionCloseComplete,
         Self::RegionCreated,
@@ -235,6 +250,11 @@ impl TraceEventKind {
             Self::Complete => "complete",
             Self::CancelRequest => "cancel_request",
             Self::CancelAck => "cancel_ack",
+            Self::WorkerCancelRequested => "worker_cancel_requested",
+            Self::WorkerCancelAcknowledged => "worker_cancel_acknowledged",
+            Self::WorkerDrainStarted => "worker_drain_started",
+            Self::WorkerDrainCompleted => "worker_drain_completed",
+            Self::WorkerFinalizeCompleted => "worker_finalize_completed",
             Self::RegionCloseBegin => "region_close_begin",
             Self::RegionCloseComplete => "region_close_complete",
             Self::RegionCreated => "region_created",
@@ -277,6 +297,11 @@ impl TraceEventKind {
             | Self::Poll
             | Self::Complete => "task, region",
             Self::CancelRequest | Self::CancelAck => "task, region, reason",
+            Self::WorkerCancelRequested
+            | Self::WorkerCancelAcknowledged
+            | Self::WorkerDrainStarted
+            | Self::WorkerDrainCompleted
+            | Self::WorkerFinalizeCompleted => "job_id, obligation, region, task, worker_id",
             Self::RegionCloseBegin | Self::RegionCloseComplete | Self::RegionCreated => {
                 "region, parent"
             }
@@ -348,6 +373,11 @@ pub const fn browser_trace_category_for_kind(kind: TraceEventKind) -> BrowserTra
         | TraceEventKind::ExitDelivered => BrowserTraceCategory::CapabilityInvocation,
         TraceEventKind::CancelRequest
         | TraceEventKind::CancelAck
+        | TraceEventKind::WorkerCancelRequested
+        | TraceEventKind::WorkerCancelAcknowledged
+        | TraceEventKind::WorkerDrainStarted
+        | TraceEventKind::WorkerDrainCompleted
+        | TraceEventKind::WorkerFinalizeCompleted
         | TraceEventKind::RegionCloseBegin
         | TraceEventKind::RegionCloseComplete
         | TraceEventKind::RegionCancelled => BrowserTraceCategory::CancellationTransition,
@@ -884,6 +914,19 @@ pub enum TraceData {
         /// The reason for cancellation.
         reason: CancelReason,
     },
+    /// Worker-offload lifecycle data across the browser boundary.
+    Worker {
+        /// Worker runtime instance identifier.
+        worker_id: String,
+        /// Offloaded job identifier within the worker coordinator.
+        job_id: u64,
+        /// The originating task that owns the offloaded work.
+        task: TaskId,
+        /// The originating region that owns the task.
+        region: RegionId,
+        /// The originating obligation that must be drained/finalized.
+        obligation: ObligationId,
+    },
     /// Region cancellation data.
     RegionCancel {
         /// The region involved.
@@ -1156,6 +1199,145 @@ impl TraceEvent {
                 region,
                 reason,
             },
+        )
+    }
+
+    fn worker_lifecycle(
+        seq: u64,
+        time: Time,
+        kind: TraceEventKind,
+        worker_id: impl Into<String>,
+        job_id: u64,
+        task: TaskId,
+        region: RegionId,
+        obligation: ObligationId,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            kind,
+            TraceData::Worker {
+                worker_id: worker_id.into(),
+                job_id,
+                task,
+                region,
+                obligation,
+            },
+        )
+    }
+
+    /// Creates a worker-offload cancel-requested event.
+    #[must_use]
+    pub fn worker_cancel_requested(
+        seq: u64,
+        time: Time,
+        worker_id: impl Into<String>,
+        job_id: u64,
+        task: TaskId,
+        region: RegionId,
+        obligation: ObligationId,
+    ) -> Self {
+        Self::worker_lifecycle(
+            seq,
+            time,
+            TraceEventKind::WorkerCancelRequested,
+            worker_id,
+            job_id,
+            task,
+            region,
+            obligation,
+        )
+    }
+
+    /// Creates a worker-offload cancel-acknowledged event.
+    #[must_use]
+    pub fn worker_cancel_acknowledged(
+        seq: u64,
+        time: Time,
+        worker_id: impl Into<String>,
+        job_id: u64,
+        task: TaskId,
+        region: RegionId,
+        obligation: ObligationId,
+    ) -> Self {
+        Self::worker_lifecycle(
+            seq,
+            time,
+            TraceEventKind::WorkerCancelAcknowledged,
+            worker_id,
+            job_id,
+            task,
+            region,
+            obligation,
+        )
+    }
+
+    /// Creates a worker-offload drain-started event.
+    #[must_use]
+    pub fn worker_drain_started(
+        seq: u64,
+        time: Time,
+        worker_id: impl Into<String>,
+        job_id: u64,
+        task: TaskId,
+        region: RegionId,
+        obligation: ObligationId,
+    ) -> Self {
+        Self::worker_lifecycle(
+            seq,
+            time,
+            TraceEventKind::WorkerDrainStarted,
+            worker_id,
+            job_id,
+            task,
+            region,
+            obligation,
+        )
+    }
+
+    /// Creates a worker-offload drain-completed event.
+    #[must_use]
+    pub fn worker_drain_completed(
+        seq: u64,
+        time: Time,
+        worker_id: impl Into<String>,
+        job_id: u64,
+        task: TaskId,
+        region: RegionId,
+        obligation: ObligationId,
+    ) -> Self {
+        Self::worker_lifecycle(
+            seq,
+            time,
+            TraceEventKind::WorkerDrainCompleted,
+            worker_id,
+            job_id,
+            task,
+            region,
+            obligation,
+        )
+    }
+
+    /// Creates a worker-offload finalize-completed event.
+    #[must_use]
+    pub fn worker_finalize_completed(
+        seq: u64,
+        time: Time,
+        worker_id: impl Into<String>,
+        job_id: u64,
+        task: TaskId,
+        region: RegionId,
+        obligation: ObligationId,
+    ) -> Self {
+        Self::worker_lifecycle(
+            seq,
+            time,
+            TraceEventKind::WorkerFinalizeCompleted,
+            worker_id,
+            job_id,
+            task,
+            region,
+            obligation,
         )
     }
 
@@ -1634,6 +1816,16 @@ impl fmt::Display for TraceEvent {
                 region,
                 reason,
             } => write!(f, " {task} in {region} reason={reason}")?,
+            TraceData::Worker {
+                worker_id,
+                job_id,
+                task,
+                region,
+                obligation,
+            } => write!(
+                f,
+                " worker={worker_id} job_id={job_id} {task} in {region} obligation={obligation}"
+            )?,
             TraceData::RegionCancel { region, reason } => {
                 write!(f, " {region} reason={reason}")?;
             }
@@ -1783,8 +1975,8 @@ mod tests {
     }
 
     #[test]
-    fn all_array_has_36_kinds() {
-        assert_eq!(TraceEventKind::ALL.len(), 36);
+    fn all_array_has_41_kinds() {
+        assert_eq!(TraceEventKind::ALL.len(), 41);
     }
 
     #[test]
@@ -2335,6 +2527,30 @@ mod tests {
     fn user_trace_accepts_string() {
         let e = TraceEvent::user_trace(34, Time::ZERO, String::from("world"));
         assert_eq!(e.data, TraceData::Message("world".into()));
+    }
+
+    #[test]
+    fn worker_lifecycle_constructors_preserve_payload_shape() {
+        let e = TraceEvent::worker_cancel_requested(
+            35,
+            Time::ZERO,
+            "worker-a",
+            77,
+            task(9),
+            region(10),
+            obligation(11),
+        );
+        assert_eq!(e.kind, TraceEventKind::WorkerCancelRequested);
+        assert_eq!(
+            e.data,
+            TraceData::Worker {
+                worker_id: "worker-a".into(),
+                job_id: 77,
+                task: task(9),
+                region: region(10),
+                obligation: obligation(11),
+            }
+        );
     }
 
     // ── with_logical_time ──────────────────────────────────────────
@@ -3036,6 +3252,35 @@ mod tests {
                 "task".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn browser_trace_schema_worker_required_fields_match_payload_shape() {
+        let schema = browser_trace_schema_v1();
+        for event_kind in [
+            "worker_cancel_requested",
+            "worker_cancel_acknowledged",
+            "worker_drain_started",
+            "worker_drain_completed",
+            "worker_finalize_completed",
+        ] {
+            let entry = schema
+                .event_specs
+                .iter()
+                .find(|entry| entry.event_kind == event_kind)
+                .unwrap_or_else(|| panic!("{event_kind} entry should exist"));
+            assert_eq!(entry.category, BrowserTraceCategory::CancellationTransition);
+            assert_eq!(
+                entry.required_fields,
+                vec![
+                    "job_id".to_string(),
+                    "obligation".to_string(),
+                    "region".to_string(),
+                    "task".to_string(),
+                    "worker_id".to_string(),
+                ]
+            );
+        }
     }
 
     #[test]

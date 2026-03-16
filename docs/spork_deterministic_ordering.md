@@ -493,6 +493,11 @@ Canonical taxonomy markers:
 - `complete` => `task, region`
 - `cancel_request` => `task, region, reason`
 - `cancel_ack` => `task, region, reason`
+- `worker_cancel_requested` => `job_id, obligation, region, task, worker_id`
+- `worker_cancel_acknowledged` => `job_id, obligation, region, task, worker_id`
+- `worker_drain_started` => `job_id, obligation, region, task, worker_id`
+- `worker_drain_completed` => `job_id, obligation, region, task, worker_id`
+- `worker_finalize_completed` => `job_id, obligation, region, task, worker_id`
 - `region_close_begin` => `region, parent`
 - `region_close_complete` => `region, parent`
 - `region_created` => `region, parent`

@@ -211,7 +211,8 @@ fn extract_task_id(event: &TraceEvent) -> Option<TaskId> {
         TraceData::Task { task, .. }
         | TraceData::Cancel { task, .. }
         | TraceData::Futurelock { task, .. }
-        | TraceData::Obligation { task, .. } => Some(*task),
+        | TraceData::Obligation { task, .. }
+        | TraceData::Worker { task, .. } => Some(*task),
         _ => None,
     }
 }

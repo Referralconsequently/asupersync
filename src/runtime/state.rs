@@ -2949,6 +2949,16 @@ pub enum EventKindSnapshot {
     CancelRequest,
     /// Cancellation acknowledged.
     CancelAck,
+    /// Worker-offload cancellation requested.
+    WorkerCancelRequested,
+    /// Worker-offload cancellation acknowledged.
+    WorkerCancelAcknowledged,
+    /// Worker-offload drain phase started.
+    WorkerDrainStarted,
+    /// Worker-offload drain phase completed.
+    WorkerDrainCompleted,
+    /// Worker-offload finalize phase completed.
+    WorkerFinalizeCompleted,
     /// Region close started.
     RegionCloseBegin,
     /// Region close completed.
@@ -3018,6 +3028,11 @@ impl From<TraceEventKind> for EventKindSnapshot {
             TraceEventKind::Complete => Self::Complete,
             TraceEventKind::CancelRequest => Self::CancelRequest,
             TraceEventKind::CancelAck => Self::CancelAck,
+            TraceEventKind::WorkerCancelRequested => Self::WorkerCancelRequested,
+            TraceEventKind::WorkerCancelAcknowledged => Self::WorkerCancelAcknowledged,
+            TraceEventKind::WorkerDrainStarted => Self::WorkerDrainStarted,
+            TraceEventKind::WorkerDrainCompleted => Self::WorkerDrainCompleted,
+            TraceEventKind::WorkerFinalizeCompleted => Self::WorkerFinalizeCompleted,
             TraceEventKind::RegionCloseBegin => Self::RegionCloseBegin,
             TraceEventKind::RegionCloseComplete => Self::RegionCloseComplete,
             TraceEventKind::RegionCreated => Self::RegionCreated,
@@ -3235,6 +3250,19 @@ pub enum EventDataSnapshot {
         /// Additional detail.
         detail: String,
     },
+    /// Worker-offload lifecycle data.
+    Worker {
+        /// Worker runtime instance identifier.
+        worker_id: String,
+        /// Offloaded job identifier.
+        job_id: u64,
+        /// Originating task identifier.
+        task: IdSnapshot,
+        /// Originating region identifier.
+        region: IdSnapshot,
+        /// Originating obligation identifier.
+        obligation: IdSnapshot,
+    },
 }
 
 impl EventDataSnapshot {
@@ -3387,6 +3415,19 @@ impl EventDataSnapshot {
                 kind: kind.clone(),
                 task: task.map(IdSnapshot::from),
                 detail: detail.clone(),
+            },
+            TraceData::Worker {
+                worker_id,
+                job_id,
+                task,
+                region,
+                obligation,
+            } => Self::Worker {
+                worker_id: worker_id.clone(),
+                job_id: *job_id,
+                task: (*task).into(),
+                region: (*region).into(),
+                obligation: (*obligation).into(),
             },
         }
     }
