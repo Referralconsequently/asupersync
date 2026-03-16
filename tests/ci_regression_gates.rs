@@ -23,6 +23,7 @@ use asupersync::raptorq::regression::{
 };
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::util::DetRng;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -56,6 +57,131 @@ const RECOVERABLE_RETRY_REPAIR_STEP: usize = 4;
 // ============================================================================
 // Helpers
 // ============================================================================
+
+#[derive(Serialize)]
+struct GateLogRecord<'a> {
+    schema_version: &'static str,
+    replay_ref: &'static str,
+    scenario_id: &'a str,
+    seed: u64,
+    lever: &'a str,
+    gate_outcome: &'a str,
+    overall_verdict: &'static str,
+    regressed_count: usize,
+    warning_count: usize,
+    total_observations: usize,
+    policy_mode: &'static str,
+    regime_state: &'static str,
+    peeled: usize,
+    inactivated: usize,
+    gauss_ops: usize,
+    dense_core_rows: usize,
+    dense_core_cols: usize,
+    factor_cache_hits: usize,
+    factor_cache_misses: usize,
+    hard_regime_activated: bool,
+    hard_regime_fallbacks: usize,
+    policy_reason: &'static str,
+    policy_replay_ref: &'static str,
+    hard_regime_branch: &'static str,
+    hard_regime_fallback_reason: &'static str,
+    artifact_path: &'static str,
+    repro_command: &'static str,
+}
+
+#[derive(Serialize)]
+struct ComparatorLogRecord {
+    schema_version: &'static str,
+    #[serde(rename = "type")]
+    record_type: &'static str,
+    replay_ref: &'static str,
+    seed: u64,
+    baseline_gauss_ops: usize,
+    warmed_gauss_ops: usize,
+    baseline_peeled: usize,
+    warmed_peeled: usize,
+    baseline_cache_hits: usize,
+    warmed_cache_hits: usize,
+    baseline_regime_state: &'static str,
+    warmed_regime_state: &'static str,
+    baseline_policy_mode: &'static str,
+    warmed_policy_mode: &'static str,
+    repro_command: &'static str,
+}
+
+fn gate_regime_state(stats: &DecodeStats) -> &'static str {
+    stats
+        .policy_mode
+        .or(stats.hard_regime_branch)
+        .unwrap_or("unknown")
+}
+
+fn gate_policy_mode(stats: &DecodeStats) -> &'static str {
+    stats.policy_mode.unwrap_or("unknown")
+}
+
+fn format_gate_log(
+    scenario_id: &str,
+    seed: u64,
+    lever: &str,
+    gate_outcome: &str,
+    stats: &DecodeStats,
+    report: Option<&RegressionReport>,
+) -> String {
+    let record = GateLogRecord {
+        schema_version: G2_SCHEMA_VERSION,
+        replay_ref: G2_REPLAY_REF,
+        scenario_id,
+        seed,
+        lever,
+        gate_outcome,
+        overall_verdict: report.map_or("unchecked", |r| r.overall_verdict.label()),
+        regressed_count: report.map_or(0, |r| r.regressed_count),
+        warning_count: report.map_or(0, |r| r.warning_count),
+        total_observations: report.map_or(0, |r| r.total_observations),
+        policy_mode: gate_policy_mode(stats),
+        regime_state: gate_regime_state(stats),
+        peeled: stats.peeled,
+        inactivated: stats.inactivated,
+        gauss_ops: stats.gauss_ops,
+        dense_core_rows: stats.dense_core_rows,
+        dense_core_cols: stats.dense_core_cols,
+        factor_cache_hits: stats.factor_cache_hits,
+        factor_cache_misses: stats.factor_cache_misses,
+        hard_regime_activated: stats.hard_regime_activated,
+        hard_regime_fallbacks: stats.hard_regime_fallbacks,
+        policy_reason: stats.policy_reason.unwrap_or("unknown"),
+        policy_replay_ref: stats.policy_replay_ref.unwrap_or("unknown"),
+        hard_regime_branch: stats.hard_regime_branch.unwrap_or("none"),
+        hard_regime_fallback_reason: stats
+            .hard_regime_conservative_fallback_reason
+            .unwrap_or("none"),
+        artifact_path: G2_ARTIFACT_PATH,
+        repro_command: G2_REPRO_CMD,
+    };
+    serde_json::to_string(&record).expect("G2 gate log serialization must succeed")
+}
+
+fn format_comparator_log(seed: u64, baseline: &DecodeStats, warmed: &DecodeStats) -> String {
+    let record = ComparatorLogRecord {
+        schema_version: G2_SCHEMA_VERSION,
+        record_type: "comparator",
+        replay_ref: G2_REPLAY_REF,
+        seed,
+        baseline_gauss_ops: baseline.gauss_ops,
+        warmed_gauss_ops: warmed.gauss_ops,
+        baseline_peeled: baseline.peeled,
+        warmed_peeled: warmed.peeled,
+        baseline_cache_hits: baseline.factor_cache_hits,
+        warmed_cache_hits: warmed.factor_cache_hits,
+        baseline_regime_state: gate_regime_state(baseline),
+        warmed_regime_state: gate_regime_state(warmed),
+        baseline_policy_mode: gate_policy_mode(baseline),
+        warmed_policy_mode: gate_policy_mode(warmed),
+        repro_command: G2_REPRO_CMD,
+    };
+    serde_json::to_string(&record).expect("G2 comparator log serialization must succeed")
+}
 
 fn make_source_data(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>> {
     let mut rng = DetRng::new(seed);
@@ -150,45 +276,9 @@ fn emit_gate_log(
     stats: &DecodeStats,
     report: Option<&RegressionReport>,
 ) {
-    let regime_state = stats
-        .policy_mode
-        .or(stats.hard_regime_branch)
-        .unwrap_or("unknown");
-    let policy_mode = stats.policy_mode.unwrap_or("unknown");
-    let overall_verdict = report.map_or("unchecked", |r| r.overall_verdict.label());
-    let regressed_count = report.map_or(0, |r| r.regressed_count);
-    let warning_count = report.map_or(0, |r| r.warning_count);
-    let total_observations = report.map_or(0, |r| r.total_observations);
-
     eprintln!(
-        "{{\"schema_version\":\"{G2_SCHEMA_VERSION}\",\"replay_ref\":\"{G2_REPLAY_REF}\",\
-         \"scenario_id\":\"{scenario_id}\",\"seed\":{seed},\"lever\":\"{lever}\",\
-         \"gate_outcome\":\"{gate_outcome}\",\"overall_verdict\":\"{overall_verdict}\",\
-         \"regressed_count\":{regressed_count},\"warning_count\":{warning_count},\
-         \"total_observations\":{total_observations},\
-         \"policy_mode\":\"{policy_mode}\",\"regime_state\":\"{regime_state}\",\
-         \"peeled\":{},\"inactivated\":{},\"gauss_ops\":{},\
-         \"dense_core_rows\":{},\"dense_core_cols\":{},\
-         \"factor_cache_hits\":{},\"factor_cache_misses\":{},\
-         \"hard_regime_activated\":{},\"hard_regime_fallbacks\":{},\
-         \"policy_reason\":\"{}\",\"policy_replay_ref\":\"{}\",\
-         \"hard_regime_branch\":\"{}\",\"hard_regime_fallback_reason\":\"{}\",\
-         \"artifact_path\":\"{G2_ARTIFACT_PATH}\",\"repro_command\":\"{G2_REPRO_CMD}\"}}",
-        stats.peeled,
-        stats.inactivated,
-        stats.gauss_ops,
-        stats.dense_core_rows,
-        stats.dense_core_cols,
-        stats.factor_cache_hits,
-        stats.factor_cache_misses,
-        stats.hard_regime_activated,
-        stats.hard_regime_fallbacks,
-        stats.policy_reason.unwrap_or("unknown"),
-        stats.policy_replay_ref.unwrap_or("unknown"),
-        stats.hard_regime_branch.unwrap_or("none"),
-        stats
-            .hard_regime_conservative_fallback_reason
-            .unwrap_or("none"),
+        "{}",
+        format_gate_log(scenario_id, seed, lever, gate_outcome, stats, report)
     );
 }
 
@@ -760,32 +850,8 @@ fn g2_conservative_vs_radical_overhead_report() {
 
     // Log comparator report.
     eprintln!(
-        "{{\"schema_version\":\"{G2_SCHEMA_VERSION}\",\"type\":\"comparator\",\
-         \"replay_ref\":\"{G2_REPLAY_REF}\",\"seed\":{seed},\
-         \"baseline_gauss_ops\":{},\"warmed_gauss_ops\":{},\
-         \"baseline_peeled\":{},\"warmed_peeled\":{},\
-         \"baseline_cache_hits\":{},\"warmed_cache_hits\":{},\
-         \"baseline_regime_state\":\"{}\",\"warmed_regime_state\":\"{}\",\
-         \"baseline_policy_mode\":\"{}\",\"warmed_policy_mode\":\"{}\",\
-         \"repro_command\":\"{G2_REPRO_CMD}\"}}",
-        baseline.stats.gauss_ops,
-        warmed.stats.gauss_ops,
-        baseline.stats.peeled,
-        warmed.stats.peeled,
-        baseline.stats.factor_cache_hits,
-        warmed.stats.factor_cache_hits,
-        baseline
-            .stats
-            .policy_mode
-            .or(baseline.stats.hard_regime_branch)
-            .unwrap_or("unknown"),
-        warmed
-            .stats
-            .policy_mode
-            .or(warmed.stats.hard_regime_branch)
-            .unwrap_or("unknown"),
-        baseline.stats.policy_mode.unwrap_or("unknown"),
-        warmed.stats.policy_mode.unwrap_or("unknown"),
+        "{}",
+        format_comparator_log(seed, &baseline.stats, &warmed.stats)
     );
 
     // Both must produce correct results (verified in decode_scenario helper
@@ -1759,42 +1825,7 @@ fn g2_structured_log_schema_compliance() {
         ..Default::default()
     };
 
-    // Capture log output via format check.
-    let log_line = format!(
-        "{{\"schema_version\":\"{G2_SCHEMA_VERSION}\",\"replay_ref\":\"{G2_REPLAY_REF}\",\
-         \"scenario_id\":\"G2-SCHEMA-TEST\",\"seed\":42,\"lever\":\"F5\",\
-         \"gate_outcome\":\"pass\",\"overall_verdict\":\"accept\",\
-         \"regressed_count\":0,\"warning_count\":0,\
-         \"total_observations\":1,\
-         \"policy_mode\":\"{}\",\"regime_state\":\"{}\",\
-         \"peeled\":{},\"inactivated\":{},\"gauss_ops\":{},\
-         \"dense_core_rows\":{},\"dense_core_cols\":{},\
-         \"factor_cache_hits\":{},\"factor_cache_misses\":{},\
-         \"hard_regime_activated\":{},\"hard_regime_fallbacks\":{},\
-         \"policy_reason\":\"{}\",\"policy_replay_ref\":\"{}\",\
-         \"hard_regime_branch\":\"{}\",\"hard_regime_fallback_reason\":\"{}\",\
-         \"artifact_path\":\"{G2_ARTIFACT_PATH}\",\"repro_command\":\"{G2_REPRO_CMD}\"}}",
-        stats.policy_mode.unwrap_or("unknown"),
-        stats
-            .policy_mode
-            .or(stats.hard_regime_branch)
-            .unwrap_or("unknown"),
-        stats.peeled,
-        stats.inactivated,
-        stats.gauss_ops,
-        stats.dense_core_rows,
-        stats.dense_core_cols,
-        stats.factor_cache_hits,
-        stats.factor_cache_misses,
-        stats.hard_regime_activated,
-        stats.hard_regime_fallbacks,
-        stats.policy_reason.unwrap_or("unknown"),
-        stats.policy_replay_ref.unwrap_or("unknown"),
-        stats.hard_regime_branch.unwrap_or("none"),
-        stats
-            .hard_regime_conservative_fallback_reason
-            .unwrap_or("none"),
-    );
+    let log_line = format_gate_log("G2-SCHEMA-TEST", 42, "F5", "pass", &stats, None);
 
     for field in required_fields {
         assert!(
@@ -1815,6 +1846,81 @@ fn g2_structured_log_schema_compliance() {
         parsed["replay_ref"].as_str(),
         Some(G2_REPLAY_REF),
         "replay ref mismatch in parsed log"
+    );
+}
+
+#[test]
+fn g2_gate_log_formatter_escapes_string_fields() {
+    let stats = DecodeStats {
+        peeled: 10,
+        inactivated: 3,
+        gauss_ops: 5,
+        policy_mode: Some("policy\"mode\\main"),
+        policy_reason: Some("reason with\nnewline and \"quotes\""),
+        policy_replay_ref: Some("replay:\\rq\"gate"),
+        hard_regime_branch: Some("branch\nignored by policy mode"),
+        hard_regime_conservative_fallback_reason: Some("fallback\\\"reason"),
+        ..Default::default()
+    };
+
+    let log_line = format_gate_log(
+        "G2-ESCAPE-\"CASE\"\nLINE\\TAIL",
+        42,
+        "F5",
+        "pass\nwith\"escape",
+        &stats,
+        None,
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&log_line).expect("G2 gate formatter must emit valid JSON");
+    assert_eq!(
+        parsed["scenario_id"].as_str(),
+        Some("G2-ESCAPE-\"CASE\"\nLINE\\TAIL")
+    );
+    assert_eq!(parsed["gate_outcome"].as_str(), Some("pass\nwith\"escape"));
+    assert_eq!(parsed["policy_mode"].as_str(), Some("policy\"mode\\main"));
+    assert_eq!(
+        parsed["policy_reason"].as_str(),
+        Some("reason with\nnewline and \"quotes\"")
+    );
+    assert_eq!(
+        parsed["policy_replay_ref"].as_str(),
+        Some("replay:\\rq\"gate")
+    );
+    assert_eq!(
+        parsed["hard_regime_fallback_reason"].as_str(),
+        Some("fallback\\\"reason")
+    );
+}
+
+#[test]
+fn g2_comparator_log_formatter_escapes_string_fields() {
+    let baseline = DecodeStats {
+        hard_regime_branch: Some("baseline\nbranch\"state"),
+        ..Default::default()
+    };
+    let warmed = DecodeStats {
+        policy_mode: Some("warmed\\policy\"mode"),
+        ..Default::default()
+    };
+
+    let log_line = format_comparator_log(7, &baseline, &warmed);
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&log_line).expect("G2 comparator formatter must emit valid JSON");
+    assert_eq!(parsed["type"].as_str(), Some("comparator"));
+    assert_eq!(
+        parsed["baseline_regime_state"].as_str(),
+        Some("baseline\nbranch\"state")
+    );
+    assert_eq!(
+        parsed["warmed_regime_state"].as_str(),
+        Some("warmed\\policy\"mode")
+    );
+    assert_eq!(
+        parsed["warmed_policy_mode"].as_str(),
+        Some("warmed\\policy\"mode")
     );
 }
 
