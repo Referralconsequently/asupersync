@@ -2,9 +2,9 @@
 
 ## Executive Thesis
 
-The first-order idea to steal from NATS is not "pub/sub in Rust." That would be too small.
+Borrowing pub/sub from NATS would be too small.
 
-The real opportunity is to combine:
+The opportunity is to combine:
 
 - NATS's subject-centric worldview
 - NATS's account/import-export trust graph
@@ -20,11 +20,11 @@ with:
 - deterministic replay, DPOR, and oracles
 - FrankenSuite evidence and decision machinery
 
-If done seriously, the result is not a better broker. It is a new systems category:
+Done properly, this would define a new systems category:
 
 **a subject operating fabric with certificate-carrying messaging, quiescent durable streams, capability-compiled federation, and replayable control-plane behavior.**
 
-That is a much more ambitious target than "NATS ideas, but in Asupersync." It is realistic only in the narrower sense that some reusable substrate already exists on the Asupersync side; the messaging, federation, control-capsule, and peer-steering semantics are still largely greenfield.
+This is a much larger target than "NATS ideas, but in Asupersync." It is only plausible because some of the substrate already exists on the Asupersync side; the messaging, federation, control-capsule, and peer-steering semantics are still mostly greenfield.
 
 ## Research Basis
 
@@ -58,9 +58,9 @@ It is also grounded in direct reading of the Asupersync substrate this would bui
 
 ## Background: What Asupersync Is
 
-Asupersync is a spec-first async runtime and concurrency substrate for Rust. It is not just "an executor with some helpers," and it is not trying to be a drop-in Tokio clone. Its central claim is that concurrency correctness should be structural: if code is built out of native Asupersync primitives, important classes of bugs become impossible, explicitly tracked, or mechanically testable instead of being left to conventions and code review.
+Asupersync is a spec-first async runtime and concurrency substrate for Rust. It is more than an executor with a few helpers, and it is not trying to be a drop-in Tokio clone. The core claim is that concurrency correctness should be structural: if code is built out of native Asupersync primitives, important classes of bugs become impossible, explicitly tracked, or mechanically testable instead of being left to convention and code review.
 
-The right mental model is "semantic concurrency kernel plus full-stack runtime surfaces built on top of that kernel."
+It is a semantic concurrency kernel with full-stack runtime surfaces built on top.
 
 ### 1. Kernel Execution Model
 
@@ -85,7 +85,7 @@ At runtime, Asupersync coordinates user futures through a scheduler, region tree
 - channel, sync, network, and stream primitives participate in that protocol instead of pretending cancellation is someone else's problem
 - traces and runtime records make the state transitions visible enough for deterministic replay and invariant checking
 
-This is why the codebase has so many "full-stack" runtime surfaces under one roof:
+That design stance explains why the codebase has so many "full-stack" runtime surfaces under one roof:
 
 - channels use reserve/commit patterns to prevent data loss on cancellation
 - synchronization primitives such as `Mutex`, `RwLock`, `Semaphore`, `Barrier`, and `OnceCell` are cancel-aware
@@ -96,7 +96,7 @@ The proposal in this document matters because it is trying to extend those same 
 
 ### 3. What Makes Asupersync Special
 
-The compelling part of Asupersync is not just that it has "more features." It has a different correctness posture.
+What stands out about Asupersync is not feature count; it is the correctness posture.
 
 - **correctness is structural, not conventional**: "no orphan tasks," "close means quiescence," and "losers are drained" are runtime contracts, not team customs
 - **cancel-correctness is a first-class design goal**: reserve/commit, request/drain/finalize, and explicit checkpoints are used to make cancellation semantics legible and safe
@@ -105,7 +105,7 @@ The compelling part of Asupersync is not just that it has "more features." It ha
 - **the runtime is math-forward where it pays off**: laws for combinators, budget algebra, DPOR-style exploration, canonical trace representations, spectral monitors, conformal calibration, e-processes, and similar machinery exist to make concurrency behavior more analyzable
 - **FrankenSuite gives decision/evidence surfaces**: important control decisions can become typed decision contracts and evidence records rather than only logs and metrics
 
-This is why the proposal keeps talking about algebra, proofs, obligations, and replay. Those are not decorative aspirations; they match the actual design center of the project.
+The repeated emphasis on algebra, proofs, obligations, and replay is deliberate. Those are not decorative aspirations; they match the actual design center of the project.
 
 ### 4. Determinism, Verification, And Replay
 
@@ -114,9 +114,9 @@ Another model reviewing this proposal needs to understand that Asupersync alread
 - `LabRuntime` gives deterministic execution with virtual time
 - DPOR-style schedule exploration and trace canonicalization reduce the number of schedules that must be reasoned about independently
 - runtime oracles can check invariants such as leaked obligations, leaked tasks, quiescent shutdown, and redelivery behavior
-- traces and evidence surfaces make it possible to ask not just "what happened?" but "why does the system believe this execution is correct or incorrect?"
+- traces and evidence surfaces make it possible to ask both "what happened?" and "why does the system believe this execution is correct or incorrect?"
 
-That matters because the messaging design proposed here is trying to be replayable and auditable in a way that ordinary broker architectures usually are not.
+The messaging design proposed here leans directly on those capabilities because it is trying to be replayable and auditable in a way ordinary broker architectures usually are not.
 
 ### 5. Distributed And Data-Movement Surfaces
 
@@ -146,7 +146,7 @@ That combination matters: the proposal is radical, but it is not trying to claim
 
 NATS is a subject-based messaging system built around a client-server architecture. At the simplest level, clients connect to a NATS server, publish messages to subjects, and subscribe to subjects. Under the hood, that simple interface scales into clusters, superclusters, edge topologies, request/reply services, and persistent streams.
 
-The right mental model is "one consistent subject-space communication fabric with optional durability and explicit topology roles."
+NATS is one consistent subject-space communication fabric with optional durability and explicit topology roles.
 
 ### 1. Core NATS
 
@@ -170,11 +170,11 @@ JetStream is NATS's built-in persistence and stateful delivery layer. It adds:
 - deduplication windows, mirrors, sources, snapshots, and restoration flows
 - higher-level facilities such as key-value and object-store abstractions built on stream primitives
 
-JetStream matters here because it shows that NATS is not just transient pub/sub. It has already grown a serious model for persistence, state capture, and delivery coordination while trying to preserve the same operational mental model.
+JetStream matters here because it shows that NATS is more than transient pub/sub. It already has a serious model for persistence, state capture, and delivery coordination while preserving the same operational mental model.
 
 ### 3. Accounts, Security, And Namespace Sharing
 
-NATS is also a multi-tenant trust graph, not just a message router.
+NATS is also a multi-tenant trust graph, not merely a message router.
 
 - accounts partition namespace and authority
 - users, credentials, NKeys/JWT-based auth, and TLS govern who may connect and what they may do
@@ -183,7 +183,7 @@ NATS is also a multi-tenant trust graph, not just a message router.
 - response permissions and service-latency reporting make request/reply crossing points first-class operational objects
 - subject mapping lets namespaces be transformed rather than treated as immutable raw strings
 
-This is one of the most important reasons the proposal takes NATS seriously. NATS already treats cross-boundary communication as a graph of explicit namespace edges, not just as raw socket reachability.
+This is one of the strongest reasons to take NATS seriously. It already treats cross-boundary communication as a graph of explicit namespace edges, not just raw socket reachability.
 
 ### 4. Topology And Deployment Model
 
@@ -222,9 +222,9 @@ A self-contained reviewer should also understand where this proposal is delibera
 
 ## What NATS Is Deeper Than It First Appears
 
-The shallow read of NATS is "subjects, streams, and clusters." The deeper read is more interesting.
+At first glance NATS looks like "subjects, streams, and clusters." Reading the code shows a richer system.
 
-### 1. Accounts are not just ACLs
+### 1. Accounts Do More Than ACLs
 
 `server/accounts.go` reveals that NATS accounts are really a programmable trust and routing graph:
 
@@ -247,7 +247,7 @@ The operational meaning is important: NATS treats cross-tenant connectivity as e
 - left and right extraction
 - strict mode for reversible import mappings
 
-The non-obvious lesson is that subject namespaces can be programmable without becoming arbitrary string spaghetti, if the transform algebra is constrained. The important caveat for Asupersync is that randomized or one-way transforms cannot live in the same authority-bearing core as reversible reply-space, capability, or replay obligations.
+The lesson is that subject namespaces can be programmable without becoming arbitrary string spaghetti, if the transform algebra is constrained. For Asupersync, the main caveat is that randomized or one-way transforms cannot live in the same authority-bearing core as reversible reply-space, capability, or replay obligations.
 
 ### 3. The control plane is itself expressed as subjects
 
@@ -345,7 +345,7 @@ Core idea:
 - wildcard routing still uses a `Sublist`-style core, but exports/imports compile into capability-checked routing programs
 - interest state changes are explicit events with trace-visible invalidation epochs
 
-This is stronger than ACLs. It makes the namespace itself part of the capability model.
+This goes beyond ACLs. It makes the namespace itself part of the capability model.
 
 Concrete synthesis:
 
@@ -393,13 +393,13 @@ This enables several genuinely new things:
 
 Here, "proof" should be read narrowly: a compact policy or transform certificate emitted by planning or registration logic and checked by a deterministic verifier, not a claim that every edge carries a full theorem-prover artifact.
 
-This is much better than "tenant A can talk to tenant B on `foo.>`."
+This is much stronger than "tenant A can talk to tenant B on `foo.>`."
 
-It becomes:
+Instead, it becomes:
 
 **tenant A has a capability-bearing morphism into a specific sub-language of tenant B's subject space, with verified reply, sharing, and transform policy.**
 
-That is a much more powerful trust primitive than conventional service mesh policy.
+That is a more powerful trust primitive than conventional service mesh policy.
 
 ### 3. Certificate-Carrying Request/Reply
 
@@ -491,7 +491,7 @@ This creates the possibility of an "adaptive consumer kernel":
 - no hand-wavy exactly-once claims
 - very strong reasoning about pending work and retry causality
 
-That is far more interesting than just reimplementing `AckWait`.
+That has more upside than simply reimplementing `AckWait`.
 
 ### 6. Control Plane As Ordinary Subjects
 
@@ -520,7 +520,7 @@ But Asupersync can add two twists NATS does not have:
 - control-plane handlers and generated advisories are region-owned and replayable once external inputs are modeled explicitly
 - material decisions on those subjects can emit FrankenSuite evidence and decision records
 
-That means an operator would not just see "gateway detached." They could see:
+That means an operator would see more than "gateway detached." They could also see:
 
 - which capability graph edges were affected
 - which obligations were transferred, aborted, or replay-scheduled
@@ -566,7 +566,7 @@ Each role would have distinct semantics.
 - ships trace/snapshot/evidence artifacts
 - supports lab replay of edge failures and delayed reconnection histories
 
-This is stronger than a generic "cluster peer" abstraction and fits Asupersync's bridge/snapshot surfaces better.
+These roles are more precise than a generic "cluster peer" abstraction and fit Asupersync's bridge/snapshot surfaces better.
 
 ## The Most Disruptive New Possibilities
 
@@ -648,7 +648,7 @@ That opens the door to:
 - browser and edge warm restore from RaptorQ capsules rather than mandatory full resync
 - deploys and failovers expressed as lawful mobility operations rather than crash-and-recover rituals
 
-The disruptive move is to make mobility a first-class semantic operation, not just an operational pattern.
+The key move is to make mobility a first-class semantic operation rather than an operational pattern layered on top.
 
 ### 7. Subject-Native Workflow And Saga Kernel
 
@@ -682,7 +682,7 @@ That turns:
 - incidents into reusable evaluation data for future routing and recovery policy
 - high-stakes changes into branch, score, and promote workflows instead of intuition-driven rollouts
 
-The key difference from ordinary simulation is that the branch starts from semantically meaningful state, not an approximate test fixture.
+Unlike ordinary simulation, the branch starts from semantically meaningful state rather than an approximate test fixture.
 
 ### 9. Distributed Supervision Compiler
 
@@ -697,7 +697,7 @@ A distributed application could eventually compile into:
 - drain and handoff contracts
 - evidence hooks for every material control-plane decision
 
-This is not "service mesh plus pub/sub." It is much closer to a distributed OTP where remote mailboxes, monitors, links, registry leases, and failover behavior inherit structural guarantees instead of living in conventions and sidecars.
+This is much closer to a distributed OTP than to "service mesh plus pub/sub." Remote mailboxes, monitors, links, registry leases, and failover behavior inherit structural guarantees instead of living in conventions and sidecars.
 
 ### 10. Bounded-Regret Reliability Control
 
@@ -789,7 +789,7 @@ Examples:
 - require certificate-carrying edges for all cross-tenant traffic
 - widen repair spread before widening steward quorum for this namespace
 
-That is not "autopilot ops." It is a path toward operations as compiled policy with explicit artifacts, bounded authority, replay, and rollback.
+This is not an "autopilot ops" pitch. It is a path toward operations as compiled policy with explicit artifacts, bounded authority, replay, and rollback.
 
 ### 15. Commutativity-Aware Sharding And Scheduling
 
@@ -829,7 +829,7 @@ That would make the messaging substrate useful in a way ordinary brokers are not
 - branch-based policy evaluation without synthetic fixtures
 - a path to "explain this response" workflows grounded in actual protocol and evidence history
 
-The disruptive point is that time and hypothetical policy stop being only external test concerns and become addressable dimensions of the hosted runtime.
+The important shift is that time and hypothetical policy stop being only external test concerns and become addressable dimensions of the hosted runtime.
 
 ### 17. Contract-Carrying Services
 
@@ -876,7 +876,7 @@ That would allow:
 - higher throughput when independent transitions no longer compete for the same serialized lane
 - much better explanation of incidents because concurrency ambiguity is explicit instead of collapsed into one log order
 
-The disruptive point is that selected messaging views start to look like a practical partial-order runtime built above linear control kernels rather than an append-only log with extra features.
+In that model, selected messaging views start to look like a practical partial-order runtime built above linear control kernels rather than an append-only log with extra features.
 
 ### 19. Budget-Carrying Traffic And Obligation-Aware Degradation
 
@@ -894,7 +894,7 @@ That means traffic and control decisions can eventually be driven by semantic da
 - degrade read models, low-value fanout, or expensive replay lanes before violating stronger service contracts
 - keep operator-intent and recovery channels alive under pressure by design rather than by convention
 
-This is more than QoS. It is a path toward overload behavior that is optimized against what the system is actually trying to protect, not a hand-wavy excuse for opaque priority inversion.
+This goes beyond QoS. It is a path toward overload behavior that is optimized against what the system is actually trying to protect, not a vague excuse for opaque priority inversion.
 
 ### 20. Certified Cut Lattice And Reality Index
 
@@ -919,7 +919,7 @@ That opens a more radical operational model:
 - "show the smallest cut that explains this user-visible outcome"
 - "restore only the subtree whose obligations can still be lawfully resumed"
 
-The result is not just better rollback tooling. It is a new object model for time, explanation, and recovery in distributed systems.
+The result is better than rollback tooling alone; it is a new object model for time, explanation, and recovery in distributed systems.
 
 ## A More Radical Move: Brokerless Peer-Cooperative Fabric
 
@@ -989,7 +989,7 @@ This creates a system where the network continuously self-organizes around the a
 
 ### 3. Split The Problem Into Control Capsules And Data Capsules
 
-The fatal mistake in many peer-to-peer messaging designs is to treat agreement on metadata and storage of bytes as the same problem.
+Many peer-to-peer messaging designs stumble by treating agreement on metadata and storage of bytes as the same problem.
 
 Asupersync should separate them aggressively.
 
@@ -1010,7 +1010,7 @@ So a publish should look like this:
 
 `ControlCapsuleV1` should be scoped honestly. Before delegated cursor partitions and batched checkpointing exist, it is a bounded-fanout, bounded-ack-rate design for cells whose consumer churn can still fit comfortably inside one replicated control stream. It should not be sold as the universal control path for arbitrarily hot cells.
 
-That is not "consensus on every byte." It is **agreement on meaning plus fountain-coded recoverability for bulk state**.
+This is not "consensus on every byte." It is **agreement on meaning plus fountain-coded recoverability for bulk state**.
 
 Ordinary ephemeral pub/sub should not automatically pay this contract. The strong durable publish path should be explicit and opt-in, with batching or asynchronous sealing where possible, or the fabric will give up the latency profile that makes Core NATS compelling.
 
@@ -1029,7 +1029,7 @@ RaptorQ can give the fabric several unusual powers:
 - **progressive reliability classes**: low-value traffic can use mostly systematic symbols and shallow repair budgets, while high-value traffic can demand deeper repair symbol spread before ack
 - **stream-window elasticity**: hot windows can attract more repair symbols and wider witness placement, then contract again when demand falls
 
-The non-obvious opportunity is to make the unit of durability a **recoverable capsule**, not a replica.
+A less obvious but important shift is to make the unit of durability a **recoverable capsule**, not a replica.
 
 The coding granularity matters. In most cases, coding should happen at the segment-window or large-payload level, not by synchronously fountain-coding every tiny publish, or the CPU and latency budget will collapse under hot-subject traffic.
 
@@ -1220,7 +1220,7 @@ That should stay off the hot publish path, but it is a strong fit for:
 - delayed rebalance verification
 - hostile or weakly trusted witness pools
 
-The right mental model is:
+In practical terms, the scheme looks like:
 
 - MLS-like machinery for steward-group secrecy and authenticated roster state
 - HKDF-separated per-cell and per-segment derived keys for operational efficiency
@@ -1419,7 +1419,7 @@ Asupersync can plausibly prove a stronger claim:
 
 **distributed messaging can be operationally simple, semantically explicit, capability-safe, and replayable.**
 
-That matters because most event systems still force ugly tradeoffs:
+Most event systems still force ugly tradeoffs:
 
 - speed or correctness
 - flexibility or legibility
@@ -1465,7 +1465,7 @@ Inside Asupersync's capability boundary, and under the runtime's standard cooper
 - "all reply/ack/lease/name obligations have resolved"
 - "this subtree is safe to snapshot, migrate, restart, or retire"
 
-That is not just better shutdown behavior. It is a foundation for:
+This supports much more than better shutdown behavior. It is the foundation for:
 
 - semantically valid hot cutovers
 - region-safe stream handoff
@@ -1520,7 +1520,7 @@ Examples:
 
 Because Asupersync already has FrankenSuite evidence and decision machinery, these choices can be recorded with explicit assumptions, posterior/confidence state where relevant, and replay linkage.
 
-That makes the fabric not just observable, but self-explaining.
+That makes the fabric observable and, to a meaningful extent, self-explaining.
 
 ### 5. Distributed Messaging Can Be Studied By Trace Algebra, Not Just Logs
 
@@ -1569,7 +1569,7 @@ That opens a path that is much more natural in Asupersync:
 - validate ordering and tie-break rules up front
 - synthesize control-plane subjects and failure contracts from the supervision structure
 
-In other words, the runtime can eventually compile distributed operational structure rather than just host it.
+More concretely, the runtime can eventually compile distributed operational structure rather than just host it.
 
 NATS is a platform you program on. Asupersync can become a platform that also compiles concurrency architecture.
 
@@ -1582,27 +1582,25 @@ Once snapshots, obligations, and traces are semantically meaningful, we can ask 
 - what if this gateway policy had preferred lower fanout over lower latency?
 - what if this consumer had used pinned-client handoff instead of overflow policy?
 
-That is not mere simulation. It is counterfactual execution over semantically faithful in-boundary state plus explicit models for the external world the runtime does not own.
+This is not simulation in the loose sense. It is counterfactual execution over semantically faithful in-boundary state plus explicit models for the external world the runtime does not own.
 
 This could become one of the most differentiated capabilities in the whole system: operations as replayable, auditable decision science rather than reactive intuition.
 
-### 9. The Real Strategic Shift
-
-The most important inversion is this:
+### 9. The Strategic Shift
 
 NATS simplifies messaging by hiding a lot of concurrency complexity behind disciplined engineering.
 
 Asupersync can simplify messaging by making the concurrency structure itself lawful enough that large classes of mistakes become unrepresentable, algebraically checkable, or replayably diagnosable.
 
-That is a much bigger step than "better broker semantics."
+That goes well beyond "better broker semantics."
 
-It suggests a future where Asupersync is not merely a runtime with messaging features, but:
+The longer-term outcome would be:
 
 **a concurrency-native systems substrate where messaging, supervision, federation, storage, and control-plane logic can be built from and constrained by the same semantic kernel across the portions the runtime actually hosts.**
 
 ## Recommendation
 
-The highest-value direction is not a narrow NATS client/server compatibility effort. It is a flagship internal subsystem:
+The highest-value direction is a flagship internal subsystem, not a narrow NATS client/server compatibility effort:
 
 **build a capability-compiled subject fabric that grows into a mobility, workflow, protocol, supervision, and counterfactual-control substrate: import/export morphisms, certificate-carrying request/reply, contract-carrying services, selected causality-native views, quiescent durable streams, policy-driven consumers, subject cells, replayable federation, recoverable service capsules, semantic execution-lane sharding above canonical cells, capability-gated branch-addressable views, retention-governed certified cut indexing, and intent-compiled operations.**
 
@@ -1615,6 +1613,6 @@ That is bold enough to matter, but still grounded in concrete mechanisms that NA
 - stream plus consumer operational model
 - simple, role-specific topology shapes
 
-If this proposal is executed fully, the strategic win is not just "better messaging." It is that the same fabric starts to absorb distributed workflow, checked protocol kernels, behavioral service contracts, supervision, live mobility, semantic execution-lane sharding, capability-gated branch-selectable reality, causality-aware views, obligation-aware degradation, and fabric-wide consistency checking.
+If this proposal is executed fully, the strategic win is broader than "better messaging." The same fabric starts to absorb distributed workflow, checked protocol kernels, behavioral service contracts, supervision, live mobility, semantic execution-lane sharding, capability-gated branch-selectable reality, causality-aware views, obligation-aware degradation, and fabric-wide consistency checking.
 
 Asupersync's job is to take NATS's best ideas, finish the thought, and then feed the resulting substrate back into the rest of the runtime until large classes of distributed systems machinery stop being ad hoc.
