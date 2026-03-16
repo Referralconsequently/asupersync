@@ -685,12 +685,18 @@ impl SharedLabHandle {
         }
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     fn try_join_probe(&self) -> Option<BTreeSet<String>> {
         let mut state = self.inner.state.lock();
         match &*state {
             LabJoinState::Ready(result) => Some(result.clone()),
             LabJoinState::InFlight => None,
             LabJoinState::Empty => {
+                // Transition to InFlight and drop state lock before acquiring
+                // handle lock — maintains lock ordering consistent with join().
+                *state = LabJoinState::InFlight;
+                drop(state);
+
                 let mut handle = self
                     .inner
                     .handle
@@ -699,12 +705,18 @@ impl SharedLabHandle {
                     .expect("join handle available");
                 let join_result = handle.try_join();
                 *self.inner.handle.lock() = Some(handle);
+
+                let mut state = self.inner.state.lock();
                 match join_result {
                     Ok(Some(result)) => {
                         *state = LabJoinState::Ready(result.clone());
                         Some(result)
                     }
-                    Ok(None) => None,
+                    Ok(None) => {
+                        // Not ready yet — revert to Empty so another caller can retry
+                        *state = LabJoinState::Empty;
+                        None
+                    }
                     Err(_) => {
                         *state = LabJoinState::Ready(BTreeSet::new());
                         drop(state);
