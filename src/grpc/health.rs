@@ -137,6 +137,8 @@ impl Default for HealthCheckResponse {
 pub struct HealthService {
     /// Service statuses.
     statuses: Arc<RwLock<HashMap<String, ServingStatus>>>,
+    /// Monotonic change counters for individual watched services.
+    watch_versions: Arc<RwLock<HashMap<String, u64>>>,
     /// Number of active reporters per service.
     reporter_counts: Arc<RwLock<HashMap<String, usize>>>,
     /// Monotonic version counter, bumped on every status change.
@@ -149,6 +151,7 @@ impl HealthService {
     pub fn new() -> Self {
         Self {
             statuses: Arc::new(RwLock::new(HashMap::new())),
+            watch_versions: Arc::new(RwLock::new(HashMap::new())),
             reporter_counts: Arc::new(RwLock::new(HashMap::new())),
             version: Arc::new(AtomicU64::new(0)),
         }
@@ -166,9 +169,10 @@ impl HealthService {
     pub fn set_status(&self, service: impl Into<String>, status: ServingStatus) {
         let service = service.into();
         let mut statuses = self.statuses.write();
-        let changed = statuses.insert(service, status) != Some(status);
+        let changed = statuses.insert(service.clone(), status) != Some(status);
         drop(statuses);
         if changed {
+            self.bump_watch_version(&service);
             self.version.fetch_add(1, Ordering::Release);
         }
     }
@@ -197,11 +201,17 @@ impl HealthService {
     pub fn clear(&self) {
         let mut statuses = self.statuses.write();
         let changed = !statuses.is_empty();
+        let affected_services = if changed {
+            statuses.keys().cloned().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         if changed {
             statuses.clear();
         }
         drop(statuses);
         if changed {
+            self.bump_watch_versions(affected_services);
             self.version.fetch_add(1, Ordering::Release);
         }
     }
@@ -212,6 +222,7 @@ impl HealthService {
         let changed = statuses.remove(service).is_some();
         drop(statuses);
         if changed {
+            self.bump_watch_version(service);
             self.version.fetch_add(1, Ordering::Release);
         }
     }
@@ -234,6 +245,37 @@ impl HealthService {
         } else {
             self.get_status(service)
                 .unwrap_or(ServingStatus::ServiceUnknown)
+        }
+    }
+
+    fn watched_version(&self, service: &str) -> u64 {
+        if service.is_empty() {
+            self.version()
+        } else {
+            let watch_versions = self.watch_versions.read();
+            watch_versions.get(service).copied().unwrap_or(0)
+        }
+    }
+
+    fn bump_watch_version(&self, service: &str) {
+        self.watch_versions
+            .write()
+            .entry(service.to_string())
+            .and_modify(|version| *version = version.saturating_add(1))
+            .or_insert(1);
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    fn bump_watch_versions<I>(&self, services: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut watch_versions = self.watch_versions.write();
+        for service in services {
+            watch_versions
+                .entry(service)
+                .and_modify(|version| *version = version.saturating_add(1))
+                .or_insert(1);
         }
     }
 
@@ -310,6 +352,7 @@ impl HealthService {
         HealthWatcher {
             service: self.clone(),
             last_status: self.watched_status(&service_name),
+            last_version: self.watched_version(&service_name),
             service_name,
         }
     }
@@ -332,6 +375,7 @@ pub struct HealthWatcher {
     service: HealthService,
     service_name: String,
     last_status: ServingStatus,
+    last_version: u64,
 }
 
 impl HealthWatcher {
@@ -340,8 +384,10 @@ impl HealthWatcher {
     /// this watcher's service.
     pub fn changed(&mut self) -> bool {
         let current_status = self.service.watched_status(&self.service_name);
-        let changed = current_status != self.last_status;
+        let current_version = self.service.watched_version(&self.service_name);
+        let changed = current_version != self.last_version;
         self.last_status = current_status;
+        self.last_version = current_version;
         changed
     }
 
@@ -357,8 +403,10 @@ impl HealthWatcher {
     /// Returns a single-read snapshot: `(changed, current_status)`.
     pub fn poll_status(&mut self) -> (bool, ServingStatus) {
         let current_status = self.service.watched_status(&self.service_name);
-        let changed = current_status != self.last_status;
+        let current_version = self.service.watched_version(&self.service_name);
+        let changed = current_version != self.last_version;
         self.last_status = current_status;
+        self.last_version = current_version;
         (changed, current_status)
     }
 }
@@ -794,6 +842,75 @@ mod tests {
             status
         );
         crate::test_complete!("health_watcher_unknown_service_reports_service_unknown");
+    }
+
+    #[test]
+    fn health_watcher_reports_named_service_transient_round_trip() {
+        init_test("health_watcher_reports_named_service_transient_round_trip");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let mut changed_watcher = service.watch("svc");
+        let mut poll_watcher = service.watch("svc");
+
+        service.set_status("svc", ServingStatus::NotServing);
+        service.set_status("svc", ServingStatus::Serving);
+
+        let changed = changed_watcher.changed();
+        crate::assert_with_log!(
+            changed,
+            "changed() observes transient round trip",
+            true,
+            changed
+        );
+        crate::assert_with_log!(
+            changed_watcher.status() == ServingStatus::Serving,
+            "effective status returns to serving",
+            ServingStatus::Serving,
+            changed_watcher.status()
+        );
+
+        let (poll_changed, polled_status) = poll_watcher.poll_status();
+        crate::assert_with_log!(
+            poll_changed,
+            "poll_status observes transient round trip",
+            true,
+            poll_changed
+        );
+        crate::assert_with_log!(
+            polled_status == ServingStatus::Serving,
+            "poll_status reports current effective status",
+            ServingStatus::Serving,
+            polled_status
+        );
+        crate::test_complete!("health_watcher_reports_named_service_transient_round_trip");
+    }
+
+    #[test]
+    fn health_watcher_reports_server_transient_round_trip() {
+        init_test("health_watcher_reports_server_transient_round_trip");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let mut watcher = service.watch("");
+
+        service.set_status("svc", ServingStatus::NotServing);
+        service.set_status("svc", ServingStatus::Serving);
+
+        let (changed, status) = watcher.poll_status();
+        crate::assert_with_log!(
+            changed,
+            "server watcher observes aggregate transient round trip",
+            true,
+            changed
+        );
+        crate::assert_with_log!(
+            status == ServingStatus::Serving,
+            "server watcher reports recovered aggregate status",
+            ServingStatus::Serving,
+            status
+        );
+        crate::test_complete!("health_watcher_reports_server_transient_round_trip");
     }
 
     #[test]
