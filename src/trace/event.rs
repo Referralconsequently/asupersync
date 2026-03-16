@@ -1202,6 +1202,7 @@ impl TraceEvent {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn worker_lifecycle(
         seq: u64,
         time: Time,
