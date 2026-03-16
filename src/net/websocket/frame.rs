@@ -743,11 +743,8 @@ impl FrameCodec {
                         apply_mask(&mut payload, *key);
                     }
 
-                    // RFC 6455 §5.5.1: Close frame body must be 0 bytes or
-                    // start with a 2-byte status code. Exactly 1 byte is invalid.
-                    if *opcode == Opcode::Close && payload.len() == 1 {
-                        self.state = DecodeState::Header;
-                        return Err(WsError::InvalidClosePayload);
+                    if *opcode == Opcode::Close {
+                        validate_close_payload(&payload)?;
                     }
 
                     let frame = Frame {
@@ -799,6 +796,23 @@ fn generate_mask_key(entropy: &dyn EntropySource) -> [u8; 4] {
     key
 }
 
+fn validate_close_payload(payload: &[u8]) -> Result<(), WsError> {
+    match payload.len() {
+        0 => Ok(()),
+        1 => Err(WsError::InvalidClosePayload),
+        _ => {
+            let code = u16::from_be_bytes([payload[0], payload[1]]);
+            if !CloseCode::is_valid_code(code) {
+                return Err(WsError::InvalidClosePayload);
+            }
+            if payload.len() > 2 {
+                std::str::from_utf8(&payload[2..]).map_err(|_| WsError::InvalidClosePayload)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Close codes defined by RFC 6455.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -827,6 +841,12 @@ pub enum CloseCode {
     MandatoryExtension = 1010,
     /// Internal server error (1011).
     InternalError = 1011,
+    /// Service restart (1012) — IANA registered.
+    ServiceRestart = 1012,
+    /// Try again later (1013) — IANA registered.
+    TryAgainLater = 1013,
+    /// Bad gateway (1014) — IANA registered.
+    BadGateway = 1014,
     /// TLS handshake failure (1015) - must not be sent in a frame.
     TlsHandshake = 1015,
 }
@@ -860,6 +880,9 @@ impl CloseCode {
             1009 => Some(Self::MessageTooBig),
             1010 => Some(Self::MandatoryExtension),
             1011 => Some(Self::InternalError),
+            1012 => Some(Self::ServiceRestart),
+            1013 => Some(Self::TryAgainLater),
+            1014 => Some(Self::BadGateway),
             1015 => Some(Self::TlsHandshake),
             _ => None,
         }
@@ -867,13 +890,13 @@ impl CloseCode {
 
     /// Check if a raw code value is valid for sending.
     ///
-    /// Valid ranges per RFC 6455:
-    /// - 1000-1003, 1007-1011: Standard codes
+    /// Valid ranges per RFC 6455 + IANA registry:
+    /// - 1000-1003, 1007-1014: Standard and IANA-registered codes
     /// - 3000-3999: Registered (IANA)
     /// - 4000-4999: Private use
     #[must_use]
     pub fn is_valid_code(code: u16) -> bool {
-        matches!(code, 1000..=1003 | 1007..=1011 | 3000..=4999)
+        matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
     }
 }
 
@@ -1149,10 +1172,27 @@ mod tests {
         assert!(CloseCode::Normal.is_sendable());
         assert!(CloseCode::GoingAway.is_sendable());
         assert!(CloseCode::ProtocolError.is_sendable());
+        assert!(CloseCode::ServiceRestart.is_sendable());
+        assert!(CloseCode::TryAgainLater.is_sendable());
+        assert!(CloseCode::BadGateway.is_sendable());
         assert!(!CloseCode::Reserved.is_sendable());
         assert!(!CloseCode::NoStatusReceived.is_sendable());
         assert!(!CloseCode::Abnormal.is_sendable());
         assert!(!CloseCode::TlsHandshake.is_sendable());
+    }
+
+    #[test]
+    fn test_close_code_from_u16_iana_registered() {
+        assert_eq!(CloseCode::from_u16(1012), Some(CloseCode::ServiceRestart));
+        assert_eq!(CloseCode::from_u16(1013), Some(CloseCode::TryAgainLater));
+        assert_eq!(CloseCode::from_u16(1014), Some(CloseCode::BadGateway));
+    }
+
+    #[test]
+    fn test_is_valid_code_iana_registered() {
+        assert!(CloseCode::is_valid_code(1012));
+        assert!(CloseCode::is_valid_code(1013));
+        assert!(CloseCode::is_valid_code(1014));
     }
 
     #[test]
@@ -1456,6 +1496,54 @@ mod tests {
     }
 
     #[test]
+    fn decode_close_frame_invalid_code_rejected() {
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=2 → 0x02
+        buf.put_u8(0x88);
+        buf.put_u8(0x02);
+        buf.put_u16(1005); // MUST NOT appear on the wire
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn decode_close_frame_invalid_utf8_reason_rejected() {
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=4 → 0x04
+        buf.put_u8(0x88);
+        buf.put_u8(0x04);
+        buf.put_u16(1000);
+        buf.put_slice(&[0xF0, 0x28]); // malformed UTF-8 prefix
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn decode_close_frame_custom_code_with_utf8_reason_accepted() {
+        let mut codec = FrameCodec::client();
+        let reason = "custom";
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=8 → 0x08
+        buf.put_u8(0x88);
+        buf.put_u8((2 + reason.len()) as u8);
+        buf.put_u16(4000);
+        buf.put_slice(reason.as_bytes());
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert_eq!(frame.payload.len(), 2 + reason.len());
+        assert_eq!(
+            u16::from_be_bytes([frame.payload[0], frame.payload[1]]),
+            4000
+        );
+        assert_eq!(&frame.payload[2..], reason.as_bytes());
+    }
+
+    #[test]
     #[should_panic(expected = "must not be sent")]
     fn close_frame_code_1005_panics() {
         // RFC 6455 §7.4.1: 1005 (No Status Received) MUST NOT be set as a
@@ -1487,10 +1575,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must not be sent")]
-    fn close_frame_code_1012_panics() {
-        // 1012 is outside this implementation's allowed wire set.
+    fn close_frame_iana_registered_codes_accepted() {
+        // 1012, 1013, 1014 are IANA-registered close codes and must be accepted.
         let _ = Frame::close(Some(1012), None);
+        let _ = Frame::close(Some(1013), None);
+        let _ = Frame::close(Some(1014), None);
     }
 
     #[test]

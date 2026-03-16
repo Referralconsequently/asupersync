@@ -522,9 +522,17 @@ mod tests {
 
     #[test]
     fn close_reason_parse_invalid_unassigned_code() {
-        let payload = 1012u16.to_be_bytes();
+        // 1016 is unassigned — 1012-1014 are now IANA-registered and valid.
+        let payload = 1016u16.to_be_bytes();
         let result = CloseReason::parse(&payload);
         assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn close_reason_parse_iana_registered_1012_accepted() {
+        let payload = 1012u16.to_be_bytes();
+        let result = CloseReason::parse(&payload);
+        assert!(result.is_ok(), "IANA-registered code 1012 must parse");
     }
 
     #[test]
