@@ -1509,6 +1509,32 @@ mod tests {
     }
 
     #[test]
+    fn decode_close_frame_invalid_code_poisons_codec() {
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+
+        // First: invalid close frame (code 1005 must not appear on wire)
+        buf.put_u8(0x88); // FIN=1, opcode=Close
+        buf.put_u8(0x02); // MASK=0, len=2
+        buf.put_u16(1005);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+
+        // Second: valid text frame — codec is poisoned after any error,
+        // so it must reject all subsequent decode attempts.
+        buf.put_u8(0x81); // FIN=1, opcode=Text
+        buf.put_u8(0x05); // MASK=0, len=5
+        buf.put_slice(b"hello");
+
+        let result2 = codec.decode(&mut buf);
+        assert!(
+            matches!(&result2, Err(WsError::ProtocolViolation(msg)) if msg.contains("poisoned")),
+            "codec must be poisoned after close validation error, got: {result2:?}"
+        );
+    }
+
+    #[test]
     fn decode_close_frame_invalid_utf8_reason_rejected() {
         let mut codec = FrameCodec::client();
         let mut buf = BytesMut::new();
