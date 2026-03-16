@@ -2651,7 +2651,11 @@ function renderCancelSM() {
   document.getElementById('budget-pct').textContent = Math.round(cancelState.budget) + '%';
   const fill = document.getElementById('budget-fill');
   fill.style.width = cancelState.budget + '%';
-  fill.style.background = cancelState.budget > 60 ? 'var(--green)' : cancelState.budget > 30 ? 'var(--orange)' : 'var(--red)';
+  // TENSION beat: budget bar shifts green → orange → red as budget drains
+  if (cancelState.budget > 60) fill.style.background = 'linear-gradient(90deg, var(--green), #16A34A)';
+  else if (cancelState.budget > 30) fill.style.background = 'linear-gradient(90deg, var(--orange), #EA580C)';
+  else fill.style.background = 'linear-gradient(90deg, var(--red), #DC2626)';
+  fill.style.boxShadow = cancelState.budget < 30 ? '0 0 12px rgba(239,68,68,0.4)' : 'none';
 
   // Status
   document.getElementById('cancel-status').textContent = cancelStatusText[cancelState.phase];
@@ -3387,6 +3391,8 @@ window.runChaos = async function() {
   const leakedEl = document.getElementById('chaos-leaked');
   leakedEl.textContent = '0';
   leakedEl.style.color = HEX.green;
+  // REVELATION beat: spring pop on zero leaks
+  if (motionLib) motionLib.animate(leakedEl, { scale: [0.5, 1.3, 1] }, { type: 'spring', stiffness: 400, damping: 20 });
 
   console.groupEnd();
   console.log(`${LOG_PREFIX} %cChaos complete: ${ops} ops, ${peakHandles} peak handles, ${errors} errors caught, 0 leaks`, LOG_STYLE, LOG_OK);
@@ -3843,6 +3849,11 @@ window.runReplayDemo = function() {
       task scheduling, making Heisenbugs nearly impossible to reproduce.
     </div>
   `);
+  // REVELATION beat: spring pop on the verdict
+  if (motionLib) {
+    const verdict = document.querySelector('#replay-result [style*="font-size:24px"]');
+    if (verdict) motionLib.animate(verdict, { scale: [0, 1.2, 1] }, { type: 'spring', stiffness: 400, damping: 20 });
+  }
   showToast(match ? 'Deterministic replay proven' : 'Non-deterministic!', match ? 'ok' : 'err');
 };
 
@@ -3906,6 +3917,11 @@ window.runLeakDetectDemo = function() {
       <div style="font-size:13px;color:var(--text2);margin-top:4px;">In tokio, these 5 tasks would run forever as zombies, holding locks and leaking memory.</div>
     </div>
   `);
+  // REVELATION beat: spring pop on the summary
+  if (motionLib) {
+    const summary = document.querySelector('#leakdetect-result [style*="font-size:16px"]');
+    if (summary) motionLib.animate(summary, { scale: [0.8, 1.05, 1], opacity: [0, 1] }, { type: 'spring', stiffness: 400, damping: 22 });
+  }
   showToast('5 orphaned tasks caught by cascade', 'ok');
 };
 
@@ -3964,13 +3980,18 @@ window.runTimeoutDemo = function() {
 
     container.innerHTML = `
       <div style="text-align:center;padding:24px;">
-        <div style="font-size:32px;font-weight:800;color:${HEX.red};margin-bottom:8px;">DEADLINE FIRED</div>
+        <div style="font-size:32px;font-weight:800;color:${HEX.red};margin-bottom:8px;" id="deadline-headline">DEADLINE FIRED</div>
         <div style="font-size:14px;color:var(--text2);">scope.close() cancelled all 3 tasks in one call</div>
         <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;">
           ${tasks.map((t,i) => `<span class="badge badge-cancel" style="font-size:11px;">worker-${i} cancelled</span>`).join('')}
         </div>
       </div>
     `;
+    // REVELATION beat: red flash on deadline
+    if (motionLib) {
+      const dl = document.getElementById('deadline-headline');
+      if (dl) motionLib.animate(dl, { scale: [0.8, 1.1, 1] }, { type: 'spring', stiffness: 400, damping: 18 });
+    }
     document.getElementById('btn-timeout-start').disabled = false;
     showToast('Scope timeout: 3 tasks auto-cancelled', 'ok');
   }, 2000);
@@ -4120,6 +4141,11 @@ window.runBenchmark = async function() {
   `);
 
   console.log(`${LOG_PREFIX} %cBenchmark: ${opsPerSec.toLocaleString()} ops/sec (${ops.toLocaleString()} total, ${nsPerOp}ns/op)`, LOG_STYLE, 'color:#06B6D4;font-weight:bold;');
+  // REVELATION beat: spring pop on the headline number
+  if (motionLib) {
+    const headline = document.querySelector('#benchmark-result [style*="font-size:48px"]');
+    if (headline) motionLib.animate(headline, { scale: [0.7, 1.15, 1], opacity: [0, 1] }, { type: 'spring', stiffness: 400, damping: 18 });
+  }
   document.getElementById('btn-bench').disabled = false;
   document.getElementById('btn-bench').textContent = 'Run 1s Benchmark';
   showToast(`${opsPerSec.toLocaleString()} ops/sec`, 'ok');
