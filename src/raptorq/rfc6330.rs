@@ -270,13 +270,23 @@ pub struct LtTuple {
 /// Return the smallest prime number greater than or equal to `n`.
 #[must_use]
 pub fn next_prime_ge(n: usize) -> usize {
+    const PRIME_SEARCH_OVERFLOW_MSG: &str =
+        "next_prime_ge overflow: no prime >= input fits in usize";
+
     if n <= 2 {
         return 2;
     }
 
-    let mut candidate = if n.is_multiple_of(2) { n + 1 } else { n };
+    let mut candidate = if n.is_multiple_of(2) {
+        n.checked_add(1)
+            .unwrap_or_else(|| panic!("{PRIME_SEARCH_OVERFLOW_MSG}: n={n}"))
+    } else {
+        n
+    };
     while !is_prime(candidate) {
-        candidate += 2;
+        candidate = candidate
+            .checked_add(2)
+            .unwrap_or_else(|| panic!("{PRIME_SEARCH_OVERFLOW_MSG}: n={n}"));
     }
     candidate
 }
@@ -289,7 +299,7 @@ fn is_prime(n: usize) -> bool {
         return n == 2;
     }
     let mut d = 3usize;
-    while d * d <= n {
+    while d <= n / d {
         if n.is_multiple_of(d) {
             return false;
         }
@@ -567,6 +577,17 @@ mod tests {
         assert_eq!(next_prime_ge(4), 5);
         assert_eq!(next_prime_ge(17), 17);
         assert_eq!(next_prime_ge(18), 19);
+    }
+
+    #[test]
+    fn next_prime_ge_overflow_adjacent_inputs_fail_closed() {
+        for n in [usize::MAX - 1, usize::MAX] {
+            let result = std::panic::catch_unwind(|| next_prime_ge(n));
+            assert!(
+                result.is_err(),
+                "next_prime_ge({n}) should fail closed instead of wrapping"
+            );
+        }
     }
 
     #[test]
