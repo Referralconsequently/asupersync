@@ -453,34 +453,96 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
 
     // Config sub-object required fields
     if let Some(config) = value.get("config") {
-        for field in &["symbol_size", "seed", "block_k", "data_len"] {
-            if value_missing_or_null(config, field) {
-                violations.push(format!("config.{field} is missing or null"));
-            }
-        }
+        validate_required_unsigned_integer_field(config, "symbol_size", "config", &mut violations);
+        validate_required_unsigned_integer_field(config, "seed", "config", &mut violations);
+        validate_required_unsigned_integer_field(config, "block_k", "config", &mut violations);
+        validate_required_unsigned_integer_field(config, "data_len", "config", &mut violations);
+        validate_required_unsigned_integer_field(
+            config,
+            "max_block_size",
+            "config",
+            &mut violations,
+        );
+        validate_required_unsigned_integer_field(config, "min_overhead", "config", &mut violations);
+        validate_required_unsigned_integer_field(config, "block_count", "config", &mut violations);
+        validate_required_number_field(config, "repair_overhead", "config", &mut violations);
     }
 
     // Loss sub-object required fields
     if let Some(loss) = value.get("loss") {
-        if value_missing_or_null(loss, "kind") {
-            violations.push("loss.kind is missing or null".to_string());
+        validate_required_string_field(loss, "kind", "loss", &mut violations);
+        validate_required_unsigned_integer_field(loss, "drop_count", "loss", &mut violations);
+        validate_required_unsigned_integer_field(loss, "keep_count", "loss", &mut violations);
+        validate_optional_unsigned_integer_field(loss, "seed", "loss", &mut violations);
+        validate_optional_unsigned_integer_field(loss, "drop_per_mille", "loss", &mut violations);
+        validate_optional_unsigned_integer_field(loss, "burst_start", "loss", &mut violations);
+        validate_optional_unsigned_integer_field(loss, "burst_len", "loss", &mut violations);
+    }
+
+    // Symbols sub-object required fields
+    if let Some(symbols) = value.get("symbols") {
+        for subsection in &["generated", "received"] {
+            match symbols.get(*subsection) {
+                Some(counts) if counts.is_object() => {
+                    validate_required_unsigned_integer_field(
+                        counts,
+                        "total",
+                        &format!("symbols.{subsection}"),
+                        &mut violations,
+                    );
+                    validate_required_unsigned_integer_field(
+                        counts,
+                        "source",
+                        &format!("symbols.{subsection}"),
+                        &mut violations,
+                    );
+                    validate_required_unsigned_integer_field(
+                        counts,
+                        "repair",
+                        &format!("symbols.{subsection}"),
+                        &mut violations,
+                    );
+                }
+                _ => violations.push(format!("symbols.{subsection} is missing or non-object")),
+            }
         }
     }
 
     // Outcome sub-object required fields
     if let Some(outcome) = value.get("outcome") {
-        if value_missing_or_null(outcome, "success") {
-            violations.push("outcome.success is missing or null".to_string());
-        }
+        validate_required_bool_field(outcome, "success", "outcome", &mut violations);
+        validate_required_unsigned_integer_field(
+            outcome,
+            "decoded_bytes",
+            "outcome",
+            &mut violations,
+        );
+        validate_optional_string_field(outcome, "reject_reason", "outcome", &mut violations);
     }
 
     // Proof sub-object required fields
     if let Some(proof) = value.get("proof") {
-        for field in &["hash", "outcome", "peeling_solved", "inactivated", "pivots"] {
-            if value_missing_or_null(proof, field) {
-                violations.push(format!("proof.{field} is missing or null"));
-            }
-        }
+        validate_required_unsigned_integer_field(proof, "hash", "proof", &mut violations);
+        validate_required_unsigned_integer_field(proof, "summary_bytes", "proof", &mut violations);
+        validate_required_string_field(proof, "outcome", "proof", &mut violations);
+        validate_required_unsigned_integer_field(proof, "received_total", "proof", &mut violations);
+        validate_required_unsigned_integer_field(
+            proof,
+            "received_source",
+            "proof",
+            &mut violations,
+        );
+        validate_required_unsigned_integer_field(
+            proof,
+            "received_repair",
+            "proof",
+            &mut violations,
+        );
+        validate_required_unsigned_integer_field(proof, "peeling_solved", "proof", &mut violations);
+        validate_required_unsigned_integer_field(proof, "inactivated", "proof", &mut violations);
+        validate_required_unsigned_integer_field(proof, "pivots", "proof", &mut violations);
+        validate_required_unsigned_integer_field(proof, "row_ops", "proof", &mut violations);
+        validate_required_unsigned_integer_field(proof, "equations_used", "proof", &mut violations);
     }
 
     violations
@@ -598,6 +660,99 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
 /// Helper: check if a field is missing or null in a JSON value.
 fn value_missing_or_null(parent: &serde_json::Value, field: &str) -> bool {
     parent.get(field).is_none_or(serde_json::Value::is_null)
+}
+
+fn validate_required_unsigned_integer_field(
+    parent: &serde_json::Value,
+    field: &str,
+    path: &str,
+    violations: &mut Vec<String>,
+) {
+    match parent.get(field) {
+        Some(value) if value.as_u64().is_some() => {}
+        Some(value) if value.is_null() => {
+            violations.push(format!("{path}.{field} is missing or null"));
+        }
+        Some(_) => violations.push(format!("{path}.{field} must be an unsigned integer")),
+        None => violations.push(format!("{path}.{field} is missing or null")),
+    }
+}
+
+fn validate_required_number_field(
+    parent: &serde_json::Value,
+    field: &str,
+    path: &str,
+    violations: &mut Vec<String>,
+) {
+    match parent.get(field) {
+        Some(value) if value.is_number() => {}
+        Some(value) if value.is_null() => {
+            violations.push(format!("{path}.{field} is missing or null"));
+        }
+        Some(_) => violations.push(format!("{path}.{field} must be a number")),
+        None => violations.push(format!("{path}.{field} is missing or null")),
+    }
+}
+
+fn validate_required_string_field(
+    parent: &serde_json::Value,
+    field: &str,
+    path: &str,
+    violations: &mut Vec<String>,
+) {
+    match parent.get(field) {
+        Some(value) if value.as_str().is_some_and(|text| !text.is_empty()) => {}
+        Some(value) if value.is_null() => {
+            violations.push(format!("{path}.{field} is missing or null"));
+        }
+        Some(value) if value.as_str().is_some() => {
+            violations.push(format!("{path}.{field} must be a non-empty string"));
+        }
+        Some(_) => violations.push(format!("{path}.{field} must be a string")),
+        None => violations.push(format!("{path}.{field} is missing or null")),
+    }
+}
+
+fn validate_required_bool_field(
+    parent: &serde_json::Value,
+    field: &str,
+    path: &str,
+    violations: &mut Vec<String>,
+) {
+    match parent.get(field) {
+        Some(value) if value.is_boolean() => {}
+        Some(value) if value.is_null() => {
+            violations.push(format!("{path}.{field} is missing or null"));
+        }
+        Some(_) => violations.push(format!("{path}.{field} must be a boolean")),
+        None => violations.push(format!("{path}.{field} is missing or null")),
+    }
+}
+
+fn validate_optional_unsigned_integer_field(
+    parent: &serde_json::Value,
+    field: &str,
+    path: &str,
+    violations: &mut Vec<String>,
+) {
+    if let Some(value) = parent.get(field) {
+        if !value.is_null() && value.as_u64().is_none() {
+            violations.push(format!("{path}.{field} must be an unsigned integer"));
+        }
+    }
+}
+
+fn validate_optional_string_field(
+    parent: &serde_json::Value,
+    field: &str,
+    path: &str,
+    violations: &mut Vec<String>,
+) {
+    if let Some(value) = parent.get(field) {
+        if !value.is_null() && value.as_str().is_none() {
+            violations.push(format!("{path}.{field} must be a string"));
+        }
+    }
 }
 
 fn validate_decode_stats_unsigned_integer_field(
@@ -1051,6 +1206,62 @@ mod tests {
                 .iter()
                 .any(|v| v.contains("phase_markers must be an array of strings")),
             "should reject non-string markers: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_e2e_log_rejects_type_invalid_nested_fields() {
+        let mut entry = valid_e2e_log_value();
+        entry["config"]["seed"] = json!("42");
+        entry["config"]["repair_overhead"] = json!("1.0");
+        entry["loss"]["kind"] = json!(7);
+        entry["symbols"]["generated"]["total"] = json!("16");
+        entry["outcome"]["success"] = json!("true");
+        entry["proof"]["hash"] = json!("123");
+        entry["proof"]["outcome"] = json!(false);
+
+        let violations = validate_e2e_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("config.seed must be an unsigned integer")),
+            "should reject non-numeric config.seed: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("config.repair_overhead must be a number")),
+            "should reject non-numeric config.repair_overhead: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("loss.kind must be a string")),
+            "should reject non-string loss.kind: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("symbols.generated.total must be an unsigned integer")),
+            "should reject non-numeric generated total: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("outcome.success must be a boolean")),
+            "should reject non-boolean outcome.success: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("proof.hash must be an unsigned integer")),
+            "should reject non-numeric proof.hash: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("proof.outcome must be a string")),
+            "should reject non-string proof.outcome: {violations:?}"
         );
     }
 
