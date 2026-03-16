@@ -2468,7 +2468,7 @@ window.selectOutcome = function(id) {
             else if (id === 'cancelled') outcomeValue = Outcome.cancelled({kind:'user',phase:'completed',origin_region:'demo',origin_task:null,timestamp_nanos:0,message:'demo',truncated:false});
             else outcomeValue = Outcome.panicked('demo panic');
             const joined = t.value.join(outcomeValue);
-            clog('outcome-console', `WASM: task "outcome-${id}" joined with ${id} outcome (real)`, 'ok');
+            console.log(`${LOG_PREFIX} %cOutcome demo: task "outcome-${id}" joined with ${id} outcome (real WASM)`, LOG_STYLE, LOG_OK);
           }
           sc.value.close();
         }
@@ -2567,21 +2567,21 @@ window.triggerCancel = function() {
             const t = sc.value.spawnTask({ label: 'resource-' + i });
             if (t.outcome === 'ok') tasks.push(t.value);
           }
-          clog('cancel-console', `WASM: spawned ${tasks.length} real tasks in cancel-demo scope`, 'info');
+          console.log(`${LOG_PREFIX} %cCancel demo: spawned ${tasks.length} real tasks`, LOG_STYLE, 'color:#06B6D4;');
           // Cancel each task through the real protocol on a timer
           tasks.forEach((t, i) => {
             cancelState.timers.push(setTimeout(() => {
               try {
                 t.cancel('shutdown', 'graceful drain');
                 t.join(a.Outcome.cancelled({kind:'shutdown',phase:'completed',origin_region:'cancel-demo',origin_task:null,timestamp_nanos:0,message:'graceful drain',truncated:false}));
-                clog('cancel-console', `WASM: task "resource-${i}" cancelled and joined (real)`, 'ok');
+                console.log(`${LOG_PREFIX} %cCancel demo: task "resource-${i}" cancelled+joined (real WASM)`, LOG_STYLE, LOG_OK);
               } catch(e) {}
             }, 800 + i * 400));
           });
           // Close scope after all tasks are joined
           cancelState.timers.push(setTimeout(() => {
             try { sc.value.close(); rt.value.close(); } catch(e) {}
-            clog('cancel-console', `WASM: cancel-demo scope closed — zero leaks (real)`, 'ok');
+            console.log(`${LOG_PREFIX} %cCancel demo: scope closed — zero leaks (real WASM)`, LOG_STYLE, LOG_OK);
           }, 2600));
         }
       }
@@ -4158,6 +4158,7 @@ initRuntime().then(() => {
   // Auto-run exhibits when they scroll into view (first time only)
   const autoRunMap = {
     'abi': () => runAbiDemo(),
+    'regions': () => { resetRegionViz(); clog('region-console', 'Region tree initialized with real WASM handles. Click any region to trigger cascading cancellation.', 'info'); },
     'budget': () => runBudgetDemo(),
     'stale': () => runStaleDemo(),
     'protocol': () => runProtocolDemo(),
