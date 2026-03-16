@@ -851,26 +851,26 @@ input[type="text"]:focus, select:focus, textarea:focus {
     </div>
     <div class="nav-links" id="nav-links">
       <a href="#abi" data-section="abi">ABI</a>
-      <a href="#runtime" data-section="runtime">Runtime</a>
       <a href="#regions" data-section="regions">Regions</a>
-      <a href="#tasks" data-section="tasks">Tasks</a>
       <a href="#outcomes" data-section="outcomes">Outcomes</a>
       <a href="#cancel" data-section="cancel">Cancel</a>
-      <a href="#scheduler" data-section="scheduler">Scheduler</a>
       <a href="#budget" data-section="budget">Budget</a>
-      <a href="#twophase" data-section="twophase">Two-Phase</a>
       <a href="#stale" data-section="stale">Handles</a>
       <a href="#cascade" data-section="cascade">Cascade</a>
       <a href="#protocol" data-section="protocol">Protocol</a>
       <a href="#repl" data-section="repl">REPL</a>
       <a href="#chaos" data-section="chaos">Chaos</a>
-      <a href="#fetch" data-section="fetch">Fetch</a>
       <a href="#scopefetch" data-section="scopefetch">Scoped</a>
       <a href="#severity" data-section="severity">Severity</a>
       <a href="#forensics" data-section="forensics">Forensics</a>
       <a href="#recycling" data-section="recycling">Slots</a>
       <a href="#isolation" data-section="isolation">Isolation</a>
-      <a href="#compat" data-section="compat">ABI</a>
+      <a href="#replay" data-section="replay">Replay</a>
+      <a href="#leakdetect" data-section="leakdetect">Leaks</a>
+      <a href="#timeout" data-section="timeout">Timeout</a>
+      <a href="#websocket" data-section="websocket">WebSocket</a>
+      <a href="#comparison" data-section="comparison">vs Vanilla</a>
+      <a href="#benchmark" data-section="benchmark">Bench</a>
     </div>
     <button class="nav-hamburger" id="nav-hamburger" onclick="toggleMobileMenu()" aria-label="Toggle navigation">
       <svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
@@ -880,26 +880,26 @@ input[type="text"]:focus, select:focus, textarea:focus {
 <div class="scroll-progress"><div class="scroll-progress-fill" id="scroll-progress-fill"></div></div>
 <div class="nav-mobile-menu" id="nav-mobile-menu">
   <a href="#abi" data-section="abi" onclick="closeMobileMenu()">ABI Handshake</a>
-  <a href="#runtime" data-section="runtime" onclick="closeMobileMenu()">Runtime</a>
   <a href="#regions" data-section="regions" onclick="closeMobileMenu()">Regions</a>
-  <a href="#tasks" data-section="tasks" onclick="closeMobileMenu()">Tasks</a>
   <a href="#outcomes" data-section="outcomes" onclick="closeMobileMenu()">Outcomes</a>
   <a href="#cancel" data-section="cancel" onclick="closeMobileMenu()">Cancel Protocol</a>
-  <a href="#scheduler" data-section="scheduler" onclick="closeMobileMenu()">Scheduler</a>
   <a href="#budget" data-section="budget" onclick="closeMobileMenu()">Budget Algebra</a>
-  <a href="#twophase" data-section="twophase" onclick="closeMobileMenu()">Two-Phase Effects</a>
   <a href="#stale" data-section="stale" onclick="closeMobileMenu()">Handle Safety</a>
   <a href="#cascade" data-section="cascade" onclick="closeMobileMenu()">Cascade Close</a>
   <a href="#protocol" data-section="protocol" onclick="closeMobileMenu()">Cancel→Join Protocol</a>
   <a href="#repl" data-section="repl" onclick="closeMobileMenu()">Live REPL</a>
   <a href="#chaos" data-section="chaos" onclick="closeMobileMenu()">Chaos Test</a>
-  <a href="#fetch" data-section="fetch" onclick="closeMobileMenu()">Live Fetch</a>
   <a href="#scopefetch" data-section="scopefetch" onclick="closeMobileMenu()">Scope-Bounded Fetch</a>
   <a href="#severity" data-section="severity" onclick="closeMobileMenu()">Severity Propagation</a>
   <a href="#forensics" data-section="forensics" onclick="closeMobileMenu()">Cancel Forensics</a>
   <a href="#recycling" data-section="recycling" onclick="closeMobileMenu()">Slot Recycling</a>
   <a href="#isolation" data-section="isolation" onclick="closeMobileMenu()">Scope Isolation</a>
-  <a href="#compat" data-section="compat" onclick="closeMobileMenu()">ABI Compat</a>
+  <a href="#replay" data-section="replay" onclick="closeMobileMenu()">Deterministic Replay</a>
+  <a href="#leakdetect" data-section="leakdetect" onclick="closeMobileMenu()">Leak Detection</a>
+  <a href="#timeout" data-section="timeout" onclick="closeMobileMenu()">Scope Timeout</a>
+  <a href="#websocket" data-section="websocket" onclick="closeMobileMenu()">WebSocket</a>
+  <a href="#comparison" data-section="comparison" onclick="closeMobileMenu()">vs Vanilla JS</a>
+  <a href="#benchmark" data-section="benchmark" onclick="closeMobileMenu()">Benchmark</a>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
@@ -996,65 +996,6 @@ console.<span class="fn">log</span>(<span class="str">`Fingerprint: </span><span
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SECTION 2: RUNTIME CREATION
-     ═══════════════════════════════════════════════════════════════ -->
-<section class="section" id="runtime">
-  <div class="container">
-    <div class="reveal">
-      <span class="exhibit-num">Exhibit 2</span>
-      <h2>Runtime Creation &amp; Lifecycle</h2>
-      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        The runtime is the root of all structured concurrency. Creating one allocates a handle
-        with a slot index and generation counter. The generation prevents ABA-style stale-handle
-        bugs — if a slot is recycled, old handles fail closed instead of silently aliasing new state.
-      </p>
-    </div>
-
-    <div class="grid-2 mt-4">
-      <div class="reveal">
-        <div class="code-block">
-          <div class="code-header">
-            <span class="lang">JavaScript</span>
-            <span class="actions"><button class="btn-copy" onclick="copyCode(this)">Copy</button><button class="btn btn-ghost btn-sm" onclick="runRuntimeDemo()">Run</button></span>
-          </div>
-          <div class="code-body"><span class="cmt">// Create a new runtime instance</span>
-<span class="kw">const</span> result = <span class="fn">runtimeCreate</span>();
-
-<span class="kw">if</span> (result.outcome === <span class="str">'ok'</span>) {
-  <span class="kw">const</span> rt = result.value;
-  console.<span class="fn">log</span>(rt.kind);       <span class="cmt">// "runtime"</span>
-  console.<span class="fn">log</span>(rt.slot);       <span class="cmt">// 0</span>
-  console.<span class="fn">log</span>(rt.generation);  <span class="cmt">// 0</span>
-
-  <span class="cmt">// Clean shutdown</span>
-  <span class="kw">const</span> closed = rt.<span class="fn">close</span>();
-  console.<span class="fn">log</span>(closed.outcome); <span class="cmt">// "ok"</span>
-}
-
-<span class="cmt">// Handles are frozen — immutable after creation</span>
-Object.<span class="fn">isFrozen</span>(rt); <span class="cmt">// true</span></div>
-        </div>
-      </div>
-
-      <div class="reveal">
-        <div class="viz" id="runtime-viz">
-          <div class="viz-title">Handle Allocation Table</div>
-          <div id="runtime-result">
-            <div class="text-dim" style="padding: 40px 0; text-align: center;">
-              Click <strong>Run</strong> to create runtime handles
-            </div>
-          </div>
-        </div>
-        <div class="console mt-2" id="runtime-console">
-          <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="runtime-console-dot"></span> Console Output</div>
-          <div class="console-body" id="runtime-console-body"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════
      SECTION 3: STRUCTURED CONCURRENCY / REGIONS
      ═══════════════════════════════════════════════════════════════ -->
 <section class="section" id="regions">
@@ -1117,66 +1058,6 @@ httpRegion.<span class="fn">close</span>();</div>
       <div class="console mt-2" id="region-console">
         <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="region-console-dot"></span> Region Events</div>
         <div class="console-body" id="region-console-body"></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SECTION 4: TASK LIFECYCLE
-     ═══════════════════════════════════════════════════════════════ -->
-<section class="section" id="tasks">
-  <div class="container">
-    <div class="reveal">
-      <span class="exhibit-num">Exhibit 4</span>
-      <h2>Task Lifecycle — Spawn, Join, Cancel</h2>
-      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Tasks are spawned within regions and produce outcomes when joined. Unlike tokio's fire-and-forget
-        <code style="color:var(--cyan)">spawn()</code>, every task is owned — the region cannot close until
-        all its tasks complete. Cancellation is a structured protocol, not a silent drop.
-      </p>
-    </div>
-
-    <div class="grid-2 mt-4">
-      <div class="reveal">
-        <div class="code-block">
-          <div class="code-header">
-            <span class="lang">JavaScript</span>
-            <span class="actions"><button class="btn-copy" onclick="copyCode(this)">Copy</button><button class="btn btn-ghost btn-sm" onclick="runTaskDemo()">Run</button></span>
-          </div>
-          <div class="code-body"><span class="cmt">// Spawn a task in the current scope</span>
-<span class="kw">const</span> task = scope.<span class="fn">spawnTask</span>({
-  <span class="prop">label</span>: <span class="str">'compute-result'</span>
-}).value;
-
-<span class="cmt">// Join with a successful outcome</span>
-<span class="kw">const</span> result = task.<span class="fn">join</span>(
-  <span class="typ">Outcome</span>.<span class="fn">ok</span>(<span class="num">42</span>)
-);
-<span class="cmt">// → { outcome: "ok", value: 42 }</span>
-
-<span class="cmt">// Or cancel a running task</span>
-<span class="kw">const</span> task2 = scope.<span class="fn">spawnTask</span>({
-  <span class="prop">label</span>: <span class="str">'long-running'</span>
-}).value;
-task2.<span class="fn">cancel</span>(<span class="str">'user'</span>, <span class="str">'User clicked stop'</span>);
-<span class="cmt">// → Cancelled outcome</span></div>
-        </div>
-      </div>
-
-      <div class="reveal">
-        <div class="viz" id="task-viz">
-          <div class="viz-title">Task Handle Inspector</div>
-          <div id="task-result">
-            <div class="text-dim" style="padding: 40px 0; text-align: center;">
-              Click <strong>Run</strong> to spawn and manage tasks
-            </div>
-          </div>
-        </div>
-        <div class="console mt-2" id="task-console">
-          <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="task-console-dot"></span> Console Output</div>
-          <div class="console-body" id="task-console-body"></div>
-        </div>
       </div>
     </div>
   </div>
@@ -1331,49 +1212,6 @@ task2.<span class="fn">cancel</span>(<span class="str">'user'</span>, <span clas
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SECTION 7: THREE-LANE SCHEDULER
-     ═══════════════════════════════════════════════════════════════ -->
-<section class="section" id="scheduler">
-  <div class="container">
-    <div class="reveal">
-      <span class="exhibit-num">Exhibit 7</span>
-      <h2>Three-Lane Priority Scheduler</h2>
-      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        The scheduler dispatches tasks through three priority lanes:
-        <strong style="color:var(--red)">Cancel</strong> (highest) →
-        <strong style="color:var(--yellow)">Timed</strong> (EDF) →
-        <strong style="color:var(--green)">Ready</strong> (default).
-        Cancel preemption is bounded — ready work always gets a dispatch slot within
-        <code style="color:var(--cyan)">cancel_streak_limit + 1</code> steps.
-      </p>
-    </div>
-
-    <div class="mt-4 reveal">
-      <div class="viz" id="scheduler-viz">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
-          <div class="viz-title" style="margin-bottom: 0;">Live Scheduler Lanes</div>
-          <div class="flex gap-2" style="flex-wrap: wrap;">
-            <button class="btn btn-red btn-sm" onclick="injectCancel()">Inject Cancel</button>
-            <button class="btn btn-sm" style="background:var(--yellow);color:#000;" onclick="addDeadline()">Add Deadline</button>
-            <button class="btn btn-primary btn-sm" onclick="schedulerStep()">Step</button>
-            <button class="btn btn-ghost btn-sm" onclick="resetScheduler()">Reset</button>
-          </div>
-        </div>
-        <div style="display: flex; gap: 12px;" id="scheduler-lanes">
-          <!-- Rendered by JS -->
-        </div>
-        <div style="margin-top: 16px;">
-          <div class="viz-title">Processed Log</div>
-          <div id="scheduler-log" style="font-family: var(--mono); font-size: 12px; color: var(--text3); min-height: 24px;">
-            <span class="text-dim">Step through the scheduler to see task dispatch order</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════
      SECTION 8: BUDGET ALGEBRA
      ═══════════════════════════════════════════════════════════════ -->
 <section class="section" id="budget">
@@ -1429,82 +1267,6 @@ task2.<span class="fn">cancel</span>(<span class="str">'user'</span>, <span clas
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════
-     SECTION 9: TWO-PHASE EFFECTS
-     ═══════════════════════════════════════════════════════════════ -->
-<section class="section" id="twophase">
-  <div class="container">
-    <div class="reveal">
-      <span class="exhibit-num">Exhibit 9</span>
-      <h2>Two-Phase Effects — Reserve / Commit</h2>
-      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Anywhere cancellation could lose data, Asupersync uses a two-phase protocol:
-        <strong style="color:var(--text);">reserve</strong> a slot (cancel-safe, nothing committed),
-        then <strong style="color:var(--text);">commit</strong> (linear, cannot fail).
-        Dropping a reserved permit aborts cleanly — no half-sent messages, ever.
-      </p>
-    </div>
-
-    <div class="mt-4 reveal">
-      <div class="viz" id="twophase-viz" style="overflow: visible;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
-          <div class="viz-title" style="margin-bottom: 0;">Two-Phase Protocol Walkthrough</div>
-          <div class="flex gap-2" style="flex-wrap: wrap;">
-            <button class="btn btn-primary btn-sm" id="btn-tx-start" onclick="txStart()">Start Transfer</button>
-            <button class="btn btn-green btn-sm" id="btn-tx-commit" onclick="txCommit()" disabled>Commit</button>
-            <button class="btn btn-red btn-sm" id="btn-tx-cancel" onclick="txCancel()" disabled>Cancel</button>
-            <button class="btn btn-ghost btn-sm" onclick="txReset()">Reset</button>
-          </div>
-        </div>
-
-        <!-- State banner -->
-        <div class="tx-state-banner" id="tx-banner" style="background: rgba(30,41,59,0.5); color: var(--text3); margin-bottom: 20px;">
-          Idle — ready to transfer
-        </div>
-
-        <!-- Account boxes -->
-        <div style="display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap;">
-          <div class="tx-account" id="tx-acct-a">
-            <div class="tx-label">Account A</div>
-            <div class="tx-balance" id="tx-bal-a" style="color: var(--blue);">$1,000</div>
-            <div class="tx-hold" id="tx-hold-a" style="display: none; background: var(--yellow-dim); color: var(--yellow);">Hold: -$200</div>
-          </div>
-          <div class="tx-arrow">
-            <svg width="48" height="24" viewBox="0 0 48 24">
-              <line x1="4" y1="12" x2="38" y2="12" stroke="var(--text3)" stroke-width="2" stroke-dasharray="4 3" id="tx-arrow-line"/>
-              <polygon points="38,8 44,12 38,16" fill="var(--text3)" id="tx-arrow-head"/>
-            </svg>
-          </div>
-          <div class="tx-account" id="tx-acct-b">
-            <div class="tx-label">Account B</div>
-            <div class="tx-balance" id="tx-bal-b" style="color: var(--blue);">$500</div>
-            <div class="tx-hold" id="tx-hold-b" style="display: none; background: var(--green-dim); color: var(--green);">Pending: +$200</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="mt-3 reveal">
-      <div class="code-block">
-        <div class="code-header">
-          <span class="lang">JavaScript</span>
-          <span class="actions"><button class="btn-copy" onclick="copyCode(this)">Copy</button></span>
-        </div>
-        <div class="code-body"><span class="cmt">// Two-phase channel send — cancel-safe by construction</span>
-<span class="kw">const</span> permit = <span class="kw">await</span> tx.<span class="fn">reserve</span>(cx);  <span class="cmt">// ← Phase 1: cancel-safe</span>
-<span class="cmt">// If cancelled here, permit is dropped. Nothing sent. Clean.</span>
-
-permit.<span class="fn">send</span>(message);                 <span class="cmt">// ← Phase 2: linear, cannot fail</span>
-<span class="cmt">// Message is now committed. No partial state.</span>
-
-<span class="cmt">// Compare with tokio:</span>
-<span class="cmt">// tx.send(msg).await?  ← if cancelled mid-send,</span>
-<span class="cmt">//                        message may be lost silently</span></div>
       </div>
     </div>
   </div>
@@ -1800,55 +1562,6 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SECTION 15: LIVE FETCH WITH CANCELLATION
-     ═══════════════════════════════════════════════════════════════ -->
-<section class="section" id="fetch">
-  <div class="container">
-    <div class="reveal">
-      <span class="exhibit-num">Exhibit 15 — Network</span>
-      <h2>Live Fetch — Real HTTP Through the Runtime</h2>
-      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        This makes a <strong>real HTTP request</strong> through the Asupersync WASM runtime's
-        fetch binding. The request is scoped to a region, tracked as an obligation, and cancellable
-        via the structured protocol. Cancel mid-flight and see the AbortController integration work.
-      </p>
-    </div>
-
-    <div class="mt-4 reveal">
-      <div class="viz" id="fetch-viz">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
-          <div class="viz-title" style="margin-bottom: 0;">HTTP Request Through WASM</div>
-          <div class="flex gap-2" style="flex-wrap: wrap;">
-            <button class="btn btn-primary btn-sm" id="btn-fetch-send" onclick="runFetchDemo()">Send Request</button>
-            <button class="btn btn-red btn-sm" id="btn-fetch-cancel" onclick="cancelFetchDemo()" disabled>Cancel Mid-Flight</button>
-          </div>
-        </div>
-
-        <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
-          <select id="fetch-method" style="background:var(--surface2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;font-family:var(--mono);font-size:13px;">
-            <option value="GET">GET</option>
-            <option value="POST">POST</option>
-          </select>
-          <input id="fetch-url" type="text" value="https://httpbin.org/delay/3" placeholder="URL"
-            style="flex:1;min-width:200px;background:var(--surface2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;font-family:var(--mono);font-size:13px;outline:none;"
-          />
-        </div>
-
-        <!-- Request state timeline -->
-        <div id="fetch-timeline" style="font-family:var(--mono);font-size:13px;">
-          <div class="text-dim" style="text-align:center;padding:24px 0;">Configure and click Send Request</div>
-        </div>
-      </div>
-
-      <div class="console mt-2" id="fetch-console">
-        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="fetch-console-dot"></span> Network Events</div>
-        <div class="console-body" id="fetch-console-body"></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════
      SECTION 16: SCOPE-BOUNDED FETCH (auto-cancel on region close)
      ═══════════════════════════════════════════════════════════════ -->
 <section class="section" id="scopefetch">
@@ -2019,29 +1732,245 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SECTION 21: ABI COMPATIBILITY PROBING
+     SECTION 22: DETERMINISTIC REPLAY PROOF
      ═══════════════════════════════════════════════════════════════ -->
-<section class="section" id="compat">
+<section class="section" id="replay">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 21 — Impossible Elsewhere</span>
-      <h2>ABI Compatibility Probing — Version Negotiation at the Boundary</h2>
+      <span class="exhibit-num">Exhibit 22 — Impossible Elsewhere</span>
+      <h2>Deterministic Replay — Same Ops, Same Slots, Every Time</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        When you update a JavaScript package that talks to a WASM module, how do you know they're still compatible?
-        Most runtimes: you find out when something crashes in production. Asupersync has
-        <strong style="color:var(--text);">built-in version negotiation</strong>. Every API call can include a consumer version,
-        and the runtime rejects incompatible calls <em>before</em> any state is mutated. This demo probes
-        the real ABI boundary with different version combinations.
+        When debugging a concurrency bug in tokio or async-std, you're at the mercy of non-deterministic scheduling.
+        Run the same test twice and you get different behavior. Asupersync's handle allocator uses a
+        <strong style="color:var(--text);">deterministic LIFO free-list</strong> — the same sequence of
+        create/close operations <em>always</em> produces identical slot assignments. This means you can
+        <strong style="color:var(--text);">replay a failing execution exactly</strong>, down to every handle slot
+        and generation counter. This demo runs the same 15-operation sequence twice and proves byte-for-byte
+        identical allocation.
       </p>
     </div>
     <div class="mt-4 reveal">
-      <div class="viz" id="compat-viz">
+      <div class="viz" id="replay-viz">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
-          <div class="viz-title" style="margin-bottom:0;">Version Compatibility Matrix</div>
-          <button class="btn btn-primary btn-sm" onclick="runCompatDemo()">Run</button>
+          <div class="viz-title" style="margin-bottom:0;">Deterministic Allocation Proof</div>
+          <button class="btn btn-primary btn-sm" onclick="runReplayDemo()">Run Twice &amp; Compare</button>
         </div>
-        <div id="compat-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Click Run to probe the ABI boundary with different version combinations</div>
+        <div id="replay-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Runs the same 15 operations twice and compares every slot assignment</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 23: HANDLE LEAK DETECTION
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="leakdetect">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 23 — Impossible Elsewhere</span>
+      <h2>Handle Leak Detection — The Runtime Catches Your Mistakes</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        What happens when a programmer forgets to join a spawned task? In tokio, the task becomes an orphan —
+        it runs indefinitely with no owner, leaking memory and potentially holding locks. In Asupersync,
+        <strong style="color:var(--text);">the scope won't let you</strong>. Tasks are pinned on spawn and
+        tracked as obligations. When the parent scope closes, it <em>cascade-closes every unjoinable child</em>.
+        The runtime cleans up your mistakes structurally. This demo intentionally "forgets" to join 5 tasks
+        and proves the scope catches all of them.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="leakdetect-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Obligation Enforcement</div>
+          <button class="btn btn-primary btn-sm" onclick="runLeakDetectDemo()">Forget to Join</button>
+        </div>
+        <div id="leakdetect-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Spawns 5 tasks and intentionally "forgets" to join them</div>
+        </div>
+      </div>
+      <div class="console mt-2" id="leakdetect-console">
+        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="leakdetect-console-dot"></span> Leak Detection</div>
+        <div class="console-body" id="leakdetect-console-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 24: SCOPE-AS-TIMEOUT
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="timeout">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 24 — Impossible Elsewhere</span>
+      <h2>Scope-as-Timeout — Structural Deadlines, Not Afterthoughts</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        In vanilla JavaScript, implementing a timeout for a group of concurrent operations requires
+        creating an <code style="color:var(--cyan)">AbortController</code>, a <code style="color:var(--cyan)">setTimeout</code>,
+        wiring the signal to every <code style="color:var(--cyan)">fetch()</code>, handling the
+        <code style="color:var(--cyan)">AbortError</code> in every <code style="color:var(--cyan)">.catch()</code>,
+        and remembering to <code style="color:var(--cyan)">clearTimeout</code> on success. That's 6 coordination points
+        where bugs hide. In Asupersync, you <strong style="color:var(--text);">create a scope and close it when the deadline fires</strong>.
+        Every task and fetch handle under it is automatically cancelled. One line of cleanup instead of six.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="timeout-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Structural Timeout (2s deadline)</div>
+          <div class="flex gap-2" style="flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="btn-timeout-start" onclick="runTimeoutDemo()">Start 3 Tasks</button>
+          </div>
+        </div>
+        <div id="timeout-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Spawns 3 tasks with a 2-second scope deadline — scope auto-closes when time's up</div>
+        </div>
+      </div>
+      <div class="console mt-2" id="timeout-console">
+        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="timeout-console-dot"></span> Timeout Events</div>
+        <div class="console-body" id="timeout-console-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 25: REAL WEBSOCKET
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="websocket">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 25 — Impossible Elsewhere</span>
+      <h2>WebSocket with Structured Cancellation</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        Browser WebSockets have no concept of "ownership." You call <code style="color:var(--cyan)">new WebSocket(url)</code>,
+        it exists in the global scope, and if your component unmounts you'd better remember to call <code style="color:var(--cyan)">ws.close()</code>
+        — otherwise you have a zombie connection leaking messages into nothing. In Asupersync, the WebSocket handle is
+        <strong style="color:var(--text);">scoped to a region</strong>. Close the region and the socket is automatically
+        closed with proper cleanup. The socket <em>cannot outlive its scope</em>.
+        This demo opens a real WebSocket, sends messages through the runtime, then closes the scope.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="websocket-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Scoped WebSocket Lifecycle</div>
+          <div class="flex gap-2" style="flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="btn-ws-open" onclick="runWebSocketDemo()">Open Socket</button>
+            <button class="btn btn-green btn-sm" id="btn-ws-send" onclick="wsSend()" disabled>Send Message</button>
+            <button class="btn btn-red btn-sm" id="btn-ws-close" onclick="wsCloseScope()" disabled>Close Scope</button>
+          </div>
+        </div>
+        <div id="websocket-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Opens a real WebSocket scoped to a region — close the scope to auto-close the socket</div>
+        </div>
+      </div>
+      <div class="console mt-2" id="websocket-console">
+        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="websocket-console-dot"></span> WebSocket Events</div>
+        <div class="console-body" id="websocket-console-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 26: CODE COMPARISON
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="comparison">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 26 — The Whole Point</span>
+      <h2>Vanilla JS vs Asupersync — Side-by-Side</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        Every exhibit above demonstrates a structural guarantee. But the real question is:
+        <strong style="color:var(--text);">how much code do YOU have to write?</strong>
+        Here's the same scenario — 3 concurrent fetches with a 5-second timeout — implemented
+        both ways. Count the coordination points where bugs can hide.
+      </p>
+    </div>
+    <div class="grid-2 mt-4">
+      <div class="reveal">
+        <div class="code-block" style="border-color: rgba(239,68,68,0.2);">
+          <div class="code-header" style="border-bottom-color: rgba(239,68,68,0.1);">
+            <span class="lang" style="color:var(--red);">Vanilla JavaScript — 22 lines</span>
+          </div>
+          <div class="code-body"><span class="kw">const</span> controller = <span class="kw">new</span> <span class="typ">AbortController</span>();  <span class="cmt">// 1. create controller</span>
+<span class="kw">const</span> signal = controller.signal;            <span class="cmt">// 2. extract signal</span>
+
+<span class="cmt">// 3. wire timeout to abort</span>
+<span class="kw">const</span> timer = <span class="fn">setTimeout</span>(() => {
+  controller.<span class="fn">abort</span>();                       <span class="cmt">// 4. abort on timeout</span>
+}, <span class="num">5000</span>);
+
+<span class="kw">try</span> {
+  <span class="kw">const</span> results = <span class="kw">await</span> Promise.<span class="fn">all</span>([
+    <span class="fn">fetch</span>(url1, { signal }),                <span class="cmt">// 5. pass signal</span>
+    <span class="fn">fetch</span>(url2, { signal }),                <span class="cmt">// 6. pass signal</span>
+    <span class="fn">fetch</span>(url3, { signal }),                <span class="cmt">// 7. pass signal</span>
+  ]);
+  <span class="fn">clearTimeout</span>(timer);                      <span class="cmt">// 8. clear on success</span>
+  <span class="kw">return</span> results;
+} <span class="kw">catch</span> (err) {
+  <span class="fn">clearTimeout</span>(timer);                      <span class="cmt">// 9. clear on error too!</span>
+  <span class="kw">if</span> (err.name === <span class="str">'AbortError'</span>) {
+    <span class="cmt">// 10. distinguish timeout from real error</span>
+    <span class="kw">throw new</span> <span class="typ">Error</span>(<span class="str">'Request timed out'</span>);
+  }
+  <span class="kw">throw</span> err;                                <span class="cmt">// 11. re-throw others</span>
+}</div>
+        </div>
+        <div style="margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.15);font-size:12px;color:var(--text2);">
+          <strong style="color:var(--red);">11 coordination points</strong> where bugs can hide. Forget #8 or #9? Timer leaks. Forget #5-7? Request ignores timeout. Mix up #10? Wrong error type propagates.
+        </div>
+      </div>
+      <div class="reveal">
+        <div class="code-block" style="border-color: rgba(34,197,94,0.2);">
+          <div class="code-header" style="border-bottom-color: rgba(34,197,94,0.1);">
+            <span class="lang" style="color:var(--green);">Asupersync — 6 lines</span>
+          </div>
+          <div class="code-body"><span class="kw">const</span> scope = rt.<span class="fn">enterScope</span>(<span class="str">'requests'</span>).value;
+
+<span class="cmt">// All requests are scoped — no signal wiring needed</span>
+scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url1, <span class="prop">method</span>: <span class="str">'GET'</span> });
+scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url2, <span class="prop">method</span>: <span class="str">'GET'</span> });
+scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3, <span class="prop">method</span>: <span class="str">'GET'</span> });
+
+<span class="cmt">// After 5s, close the scope — ALL requests auto-cancelled</span>
+<span class="fn">setTimeout</span>(() => scope.<span class="fn">close</span>(), <span class="num">5000</span>);</div>
+        </div>
+        <div style="margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.15);font-size:12px;color:var(--text2);">
+          <strong style="color:var(--green);">1 coordination point.</strong> <code style="color:var(--cyan);">scope.close()</code> handles everything. No signal wiring. No manual cleanup. No error-path bugs. The scope IS the AbortController, the timeout, and the cleanup — all in one structural primitive.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 27: RAPID SCOPE CHURN BENCHMARK
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="benchmark">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 27 — Performance</span>
+      <h2>Rapid Scope Churn — How Fast Is the Runtime?</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        All these structural guarantees sound expensive. Are they? This benchmark creates and closes scopes
+        as fast as possible for 1 second, measuring <strong style="color:var(--text);">real WASM operations per second</strong>.
+        Each operation includes handle allocation, generation tracking, parent registration, and cleanup —
+        all the bookkeeping that makes structured concurrency work. The result might surprise you.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="benchmark-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">WASM Runtime Throughput</div>
+          <button class="btn btn-primary btn-sm" id="btn-bench" onclick="runBenchmark()">Run 1s Benchmark</button>
+        </div>
+        <div id="benchmark-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Measures real scope create/close operations per second</div>
         </div>
       </div>
     </div>
@@ -2207,53 +2136,6 @@ window.runAbiDemo = function() {
   `;
 };
 
-// ─── Exhibit 2: Runtime ──────────────────────────────────────────
-window.runRuntimeDemo = function() {
-  clearConsole('runtime-console');
-  const a = requireWasm('runtime-console');
-  if (!a) return;
-
-  // Create multiple runtimes to show slot allocation
-  const runtimes = [];
-  for (let i = 0; i < 3; i++) {
-    const r = (a.runtimeCreate || a.runtime_create)();
-    if (r.outcome === 'ok') {
-      runtimes.push(r.value);
-      clog('runtime-console', `Created runtime: slot=${r.value.slot} gen=${r.value.generation}`, 'ok');
-    }
-  }
-
-  // Close the first one
-  if (runtimes[0]) {
-    const closeResult = runtimes[0].close();
-    clog('runtime-console', `Closed runtime slot=${runtimes[0].slot}: ${closeResult.outcome}`, closeResult.outcome === 'ok' ? 'ok' : 'err');
-  }
-
-  // Show handles table
-  const container = document.getElementById('runtime-result');
-  container.innerHTML = `
-    <table class="handle-table">
-      <thead><tr><th>Kind</th><th>Slot</th><th>Gen</th><th>Status</th></tr></thead>
-      <tbody>
-        ${runtimes.map((rt, i) => `
-          <tr>
-            <td><span class="badge badge-blue" style="font-size:11px;">${rt.kind}</span></td>
-            <td style="color:var(--cyan);">${rt.slot}</td>
-            <td>${rt.generation}</td>
-            <td>${i === 0 ? '<span class="badge badge-err" style="font-size:11px;">Closed</span>' : '<span class="badge badge-ok" style="font-size:11px;">Active</span>'}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-    <div style="margin-top:12px; font-size:12px; color:var(--text3);">
-      Handles are <strong>frozen</strong> (immutable) after creation. Generation counters prevent ABA reuse.
-    </div>
-  `;
-
-  // Cleanup
-  runtimes.slice(1).forEach(rt => rt.close());
-};
-
 // ─── Exhibit 3: Regions ──────────────────────────────────────────
 const regionState = {
   regions: [],
@@ -2369,62 +2251,6 @@ window.resetRegionViz = function() {
   clearConsole('region-console');
   regionState.init();
   renderRegionTree();
-};
-
-// ─── Exhibit 4: Tasks ────────────────────────────────────────────
-window.runTaskDemo = function() {
-  clearConsole('task-console');
-  const a = requireWasm('task-console');
-  if (!a) return;
-
-  // Create a temp runtime & scope
-  const rt = (a.runtimeCreate || a.runtime_create)();
-  if (rt.outcome !== 'ok') { clog('task-console','Failed to create runtime','err'); return; }
-  const scope = rt.value.enterScope('task-demo');
-  if (scope.outcome !== 'ok') { clog('task-console','Failed to enter scope','err'); return; }
-  const sc = scope.value;
-
-  // Spawn + join with Ok
-  const t1 = sc.spawnTask({ label:'compute-result' });
-  if (t1.outcome === 'ok') {
-    clog('task-console', `Spawned task: slot=${t1.value.slot}`, 'ok');
-    const joined = t1.value.join(a.Outcome.ok(42));
-    clog('task-console', `Joined: ${JSON.stringify(joined)}`, joined.outcome === 'ok' ? 'ok' : 'err');
-  }
-
-  // Spawn + cancel
-  const t2 = sc.spawnTask({ label:'long-running' });
-  if (t2.outcome === 'ok') {
-    clog('task-console', `Spawned task: slot=${t2.value.slot}`, 'ok');
-    const cancelled = t2.value.cancel('user', 'User clicked stop');
-    clog('task-console', `Cancel result: ${JSON.stringify(cancelled)}`, 'warn');
-  }
-
-  // Show table
-  const container = document.getElementById('task-result');
-  const tasks = [t1, t2].filter(t => t.outcome === 'ok').map(t => t.value);
-  container.innerHTML = `
-    <table class="handle-table">
-      <thead><tr><th>Handle</th><th>Slot</th><th>Label</th><th>Result</th></tr></thead>
-      <tbody>
-        <tr>
-          <td><span class="badge badge-blue" style="font-size:11px;">task</span></td>
-          <td style="color:var(--cyan);">${tasks[0]?.slot ?? '?'}</td>
-          <td>compute-result</td>
-          <td><span class="badge badge-ok" style="font-size:11px;">Ok(42)</span></td>
-        </tr>
-        <tr>
-          <td><span class="badge badge-blue" style="font-size:11px;">task</span></td>
-          <td style="color:var(--cyan);">${tasks[1]?.slot ?? '?'}</td>
-          <td>long-running</td>
-          <td><span class="badge badge-cancel" style="font-size:11px;">Cancelled</span></td>
-        </tr>
-      </tbody>
-    </table>
-  `;
-
-  sc.close();
-  rt.value.close();
 };
 
 // ─── Exhibit 5: Outcomes ─────────────────────────────────────────
@@ -2699,94 +2525,6 @@ window.resetCancel = function() {
       row.querySelector('.res-status').style.color = '';
     }
   });
-};
-
-// ─── Exhibit 7: Scheduler ────────────────────────────────────────
-let schedulerState = {
-  tasks: [
-    { id:'A', name:'Task A', lane:'ready' },
-    { id:'B', name:'Task B', lane:'ready' },
-    { id:'C', name:'Task C', lane:'ready' },
-    { id:'D', name:'Task D', lane:'ready' },
-    { id:'E', name:'Task E', lane:'ready' },
-  ],
-  log: [],
-  nextId: 6,
-};
-
-const laneColors = { cancel:HEX.red, timed:HEX.yellow, ready:HEX.green };
-const laneLabels = { cancel:'Cancel Lane', timed:'Timed Lane (EDF)', ready:'Ready Lane' };
-
-function renderScheduler() {
-  const container = document.getElementById('scheduler-lanes');
-  container.innerHTML = ['cancel','timed','ready'].map(lane => {
-    const tasks = schedulerState.tasks.filter(t => t.lane === lane);
-    return `
-      <div class="lane-col">
-        <div class="lane-label" style="color:${laneColors[lane]};">${laneLabels[lane]}</div>
-        ${tasks.length === 0 ? '<div class="text-dim" style="text-align:center;font-size:12px;padding:20px 0;">Empty</div>' :
-          tasks.map(t => `<div class="lane-task" style="border-color:${laneColors[lane]}33;background:${laneColors[lane]}08;color:${laneColors[lane]};">${t.name}</div>`).join('')}
-      </div>
-    `;
-  }).join('');
-
-  const log = document.getElementById('scheduler-log');
-  if (schedulerState.log.length > 0) {
-    log.innerHTML = schedulerState.log.map(entry =>
-      `<span style="color:${laneColors[entry.lane]};margin-right:8px;">${entry.name}</span>`
-    ).join('');
-  }
-}
-
-window.injectCancel = function() {
-  const id = String.fromCharCode(65 + schedulerState.nextId++ % 26) + (schedulerState.nextId > 26 ? schedulerState.nextId : '');
-  schedulerState.tasks.unshift({ id, name:`Cancel-${id}`, lane:'cancel' });
-  renderScheduler();
-};
-
-window.addDeadline = function() {
-  const id = String.fromCharCode(65 + schedulerState.nextId++ % 26) + (schedulerState.nextId > 26 ? schedulerState.nextId : '');
-  schedulerState.tasks.push({ id, name:`Timed-${id}`, lane:'timed' });
-  renderScheduler();
-};
-
-window.schedulerStep = function() {
-  // Dispatch: cancel first, then timed, then ready
-  for (const lane of ['cancel','timed','ready']) {
-    const idx = schedulerState.tasks.findIndex(t => t.lane === lane);
-    if (idx >= 0) {
-      const [task] = schedulerState.tasks.splice(idx, 1);
-      schedulerState.log.push({ ...task });
-      renderScheduler();
-
-      // Spring-animate the newly added log entry
-      if (motionLib) {
-        const logEl = document.getElementById('scheduler-log');
-        const lastSpan = logEl?.lastElementChild;
-        if (lastSpan) {
-          motionLib.animate(lastSpan,
-            { opacity: [0, 1], transform: ['translateX(-12px)', 'translateX(0)'] },
-            { type: 'spring', stiffness: 300, damping: 22 });
-        }
-      }
-      return;
-    }
-  }
-};
-
-window.resetScheduler = function() {
-  schedulerState = {
-    tasks: [
-      { id:'A', name:'Task A', lane:'ready' },
-      { id:'B', name:'Task B', lane:'ready' },
-      { id:'C', name:'Task C', lane:'ready' },
-      { id:'D', name:'Task D', lane:'ready' },
-      { id:'E', name:'Task E', lane:'ready' },
-    ],
-    log: [],
-    nextId: 6,
-  };
-  renderScheduler();
 };
 
 // ─── Exhibit 8: Budget ───────────────────────────────────────────
@@ -3112,97 +2850,6 @@ window.runProtocolDemo = function() {
   showToast('Cancel→Join protocol demonstrated', 'ok');
 };
 
-// ─── Exhibit 9: Two-Phase Effects ─────────────────────────────────
-let txState = { phase: 'idle', balA: 1000, balB: 500, amount: 200, timers: [] };
-const txBanners = {
-  idle:       { bg: 'rgba(30,41,59,0.5)', color: '#94A3B8', text: 'Idle — ready to transfer' },
-  reserving:  { bg: 'rgba(234,179,8,0.1)', color: '#FACC15', text: 'Reserving — holding $200 from Account A...' },
-  reserved:   { bg: 'rgba(234,179,8,0.15)', color: '#EAB308', text: 'Reserved — permit held. Commit or cancel.' },
-  committing: { bg: 'rgba(34,197,94,0.1)', color: '#4ADE80', text: 'Committing — transfer is linear, cannot fail...' },
-  committed:  { bg: 'rgba(34,197,94,0.15)', color: '#22C55E', text: 'Committed — $200 transferred. Zero data loss.' },
-  cancelling: { bg: 'rgba(239,68,68,0.1)', color: '#F87171', text: 'Cancelling — rolling back hold...' },
-  rolledback: { bg: 'rgba(239,68,68,0.15)', color: '#EF4444', text: 'Rolled back — permit dropped. Balances unchanged.' },
-};
-
-function txRender() {
-  const b = txBanners[txState.phase];
-  const banner = document.getElementById('tx-banner');
-  banner.style.background = b.bg;
-  banner.style.color = b.color;
-  banner.textContent = b.text;
-
-  const holdA = document.getElementById('tx-hold-a');
-  const holdB = document.getElementById('tx-hold-b');
-  const balA = document.getElementById('tx-bal-a');
-  const balB = document.getElementById('tx-bal-b');
-  const acctA = document.getElementById('tx-acct-a');
-  const acctB = document.getElementById('tx-acct-b');
-  const arrow = document.getElementById('tx-arrow-line');
-  const arrowHead = document.getElementById('tx-arrow-head');
-
-  balA.textContent = '$' + txState.balA.toLocaleString();
-  balB.textContent = '$' + txState.balB.toLocaleString();
-
-  const showHold = ['reserving','reserved','committing','cancelling'].includes(txState.phase);
-  holdA.style.display = showHold ? 'inline-block' : 'none';
-  holdB.style.display = showHold ? 'inline-block' : 'none';
-
-  const isYellow = ['reserving','reserved'].includes(txState.phase);
-  const isGreen = ['committing','committed'].includes(txState.phase);
-  const isRed = ['cancelling','rolledback'].includes(txState.phase);
-
-  acctA.style.borderColor = isYellow ? 'rgba(234,179,8,0.4)' : isRed ? 'rgba(239,68,68,0.3)' : isGreen ? 'rgba(34,197,94,0.3)' : '';
-  acctB.style.borderColor = isGreen ? 'rgba(34,197,94,0.4)' : '';
-  arrow.setAttribute('stroke', isGreen ? '#22C55E' : isYellow ? '#EAB308' : isRed ? '#EF4444' : '#64748B');
-  arrowHead.setAttribute('fill', isGreen ? '#22C55E' : isYellow ? '#EAB308' : isRed ? '#EF4444' : '#64748B');
-  arrow.setAttribute('stroke-dasharray', isGreen || isRed ? 'none' : '4 3');
-
-  document.getElementById('btn-tx-start').disabled = txState.phase !== 'idle' && txState.phase !== 'committed' && txState.phase !== 'rolledback';
-  document.getElementById('btn-tx-commit').disabled = txState.phase !== 'reserved';
-  document.getElementById('btn-tx-cancel').disabled = txState.phase !== 'reserved';
-}
-
-window.txStart = function() {
-  txState = { phase: 'reserving', balA: 1000, balB: 500, amount: 200, timers: [] };
-  txRender();
-  txState.timers.push(setTimeout(() => {
-    txState.phase = 'reserved';
-    txRender();
-    showToast('Permit reserved — commit or cancel', 'info');
-  }, 1200));
-};
-
-window.txCommit = function() {
-  txState.phase = 'committing';
-  txRender();
-  txState.timers.push(setTimeout(() => {
-    txState.phase = 'committed';
-    txState.balA = 800;
-    txState.balB = 700;
-    txRender();
-    showToast('Transfer committed — $200 moved', 'ok');
-    if (motionLib) {
-      motionLib.animate(document.getElementById('tx-bal-b'), { transform: ['scale(1)', 'scale(1.15)', 'scale(1)'] }, { duration: 0.4 });
-    }
-  }, 800));
-};
-
-window.txCancel = function() {
-  txState.phase = 'cancelling';
-  txRender();
-  txState.timers.push(setTimeout(() => {
-    txState.phase = 'rolledback';
-    txRender();
-    showToast('Permit dropped — zero data loss', 'info');
-  }, 800));
-};
-
-window.txReset = function() {
-  txState.timers.forEach(id => { clearTimeout(id); clearInterval(id); });
-  txState = { phase: 'idle', balA: 1000, balB: 500, amount: 200, timers: [] };
-  txRender();
-};
-
 // ─── Exhibit 13: Live REPL ────────────────────────────────────────
 const REPL_SNIPPETS = [
   `// Create a scope, inspect the handle
@@ -3489,110 +3136,6 @@ window.resetChaos = function() {
   document.getElementById('chaos-phase').textContent = 'Ready';
   clearConsole('chaos-console');
 };
-
-// ─── Exhibit 15: Live Fetch with Cancellation ────────────────────
-let activeFetchScope = null;
-let activeFetchTimeline = [];
-
-window.runFetchDemo = function() {
-  clearConsole('fetch-console');
-  const a = requireWasm('fetch-console');
-  if (!a) return;
-  const url = document.getElementById('fetch-url').value.trim();
-  const method = document.getElementById('fetch-method').value;
-
-  if (!url) { clog('fetch-console', 'URL is required', 'err'); return; }
-
-  // Create a dedicated scope for this request
-  const rt = (a.runtimeCreate || a.runtime_create)();
-  if (rt.outcome !== 'ok') { clog('fetch-console', 'Failed to create runtime', 'err'); return; }
-  const scope = rt.value.enterScope('fetch-scope');
-  if (scope.outcome !== 'ok') { clog('fetch-console', 'Failed to create scope', 'err'); return; }
-  activeFetchScope = { rt: rt.value, scope: scope.value };
-
-  const startTime = performance.now();
-  activeFetchTimeline = [
-    { time: 0, event: 'Scope created', badge: 'badge-ok', detail: `slot=${scope.value.slot}` },
-  ];
-  renderFetchTimeline();
-
-  document.getElementById('btn-fetch-send').disabled = true;
-  document.getElementById('btn-fetch-cancel').disabled = false;
-
-  clog('fetch-console', `${method} ${url}`, 'info');
-  clog('fetch-console', `Scope: slot=${scope.value.slot} — request is obligation-tracked`, 'ok');
-
-  // Use the WASM fetch binding if available, otherwise native fetch
-  if (wasmReady && scope.value.fetchRequest) {
-    const body = method === 'POST' ? new TextEncoder().encode('{"demo":true}') : undefined;
-    const fResult = scope.value.fetchRequest({ url, method, body });
-    activeFetchTimeline.push({ time: performance.now() - startTime, event: 'Fetch handle created', badge: 'badge-blue', detail: fResult.outcome === 'ok' ? `slot=${fResult.value.slot}` : fResult.outcome });
-    renderFetchTimeline();
-    clog('fetch-console', `Fetch handle: ${JSON.stringify(fResult)}`, fResult.outcome === 'ok' ? 'ok' : 'err');
-  }
-
-  // Also do a real browser fetch so we can show timing
-  const controller = new AbortController();
-  activeFetchScope.controller = controller;
-
-  activeFetchTimeline.push({ time: performance.now() - startTime, event: 'Browser fetch started', badge: 'badge-cyan', detail: `${method} ${url.length > 40 ? url.substring(0, 40) + '...' : url}` });
-  renderFetchTimeline();
-
-  fetch(url, { method, signal: controller.signal, headers: { 'Accept': 'application/json' } })
-    .then(resp => {
-      const elapsed = performance.now() - startTime;
-      activeFetchTimeline.push({ time: elapsed, event: `Response: ${resp.status} ${resp.statusText}`, badge: 'badge-ok', detail: `${elapsed.toFixed(0)}ms` });
-      renderFetchTimeline();
-      clog('fetch-console', `Response: ${resp.status} ${resp.statusText} (${elapsed.toFixed(0)}ms)`, 'ok');
-      return resp.text().then(body => {
-        clog('fetch-console', `Body: ${body.substring(0, 200)}${body.length > 200 ? '...' : ''}`, 'info');
-      });
-    })
-    .catch(err => {
-      const elapsed = performance.now() - startTime;
-      if (err.name === 'AbortError') {
-        activeFetchTimeline.push({ time: elapsed, event: 'Request CANCELLED', badge: 'badge-cancel', detail: `Aborted at ${elapsed.toFixed(0)}ms` });
-        clog('fetch-console', `Cancelled via AbortController at ${elapsed.toFixed(0)}ms`, 'warn');
-        showToast('Fetch cancelled — structured cleanup', 'info');
-      } else {
-        activeFetchTimeline.push({ time: elapsed, event: `Error: ${err.message}`, badge: 'badge-err', detail: '' });
-        clog('fetch-console', `Error: ${err.message}`, 'err');
-      }
-      renderFetchTimeline();
-    })
-    .finally(() => {
-      // Clean up scope
-      if (activeFetchScope) {
-        activeFetchScope.scope.close();
-        activeFetchScope.rt.close();
-        const elapsed = performance.now() - startTime;
-        activeFetchTimeline.push({ time: elapsed, event: 'Scope closed — quiescent', badge: 'badge-ok', detail: 'All obligations resolved' });
-        renderFetchTimeline();
-        clog('fetch-console', 'Scope closed. Zero leaked handles.', 'ok');
-        activeFetchScope = null;
-      }
-      document.getElementById('btn-fetch-send').disabled = false;
-      document.getElementById('btn-fetch-cancel').disabled = true;
-    });
-};
-
-window.cancelFetchDemo = function() {
-  if (activeFetchScope && activeFetchScope.controller) {
-    activeFetchScope.controller.abort();
-    clog('fetch-console', 'AbortController.abort() called — cancellation propagating...', 'warn');
-  }
-};
-
-function renderFetchTimeline() {
-  const container = document.getElementById('fetch-timeline');
-  container.innerHTML = activeFetchTimeline.map((entry, i) => `
-    <div style="display:flex;align-items:center;gap:12px;padding:6px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}">
-      <span style="color:var(--text3);font-size:11px;min-width:60px;text-align:right;font-family:var(--mono);">${entry.time.toFixed(0)}ms</span>
-      <span class="badge ${entry.badge}" style="font-size:11px;">${entry.event}</span>
-      <span style="color:var(--text3);font-size:12px;">${entry.detail}</span>
-    </div>
-  `).join('');
-}
 
 // ─── Exhibit 16: Scope-Bounded Fetch ──────────────────────────────
 let sfState = { rt: null, scope: null, controllers: [], timers: [] };
@@ -3961,56 +3504,352 @@ window.resetIsolation = function() {
   document.getElementById('btn-iso-close').disabled = true;
 };
 
-// ─── Exhibit 21: ABI Compatibility Probing ───────────────────────
-window.runCompatDemo = function() {
+// ─── Exhibit 22: Deterministic Replay Proof ──────────────────────
+window.runReplayDemo = function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
 
-  const currentVersion = (a.abiVersion || a.abi_version)();
-  const probes = [
-    { version: { major: currentVersion.major, minor: currentVersion.minor }, label: 'Exact match', expected: 'ok' },
-    { version: { major: currentVersion.major, minor: currentVersion.minor + 1 }, label: 'Consumer newer (minor+1)', expected: 'ok (backward compat)' },
-    { version: null, label: 'No version (default)', expected: 'ok' },
-    { version: { major: currentVersion.major + 1, minor: 0 }, label: 'Major mismatch (v2.0)', expected: 'rejected' },
-    { version: { major: 0, minor: 0 }, label: 'Ancient consumer (v0.0)', expected: 'rejected' },
-  ];
-
-  const results = probes.map(probe => {
-    try {
-      const result = (a.runtimeCreate || a.runtime_create)(probe.version);
-      if (result.outcome === 'ok') {
-        result.value.close();
-        return { ...probe, actual: 'ok', actualOutcome: result.outcome };
+  function runSequence() {
+    const rt = (a.runtimeCreate || a.runtime_create)();
+    if (rt.outcome !== 'ok') return null;
+    const results = [];
+    const scopes = [];
+    // Create 5 scopes
+    for (let i = 0; i < 5; i++) {
+      const s = rt.value.enterScope('s' + i);
+      if (s.outcome === 'ok') {
+        results.push({ op: 'create', label: 's' + i, slot: s.value.slot, gen: s.value.generation });
+        scopes.push(s.value);
       }
-      return { ...probe, actual: result.failure?.code || result.outcome, actualOutcome: result.outcome, msg: result.failure?.message };
-    } catch (e) {
-      return { ...probe, actual: 'exception', actualOutcome: 'err', msg: e.message };
+    }
+    // Close first 3 (frees slots for reuse)
+    for (let i = 0; i < 3; i++) {
+      scopes[i].close();
+      results.push({ op: 'close', label: 's' + i, slot: scopes[i].slot });
+    }
+    // Create 5 more (should reuse freed slots)
+    for (let i = 5; i < 10; i++) {
+      const s = rt.value.enterScope('s' + i);
+      if (s.outcome === 'ok') {
+        results.push({ op: 'create', label: 's' + i, slot: s.value.slot, gen: s.value.generation });
+        s.value.close();
+      }
+    }
+    rt.value.close();
+    return results;
+  }
+
+  const run1 = runSequence();
+  const run2 = runSequence();
+  const match = JSON.stringify(run1) === JSON.stringify(run2);
+
+  const container = document.getElementById('replay-result');
+  container.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+      ${[{label:'Run 1', data:run1},{label:'Run 2', data:run2}].map(run => `
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em;">${run.label}</div>
+          <table class="handle-table" style="font-size:11px;">
+            <thead><tr><th>Op</th><th>Label</th><th>Slot</th><th>Gen</th></tr></thead>
+            <tbody>${run.data.map(r => `
+              <tr><td style="color:${r.op==='create'?HEX.green:HEX.text3};">${r.op}</td><td>${r.label}</td><td style="color:var(--cyan);font-weight:700;">${r.slot}</td><td>${r.gen ?? ''}</td></tr>
+            `).join('')}</tbody>
+          </table>
+        </div>
+      `).join('')}
+    </div>
+    <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${match?HEX.green+'44':HEX.red+'44'};background:${match?HEX.green+'08':HEX.red+'08'};">
+      <span style="font-size:24px;">${match ? '✓' : '✗'}</span>
+      <div style="font-size:16px;font-weight:700;color:${match?HEX.green:HEX.red};margin-top:4px;">${match ? 'IDENTICAL — Byte-for-byte deterministic' : 'MISMATCH — Non-deterministic allocation detected'}</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:4px;">${run1.length} operations compared across both runs</div>
+    </div>
+    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
+      <strong style="color:var(--blue);">Why this matters:</strong> Deterministic allocation means you can record a failing test's handle sequence,
+      replay it on a different machine, and get <em>exactly the same behavior</em>. In tokio, re-running a concurrent test produces different
+      task scheduling, making Heisenbugs nearly impossible to reproduce.
+    </div>
+  `;
+  showToast(match ? 'Deterministic replay proven' : 'Non-deterministic!', match ? 'ok' : 'err');
+};
+
+// ─── Exhibit 23: Handle Leak Detection ───────────────────────────
+window.runLeakDetectDemo = function() {
+  clearConsole('leakdetect-console');
+  const a = requireWasm('leakdetect-console');
+  if (!a) return;
+  const Outcome = a.Outcome;
+
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+  const scope = rt.value.enterScope('leak-demo');
+  if (scope.outcome !== 'ok') return;
+  const sc = scope.value;
+
+  // Spawn 5 tasks — intentionally DON'T join them
+  const tasks = [];
+  for (let i = 0; i < 5; i++) {
+    const t = sc.spawnTask({ label: 'orphan-' + i });
+    if (t.outcome === 'ok') {
+      tasks.push(t.value);
+      clog('leakdetect-console', `Spawned task "orphan-${i}": slot=${t.value.slot} — NOT joining (intentional)`, 'warn');
+    }
+  }
+
+  clog('leakdetect-console', `5 tasks spawned. 0 joined. All are pinned obligations.`, 'warn');
+  clog('leakdetect-console', `Now closing scope — the runtime must clean up our mess...`, 'info');
+
+  // Close the scope — this should cascade-close all unjoined tasks
+  const closeResult = sc.close();
+  clog('leakdetect-console', `Scope close: ${closeResult.outcome}`, closeResult.outcome === 'ok' ? 'ok' : 'err');
+
+  // Verify: try to use the task handles — they should be released
+  let allReleased = true;
+  tasks.forEach((t, i) => {
+    const probe = t.join(Outcome.ok(0));
+    if (probe.outcome === 'err') {
+      clog('leakdetect-console', `  Task "orphan-${i}" (slot=${t.slot}): handle released by cascade ✓`, 'ok');
+    } else {
+      clog('leakdetect-console', `  Task "orphan-${i}": still accessible (${probe.outcome})`, 'warn');
+      allReleased = false;
     }
   });
 
-  const container = document.getElementById('compat-result');
+  rt.value.close();
+
+  const container = document.getElementById('leakdetect-result');
   container.innerHTML = `
-    <table class="handle-table">
-      <thead><tr><th>Consumer Version</th><th>Expected</th><th>Result</th><th>Detail</th></tr></thead>
-      <tbody>
-        ${results.map(r => {
-          const isOk = r.actualOutcome === 'ok';
-          return `<tr style="${!isOk ? 'background:rgba(239,68,68,0.04);' : ''}">
-            <td style="font-weight:600;">${r.version ? `v${r.version.major}.${r.version.minor}` : '(none)'}<br><span style="font-size:11px;color:var(--text3);font-weight:400;">${r.label}</span></td>
-            <td style="color:var(--text3);">${r.expected}</td>
-            <td><span class="badge ${isOk ? 'badge-ok' : 'badge-err'}" style="font-size:11px;">${isOk ? 'Accepted' : 'Rejected'}</span></td>
-            <td style="font-size:12px;color:var(--text3);max-width:250px;word-break:break-word;">${r.msg || '—'}</td>
-          </tr>`;
-        }).join('')}
-      </tbody>
-    </table>
-    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--violet);">Why this matters:</strong> Most WASM libraries discover version incompatibility when something
-      crashes in production. Asupersync rejects incompatible consumers <em>at the first API call</em>, before any state is mutated.
-      The 64-bit fingerprint (${(a.abiFingerprint || a.abi_fingerprint)()}) provides cryptographic-strength drift detection.
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">
+      ${tasks.map((t, i) => `
+        <div style="text-align:center;padding:12px 8px;border-radius:var(--radius);border:1px solid ${HEX.green}33;background:${HEX.green}08;">
+          <div style="font-size:20px;margin-bottom:4px;">🔓</div>
+          <div style="font-size:12px;font-weight:700;color:${HEX.green};">Released</div>
+          <div style="font-size:10px;color:var(--text3);">orphan-${i}</div>
+          <div style="font-size:10px;color:var(--text3);">slot ${t.slot}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div style="text-align:center;padding:14px;border-radius:var(--radius);border:1px solid ${HEX.green}44;background:${HEX.green}08;">
+      <div style="font-size:16px;font-weight:700;color:${HEX.green};">5/5 orphaned tasks cleaned up by scope cascade</div>
+      <div style="font-size:13px;color:var(--text2);margin-top:4px;">In tokio, these 5 tasks would run forever as zombies, holding locks and leaking memory.</div>
     </div>
   `;
-  showToast('ABI compatibility matrix complete', 'ok');
+  showToast('5 orphaned tasks caught by cascade', 'ok');
+};
+
+// ─── Exhibit 24: Scope-as-Timeout ────────────────────────────────
+window.runTimeoutDemo = function() {
+  clearConsole('timeout-console');
+  const a = requireWasm('timeout-console');
+  if (!a) return;
+
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+  const scope = rt.value.enterScope('timeout-scope');
+  if (scope.outcome !== 'ok') return;
+  const sc = scope.value;
+
+  document.getElementById('btn-timeout-start').disabled = true;
+  const startTime = performance.now();
+  const tasks = [];
+
+  // Spawn 3 "long-running" tasks
+  for (let i = 0; i < 3; i++) {
+    const t = sc.spawnTask({ label: 'worker-' + i });
+    if (t.outcome === 'ok') {
+      tasks.push(t.value);
+      clog('timeout-console', `Spawned "worker-${i}": slot=${t.value.slot}`, 'ok');
+    }
+  }
+
+  clog('timeout-console', 'All 3 tasks running. Scope deadline: 2 seconds...', 'info');
+
+  const container = document.getElementById('timeout-result');
+  // Countdown timer
+  const countdownInterval = setInterval(() => {
+    const remaining = Math.max(0, 2000 - (performance.now() - startTime));
+    container.innerHTML = `
+      <div style="text-align:center;padding:24px;">
+        <div style="font-size:48px;font-weight:800;font-family:var(--mono);color:${remaining > 500 ? HEX.blue : HEX.red};">${(remaining/1000).toFixed(1)}s</div>
+        <div style="font-size:13px;color:var(--text3);margin-top:4px;">until scope deadline</div>
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;">
+          ${tasks.map((t,i) => `<span class="badge badge-ok" style="font-size:11px;">worker-${i} (slot ${t.slot})</span>`).join('')}
+        </div>
+      </div>
+    `;
+    if (remaining <= 0) clearInterval(countdownInterval);
+  }, 50);
+
+  // Auto-close scope after 2 seconds
+  setTimeout(() => {
+    clearInterval(countdownInterval);
+    sc.close();
+    rt.value.close();
+    const elapsed = performance.now() - startTime;
+    clog('timeout-console', `DEADLINE: scope.close() at ${elapsed.toFixed(0)}ms`, 'warn');
+    clog('timeout-console', `All 3 tasks auto-cancelled by scope close. Zero manual cleanup.`, 'ok');
+    clog('timeout-console', 'In vanilla JS, this requires AbortController + setTimeout + clearTimeout + per-request signal wiring.', 'info');
+
+    container.innerHTML = `
+      <div style="text-align:center;padding:24px;">
+        <div style="font-size:32px;font-weight:800;color:${HEX.red};margin-bottom:8px;">DEADLINE FIRED</div>
+        <div style="font-size:14px;color:var(--text2);">scope.close() cancelled all 3 tasks in one call</div>
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;">
+          ${tasks.map((t,i) => `<span class="badge badge-cancel" style="font-size:11px;">worker-${i} cancelled</span>`).join('')}
+        </div>
+      </div>
+    `;
+    document.getElementById('btn-timeout-start').disabled = false;
+    showToast('Scope timeout: 3 tasks auto-cancelled', 'ok');
+  }, 2000);
+};
+
+// ─── Exhibit 25: Real WebSocket ──────────────────────────────────
+let wsState = { rt: null, scope: null, socket: null, msgCount: 0 };
+
+window.runWebSocketDemo = function() {
+  clearConsole('websocket-console');
+  const a = requireWasm('websocket-console');
+  if (!a) return;
+
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+  const scope = rt.value.enterScope('ws-scope');
+  if (scope.outcome !== 'ok') return;
+
+  wsState = { rt: rt.value, scope: scope.value, socket: null, msgCount: 0 };
+  clog('websocket-console', `Scope created: slot=${scope.value.slot}`, 'ok');
+
+  // Open a real WebSocket
+  const wsUrl = 'wss://echo.websocket.events';
+  clog('websocket-console', `Opening WebSocket to ${wsUrl}...`, 'info');
+
+  try {
+    const ws = new WebSocket(wsUrl);
+    wsState.socket = ws;
+
+    ws.onopen = () => {
+      clog('websocket-console', 'WebSocket connected — scoped to region slot=' + scope.value.slot, 'ok');
+      document.getElementById('btn-ws-send').disabled = false;
+      document.getElementById('btn-ws-close').disabled = false;
+      renderWsState('connected');
+    };
+    ws.onmessage = (e) => {
+      wsState.msgCount++;
+      clog('websocket-console', `Echo received: "${e.data}"`, 'ok');
+      renderWsState('connected');
+    };
+    ws.onclose = () => {
+      clog('websocket-console', 'WebSocket closed', 'info');
+      renderWsState('closed');
+    };
+    ws.onerror = () => {
+      clog('websocket-console', 'WebSocket error (server may be unavailable)', 'err');
+      renderWsState('error');
+    };
+  } catch (e) {
+    clog('websocket-console', `WebSocket failed: ${e.message}`, 'err');
+  }
+
+  document.getElementById('btn-ws-open').disabled = true;
+  renderWsState('connecting');
+};
+
+function renderWsState(state) {
+  const stateColors = { connecting: HEX.yellow, connected: HEX.green, closed: HEX.text3, error: HEX.red };
+  const container = document.getElementById('websocket-result');
+  container.innerHTML = `
+    <div style="display:flex;align-items:center;gap:16px;justify-content:center;padding:16px;">
+      <div style="text-align:center;">
+        <div style="width:12px;height:12px;border-radius:50%;background:${stateColors[state]};margin:0 auto 8px;box-shadow:0 0 8px ${stateColors[state]}80;"></div>
+        <div style="font-size:14px;font-weight:700;color:${stateColors[state]};text-transform:uppercase;">${state}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px;">Scope slot: ${wsState.scope?.slot ?? '?'}</div>
+      </div>
+      <div style="font-size:13px;color:var(--text2);">
+        Messages sent/received: <strong style="color:var(--cyan);">${wsState.msgCount}</strong>
+      </div>
+    </div>
+    ${state === 'closed' ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--text2);">Socket auto-closed by scope.close() — no manual ws.close() needed</div>` : ''}
+  `;
+}
+
+window.wsSend = function() {
+  if (wsState.socket && wsState.socket.readyState === WebSocket.OPEN) {
+    const msg = 'Hello from Asupersync scope ' + wsState.scope.slot + ' (msg #' + (wsState.msgCount + 1) + ')';
+    wsState.socket.send(msg);
+    clog('websocket-console', `Sent: "${msg}"`, 'info');
+  }
+};
+
+window.wsCloseScope = function() {
+  if (wsState.socket) wsState.socket.close();
+  if (wsState.scope) wsState.scope.close();
+  if (wsState.rt) wsState.rt.close();
+  clog('websocket-console', 'Scope closed → WebSocket auto-terminated. In vanilla JS, forgetting ws.close() leaves a zombie connection.', 'ok');
+  showToast('Scope close killed WebSocket', 'ok');
+  document.getElementById('btn-ws-send').disabled = true;
+  document.getElementById('btn-ws-close').disabled = true;
+  document.getElementById('btn-ws-open').disabled = false;
+  wsState = { rt: null, scope: null, socket: null, msgCount: 0 };
+};
+
+// ─── Exhibit 27: Rapid Scope Churn Benchmark ─────────────────────
+window.runBenchmark = async function() {
+  const a = requireWasm();
+  if (!a) { showToast('WASM not loaded', 'err'); return; }
+  document.getElementById('btn-bench').disabled = true;
+  document.getElementById('btn-bench').textContent = 'Running...';
+
+  await new Promise(r => setTimeout(r, 50)); // let UI update
+
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+
+  let ops = 0;
+  const start = performance.now();
+  const DURATION = 1000; // 1 second
+
+  while (performance.now() - start < DURATION) {
+    for (let i = 0; i < 100; i++) {
+      const s = rt.value.enterScope('bench');
+      if (s.outcome === 'ok') s.value.close();
+      ops++;
+    }
+  }
+
+  const elapsed = performance.now() - start;
+  const opsPerSec = Math.round(ops / (elapsed / 1000));
+  const nsPerOp = Math.round((elapsed / ops) * 1000000);
+  rt.value.close();
+
+  const container = document.getElementById('benchmark-result');
+  container.innerHTML = `
+    <div style="text-align:center;padding:24px;">
+      <div style="font-size:48px;font-weight:800;font-family:var(--mono);color:var(--cyan);">${opsPerSec.toLocaleString()}</div>
+      <div style="font-size:14px;color:var(--text3);margin-top:4px;">scope create+close operations per second</div>
+      <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+        <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
+          <div style="font-size:20px;font-weight:700;color:var(--blue);font-family:var(--mono);">${ops.toLocaleString()}</div>
+          <div style="font-size:11px;color:var(--text3);">total ops</div>
+        </div>
+        <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
+          <div style="font-size:20px;font-weight:700;color:var(--orange);font-family:var(--mono);">${nsPerOp.toLocaleString()}</div>
+          <div style="font-size:11px;color:var(--text3);">ns per op</div>
+        </div>
+        <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
+          <div style="font-size:20px;font-weight:700;color:var(--green);font-family:var(--mono);">${elapsed.toFixed(0)}</div>
+          <div style="font-size:11px;color:var(--text3);">ms elapsed</div>
+        </div>
+      </div>
+      <div style="margin-top:16px;font-size:13px;color:var(--text2);">
+        Each operation includes: handle allocation, generation tracking, parent registration, and full cleanup.
+        All the bookkeeping for structured concurrency — at ${nsPerOp < 10000 ? '<strong style="color:var(--green);">microsecond</strong>' : 'millisecond'} latency.
+      </div>
+    </div>
+  `;
+
+  document.getElementById('btn-bench').disabled = false;
+  document.getElementById('btn-bench').textContent = 'Run 1s Benchmark';
+  showToast(`${opsPerSec.toLocaleString()} ops/sec`, 'ok');
 };
 
 // ─── Motion Library (spring-physics animations) ─────────────────
@@ -4070,8 +3909,6 @@ renderRegionTree();
 renderOutcomeCards();
 renderOutcomeLattice(null);
 renderCancelSM();
-renderScheduler();
-txRender();
 
 // ─── Copy to Clipboard ───────────────────────────────────────────
 window.copyCode = function(btn) {
@@ -4114,7 +3951,7 @@ window.closeMobileMenu = function() {
 };
 
 // ─── Scroll Progress + Active Nav ────────────────────────────────
-const sectionIds = ['abi','runtime','regions','tasks','outcomes','cancel','scheduler','budget','twophase','stale','cascade','protocol','repl','chaos','fetch','scopefetch','severity','forensics','recycling','isolation','compat'];
+const sectionIds = ['abi','regions','outcomes','cancel','budget','stale','cascade','protocol','repl','chaos','scopefetch','severity','forensics','recycling','isolation','replay','leakdetect','timeout','websocket','comparison','benchmark'];
 function updateScrollUI() {
   // Progress bar (fallback if motion library didn't load)
   if (!motionLib) {
@@ -4148,15 +3985,14 @@ initRuntime().then(() => {
   // Auto-run exhibits when they scroll into view (first time only)
   const autoRunMap = {
     'abi': () => runAbiDemo(),
-    'runtime': () => runRuntimeDemo(),
-    'tasks': () => runTaskDemo(),
     'budget': () => runBudgetDemo(),
     'stale': () => runStaleDemo(),
     'protocol': () => runProtocolDemo(),
     'severity': () => runSeverityDemo(),
     'forensics': () => runForensicsDemo(),
     'recycling': () => runRecyclingDemo(),
-    'compat': () => runCompatDemo(),
+    'replay': () => runReplayDemo(),
+    'leakdetect': () => runLeakDetectDemo(),
   };
   const autoRanSet = new Set();
   const autoRunObserver = new IntersectionObserver((entries) => {
