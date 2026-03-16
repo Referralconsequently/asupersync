@@ -25,6 +25,7 @@
     "envelope_version": "worker-envelope-v1",
     "required_fields": [
       "message_id",
+      "decision_seq",
       "job_id",
       "region_id",
       "task_id",
@@ -33,9 +34,10 @@
       "seq_no",
       "seed",
       "issued_at_turn",
+      "replay_hash",
       "payload"
     ],
-    "operations": [
+    "request_operations": [
       "spawn_job",
       "poll_status",
       "cancel_job",
@@ -43,6 +45,21 @@
       "finalize_job",
       "shutdown_worker"
     ],
+    "event_operations": [
+      "bootstrap_ready",
+      "bootstrap_failed",
+      "status_snapshot",
+      "job_completed",
+      "cancel_acknowledged",
+      "drain_completed",
+      "finalize_completed",
+      "shutdown_completed",
+      "diagnostic"
+    ],
+    "payload_transfer_modes": [
+      "structured_clone"
+    ],
+    "owned_payload_required": true,
     "states": [
       "created",
       "queued",

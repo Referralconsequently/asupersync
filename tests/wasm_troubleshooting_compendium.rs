@@ -56,13 +56,19 @@ fn troubleshooting_doc_includes_deterministic_command_paths() {
     let required_tokens = [
         "python3 scripts/run_browser_onboarding_checks.py --scenario all",
         "python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding",
+        "python3 scripts/run_browser_onboarding_checks.py --scenario worker",
         "bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute",
         "bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke",
         "bash ./scripts/run_all_e2e.sh --verify-matrix",
         "python3 scripts/check_wasm_dependency_policy.py",
         "--policy .github/wasm_dependency_policy.json",
+        "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
         "rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture",
+        "rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture",
+        "rch exec -- cargo test --test wasm_browser_feasibility_matrix dedicated_worker_storage_ -- --nocapture",
         "rch exec -- cargo test --test wasm_bundler_compatibility -- --nocapture",
+        "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
         "python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json",
         "rch exec -- cargo test --test obligation_wasm_parity wasm_full_browser_lifecycle_simulation -- --nocapture",
     ];
@@ -91,9 +97,12 @@ fn troubleshooting_doc_includes_expected_artifacts_and_cross_refs() {
 
     let required_artifacts = [
         "artifacts/onboarding/vanilla.summary.json",
+        "artifacts/onboarding/worker.summary.json",
         "artifacts/wasm_bundler_compatibility_summary.json",
         "artifacts/wasm_flake_governance_report.json",
         "artifacts/wasm_flake_governance_events.ndjson",
+        "target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
         "target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json",
         "target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json",
     ];
@@ -106,6 +115,7 @@ fn troubleshooting_doc_includes_expected_artifacts_and_cross_refs() {
 
     let required_refs = [
         "docs/integration.md",
+        "docs/wasm_canonical_examples.md",
         "docs/wasm_quickstart_migration.md",
         "docs/wasm_qa_evidence_matrix_contract.md",
         "docs/wasm_bundler_compatibility_matrix.md",
@@ -133,6 +143,32 @@ fn troubleshooting_doc_mentions_browser_qa_smoke_ci_lane_contract() {
         assert!(
             doc.contains(token),
             "Troubleshooting compendium missing Browser Edition QA smoke token: {token}"
+        );
+    }
+}
+
+#[test]
+fn troubleshooting_doc_covers_browser_storage_and_artifact_failure_paths() {
+    let doc = load_doc();
+    for token in [
+        "ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED",
+        "ASUPERSYNC_BROWSER_ARTIFACT_OPERATION_FAILED",
+        "ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED",
+        "BrowserArtifactStore",
+        "exportArchive()",
+        "downloadArchive()",
+        "blocked_upgrade",
+        "quota_exceeded",
+        "download_unavailable",
+        "worker_storage_roundtrip_marker",
+        "worker_artifact_export_marker",
+        "worker_artifact_download_guard_marker",
+        "worker_artifact_quota_guard_marker",
+        "worker_artifact_cleanup_marker",
+    ] {
+        assert!(
+            doc.contains(token),
+            "Troubleshooting compendium missing browser storage/artifact token: {token}"
         );
     }
 }

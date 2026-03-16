@@ -150,25 +150,43 @@ Worker jobs remain owned by the originating region/task tuple:
 
 Worker control uses typed envelopes with deterministic sequencing:
 
-1. Required fields include `message_id`, `job_id`, `op`, `seq_no`, `seed`,
-   `issued_at_turn`, and ownership fields.
-2. Allowed operations are limited to:
+1. Required envelope metadata includes `message_id`, `seq_no`,
+   `decision_seq`, `seed`, `issued_at_turn`, and `replay_hash`.
+2. Ownership-bearing job messages carry `job_id`, `region_id`, `task_id`,
+   `obligation_id`, `op`, and any payload bytes.
+3. Request operations are limited to:
    - `spawn_job`
    - `poll_status`
    - `cancel_job`
    - `drain_job`
    - `finalize_job`
    - `shutdown_worker`
-3. Terminal states are only `completed` or `failed`.
+4. Event operations are limited to:
+   - `bootstrap_ready`
+   - `bootstrap_failed`
+   - `status_snapshot`
+   - `job_completed`
+   - `cancel_acknowledged`
+   - `drain_completed`
+   - `finalize_completed`
+   - `shutdown_completed`
+   - `diagnostic`
+5. The concrete v1 non-SAB lane uses owned byte payloads with
+   structured-clone semantics. Shared memory is forbidden; any future
+   transferable `ArrayBuffer` widening must preserve the same ownership and
+   cancellation law.
+6. Terminal states are only `completed` or `failed`.
 
 ### W4: Cancellation Across Worker Boundary
 
 Worker lifecycle must preserve runtime cancellation semantics:
 
 1. Cancel request (`cancel_job`) is acknowledged within `request_timeout_ms`.
-2. Worker executes bounded drain (`drain_job`) and bounded finalize
-   (`finalize_job`).
-3. Required trace events:
+2. After `cancel_acknowledged`, the coordinator emits explicit `drain_job` and
+   `finalize_job` control messages rather than silently collapsing the phases.
+3. Worker executes bounded drain (`drain_job`) and bounded finalize
+   (`finalize_job`) under those explicit control points.
+4. Required trace events:
    - `worker_cancel_requested`
    - `worker_cancel_acknowledged`
    - `worker_drain_started`
@@ -181,8 +199,8 @@ Offloaded execution remains replay-safe only when the worker envelope includes:
 
 1. `seed`
 2. `decision_seq`
-3. `host_turn_id`
-4. replay hash / digest key
+3. `issued_at_turn` (host turn identifier)
+4. `replay_hash`
 
 Missing any of these is a policy violation.
 

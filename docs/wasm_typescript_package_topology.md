@@ -69,6 +69,13 @@ runtime/capability inventory lives in `docs/wasm_api_surface_census.md`.
 | Next server / edge | Bridge-only | Use the explicit `use_server_bridge` / `use_edge_bridge` fallbacks instead of direct Browser Edition execution. |
 | Plain Node / SSR / non-browser test process | Not a Browser Edition direct-runtime target | Use native `asupersync` or explicit bridge seams rather than catching unsupported-runtime errors and continuing. |
 
+Maintained dedicated-worker validation path:
+
+- fixture: `tests/fixtures/dedicated-worker-consumer`
+- validator: `scripts/validate_dedicated_worker_consumer.sh`
+- onboarding lane: `python3 scripts/run_browser_onboarding_checks.py --scenario worker`
+- artifact pointer: `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`
+
 ## Rust Crate Layout and Artifact Provenance
 
 The TypeScript package topology is layered over a separate Rust crate layout.
@@ -294,6 +301,13 @@ python3 scripts/check_wasm_typescript_package_policy.py \
   --policy .github/wasm_typescript_package_policy.json \
   --only-scenario TS-PKG-NEXT-ESM \
   --only-scenario TS-PKG-NEXT-CJS
+```
+
+Dedicated-worker validation lane:
+
+```bash
+python3 scripts/run_browser_onboarding_checks.py --scenario worker
+PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 ```
 
 Reference verification:

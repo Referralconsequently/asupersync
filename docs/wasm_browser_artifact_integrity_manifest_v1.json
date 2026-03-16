@@ -5,12 +5,12 @@
   "entries": [
     {
       "path": "docs/wasm_browser_sbom_v1.json",
-      "sha256": "afc88af2791b31d145b68fcbeac9047e5bea8714210e5786c5069db3649be70e",
+      "sha256": "714856e4ee441bbb912199f886f8c90fd47b2eba239940449845b472e6453660",
       "kind": "sbom"
     },
     {
       "path": "docs/wasm_browser_provenance_attestation_v1.json",
-      "sha256": "aaec39d0046001ed809bf9f7704adb1fcba20631b717e250710dc64b3f5aaad9",
+      "sha256": "8ba00bd28a72ea32b3a64c6e353b651438154f14a5ca193c817cab5ee5e5c882",
       "kind": "provenance"
     },
     {
@@ -20,22 +20,22 @@
     },
     {
       "path": "packages/browser-core/index.js",
-      "sha256": "740a8968ea973a27ffa367c04f83be46d7aca4daba8737c1d5e275dd00b87bb3",
+      "sha256": "cde7057172e0c3b5b372d0a86337f91f00b08eac91ef009c7cfad6f883182da1",
       "kind": "package-file"
     },
     {
       "path": "packages/browser-core/index.d.ts",
-      "sha256": "c2279fa93aa660ea5a9ab8176ee1823c8225c900dba59a8faa43a808969a340c",
+      "sha256": "5cfe6b22f2a1834ef104dfe06200067c5ca704c86fbdc133af459a4377fed787",
       "kind": "package-file"
     },
     {
       "path": "packages/browser-core/asupersync.js",
-      "sha256": "2ca16fe7ad1350976dbd1f2bd72c8b15bf361a43bed1b1d81bb6f85c55ac98a4",
+      "sha256": "9c7110be3da3e3372a6273df25482c54f2868ab8d409c3cf73d655f2f60681f1",
       "kind": "package-file"
     },
     {
       "path": "packages/browser-core/asupersync.d.ts",
-      "sha256": "cb47f89ca34b5d0f1421009a95ecb8972536fe4a57e102a0822cb9f6f391d50b",
+      "sha256": "f7ed0dc477decc114a42a310a715259ec8739f1d8ce2f1a8f3d248225b6c9c9b",
       "kind": "package-file"
     },
     {
@@ -45,12 +45,12 @@
     },
     {
       "path": "packages/browser-core/asupersync_bg.wasm",
-      "sha256": "d4e7690dcf2c87ebf09d512ccdeb10114c80e05e14d70626e26fae7b480eb443",
+      "sha256": "df617eba513cdf72d4acea14088c05efb7dca05af9adff85ef4296b0d51f9aae",
       "kind": "wasm"
     },
     {
       "path": "packages/browser-core/asupersync_bg.wasm.d.ts",
-      "sha256": "04e1d000b3d26951e240f8f2902b72f1dd718e692ca1eefbef38027539bc2de5",
+      "sha256": "b2c6e5bc662390c76e656ab63e244a0f10b3f90b6c364784f79589fad46718c0",
       "kind": "package-file"
     },
     {

@@ -73,6 +73,30 @@ When a runtime is outside the supported envelope, route through the bridge-only
 pattern and keep capability boundaries explicit instead of adding ambient
 runtime fallbacks.
 
+## Rust-Authored Browser Consumer Snapshot
+
+Use this table when the author is writing browser-facing code in Rust rather
+than consuming the shipped JS/TS packages.
+
+| Goal | Status today | Recommended lane |
+|---|---|---|
+| Verify browser-safe cfg/feature closure for the semantic core | Supported | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` |
+| Maintain the wasm ABI/export boundary from Rust | Supported for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` |
+| Ship a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Not yet a public supported lane | Treat this as future work under `asupersync-4l9iw`; use `@asupersync/browser` / `@asupersync/react` / `@asupersync/next` today |
+
+Rules for migration guidance:
+
+- Do not describe `asupersync-browser-core` or `asupersync-wasm` as the public
+  end-user Browser Edition SDK for Rust consumers. They are binding/export
+  crates that feed the JS/TS packages.
+- Do not promise `RuntimeBuilder` parity or direct `Cx`/`Scope` browser
+  bootstrapping from external Rust app code until the runtime exposes that lane
+  explicitly.
+- Keep the Rust-authored browser story on the same support matrix as JS/TS:
+  browser main thread and dedicated worker are the direct-runtime contexts for
+  the shipped product, while service/shared workers, SAB-based parallelism, and
+  native-only surfaces remain deferred or unsupported.
+
 ## Release Channel Workflow (WASM-14 / `asupersync-umelq.15.3`)
 
 Browser onboarding and migration should flow through the release-channel

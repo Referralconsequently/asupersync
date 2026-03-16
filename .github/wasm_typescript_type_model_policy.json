@@ -3,7 +3,7 @@
   "description": "Deterministic TypeScript type-model contract for Browser Edition runtime semantics.",
   "type_surface": {
     "outcome_variants": ["ok", "err", "cancelled", "panicked"],
-    "cancellation_phase_order": ["requested", "draining", "finalizing", "completed"],
+    "cancellation_phase_order": ["requested", "cancelling", "finalizing", "completed"],
     "required_types": [
       "Outcome<T, E>",
       "Budget",

@@ -51,10 +51,11 @@ wins.
 | Next.js client component after hydration | Direct-runtime supported | `packages/next/src/index.ts` models `client_hydrated` as the direct-runtime lane and `client_ssr` as defer-until-hydrated | The client target is valid only once hydration hands control to the browser. |
 | Next.js server component / route handler / Node server | Bridge-only | `packages/next/src/index.ts` maps these environments to `use_server_bridge` and marks direct runtime unsupported | Keep Browser Edition handles out of server execution paths. |
 | Next.js edge runtime | Bridge-only | `packages/next/src/index.ts` maps `edge_runtime` to `use_edge_bridge` and `directRuntimeSupported: false` | Edge Web API subsets are not treated as direct Browser Edition execution authority. |
-| Durable browser storage: `localStorage` | Guarded optional | `src/io/browser_storage.rs` registers a wasm `LocalStorageHostBackend`, but the JS/TS packages do not expose a public Browser Edition storage API | The capability exists below the package layer and still needs productization. |
-| Durable browser storage: IndexedDB | Feasible, but not yet shipped | `src/io/browser_storage.rs` has a complete `IndexedDbHostBackend` with `set`/`get`/`clear`/`list_keys` via `web_sys::IdbFactory` (worker-compatible); `src/io/cap.rs` has full policy validation | Rust host backend is complete; the gap is only in the public JS/TS package surface (no `BrowserStorage` export). |
+| Durable browser storage: `localStorage` | Guarded package-level support in `@asupersync/browser` | `src/io/browser_storage.rs` registers a wasm `LocalStorageHostBackend`, and `packages/browser/src/index.ts` exposes it through `BrowserStorage` backend selection plus support diagnostics | Public, explicit backend for main-thread preference-style persistence; still intentionally non-worker and less durable than IndexedDB. |
+| Durable browser storage: IndexedDB | Direct-runtime supported in `@asupersync/browser` on browser main thread and dedicated workers | `src/io/browser_storage.rs` has a complete `IndexedDbHostBackend` with `set`/`get`/`clear`/`list_keys` via `web_sys::IdbFactory` (worker-compatible); `src/io/cap.rs` has full policy validation; `packages/browser/src/index.ts` exports `BrowserStorage` + storage diagnostics | Rust `IndexedDbHostBackend` host backend is complete, and the public JS/TS package surface now ships blocked-open, quota, and transaction-failure diagnostics. |
+| Runtime trace / crash / evidence artifact persistence | Direct-runtime supported through explicit `BrowserArtifactStore` export flows in `@asupersync/browser` | `packages/browser/src/index.ts` adds `BrowserArtifactStore`, explicit retention policy, `persistTraceRecord()` / `persistCrashArtifact()` / `persistEvidenceArtifact()`, plus `exportArtifact()` / `exportArchive()` / `downloadArtifact()` | Persistence remains opt-in and quota-bounded. Main-thread DOM runtimes can trigger direct downloads; dedicated workers export bytes/blob payloads and hand them to a UI boundary. |
 | Browser-native transport: `fetch` + WebSocket | Direct-runtime supported on the main thread and in dedicated workers | `asupersync-browser-core/src/lib.rs` exports `fetch_request`, `websocket_open`, `websocket_send`, `websocket_recv`, and `websocket_close`, and the fetch host now accepts `window` or `WorkerGlobalScope` | This is the live browser I/O envelope today for supported browser SDK hosts. |
-| Browser-native transport: WebTransport | Feasible, but not yet shipped | `src/io/cap.rs` defines `BrowserTransportKind::WebTransport`, but there is no matching browser-core host implementation or JS/TS package export | The capability policy exists ahead of a real runtime lane. |
+| Browser-native transport: WebTransport datagrams | Guarded direct-runtime support in `@asupersync/browser-core` and `@asupersync/browser` | `src/io/cap.rs` defines `BrowserTransportKind::WebTransport`; `packages/browser-core/index.js` + `index.d.ts` expose `webtransport_*`; `packages/browser/src/index.ts` adds diagnostics plus `RegionHandle.openWebTransport()` / `WebTransportHandle` | Shipped as an explicit capability-gated lane. The public surface is datagram-oriented and intentionally does not imply raw-socket parity. |
 | Rust-authored Asupersync consumer compiled to `wasm32-unknown-unknown` | Feasible, but not yet shipped | `docs/WASM.md` documents this path as architecturally plausible but not public, documented, or tested end-to-end | The semantic core is portable, but there is no public Rust-facing browser bootstrap contract yet. |
 | SharedArrayBuffer / multi-worker browser offload | Feasible, but not yet shipped | `src/runtime/config.rs` defines `BrowserWorkerOffloadConfig`, while `docs/WASM.md` still treats threaded WASM as a future phase gated on cross-origin isolation | Parallel browser execution remains scaffolded policy, not a shipped runtime lane. |
 | Native OS surfaces (`fs`, `process`, `signal`, raw TCP/UDP, native DB clients, Kafka, native QUIC/H3`) | Impossible or non-goal for direct browser runtime | `docs/WASM.md` calls these native-only or browser-unavailable, and the workspace keeps them behind wasm-incompatible feature gates | Reach them through browser-native substitutes or explicit server/edge bridges, not direct Browser Edition execution. |
@@ -66,13 +67,16 @@ wins.
    and `asupersync-browser-core/src/lib.rs` now admit dedicated-worker
    bootstrap + fetch hosting, while service/shared workers remain bridge-only
    and framework adapters still target client-rendered browser trees.
-2. Browser storage has complete Rust host backends for both `localStorage`
-   and `IndexedDB` in `src/io/browser_storage.rs`, plus a full policy layer
-   in `src/io/cap.rs`. The published JS/TS package stack still has no
-   first-class storage API — the gap is packaging, not implementation.
-3. WebTransport exists in the capability vocabulary (`src/io/cap.rs`) before
-   it exists as a shipped browser runtime lane. `asupersync-browser-core`
-   and the JS packages do not currently expose a WebTransport host binding.
+2. `MessagePort` and `BroadcastChannel` have reactor-level bindings in
+   `src/runtime/reactor/browser.rs`, but there is still no public
+   JS/TS package API for them.
+3. Browser stream bridging (`src/io/browser_stream.rs`) is implemented in
+   Rust, but it still is not exported as a public JS/TS Browser Edition API.
+4. WebTransport is now shipped at the JS package layer, but some package/topology
+   docs still describe browser transport as only `fetch` + WebSocket. The
+   architecture is also easy to misstate: the low-level `@asupersync/browser-core`
+   package composes existing dispatcher primitives into a WebTransport lane
+   without adding a new Rust `wasm-bindgen` export in `asupersync-browser-core/src/lib.rs`.
 
 ---
 
@@ -186,7 +190,7 @@ These modules contain pure logic, data types, algorithms, and combinators with n
 - **Public API:** `Evidence`, `EvidenceEntry`, `EvidenceSink`
 - **OS deps:** `parking_lot::Mutex` in evidence_sink.rs
 - **Browser classification:** OPTIONAL — evidence collection for forensics
-- **Notes:** evidence_sink borderline T1/T2
+- **Notes:** Core evidence sinks are still native/memory oriented, but the public browser package now provides `BrowserArtifactStore` as the explicit browser-safe persistence/export layer for evidence payloads.
 
 ### monitor.rs — Resource Monitoring
 - **Lines:** 1,382
@@ -392,7 +396,7 @@ These modules require OS primitives but contain valuable core algorithms. They n
   - **Clock-dependent:** minimizer.rs (1,311), flamegraph.rs (1,312)
 - **OS deps:** `std::fs` in file output; `std::time::Instant` in timing; `libc::ENOSPC` in file.rs
 - **Browser classification:** REQUIRED with platform seam
-- **Adaptation:** Replace file I/O with IndexedDB/memory. Replace Instant with performance.now(). Replay and event logic are pure.
+- **Adaptation:** Replace file I/O with IndexedDB/memory via explicit browser package clients such as `BrowserArtifactStore`. Replace Instant with performance.now(). Replay and event logic are pure.
 
 ---
 

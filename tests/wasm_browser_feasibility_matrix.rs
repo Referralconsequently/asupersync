@@ -240,15 +240,15 @@ fn abi_versioning_is_direct_runtime_supported() {
     );
 }
 
-// ── Direct-runtime feasible but not yet shipped capabilities ─────────
+// ── Browser capabilities with real substrate/package evidence ────────
 
 #[test]
-fn indexeddb_is_feasible_with_real_host_backend() {
+fn indexeddb_is_direct_runtime_supported_with_real_host_backend() {
     // Evidence: src/io/browser_storage.rs has a complete
     // IndexedDbHostBackend with set/get/clear/list_keys wired through
     // web_sys::IdbFactory. The policy layer in src/io/cap.rs validates
-    // requests. But the public @asupersync/browser package has no
-    // IndexedDB exports.
+    // requests, and the public @asupersync/browser package now exposes
+    // a BrowserStorage API for the shipped JS/TS surface.
     let storage_src = read_file("src/io/browser_storage.rs");
     assert!(
         storage_src.contains("IndexedDbHostBackend"),
@@ -258,23 +258,107 @@ fn indexeddb_is_feasible_with_real_host_backend() {
         storage_src.contains("IdbFactory"),
         "IndexedDB host must use IdbFactory"
     );
-    // Negative: no public JS/TS API yet
     let browser_src = read_file("packages/browser/src/index.ts");
     assert!(
-        !browser_src.contains("indexedDb") && !browser_src.contains("IndexedDb"),
-        "browser SDK must NOT yet export IndexedDB APIs (not shipped)"
+        browser_src.contains("BrowserStorage")
+            && browser_src.contains("detectBrowserStorageSupport")
+            && browser_src.contains("indexeddb"),
+        "browser SDK must export IndexedDB storage APIs once shipped"
     );
 }
 
 #[test]
-fn localstorage_is_feasible_substrate_only() {
+fn localstorage_has_guarded_package_level_support() {
     // Evidence: src/io/browser_storage.rs has LocalStorageHostBackend
-    // wired through web_sys::Storage. Not exposed in public packages.
+    // wired through web_sys::Storage and the browser SDK now exposes it
+    // as a guarded package-level backend.
     let storage_src = read_file("src/io/browser_storage.rs");
     assert!(
         storage_src.contains("LocalStorage") || storage_src.contains("localStorage"),
         "localStorage host backend must exist"
     );
+    let browser_src = read_file("packages/browser/src/index.ts");
+    assert!(
+        browser_src.contains("localstorage") || browser_src.contains("localStorage"),
+        "browser SDK must surface localStorage as an explicit backend"
+    );
+}
+
+#[test]
+fn browser_runtime_artifact_persistence_is_direct_runtime_supported() {
+    // Evidence: the browser SDK now exposes an explicit BrowserArtifactStore
+    // on top of BrowserStorage for trace/crash/evidence persistence with
+    // export flows and bounded retention.
+    let browser_src = read_file("packages/browser/src/index.ts");
+    assert!(
+        browser_src.contains("BrowserArtifactStore")
+            && browser_src.contains("createBrowserArtifactStore")
+            && browser_src.contains("persistTraceRecord")
+            && browser_src.contains("exportArchive"),
+        "browser SDK must expose explicit runtime artifact persistence helpers"
+    );
+}
+
+#[test]
+fn browser_main_thread_storage_artifact_download_flow_is_supported() {
+    let browser_src = read_file("packages/browser/src/index.ts");
+    assert!(
+        browser_src.contains("browser_main_thread")
+            && browser_src.contains("createBrowserStorage")
+            && browser_src.contains("createBrowserArtifactStore")
+            && browser_src.contains("downloadArtifact")
+            && browser_src.contains("downloadArchive"),
+        "browser main thread must retain the explicit storage + download artifact flow"
+    );
+}
+
+#[test]
+fn dedicated_worker_storage_export_flow_is_supported() {
+    let browser_src = read_file("packages/browser/src/index.ts");
+    assert!(
+        browser_src.contains("dedicated_worker")
+            && browser_src.contains("createBrowserStorage")
+            && browser_src.contains("exportArchive")
+            && browser_src.contains(
+                "browser artifact archive downloads require a browser main-thread document; use exportArchive() in workers",
+            ),
+        "dedicated workers must retain storage/export support plus main-thread-only download guidance"
+    );
+}
+
+#[test]
+fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
+    let worker_src = read_file("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
+    for marker in [
+        "worker-storage-support",
+        "worker-storage-roundtrip",
+        "worker-storage-artifact-export-handoff",
+        "worker-artifact-archive",
+        "worker-artifact-download-unavailable",
+        "worker-artifact-quota-guard",
+        "worker-artifact-cleanup",
+    ] {
+        assert!(
+            worker_src.contains(marker),
+            "dedicated-worker fixture must preserve storage/artifact marker: {marker}"
+        );
+    }
+
+    let validator = read_file("scripts/validate_dedicated_worker_consumer.sh");
+    for marker in [
+        "worker_storage_support_marker",
+        "worker_storage_roundtrip_marker",
+        "storage_artifact_marker",
+        "worker_artifact_export_marker",
+        "worker_artifact_download_guard_marker",
+        "worker_artifact_quota_guard_marker",
+        "worker_artifact_cleanup_marker",
+    ] {
+        assert!(
+            validator.contains(marker),
+            "dedicated-worker validator must preserve storage/artifact summary marker: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -300,19 +384,20 @@ fn broadcast_channel_reactor_binding_exists_as_substrate() {
 }
 
 #[test]
-fn web_transport_is_modeled_not_implemented() {
+fn web_transport_is_capability_gated_in_public_packages() {
     // Evidence: src/io/cap.rs defines BrowserTransportKind::WebTransport
-    // in the capability model, but no host backend exists.
+    // and the public JS packages now expose a guarded datagram lane.
     let cap_src = read_file("src/io/cap.rs");
     assert!(
         cap_src.contains("WebTransport"),
         "cap.rs must model WebTransport capability"
     );
-    // Negative: no host implementation
-    let core_lib = read_file("asupersync-browser-core/src/lib.rs");
+    let browser_src = read_file("packages/browser/src/index.ts");
     assert!(
-        !core_lib.contains("WebTransport"),
-        "browser-core must NOT yet implement WebTransport host binding"
+        browser_src.contains("detectWebTransportSupport")
+            && browser_src.contains("openWebTransport")
+            && browser_src.contains("WebTransportHandle"),
+        "browser SDK must expose the capability-gated WebTransport lane"
     );
 }
 
@@ -384,12 +469,22 @@ fn docs_wasm_md_has_authoritative_matrix_section() {
 
 #[test]
 fn docs_wasm_md_classifies_indexeddb_accurately() {
-    // IndexedDB has a real host backend now, but the docs should note
-    // that the public package surface is not yet shipped.
+    // IndexedDB has a real host backend and a public browser package surface.
     let doc = read_file("docs/WASM.md");
     assert!(
         doc.contains("IndexedDB"),
         "docs/WASM.md must discuss IndexedDB classification"
+    );
+}
+
+#[test]
+fn docs_wasm_md_classifies_browser_artifact_persistence() {
+    let doc = read_file("docs/WASM.md");
+    assert!(
+        doc.contains("BrowserArtifactStore")
+            && doc.contains("exportArtifact()")
+            && doc.contains("exportArchive()"),
+        "docs/WASM.md must describe explicit browser artifact persistence/export flows"
     );
 }
 
@@ -414,13 +509,13 @@ fn docs_wasm_md_classifies_dedicated_worker_as_direct_runtime() {
 /// resolved").
 #[test]
 fn known_contradictions_are_tracked() {
-    // Contradiction 1: IndexedDB host backend is complete in Rust, but
-    // the public @asupersync/browser package has no storage exports.
+    // Resolved contradiction 1: IndexedDB host backend is complete in Rust
+    // and the public @asupersync/browser package now exposes BrowserStorage.
     let browser_src = read_file("packages/browser/src/index.ts");
-    let has_storage_exports = browser_src.contains("indexedDb") || browser_src.contains("storage");
     assert!(
-        !has_storage_exports,
-        "When IndexedDB is shipped in the browser package, update this test"
+        browser_src.contains("BrowserStorage")
+            && browser_src.contains("detectBrowserStorageSupport"),
+        "IndexedDB BrowserStorage surface should now be shipped"
     );
 
     // Contradiction 2: MessagePort and BroadcastChannel have reactor
@@ -430,11 +525,11 @@ fn known_contradictions_are_tracked() {
         "When MessagePort/BroadcastChannel are shipped, update this test"
     );
 
-    // Contradiction 3: localStorage host backend exists but is not
-    // elevated to public package surface.
+    // Resolved contradiction 3: localStorage host backend is now elevated
+    // to an explicit package-level backend.
     assert!(
-        !browser_src.contains("localStorage"),
-        "When localStorage is shipped in the browser package, update this test"
+        browser_src.contains("localstorage") || browser_src.contains("localStorage"),
+        "localStorage package surface should now be explicit"
     );
 
     // Contradiction 4: Browser stream bridge (ReadableStream/WritableStream
@@ -519,6 +614,17 @@ fn census_doc_indexeddb_mentions_real_host_backend() {
     assert!(
         doc.contains("IndexedDbHostBackend") || doc.contains("host backend is complete"),
         "census doc must acknowledge IndexedDB host backend"
+    );
+}
+
+#[test]
+fn census_doc_mentions_browser_artifact_store() {
+    let doc = read_file("docs/wasm_api_surface_census.md");
+    assert!(
+        doc.contains("BrowserArtifactStore")
+            && doc.contains("exportArchive()")
+            && doc.contains("downloadArtifact()"),
+        "census doc must describe the explicit browser artifact persistence lane"
     );
 }
 

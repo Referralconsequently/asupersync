@@ -24,9 +24,15 @@ const HANDLE_KINDS = new Set([
   "fetch_request",
 ]);
 
+const REGION_PARENTS = new Map();
+const INFLIGHT_WEBTRANSPORTS = new Map();
+const WEBTRANSPORT_TASK_LABEL = "browser-webtransport";
+const WEBTRANSPORT_CANCEL_KIND = "abort_signal";
+const WEBTRANSPORT_CLOSE_KIND = "webtransport_close";
+
 const CANCELLATION_PHASE_ORDER = Object.freeze([
   "requested",
-  "draining",
+  "cancelling",
   "finalizing",
   "completed",
 ]);
@@ -64,7 +70,7 @@ function parseJson(raw, label) {
   }
 }
 
-function consumerVersionJson(consumerVersion) {
+function vjson(consumerVersion) {
   return consumerVersion === null || consumerVersion === undefined
     ? undefined
     : JSON.stringify(consumerVersion);
@@ -155,7 +161,7 @@ function isRawHandle(value) {
   );
 }
 
-function normalizeHandle(handle, label, expectedKind) {
+function normHandle(handle, label, expectedKind) {
   const raw = handle instanceof BaseHandle ? handle.toJSON() : handle;
   if (!isRawHandle(raw)) {
     throw new TypeError(`${label} must be a browser-core handle`);
@@ -171,7 +177,7 @@ function normalizeHandle(handle, label, expectedKind) {
 }
 
 function wrapHandle(rawHandle) {
-  const handle = normalizeHandle(rawHandle, "value");
+  const handle = normHandle(rawHandle, "value");
   switch (handle.kind) {
     case "runtime":
       return new RuntimeHandle(handle);
@@ -189,7 +195,7 @@ function wrapHandle(rawHandle) {
 }
 
 function parseHandleResult(rawHandle, label, expectedKind) {
-  return wrapHandle(normalizeHandle(parseJson(rawHandle, label), label, expectedKind));
+  return wrapHandle(normHandle(parseJson(rawHandle, label), label, expectedKind));
 }
 
 function reviveValue(rawValue) {
@@ -238,7 +244,7 @@ function encodeValue(value, label) {
     return { kind: "bytes", value: normalizeByteArray(value, label) };
   }
   if (value instanceof BaseHandle || isRawHandle(value)) {
-    return { kind: "handle", value: normalizeHandle(value, label) };
+    return { kind: "handle", value: normHandle(value, label) };
   }
   if (value && typeof value === "object" && typeof value.kind === "string") {
     return value;
@@ -313,9 +319,366 @@ export const Outcome = Object.freeze({
   },
 });
 
+function failOut(code, recoverability, message) {
+  return Outcome.err(code, recoverability, message);
+}
+
+function cancelOut(kind, phase, message, originTask = null) {
+  return Outcome.cancelled({
+    kind,
+    phase,
+    origin_region: "browser",
+    origin_task: originTask,
+    timestamp_nanos: 0,
+    message,
+    truncated: false,
+  });
+}
+
+function keyOf(handle, label = "handle", expectedKind = undefined) {
+  const normalized = normHandle(handle, label, expectedKind);
+  return `${normalized.kind}:${normalized.slot}:${normalized.generation}`;
+}
+
+function recordRegionParent(parentHandle, regionHandle) {
+  REGION_PARENTS.set(
+    keyOf(regionHandle, "regionHandle", "region"),
+    keyOf(parentHandle, "parentHandle"),
+  );
+}
+
+function collectOwnedRegionKeys(rootKey) {
+  const owned = new Set([rootKey]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [regionKey, parentKey] of REGION_PARENTS) {
+      if (owned.has(parentKey) && !owned.has(regionKey)) {
+        owned.add(regionKey);
+        changed = true;
+      }
+    }
+  }
+  return owned;
+}
+
+function deleteOwnedRegionKeys(rootKey) {
+  const owned = collectOwnedRegionKeys(rootKey);
+  for (const regionKey of owned) {
+    if (regionKey !== rootKey) {
+      REGION_PARENTS.delete(regionKey);
+    }
+  }
+  return owned;
+}
+
+function closeOwnedWebTransports(ownerKeys, reason) {
+  for (const [sessionKey, state] of INFLIGHT_WEBTRANSPORTS) {
+    if (!ownerKeys.has(state.scopeKey)) {
+      continue;
+    }
+    state.settled = true;
+    closeHostWebTransportState(state, reason);
+    INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+  }
+}
+
+function cleanupScopeOwnedHostState(regionHandle) {
+  const ownerKeys = deleteOwnedRegionKeys(keyOf(regionHandle, "regionHandle", "region"));
+  closeOwnedWebTransports(ownerKeys, "scope_close");
+}
+
+function cleanupRuntimeOwnedHostState(runtimeHandle) {
+  const ownerKeys = deleteOwnedRegionKeys(keyOf(runtimeHandle, "runtimeHandle", "runtime"));
+  closeOwnedWebTransports(ownerKeys, "runtime_close");
+}
+
+function normalizeWebTransportUrl(url) {
+  if (typeof url !== "string") {
+    throw new TypeError("webtransport URL must be a string");
+  }
+  const trimmed = url.trim();
+  if (!trimmed) {
+    throw new TypeError("webtransport URL must not be empty");
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch (error) {
+    throw new TypeError(
+      `webtransport URL must be an absolute https:// URL: ${errorMessage(error)}`,
+    );
+  }
+  if (parsed.protocol !== "https:") {
+    throw new TypeError(`webtransport URL must start with https://: ${parsed.href}`);
+  }
+  return parsed.href;
+}
+
+function resolveWebTransportConstructor() {
+  const globalObject =
+    typeof globalThis === "object" && globalThis !== null ? globalThis : undefined;
+  if (!globalObject) {
+    return failOut(
+      "compatibility_rejected",
+      "permanent",
+      "WebTransport requires a browser-like globalThis. Use fetch or WebSocket in server, SSR, and edge contexts.",
+    );
+  }
+  if (typeof globalObject.WebTransport !== "function") {
+    return failOut(
+      "compatibility_rejected",
+      "permanent",
+      "WebTransport is unavailable in this runtime. Use fetch or WebSocket unless the browser exposes globalThis.WebTransport over HTTPS.",
+    );
+  }
+  return globalObject.WebTransport;
+}
+
+function encodeWebTransportDatagram(value, label) {
+  if (typeof value === "string") {
+    if (typeof TextEncoder !== "function") {
+      throw new TypeError("webtransport string datagrams require TextEncoder support");
+    }
+    return new TextEncoder().encode(value);
+  }
+  return Uint8Array.from(normalizeByteArray(value, label));
+}
+
+function queueWebTransportOutcome(state, outcome, { terminal = false } = {}) {
+  if (terminal) {
+    if (state.terminalQueued) {
+      return;
+    }
+    state.terminalQueued = true;
+  }
+  state.inbox.push(outcome);
+}
+
+function isTerminalOutcome(outcome) {
+  return Boolean(outcome) && typeof outcome === "object" && outcome.outcome !== "ok";
+}
+
+function settleHostWebTransportState(state, outcome, closeReason = undefined) {
+  if (state.settled) {
+    return;
+  }
+  state.settled = true;
+  INFLIGHT_WEBTRANSPORTS.delete(state.sessionKey);
+  closeHostWebTransportState(state, closeReason);
+  void task_join(state.taskHandle, outcome, state.consumerVersion);
+}
+
+function closeHostWebTransportState(state, reason = undefined) {
+  if (state.closed) {
+    return;
+  }
+  state.closed = true;
+  if (state.reader && typeof state.reader.cancel === "function") {
+    Promise.resolve(state.reader.cancel(reason ?? WEBTRANSPORT_CLOSE_KIND)).catch(() => {});
+  }
+  if (state.reader && typeof state.reader.releaseLock === "function") {
+    try {
+      state.reader.releaseLock();
+    } catch {}
+  }
+  if (state.writer && typeof state.writer.close === "function") {
+    Promise.resolve(state.writer.close()).catch(() => {});
+  }
+  if (state.writer && typeof state.writer.releaseLock === "function") {
+    try {
+      state.writer.releaseLock();
+    } catch {}
+  }
+  if (state.transport && typeof state.transport.close === "function") {
+    if (reason) {
+      try {
+        state.transport.close({ reason });
+      } catch {
+        try {
+          state.transport.close();
+        } catch {}
+      }
+      return;
+    }
+    try {
+      state.transport.close();
+    } catch {}
+  }
+}
+
+function flushPendingWebTransportWrites(state, sessionOrigin) {
+  if (state.flushPromise || state.closed || !state.ready || !state.writer) {
+    return;
+  }
+  state.flushPromise = Promise.resolve()
+    .then(async () => {
+      while (!state.closed && state.pendingWrites.length > 0) {
+        const datagram = state.pendingWrites.shift();
+        try {
+          await state.writer.write(datagram);
+        } catch (error) {
+          settleHostWebTransportState(
+            state,
+            failOut(
+              "internal_failure",
+              "transient",
+              `webtransport datagram write failed: ${errorMessage(error)}`,
+            ),
+            "write_failure",
+          );
+          break;
+        }
+      }
+    })
+    .catch((error) => {
+      if (!state.closed) {
+        settleHostWebTransportState(
+          state,
+          failOut(
+            "internal_failure",
+            "transient",
+            `webtransport write queue failed: ${errorMessage(error)}`,
+          ),
+          "write_queue_failure",
+        );
+      }
+    })
+    .finally(() => {
+      state.flushPromise = null;
+      if (!state.closed && state.ready && state.pendingWrites.length > 0) {
+        flushPendingWebTransportWrites(state, sessionOrigin);
+      }
+    });
+}
+
+async function pumpWebTransportReads(state, sessionOrigin) {
+  while (!state.closed && state.reader) {
+    try {
+      const { value, done } = await state.reader.read();
+      if (done) {
+        settleHostWebTransportState(
+          state,
+          cancelOut(
+            WEBTRANSPORT_CLOSE_KIND,
+            "completed",
+            "webtransport datagram reader closed",
+            sessionOrigin,
+          ),
+          "read_closed",
+        );
+        return;
+      }
+      if (value !== undefined) {
+        queueWebTransportOutcome(
+          state,
+          Outcome.ok(Uint8Array.from(normalizeByteArray(value, "webtransport datagram"))),
+        );
+      }
+    } catch (error) {
+      if (!state.closed) {
+        settleHostWebTransportState(
+          state,
+          failOut(
+            "internal_failure",
+            "transient",
+            `webtransport datagram read failed: ${errorMessage(error)}`,
+          ),
+          "read_failure",
+        );
+      }
+      return;
+    }
+  }
+}
+
+function monitorWebTransportClosure(state, sessionOrigin) {
+  Promise.resolve(state.transport.closed).then(
+    (closeInfo) => {
+      if (state.closed) {
+        return;
+      }
+      const reason =
+        closeInfo && typeof closeInfo.reason === "string" && closeInfo.reason
+          ? closeInfo.reason
+          : "webtransport session closed";
+      settleHostWebTransportState(
+        state,
+        cancelOut(WEBTRANSPORT_CLOSE_KIND, "completed", reason, sessionOrigin),
+        reason,
+      );
+    },
+    (error) => {
+      if (state.closed) {
+        return;
+      }
+      settleHostWebTransportState(
+        state,
+        failOut(
+          "internal_failure",
+          "transient",
+          `webtransport session closed with error: ${errorMessage(error)}`,
+        ),
+        "session_closed_error",
+      );
+    },
+  );
+}
+
+async function initializeWebTransportState(state, sessionOrigin) {
+  try {
+    await state.transport.ready;
+    if (state.closed) {
+      return;
+    }
+    const datagrams = state.transport.datagrams;
+    const readable = datagrams?.readable;
+    const writable = datagrams?.writable;
+    if (
+      !readable ||
+      typeof readable.getReader !== "function" ||
+      !writable ||
+      typeof writable.getWriter !== "function"
+    ) {
+      throw new Error(
+        "WebTransport datagrams are unavailable. This lane currently exposes explicit datagram transport, not bidirectional streams.",
+      );
+    }
+    state.reader = readable.getReader();
+    state.writer = writable.getWriter();
+    state.ready = true;
+    flushPendingWebTransportWrites(state, sessionOrigin);
+    void pumpWebTransportReads(state, sessionOrigin);
+    monitorWebTransportClosure(state, sessionOrigin);
+  } catch (error) {
+    if (state.closed) {
+      return;
+    }
+    settleHostWebTransportState(
+      state,
+      failOut(
+        "compatibility_rejected",
+        "permanent",
+        `webtransport handshake failed: ${errorMessage(error)}. Ensure the endpoint serves WebTransport over HTTPS/HTTP3 and that this browser exposes the WebTransport API.`,
+      ),
+      "handshake_failure",
+    );
+  }
+}
+
+function takeWebTransportState(sessionHandle) {
+  const sessionKey = keyOf(sessionHandle, "sessionHandle", "task");
+  const state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
+  if (!state) {
+    return { sessionKey, state: null };
+  }
+  INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+  return { sessionKey, state };
+}
+
 export class BaseHandle {
   constructor(rawHandle, expectedKind) {
-    const handle = normalizeHandle(rawHandle, "handle", expectedKind);
+    const handle = normHandle(rawHandle, "handle", expectedKind);
     this.kind = handle.kind;
     this.slot = handle.slot;
     this.generation = handle.generation;
@@ -369,6 +732,10 @@ export class RegionHandle extends BaseHandle {
   openWebSocket(url, protocols = undefined, consumerVersion = null) {
     return websocket_open({ scope: this, url, protocols }, consumerVersion);
   }
+
+  openWebTransport(url, options = undefined, consumerVersion = null) {
+    return webtransport_open({ scope: this, url, options }, consumerVersion);
+  }
 }
 
 export class TaskHandle extends BaseHandle {
@@ -406,49 +773,61 @@ export { init };
 
 export function runtime_create(consumerVersion = null) {
   return invokeHandleOperation("runtime_create", "runtime", () =>
-    rawRuntimeCreate(consumerVersionJson(consumerVersion)),
+    rawRuntimeCreate(vjson(consumerVersion)),
   );
 }
 
 export function runtime_close(runtimeHandle, consumerVersion = null) {
-  return invokeOutcomeOperation("runtime_close", () =>
+  const outcome = invokeOutcomeOperation("runtime_close", () =>
     rawRuntimeClose(
-      JSON.stringify(normalizeHandle(runtimeHandle, "runtimeHandle", "runtime")),
-      consumerVersionJson(consumerVersion),
+      JSON.stringify(normHandle(runtimeHandle, "runtimeHandle", "runtime")),
+      vjson(consumerVersion),
     ),
   );
+  if (outcome.outcome === "ok") {
+    cleanupRuntimeOwnedHostState(runtimeHandle);
+  }
+  return outcome;
 }
 
 export function scope_enter(request, consumerVersion = null) {
-  return invokeHandleOperation("scope_enter", "region", () =>
+  const outcome = invokeHandleOperation("scope_enter", "region", () =>
     rawScopeEnter(
       JSON.stringify({
-        parent: normalizeHandle(request.parent, "request.parent"),
+        parent: normHandle(request.parent, "request.parent"),
         label: request.label ?? undefined,
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
+  if (outcome.outcome === "ok") {
+    recordRegionParent(request.parent, outcome.value);
+  }
+  return outcome;
 }
 
 export function scope_close(regionHandle, consumerVersion = null) {
-  return invokeOutcomeOperation("scope_close", () =>
+  const outcome = invokeOutcomeOperation("scope_close", () =>
     rawScopeClose(
-      JSON.stringify(normalizeHandle(regionHandle, "regionHandle", "region")),
-      consumerVersionJson(consumerVersion),
+      JSON.stringify(normHandle(regionHandle, "regionHandle", "region")),
+      vjson(consumerVersion),
     ),
   );
+  if (outcome.outcome === "ok") {
+    cleanupScopeOwnedHostState(regionHandle);
+  }
+  return outcome;
 }
 
 export function task_spawn(request, consumerVersion = null) {
   return invokeHandleOperation("task_spawn", "task", () =>
     rawTaskSpawn(
       JSON.stringify({
-        scope: normalizeHandle(request.scope, "request.scope", "region"),
+        scope: normHandle(request.scope, "request.scope", "region"),
         label: request.label ?? undefined,
         cancel_kind: request.cancel_kind ?? undefined,
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -456,9 +835,9 @@ export function task_spawn(request, consumerVersion = null) {
 export function task_join(taskHandle, outcome, consumerVersion = null) {
   return invokeOutcomeOperation("task_join", () =>
     rawTaskJoin(
-      JSON.stringify(normalizeHandle(taskHandle, "taskHandle", "task")),
+      JSON.stringify(normHandle(taskHandle, "taskHandle", "task")),
       JSON.stringify(encodeOutcomeEnvelope(outcome, "outcome")),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -467,11 +846,11 @@ export function task_cancel(request, consumerVersion = null) {
   return invokeOutcomeOperation("task_cancel", () =>
     rawTaskCancel(
       JSON.stringify({
-        task: normalizeHandle(request.task, "request.task", "task"),
+        task: normHandle(request.task, "request.task", "task"),
         kind: request.kind,
         message: request.message ?? undefined,
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -480,7 +859,7 @@ export function fetch_request(request, consumerVersion = null) {
   return invokeOutcomeOperation("fetch_request", () =>
     rawFetchRequest(
       JSON.stringify({
-        scope: normalizeHandle(request.scope, "request.scope", "region"),
+        scope: normHandle(request.scope, "request.scope", "region"),
         url: request.url,
         method: request.method,
         body:
@@ -488,7 +867,7 @@ export function fetch_request(request, consumerVersion = null) {
             ? undefined
             : normalizeByteArray(request.body, "request.body"),
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -497,11 +876,11 @@ export function websocket_open(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_open", () =>
     rawWebSocketOpen(
       JSON.stringify({
-        scope: normalizeHandle(request.scope, "request.scope", "region"),
+        scope: normHandle(request.scope, "request.scope", "region"),
         url: request.url,
         protocols: request.protocols ?? undefined,
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -510,10 +889,10 @@ export function websocket_send(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_send", () =>
     rawWebSocketSend(
       JSON.stringify({
-        socket: normalizeHandle(request.socket, "request.socket", "task"),
+        socket: normHandle(request.socket, "request.socket", "task"),
         value: encodeValue(request.value, "request.value"),
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -522,9 +901,9 @@ export function websocket_recv(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_recv", () =>
     rawWebSocketRecv(
       JSON.stringify({
-        socket: normalizeHandle(request.socket, "request.socket", "task"),
+        socket: normHandle(request.socket, "request.socket", "task"),
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -533,10 +912,10 @@ export function websocket_close(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_close", () =>
     rawWebSocketClose(
       JSON.stringify({
-        socket: normalizeHandle(request.socket, "request.socket", "task"),
+        socket: normHandle(request.socket, "request.socket", "task"),
         reason: request.reason ?? undefined,
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
   );
 }
@@ -545,12 +924,206 @@ export function websocket_cancel(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_cancel", () =>
     rawWebSocketCancel(
       JSON.stringify({
-        socket: normalizeHandle(request.socket, "request.socket", "task"),
+        socket: normHandle(request.socket, "request.socket", "task"),
         kind: request.kind,
         message: request.message ?? undefined,
       }),
-      consumerVersionJson(consumerVersion),
+      vjson(consumerVersion),
     ),
+  );
+}
+
+export function webtransport_open(request, consumerVersion = null) {
+  let normalizedUrl;
+  try {
+    normalizedUrl = normalizeWebTransportUrl(request.url);
+  } catch (error) {
+    return failOut(
+      "compatibility_rejected",
+      "permanent",
+      `webtransport_open rejected: ${errorMessage(error)}. Use fetch or WebSocket when a valid HTTPS WebTransport endpoint is unavailable.`,
+    );
+  }
+  const WebTransportConstructor = resolveWebTransportConstructor();
+  if (typeof WebTransportConstructor !== "function") {
+    return WebTransportConstructor;
+  }
+  const spawned = task_spawn(
+    {
+      scope: request.scope,
+      label: WEBTRANSPORT_TASK_LABEL,
+      cancel_kind: WEBTRANSPORT_CANCEL_KIND,
+    },
+    consumerVersion,
+  );
+  if (spawned.outcome !== "ok") {
+    return spawned;
+  }
+  const session = spawned.value;
+  const sessionOrigin = keyOf(session, "session", "task");
+  try {
+    const transport = new WebTransportConstructor(normalizedUrl, request.options ?? undefined);
+    const state = {
+      consumerVersion,
+      taskHandle: session,
+      transport,
+      sessionKey: sessionOrigin,
+      scopeKey: keyOf(request.scope, "request.scope", "region"),
+      inbox: [],
+      pendingWrites: [],
+      ready: false,
+      closed: false,
+      settled: false,
+      terminalQueued: false,
+      reader: null,
+      writer: null,
+      flushPromise: null,
+    };
+    INFLIGHT_WEBTRANSPORTS.set(sessionOrigin, state);
+    void initializeWebTransportState(state, sessionOrigin);
+    return Outcome.ok(session);
+  } catch (error) {
+    const failure = failOut(
+      "compatibility_rejected",
+      "permanent",
+      `webtransport_open failed: ${errorMessage(error)}. Use fetch or WebSocket when this browser rejects WebTransport construction.`,
+    );
+    void task_join(session, failure, consumerVersion);
+    return failure;
+  }
+}
+
+export function webtransport_send(request, _consumerVersion = null) {
+  let state;
+  try {
+    state = INFLIGHT_WEBTRANSPORTS.get(keyOf(request.session, "request.session", "task"));
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_send rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (!state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_send rejected: unknown WebTransport session handle",
+    );
+  }
+  if (state.closed) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_send rejected: WebTransport session is already closed",
+    );
+  }
+  try {
+    state.pendingWrites.push(
+      encodeWebTransportDatagram(request.value, "request.value"),
+    );
+  } catch (error) {
+    return failOut(
+      "compatibility_rejected",
+      "permanent",
+      `webtransport_send rejected: ${errorMessage(error)}`,
+    );
+  }
+  flushPendingWebTransportWrites(state, keyOf(request.session, "request.session", "task"));
+  return Outcome.ok(undefined);
+}
+
+export function webtransport_recv(request, _consumerVersion = null) {
+  let sessionKey;
+  let state;
+  try {
+    sessionKey = keyOf(request.session, "request.session", "task");
+    state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_recv rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (!state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_recv rejected: unknown WebTransport session handle",
+    );
+  }
+  const result = state.inbox.shift() ?? Outcome.ok(undefined);
+  if (isTerminalOutcome(result)) {
+    INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+  }
+  return result;
+}
+
+export function webtransport_close(request, consumerVersion = null) {
+  let taken;
+  try {
+    taken = takeWebTransportState(request.session);
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_close rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (!taken.state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_close rejected: unknown WebTransport session handle",
+    );
+  }
+  taken.state.settled = true;
+  closeHostWebTransportState(taken.state, request.reason);
+  const outcome = cancelOut(
+    WEBTRANSPORT_CLOSE_KIND,
+    "completed",
+    request.reason ?? "webtransport session closed by caller",
+    taken.sessionKey,
+  );
+  return task_join(request.session, outcome, consumerVersion);
+}
+
+export function webtransport_cancel(request, consumerVersion = null) {
+  const cancelled = task_cancel(
+    {
+      task: request.session,
+      kind: request.kind,
+      message: request.message ?? undefined,
+    },
+    consumerVersion,
+  );
+  if (cancelled.outcome !== "ok") {
+    return cancelled;
+  }
+  let taken;
+  try {
+    taken = takeWebTransportState(request.session);
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_cancel rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (taken.state) {
+    taken.state.settled = true;
+    closeHostWebTransportState(taken.state, request.message);
+  }
+  return task_join(
+    request.session,
+    cancelOut(
+      request.kind,
+      "cancelling",
+      request.message ?? null,
+      taken.sessionKey,
+    ),
+    consumerVersion,
   );
 }
 
@@ -575,6 +1148,11 @@ export const websocketSend = websocket_send;
 export const websocketRecv = websocket_recv;
 export const websocketClose = websocket_close;
 export const websocketCancel = websocket_cancel;
+export const webtransportOpen = webtransport_open;
+export const webtransportSend = webtransport_send;
+export const webtransportRecv = webtransport_recv;
+export const webtransportClose = webtransport_close;
+export const webtransportCancel = webtransport_cancel;
 export const abiVersion = abi_version;
 export const abiFingerprint = abi_fingerprint;
 

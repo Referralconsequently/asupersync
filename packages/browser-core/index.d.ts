@@ -20,7 +20,7 @@ export interface Budget {
 
 export type CancellationPhase =
   | "requested"
-  | "draining"
+  | "cancelling"
   | "finalizing"
   | "completed";
 
@@ -54,7 +54,7 @@ export interface AbiFailure {
 
 export interface AbiCancellation {
   kind: string;
-  phase: CancellationPhase | string;
+  phase: CancellationPhase;
   origin_region: string;
   origin_task: string | null;
   timestamp_nanos: number;
@@ -134,6 +134,32 @@ export interface WebSocketCancelRequest {
   message?: string;
 }
 
+export interface WebTransportOpenRequest {
+  scope: RegionHandle | HandleRef;
+  url: string;
+  options?: Record<string, unknown>;
+}
+
+export interface WebTransportSendRequest {
+  session: TaskHandle | HandleRef;
+  value: string | Uint8Array | ArrayBuffer | ArrayBufferView | number[];
+}
+
+export interface WebTransportRecvRequest {
+  session: TaskHandle | HandleRef;
+}
+
+export interface WebTransportCloseRequest {
+  session: TaskHandle | HandleRef;
+  reason?: string;
+}
+
+export interface WebTransportCancelRequest {
+  session: TaskHandle | HandleRef;
+  kind: string;
+  message?: string;
+}
+
 export declare class BaseHandle {
   readonly kind: HandleKind;
   readonly slot: number;
@@ -163,6 +189,11 @@ export declare class RegionHandle extends BaseHandle {
   openWebSocket(
     url: string,
     protocols?: string[],
+    consumerVersion?: AbiVersion | null,
+  ): Outcome<TaskHandle>;
+  openWebTransport(
+    url: string,
+    options?: Record<string, unknown>,
     consumerVersion?: AbiVersion | null,
   ): Outcome<TaskHandle>;
 }
@@ -260,6 +291,26 @@ export declare function websocket_cancel(
   request: WebSocketCancelRequest,
   consumerVersion?: AbiVersion | null,
 ): Outcome<void>;
+export declare function webtransport_open(
+  request: WebTransportOpenRequest,
+  consumerVersion?: AbiVersion | null,
+): Outcome<TaskHandle>;
+export declare function webtransport_send(
+  request: WebTransportSendRequest,
+  consumerVersion?: AbiVersion | null,
+): Outcome<void>;
+export declare function webtransport_recv(
+  request: WebTransportRecvRequest,
+  consumerVersion?: AbiVersion | null,
+): Outcome<WasmValue>;
+export declare function webtransport_close(
+  request: WebTransportCloseRequest,
+  consumerVersion?: AbiVersion | null,
+): Outcome<void>;
+export declare function webtransport_cancel(
+  request: WebTransportCancelRequest,
+  consumerVersion?: AbiVersion | null,
+): Outcome<void>;
 export declare function abi_version(): AbiVersion;
 export declare function abi_fingerprint(): number;
 
@@ -276,6 +327,11 @@ export declare const websocketSend: typeof websocket_send;
 export declare const websocketRecv: typeof websocket_recv;
 export declare const websocketClose: typeof websocket_close;
 export declare const websocketCancel: typeof websocket_cancel;
+export declare const webtransportOpen: typeof webtransport_open;
+export declare const webtransportSend: typeof webtransport_send;
+export declare const webtransportRecv: typeof webtransport_recv;
+export declare const webtransportClose: typeof webtransport_close;
+export declare const webtransportCancel: typeof webtransport_cancel;
 export declare const abiVersion: typeof abi_version;
 export declare const abiFingerprint: typeof abi_fingerprint;
 

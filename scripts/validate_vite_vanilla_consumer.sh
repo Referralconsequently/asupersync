@@ -58,7 +58,7 @@ EOF
   exit 1
 fi
 
-WORK_DIR="$(mktemp -d "${RUN_DIR}/work.XXXXXX")"
+WORK_DIR="$(mktemp -d "/tmp/asupersync-vite-vanilla.XXXXXX")"
 CONSUMER_DIR="${WORK_DIR}/consumer"
 PKG_DIR="${WORK_DIR}/packages"
 
@@ -68,16 +68,24 @@ cp -R "${REPO_ROOT}/packages/browser-core" "${PKG_DIR}/browser-core"
 cp -R "${REPO_ROOT}/packages/browser" "${PKG_DIR}/browser"
 
 # Consumer installs from local package copies; rewrite workspace protocol so npm can resolve.
-python3 - "${PKG_DIR}/browser/package.json" <<'PY'
+python3 - "${CONSUMER_DIR}/package.json" "${PKG_DIR}/browser/package.json" <<'PY'
 import json
 import pathlib
 import sys
 
-path = pathlib.Path(sys.argv[1])
-data = json.loads(path.read_text())
-deps = data.setdefault("dependencies", {})
-deps["@asupersync/browser-core"] = "file:../browser-core"
-path.write_text(json.dumps(data, indent=2) + "\n")
+consumer_pkg = pathlib.Path(sys.argv[1])
+browser_pkg = pathlib.Path(sys.argv[2])
+
+consumer_data = json.loads(consumer_pkg.read_text())
+consumer_deps = consumer_data.setdefault("dependencies", {})
+consumer_deps["@asupersync/browser"] = "file:../packages/browser"
+consumer_deps["@asupersync/browser-core"] = "file:../packages/browser-core"
+consumer_pkg.write_text(json.dumps(consumer_data, indent=2) + "\n")
+
+browser_data = json.loads(browser_pkg.read_text())
+browser_deps = browser_data.setdefault("dependencies", {})
+browser_deps["@asupersync/browser-core"] = "file:../browser-core"
+browser_pkg.write_text(json.dumps(browser_data, indent=2) + "\n")
 PY
 
 (
@@ -97,6 +105,18 @@ summary_path = pathlib.Path(sys.argv[2])
 timestamp = sys.argv[3]
 dist = consumer / "dist"
 assets = dist / "assets"
+asset_files = list(assets.glob("*.js")) if assets.exists() else []
+markers = {
+    "storage_artifact_marker": False,
+    "storage_namespace_marker": False,
+    "artifact_namespace_marker": False,
+}
+for asset in asset_files:
+    content = asset.read_text(encoding="utf-8", errors="replace")
+    markers["storage_artifact_marker"] |= "vanilla-storage-artifact-flow" in content
+    markers["storage_namespace_marker"] |= "vanilla_fixture_storage" in content
+    markers["artifact_namespace_marker"] |= "vanilla_fixture_artifacts" in content
+
 summary = {
     "scenario_id": "L6-BUNDLER-VITE",
     "timestamp": timestamp,
@@ -105,7 +125,8 @@ summary = {
     "checks": {
         "dist_exists": dist.exists(),
         "index_html_exists": (dist / "index.html").exists(),
-        "asset_js_count": len(list(assets.glob("*.js"))) if assets.exists() else 0,
+        "asset_js_count": len(asset_files),
+        **markers,
     },
 }
 summary_path.write_text(json.dumps(summary, indent=2) + "\n")

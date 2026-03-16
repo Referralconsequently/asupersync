@@ -8,10 +8,11 @@ Downstream Bead: `asupersync-3qv04.9.3.1`
 
 Define the canonical Browser Edition examples for:
 
-1. Vanilla JS runtime embedding
-2. TypeScript outcome/cancellation modeling
-3. React provider + hook lifecycle patterns
-4. Next.js App Router bootstrap boundaries
+1. Vanilla JS runtime embedding plus durable storage/artifact exercise
+2. Dedicated-worker bootstrap, storage/artifact export handoff, and shutdown coordination
+3. TypeScript outcome/cancellation modeling
+4. React provider + hook lifecycle patterns
+5. Next.js App Router bootstrap boundaries
 
 Each example must stay deterministic, preserve structured-concurrency invariants,
 and provide replayable commands and artifact paths.
@@ -30,7 +31,8 @@ Every example in this catalog must preserve:
 
 | Surface | Canonical Scenario IDs | Deterministic Harness | Replay Artifact Pointers |
 | --- | --- | --- | --- |
-| Vanilla JS | `vanilla.behavior_loser_drain_replay`, `vanilla.negative_skipped_loser_detection`, `vanilla.timing_mid_computation_drain`, `L6-BUNDLER-VITE` | `tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs`, `scripts/validate_vite_vanilla_consumer.sh` | `artifacts/onboarding/vanilla.behavior_loser_drain_replay.log`, `artifacts/onboarding/vanilla.negative_skipped_loser_detection.log`, `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json` |
+| Vanilla JS | `vanilla.storage_artifact_bundle`, `vanilla.behavior_loser_drain_replay`, `vanilla.negative_skipped_loser_detection`, `vanilla.timing_mid_computation_drain`, `L6-BUNDLER-VITE` | `tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs`, `scripts/validate_vite_vanilla_consumer.sh` | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `artifacts/onboarding/vanilla.behavior_loser_drain_replay.log`, `artifacts/onboarding/vanilla.negative_skipped_loser_detection.log` |
+| Dedicated Worker | `worker.runtime_support_matrix`, `worker.storage_artifact_diagnostics`, `worker.storage_artifact_export_handoff`, `worker.coordinator_protocol`, `L6-BUNDLER-DEDICATED-WORKER` | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `src/net/worker_channel.rs`, `scripts/validate_dedicated_worker_consumer.sh` | `artifacts/onboarding/worker.runtime_support_matrix.log`, `artifacts/onboarding/worker.storage_artifact_diagnostics.log`, `artifacts/onboarding/worker.coordinator_protocol.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json` |
 | TypeScript | `TS-TYPE-VANILLA`, `TS-TYPE-REACT`, `TS-TYPE-NEXT` | `scripts/check_wasm_typescript_type_model_policy.py` | `artifacts/wasm_typescript_type_model_summary.json`, `artifacts/wasm_typescript_type_model_log.ndjson` |
 | React | `react_ref.task_group_cancel`, `react_ref.retry_after_transient_failure`, `react_ref.bulkhead_isolation`, `react_ref.tracing_hook_transition` | `tests/react_wasm_strictmode_harness.rs` | `artifacts/onboarding/react.behavior_strict_mode_double_invocation.log`, `artifacts/onboarding/react.timing_restart_churn.log` |
 | Next.js | `next_ref.template_deploy`, `next_ref.cache_revalidation_reinit`, `next_ref.hard_navigation_rebootstrap`, `next_ref.cancel_retry_runtime_init` | `tests/nextjs_bootstrap_harness.rs` | `artifacts/onboarding/next.behavior_bootstrap_harness.log`, `artifacts/onboarding/next.timing_navigation_churn.log` |
@@ -60,12 +62,48 @@ This fixture is the canonical low-friction browser-only entrypoint for:
 
 - `@asupersync/browser` package import resolution
 - packaged WASM artifact loading through a real Vite consumer build
+- explicit `BrowserStorage` diagnostics plus deterministic IndexedDB key cleanup
+- explicit `BrowserArtifactStore` persist/export/clear flows on the browser main thread
 - deterministic artifact output under `target/e2e-results/vite_vanilla_consumer/`
 
 Primary deterministic validation command:
 
 ```bash
 PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh
+```
+
+## Maintained Dedicated Worker Example
+
+Maintained dedicated-worker Browser Edition example source:
+
+- `tests/fixtures/dedicated-worker-consumer`
+- validation harness: `scripts/validate_dedicated_worker_consumer.sh`
+
+This fixture is the canonical worker entrypoint for:
+
+- `@asupersync/browser` direct runtime bootstrap inside a dedicated worker
+- worker-safe `BrowserStorage` exercise over the IndexedDB-backed browser lane
+- worker-safe `BrowserArtifactStore` export handoff via `exportArchive()`
+- actionable `downloadArchive()` failure guidance proving downloads stay main-thread-only
+- explicit quota-guard coverage proving retention failures surface as
+  `quota_exceeded` instead of silently retaining unbounded worker artifacts
+- explicit worker startup, main-thread handoff, and graceful shutdown messaging
+- deterministic artifact output under `target/e2e-results/dedicated_worker_consumer/`
+
+The dedicated-worker summary is expected to retain these bundle markers:
+
+- `worker_storage_support_marker`
+- `worker_storage_roundtrip_marker`
+- `worker_artifact_export_marker`
+- `worker_artifact_download_guard_marker`
+- `worker_artifact_quota_guard_marker`
+- `worker_artifact_cleanup_marker`
+
+Primary deterministic validation commands:
+
+```bash
+python3 scripts/run_browser_onboarding_checks.py --scenario worker
+PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 ```
 
 ## Maintained Next.js Example
@@ -96,10 +134,11 @@ Run all example lanes (preferred CI/replay bundle):
 python3 scripts/run_browser_onboarding_checks.py --scenario all
 ```
 
-Run framework-scoped lanes:
+Run lane-scoped bundles:
 
 ```bash
 python3 scripts/run_browser_onboarding_checks.py --scenario vanilla
+python3 scripts/run_browser_onboarding_checks.py --scenario worker
 python3 scripts/run_browser_onboarding_checks.py --scenario react
 python3 scripts/run_browser_onboarding_checks.py --scenario next
 ```
@@ -108,6 +147,12 @@ Run the maintained vanilla Vite fixture directly:
 
 ```bash
 PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh
+```
+
+Run the maintained dedicated-worker fixture directly:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 ```
 
 Run the maintained Next fixture directly:
@@ -132,9 +177,10 @@ python3 scripts/check_wasm_typescript_type_model_policy.py \
   --only-scenario TS-TYPE-NEXT
 ```
 
-Run deterministic React/Next harnesses directly:
+Run deterministic harnesses directly:
 
 ```bash
+rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture
 rch exec -- cargo test --test react_wasm_strictmode_harness -- --nocapture
 rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture
 ```

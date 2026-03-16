@@ -3,6 +3,7 @@
 
 Runs documented onboarding command bundles for:
 - vanilla browser smoke
+- dedicated worker readiness
 - react readiness
 - next readiness
 
@@ -64,6 +65,17 @@ SCENARIOS: dict[str, list[Step]] = {
             adapter_path="none",
             runtime_profile="FP-BR-DEV",
             diagnostic_category="package_topology",
+        ),
+        Step(
+            "vanilla.storage_artifact_bundle",
+            "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
+            "Restage package outputs or inspect the maintained vanilla consumer fixture when BrowserStorage or BrowserArtifactStore bundle markers drift.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="none",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="durable_storage",
+            coverage_kind="behavioral",
+            trace_artifact_hint="target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json",
         ),
         Step(
             "vanilla.browser_ready_handoff",
@@ -247,6 +259,78 @@ SCENARIOS: dict[str, list[Step]] = {
             diagnostic_category="lifecycle_chaos",
             coverage_kind="lifecycle_chaos",
             trace_artifact_hint="artifacts/onboarding/react.lifecycle_background_throttle_suspend_resume.log",
+        ),
+    ],
+    "worker": [
+        Step(
+            "worker.runtime_support_matrix",
+            "rch exec -- cargo test --test wasm_browser_feasibility_matrix "
+            "dedicated_worker_ -- --nocapture",
+            "Inspect dedicated-worker support classification drift across packages/browser/src/index.ts, docs/WASM.md, and docs/integration.md.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="worker/bootstrap",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="support_matrix",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/worker.runtime_support_matrix.log",
+        ),
+        Step(
+            "worker.sdk_runtime_diagnostics",
+            "rch exec -- cargo test --test wasm_js_exports_coverage_contract "
+            "browser_src_index_ -- --nocapture",
+            "Verify dedicated-worker runtime diagnostics and actionable guidance in packages/browser/src/index.ts.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="worker/bootstrap",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="sdk_diagnostics",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/worker.sdk_runtime_diagnostics.log",
+        ),
+        Step(
+            "worker.storage_artifact_diagnostics",
+            "rch exec -- cargo test --test wasm_js_exports_coverage_contract "
+            "browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture",
+            "Verify BrowserStorage and BrowserArtifactStore failure diagnostics, cleanup flows, and worker download guidance in packages/browser/src/index.ts.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="worker/bootstrap",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="durable_storage",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/worker.storage_artifact_diagnostics.log",
+        ),
+        Step(
+            "worker.fetch_host_bridge",
+            "rch exec -- cargo test --test wasm_js_exports_coverage_contract "
+            "browser_core_fetch_bridge_supports_window_or_worker_hosts -- --nocapture",
+            "Confirm browser-core fetch host wiring still accepts dedicated-worker globals when window is unavailable.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="worker/bootstrap",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="fetch_host",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/worker.fetch_host_bridge.log",
+        ),
+        Step(
+            "worker.coordinator_protocol",
+            "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
+            "Investigate worker coordination protocol regressions in src/net/worker_channel.rs before touching browser-side bootstrap code.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="worker/bootstrap",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="worker_coordination",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/worker.coordinator_protocol.log",
+        ),
+        Step(
+            "worker.storage_artifact_export_handoff",
+            "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
+            "Rebuild or restage package artifacts if the maintained dedicated-worker consumer fixture cannot bundle the storage/export handoff path cleanly.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="worker/bootstrap",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="durable_storage",
+            coverage_kind="behavioral",
+            trace_artifact_hint="target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
         ),
     ],
     "next": [
@@ -486,7 +570,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run browser onboarding check bundles.")
     parser.add_argument(
         "--scenario",
-        choices=["vanilla", "react", "next", "all"],
+        choices=["vanilla", "worker", "react", "next", "all"],
         default="all",
         help="Scenario to run (default: all).",
     )
@@ -508,7 +592,7 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    scenarios = ["vanilla", "react", "next"] if args.scenario == "all" else [args.scenario]
+    scenarios = ["vanilla", "worker", "react", "next"] if args.scenario == "all" else [args.scenario]
 
     exit_code = 0
     for scenario_id in scenarios:

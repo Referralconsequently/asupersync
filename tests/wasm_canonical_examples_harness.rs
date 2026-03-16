@@ -1,5 +1,9 @@
 #![allow(missing_docs)]
 
+use asupersync::net::worker_channel::{
+    JobOutcome, JobResult, JobState, WorkerChannelError, WorkerCoordinator, WorkerEnvelope,
+    WorkerOp,
+};
 use asupersync::types::wasm_abi::ErrorBoundaryAction;
 use asupersync::types::{
     NextjsBootstrapPhase, NextjsNavigationType, ReactProviderConfig, ReactProviderPhase,
@@ -38,6 +42,15 @@ struct ReactExampleSnapshot {
     cancel_count: usize,
     join_count: usize,
     clean: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DedicatedWorkerExampleSnapshot {
+    worker_ready_after_shutdown: bool,
+    inflight_count: usize,
+    job_state_after_completion: Option<JobState>,
+    shutdown_blocked_spawn: bool,
+    shutdown_cleared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +268,75 @@ fn run_react_example_scenario() -> ReactExampleSnapshot {
     }
 }
 
+fn run_dedicated_worker_example_scenario() -> DedicatedWorkerExampleSnapshot {
+    let mut coordinator = WorkerCoordinator::new(42);
+    coordinator
+        .handle_inbound(&WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "canonical-worker".to_string(),
+            },
+        ))
+        .expect("worker bootstrap must succeed");
+
+    coordinator
+        .spawn_job(7, 100, 200, 300, vec![1, 2, 3])
+        .expect("spawn after worker bootstrap should succeed");
+    let spawn = coordinator
+        .drain_outbox()
+        .expect("spawn envelope should be queued");
+    assert!(matches!(spawn.op, WorkerOp::SpawnJob(_)));
+
+    coordinator
+        .handle_inbound(&WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::JobCompleted(JobResult {
+                job_id: 7,
+                outcome: JobOutcome::Ok {
+                    payload: vec![0x2A],
+                },
+            }),
+        ))
+        .expect("completed job envelope should be accepted");
+
+    coordinator
+        .request_shutdown("canonical example complete".to_string())
+        .expect("shutdown request should succeed");
+    let shutdown = coordinator
+        .drain_outbox()
+        .expect("shutdown envelope should be queued");
+    assert!(matches!(shutdown.op, WorkerOp::ShutdownWorker { .. }));
+
+    let shutdown_blocked_spawn = matches!(
+        coordinator.spawn_job(8, 101, 201, 301, vec![9, 9, 9]),
+        Err(WorkerChannelError::ShutdownInProgress)
+    );
+
+    coordinator
+        .handle_inbound(&WorkerEnvelope::new(
+            3,
+            3,
+            42,
+            2,
+            WorkerOp::ShutdownCompleted,
+        ))
+        .expect("shutdown completion should clear shutdown state");
+
+    DedicatedWorkerExampleSnapshot {
+        worker_ready_after_shutdown: coordinator.is_worker_ready(),
+        inflight_count: coordinator.inflight_count(),
+        job_state_after_completion: coordinator.job_state(7),
+        shutdown_blocked_spawn,
+        shutdown_cleared: !coordinator.is_shutdown_requested(),
+    }
+}
+
 fn run_nextjs_example_scenario() -> NextjsExampleSnapshot {
     let mut state = NextjsBootstrapState::new();
 
@@ -371,6 +453,18 @@ fn canonical_react_example_is_deterministic_and_cancel_correct() {
 }
 
 #[test]
+fn canonical_dedicated_worker_example_is_deterministic_and_shutdown_safe() {
+    let first = run_dedicated_worker_example_scenario();
+    let second = run_dedicated_worker_example_scenario();
+    assert_eq!(first, second);
+    assert!(!first.worker_ready_after_shutdown);
+    assert_eq!(first.inflight_count, 0);
+    assert_eq!(first.job_state_after_completion, Some(JobState::Completed));
+    assert!(first.shutdown_blocked_spawn);
+    assert!(first.shutdown_cleared);
+}
+
+#[test]
 fn canonical_nextjs_example_is_deterministic_and_recovery_safe() {
     let first = run_nextjs_example_scenario();
     let second = run_nextjs_example_scenario();
@@ -407,23 +501,46 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
     for expected in [
         "asupersync-umelq.16.3",
         "asupersync-3qv04.9.3.1",
+        "vanilla.storage_artifact_bundle",
         "vanilla.behavior_loser_drain_replay",
+        "worker.runtime_support_matrix",
+        "worker.storage_artifact_diagnostics",
+        "worker.storage_artifact_export_handoff",
+        "worker.coordinator_protocol",
+        "L6-BUNDLER-DEDICATED-WORKER",
         "L6-BUNDLER-VITE",
+        "BrowserStorage",
+        "BrowserArtifactStore",
+        "exportArchive()",
+        "downloadArchive()",
+        "quota_exceeded",
+        "worker_storage_support_marker",
+        "worker_storage_roundtrip_marker",
+        "worker_artifact_export_marker",
+        "worker_artifact_download_guard_marker",
+        "worker_artifact_quota_guard_marker",
+        "worker_artifact_cleanup_marker",
         "TS-TYPE-VANILLA",
         "react_ref.task_group_cancel",
         "next_ref.template_deploy",
         "tests/fixtures/vite-vanilla-consumer",
+        "tests/fixtures/dedicated-worker-consumer",
         "tests/fixtures/next-turbopack-consumer",
         "scripts/validate_vite_vanilla_consumer.sh",
+        "scripts/validate_dedicated_worker_consumer.sh",
         "scripts/validate_next_turbopack_consumer.sh",
         "target/e2e-results/vite_vanilla_consumer/",
+        "target/e2e-results/dedicated_worker_consumer/",
         "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
+        "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
         "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh",
         "python3 scripts/run_browser_onboarding_checks.py --scenario vanilla",
+        "python3 scripts/run_browser_onboarding_checks.py --scenario worker",
         "python3 scripts/run_browser_onboarding_checks.py --scenario react",
         "python3 scripts/run_browser_onboarding_checks.py --scenario next",
-        "cargo test --test react_wasm_strictmode_harness -- --nocapture",
-        "cargo test --test nextjs_bootstrap_harness -- --nocapture",
+        "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
+        "rch exec -- cargo test --test react_wasm_strictmode_harness -- --nocapture",
+        "rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture",
     ] {
         assert!(
             doc.contains(expected),
@@ -440,6 +557,67 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
         assert!(
             Path::new(related_doc).exists(),
             "canonical examples dependency doc missing: {related_doc}"
+        );
+    }
+}
+
+#[test]
+fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
+    let worker_path = Path::new("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
+    let worker_src = std::fs::read_to_string(worker_path)
+        .unwrap_or_else(|_| panic!("missing {}", worker_path.display()));
+    for marker in [
+        "createBrowserStorage",
+        "createBrowserArtifactStore",
+        "detectBrowserStorageSupport",
+        "worker-storage-support",
+        "worker-storage-roundtrip",
+        "worker-storage-artifact-export-handoff",
+        "worker-artifact-archive",
+        "worker-artifact-download-unavailable",
+        "worker-artifact-quota-guard",
+        "worker-artifact-cleanup",
+        "BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED_CODE",
+        "quota_exceeded",
+    ] {
+        assert!(
+            worker_src.contains(marker),
+            "dedicated-worker fixture source missing storage/artifact marker: {marker}"
+        );
+    }
+
+    let readme_path = Path::new("tests/fixtures/dedicated-worker-consumer/README.md");
+    let readme = std::fs::read_to_string(readme_path)
+        .unwrap_or_else(|_| panic!("missing {}", readme_path.display()));
+    for marker in [
+        "BrowserStorage",
+        "BrowserArtifactStore",
+        "downloadArchive()",
+        "worker-artifact-download-unavailable",
+        "worker-artifact-quota-guard",
+    ] {
+        assert!(
+            readme.contains(marker),
+            "dedicated-worker fixture README missing marker: {marker}"
+        );
+    }
+
+    let bundle_path =
+        Path::new("tests/fixtures/dedicated-worker-consumer/scripts/check-bundle.mjs");
+    let bundle = std::fs::read_to_string(bundle_path)
+        .unwrap_or_else(|_| panic!("missing {}", bundle_path.display()));
+    for marker in [
+        "worker-storage-support",
+        "worker-storage-roundtrip",
+        "worker-storage-artifact-export-handoff",
+        "worker-artifact-archive",
+        "worker-artifact-download-unavailable",
+        "worker-artifact-quota-guard",
+        "worker-artifact-cleanup",
+    ] {
+        assert!(
+            bundle.contains(marker),
+            "dedicated-worker bundle check missing marker: {marker}"
         );
     }
 }

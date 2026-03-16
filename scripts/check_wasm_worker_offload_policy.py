@@ -132,7 +132,18 @@ def validate_policy(policy: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if not isinstance(envelope_version, str) or not envelope_version:
         raise PolicyError("message_protocol.envelope_version must be non-empty string")
     required_fields = require_nonempty_str_list(protocol, "required_fields", "message_protocol")
-    operations = require_nonempty_str_list(protocol, "operations", "message_protocol")
+    request_operations = require_nonempty_str_list(
+        protocol, "request_operations", "message_protocol"
+    )
+    event_operations = require_nonempty_str_list(
+        protocol, "event_operations", "message_protocol"
+    )
+    payload_transfer_modes = require_nonempty_str_list(
+        protocol, "payload_transfer_modes", "message_protocol"
+    )
+    owned_payload_required = protocol.get("owned_payload_required")
+    if not isinstance(owned_payload_required, bool):
+        raise PolicyError("message_protocol.owned_payload_required must be bool")
     states = require_nonempty_str_list(protocol, "states", "message_protocol")
     terminal_states = require_nonempty_str_list(protocol, "terminal_states", "message_protocol")
     missing_terminal = sorted(set(terminal_states).difference(states))
@@ -141,10 +152,48 @@ def validate_policy(policy: dict[str, Any]) -> tuple[dict[str, Any], str]:
             "message_protocol.terminal_states must be subset of states "
             f"(missing: {', '.join(missing_terminal)})"
         )
-    if "cancel_job" not in operations or "drain_job" not in operations or "finalize_job" not in operations:
-        raise PolicyError("message_protocol.operations must include cancel_job, drain_job, finalize_job")
+    expected_request_ops = {
+        "spawn_job",
+        "poll_status",
+        "cancel_job",
+        "drain_job",
+        "finalize_job",
+        "shutdown_worker",
+    }
+    missing_request_ops = sorted(expected_request_ops.difference(request_operations))
+    if missing_request_ops:
+        raise PolicyError(
+            "message_protocol.request_operations missing: "
+            + ", ".join(missing_request_ops)
+        )
+    expected_event_ops = {
+        "bootstrap_ready",
+        "bootstrap_failed",
+        "status_snapshot",
+        "job_completed",
+        "cancel_acknowledged",
+        "drain_completed",
+        "finalize_completed",
+        "shutdown_completed",
+        "diagnostic",
+    }
+    missing_event_ops = sorted(expected_event_ops.difference(event_operations))
+    if missing_event_ops:
+        raise PolicyError(
+            "message_protocol.event_operations missing: " + ", ".join(missing_event_ops)
+        )
     if "job_id" not in required_fields or "obligation_id" not in required_fields:
         raise PolicyError("message_protocol.required_fields must include job_id and obligation_id")
+    if "decision_seq" not in required_fields or "replay_hash" not in required_fields:
+        raise PolicyError(
+            "message_protocol.required_fields must include decision_seq and replay_hash"
+        )
+    if "structured_clone" not in payload_transfer_modes:
+        raise PolicyError(
+            "message_protocol.payload_transfer_modes must include structured_clone"
+        )
+    if not owned_payload_required:
+        raise PolicyError("message_protocol.owned_payload_required must be true")
 
     cancellation = policy.get("cancellation_contract")
     if not isinstance(cancellation, dict):
@@ -249,7 +298,9 @@ def validate_policy(policy: dict[str, Any]) -> tuple[dict[str, Any], str]:
         "protocol": {
             "envelope_version": envelope_version,
             "required_fields_count": len(required_fields),
-            "operations_count": len(operations),
+            "request_operations_count": len(request_operations),
+            "event_operations_count": len(event_operations),
+            "payload_transfer_modes": sorted(payload_transfer_modes),
             "state_count": len(states),
             "terminal_states": terminal_states,
         },
@@ -289,8 +340,34 @@ def run_self_test() -> None:
         },
         "message_protocol": {
             "envelope_version": "worker-envelope-v1",
-            "required_fields": ["message_id", "job_id", "obligation_id"],
-            "operations": ["spawn_job", "cancel_job", "drain_job", "finalize_job"],
+            "required_fields": [
+                "message_id",
+                "job_id",
+                "obligation_id",
+                "decision_seq",
+                "replay_hash",
+            ],
+            "request_operations": [
+                "spawn_job",
+                "poll_status",
+                "cancel_job",
+                "drain_job",
+                "finalize_job",
+                "shutdown_worker",
+            ],
+            "event_operations": [
+                "bootstrap_ready",
+                "bootstrap_failed",
+                "status_snapshot",
+                "job_completed",
+                "cancel_acknowledged",
+                "drain_completed",
+                "finalize_completed",
+                "shutdown_completed",
+                "diagnostic",
+            ],
+            "payload_transfer_modes": ["structured_clone"],
+            "owned_payload_required": True,
             "states": ["created", "running", "completed", "failed"],
             "terminal_states": ["completed", "failed"],
         },

@@ -35,7 +35,7 @@ Variant removal or renaming fails policy.
 Cancellation phase ordering is normative:
 
 1. `requested`
-2. `draining`
+2. `cancelling`
 3. `finalizing`
 4. `completed`
 

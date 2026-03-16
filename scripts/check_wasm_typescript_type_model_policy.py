@@ -116,7 +116,7 @@ def validate_type_surface(policy: dict[str, Any]) -> list[Finding]:
     phase_order = ensure_str_list(
         type_surface.get("cancellation_phase_order"), "type_surface.cancellation_phase_order"
     )
-    expected_phase_order = ["requested", "draining", "finalizing", "completed"]
+    expected_phase_order = ["requested", "cancelling", "finalizing", "completed"]
     if phase_order != expected_phase_order:
         findings.append(
             Finding(
@@ -390,7 +390,7 @@ def run_self_tests() -> int:
         "schema_version": "wasm-typescript-type-model-policy-v1",
         "type_surface": {
             "outcome_variants": ["ok", "err", "cancelled", "panicked"],
-            "cancellation_phase_order": ["requested", "draining", "finalizing", "completed"],
+            "cancellation_phase_order": ["requested", "cancelling", "finalizing", "completed"],
             "required_types": [
                 "Outcome<T, E>",
                 "Budget",

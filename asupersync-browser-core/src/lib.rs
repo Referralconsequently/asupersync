@@ -466,7 +466,7 @@ fn setup_browser_websocket(
         };
         inbox_for_close.borrow_mut().push_back(cancelled_outcome(
             "websocket_close",
-            "draining",
+            "completed",
             Some(message),
             None,
         ));
@@ -625,7 +625,7 @@ fn close_browser_websocket_socket(
     if let Some(reason) = reason {
         state.inbox.push_back(cancelled_outcome(
             "websocket_close",
-            "draining",
+            "completed",
             Some(reason),
             None,
         ));
@@ -799,7 +799,7 @@ fn websocket_close_impl(
     let outcome = if let Some(reason) = request.reason {
         cancelled_outcome(
             "websocket_close",
-            "draining",
+            "completed",
             Some(reason),
             Some(format!("{:?}", request.socket)),
         )

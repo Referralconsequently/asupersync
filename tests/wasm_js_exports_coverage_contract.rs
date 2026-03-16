@@ -197,16 +197,116 @@ fn browser_src_index_defines_high_level_sdk_wrappers() {
         "export class BrowserRuntime",
         "export class RegionHandle",
         "export class TaskHandle",
+        "export class BrowserArtifactStore",
+        "export class BrowserStorage",
+        "export class WebTransportHandle",
         "export class CancellationToken",
+        "export function createBrowserArtifactOperationError",
+        "export function createBrowserArtifactDownloadUnsupportedError",
+        "export function createBrowserArtifactStore",
+        "export function detectBrowserStorageSupport",
+        "export function createBrowserStorageUnsupportedError",
+        "export function createBrowserStorageOperationError",
+        "export function createBrowserStorage",
         "export function createCancellationToken",
         "export async function createBrowserRuntime",
         "export async function createBrowserScope",
         "export function createBrowserSdkDiagnostics",
+        "export function detectWebTransportSupport",
+        "export function createWebTransportUnsupportedError",
+        "export function assertWebTransportSupport",
         "export function unwrapOutcome",
     ] {
         assert!(
             content.contains(marker),
             "browser src/index.ts must define marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_exposes_browser_artifact_persistence_lane() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "export type BrowserArtifactKind = \"trace\" | \"crashpack\" | \"evidence\" | \"custom\";",
+        "quotaStrategy: \"evict_oldest\" | \"fail\";",
+        "export class BrowserArtifactStore",
+        "async persistTraceRecord(",
+        "async persistCrashArtifact(",
+        "async persistEvidenceArtifact(",
+        "async exportArchive(): Promise<BrowserArtifactArchiveExport>",
+        "async downloadArtifact(id: string): Promise<BrowserArtifactExport>",
+        "async downloadArchive(): Promise<BrowserArtifactArchiveExport>",
+        "browser artifact downloads require a browser main-thread document; use exportArtifact() in workers",
+        "export function createBrowserArtifactStore(",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve BrowserArtifactStore marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_exposes_storage_and_artifact_diagnostics() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "ASUPERSYNC_BROWSER_STORAGE_UNSUPPORTED",
+        "ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED",
+        "ASUPERSYNC_BROWSER_ARTIFACT_OPERATION_FAILED",
+        "ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED",
+        "\"quota_exceeded\"",
+        "\"corrupt_index\"",
+        "\"download_unavailable\"",
+        "retentionPolicy(): BrowserArtifactRetentionPolicy",
+        "async listArtifacts(): Promise<BrowserArtifactRecord[]>",
+        "async deleteArtifact(id: string): Promise<boolean>",
+        "async clearArtifacts(): Promise<number>",
+        "Use exportArtifact() or exportArchive() in dedicated workers or non-DOM runtimes, then hand the bytes to a browser main-thread UI for download.",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve storage/artifact diagnostics marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_exposes_browser_storage_lane() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "hasIndexedDb: browserIndexedDbFactory(globalObject) !== null",
+        "hasLocalStorage: browserLocalStorage(globalObject) !== null",
+        "export type BrowserStorageBackend = \"indexeddb\" | \"localstorage\";",
+        "export class BrowserStorage",
+        "async listKeys(namespace: string): Promise<string[]>",
+        "async clearNamespace(namespace: string): Promise<number>",
+        "case \"blocked_upgrade\":",
+        "case \"quota_exceeded\":",
+        "IndexedDB open blocked by another connection",
+        "localStorage is unavailable in this browser/runtime.",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve BrowserStorage marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_exposes_capability_gated_webtransport_lane() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "hasWebTransport: typeof globalObject?.WebTransport === \"function\"",
+        "openWebTransport(",
+        "sendDatagram(",
+        "recvDatagram(",
+        "WebTransport is unavailable in this browser/runtime.",
+        "Use WebSocket or fetch when WebTransport support is unavailable.",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve WebTransport marker: {marker}"
         );
     }
 }
@@ -221,6 +321,7 @@ fn browser_src_index_preserves_low_level_aliases_for_core_surface() {
         "CoreRegionHandle",
         "CoreTaskHandle",
         "CoreCancellationToken",
+        "webtransportCancel,",
         "@asupersync/browser-core/abi-metadata.json",
     ] {
         assert!(
@@ -231,14 +332,69 @@ fn browser_src_index_preserves_low_level_aliases_for_core_surface() {
 }
 
 #[test]
+fn browser_dist_index_preserves_low_level_aliases_for_core_surface() {
+    let js = read_source("packages/browser/dist/index.js");
+    let dts = read_source("packages/browser/dist/index.d.ts");
+    for marker in [
+        "webtransportCancel,",
+        "webtransportClose,",
+        "webtransportOpen,",
+    ] {
+        assert!(
+            js.contains(marker),
+            "browser dist/index.js must preserve core alias marker: {marker}"
+        );
+        assert!(
+            dts.contains(marker),
+            "browser dist/index.d.ts must preserve core alias marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_preserves_webtransport_cleanup_order() {
+    let content = read_source("packages/browser/src/index.ts");
+
+    assert!(
+        content.contains("const ready = Promise.all([reader, writer]).then(() => undefined);"),
+        "WebTransport readiness must wait for datagram reader/writer acquisition"
+    );
+
+    let reader_cancel = content
+        .find("reader.cancel?.(reason)")
+        .expect("reader cleanup must cancel before releasing the lock");
+    let reader_release = content
+        .find("reader.releaseLock?.();")
+        .expect("reader cleanup must release the lock");
+    assert!(
+        reader_cancel < reader_release,
+        "reader cleanup must cancel before releasing the lock"
+    );
+
+    let writer_abort = content
+        .find("writer.abort?.(reason)")
+        .expect("writer cleanup must abort with a reason before releasing the lock");
+    let writer_close = content
+        .find("writer.close?.()")
+        .expect("writer cleanup must close without a reason before releasing the lock");
+    let writer_release = content
+        .find("writer.releaseLock?.();")
+        .expect("writer cleanup must release the lock");
+    assert!(
+        writer_abort < writer_release && writer_close < writer_release,
+        "writer cleanup must close or abort before releasing the lock"
+    );
+}
+
+#[test]
 fn browser_src_index_threads_runtime_reference_through_scope_handles() {
     let path = repo_root().join("packages/browser/src/index.ts");
     let content =
         std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     for marker in [
         "readonly runtime: BrowserRuntime | null = null",
-        "new RegionHandle(handle, consumerVersion, this)",
-        "new RegionHandle(handle, consumerVersion, this.runtime)",
+        "new RegionHandle(entered.value, consumerVersion, this)",
+        "new RegionHandle(entered.value, consumerVersion, this.runtime)",
     ] {
         assert!(
             content.contains(marker),
@@ -337,6 +493,78 @@ fn browser_core_fetch_bridge_supports_window_or_worker_hosts() {
         assert!(
             content.contains(marker),
             "browser-core src/lib.rs must preserve worker fetch-host marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_core_package_exposes_low_level_webtransport_surface() {
+    let content = read_source("packages/browser-core/index.js");
+    for marker in [
+        "const INFLIGHT_WEBTRANSPORTS = new Map();",
+        "openWebTransport(url, options = undefined, consumerVersion = null)",
+        "export function webtransport_open(",
+        "export function webtransport_send(",
+        "export function webtransport_recv(",
+        "export function webtransport_close(",
+        "export function webtransport_cancel(",
+        "export const webtransportOpen = webtransport_open;",
+        "export const webtransportSend = webtransport_send;",
+        "export const webtransportRecv = webtransport_recv;",
+        "export const webtransportClose = webtransport_close;",
+        "export const webtransportCancel = webtransport_cancel;",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser-core package must preserve WebTransport export marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_core_webtransport_terminal_paths_close_and_retire_host_state() {
+    let content = read_source("packages/browser-core/index.js");
+    for marker in [
+        "function isTerminalOutcome(outcome) {",
+        "\"read_closed\",",
+        "\"read_failure\",",
+        "\"session_closed_error\",",
+        "closeHostWebTransportState(state, closeReason);",
+        "closeHostWebTransportState(state, reason);",
+        "if (isTerminalOutcome(result)) {",
+        "INFLIGHT_WEBTRANSPORTS.delete(sessionKey);",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser-core WebTransport cleanup marker missing: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_core_types_declare_webtransport_requests_and_exports() {
+    let content = read_source("packages/browser-core/index.d.ts");
+    for marker in [
+        "export interface WebTransportOpenRequest",
+        "export interface WebTransportSendRequest",
+        "export interface WebTransportRecvRequest",
+        "export interface WebTransportCloseRequest",
+        "export interface WebTransportCancelRequest",
+        "openWebTransport(",
+        "export declare function webtransport_open(",
+        "export declare function webtransport_send(",
+        "export declare function webtransport_recv(",
+        "export declare function webtransport_close(",
+        "export declare function webtransport_cancel(",
+        "export declare const webtransportOpen: typeof webtransport_open;",
+        "export declare const webtransportSend: typeof webtransport_send;",
+        "export declare const webtransportRecv: typeof webtransport_recv;",
+        "export declare const webtransportClose: typeof webtransport_close;",
+        "export declare const webtransportCancel: typeof webtransport_cancel;",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser-core types must preserve WebTransport marker: {marker}"
         );
     }
 }
