@@ -120,7 +120,7 @@ impl Default for ChannelConfig {
     }
 }
 
-/// Builder for creating a gRPC channel.
+/// Builder for creating a loopback gRPC channel.
 #[derive(Debug)]
 pub struct ChannelBuilder {
     /// The target URI.
@@ -131,6 +131,9 @@ pub struct ChannelBuilder {
 
 impl ChannelBuilder {
     /// Create a new channel builder for the given URI.
+    ///
+    /// The current client transport is loopback-only, so successful connects
+    /// require the URI host to be `loopback`.
     #[must_use]
     pub fn new(uri: impl Into<String>) -> Self {
         Self {
@@ -233,7 +236,7 @@ impl ChannelBuilder {
     }
 }
 
-/// A gRPC channel representing a connection to a server.
+/// A gRPC channel representing the current loopback-only client transport.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
@@ -249,12 +252,18 @@ impl Channel {
         ChannelBuilder::new(uri)
     }
 
-    /// Connect to a gRPC server at the given URI.
+    /// Connect to the loopback gRPC client transport at the given URI.
+    ///
+    /// The current implementation is an in-memory loopback transport rather
+    /// than a network HTTP/2 client, so the URI host must be `loopback`.
     pub async fn connect(uri: impl Into<String>) -> Result<Self, GrpcError> {
         Self::connect_with_config(&uri.into(), ChannelConfig::default()).await
     }
 
     /// Connect with custom configuration.
+    ///
+    /// The current implementation is an in-memory loopback transport rather
+    /// than a network HTTP/2 client, so the URI host must be `loopback`.
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
         validate_channel_uri(uri)?;
@@ -537,6 +546,25 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     if !(uri.starts_with("http://") || uri.starts_with("https://")) {
         return Err(GrpcError::transport(
             "channel URI must start with http:// or https://",
+        ));
+    }
+    let (_, remainder) = uri
+        .split_once("://")
+        .ok_or_else(|| GrpcError::transport("channel URI is missing a scheme separator"))?;
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .ok_or_else(|| GrpcError::transport("channel URI is missing an authority"))?;
+    let host = authority
+        .split_once(':')
+        .map_or(authority, |(host, _)| host)
+        .trim();
+    if host.is_empty() {
+        return Err(GrpcError::transport("channel URI is missing a host"));
+    }
+    if !host.eq_ignore_ascii_case("loopback") {
+        return Err(GrpcError::transport(
+            "gRPC client transport is loopback-only today; use a URI with host `loopback`",
         ));
     }
     Ok(())
@@ -1063,7 +1091,7 @@ mod tests {
     #[test]
     fn test_channel_builder() {
         init_test("test_channel_builder");
-        let builder = Channel::builder("http://localhost:50051")
+        let builder = Channel::builder("http://loopback:50051")
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .max_recv_message_size(8 * 1024 * 1024);
@@ -1164,10 +1192,10 @@ mod tests {
 
     #[test]
     fn channel_builder_debug() {
-        let builder = Channel::builder("http://localhost:50051");
+        let builder = Channel::builder("http://loopback:50051");
         let dbg = format!("{builder:?}");
         assert!(dbg.contains("ChannelBuilder"));
-        assert!(dbg.contains("localhost"));
+        assert!(dbg.contains("loopback"));
     }
 
     #[test]
@@ -1216,24 +1244,24 @@ mod tests {
 
     #[test]
     fn channel_debug_clone() {
-        let channel = make_channel("http://test:8080");
+        let channel = make_channel("http://loopback:8080");
         let dbg = format!("{channel:?}");
         assert!(dbg.contains("Channel"));
 
         let cloned = channel;
-        assert_eq!(cloned.uri(), "http://test:8080");
+        assert_eq!(cloned.uri(), "http://loopback:8080");
     }
 
     #[test]
     fn channel_uri_accessor() {
-        let channel = make_channel("http://myhost:9090");
-        assert_eq!(channel.uri(), "http://myhost:9090");
+        let channel = make_channel("http://loopback:9090");
+        assert_eq!(channel.uri(), "http://loopback:9090");
         assert_eq!(channel.config().connect_timeout, Duration::from_secs(5));
     }
 
     #[test]
     fn grpc_client_debug() {
-        let channel = make_channel("http://test:50051");
+        let channel = make_channel("http://loopback:50051");
         let client = GrpcClient::new(channel);
         let dbg = format!("{client:?}");
         assert!(dbg.contains("GrpcClient"));
@@ -1241,15 +1269,15 @@ mod tests {
 
     #[test]
     fn grpc_client_channel_accessor() {
-        let channel = make_channel("http://svc:80");
+        let channel = make_channel("http://loopback:80");
         let client = GrpcClient::new(channel);
-        assert_eq!(client.channel().uri(), "http://svc:80");
+        assert_eq!(client.channel().uri(), "http://loopback:80");
     }
 
     #[test]
     fn grpc_client_applies_deadline_metadata_by_default() {
         let channel = futures_lite::future::block_on(
-            Channel::builder("http://svc:80")
+            Channel::builder("http://loopback:80")
                 .timeout(Duration::from_secs(2))
                 .connect(),
         )
@@ -1273,7 +1301,7 @@ mod tests {
         use crate::grpc::timeout_interceptor;
 
         let channel = futures_lite::future::block_on(
-            Channel::builder("http://svc:80")
+            Channel::builder("http://loopback:80")
                 .send_compression(CompressionEncoding::Gzip)
                 .accept_compressions([CompressionEncoding::Identity, CompressionEncoding::Gzip])
                 .connect(),
@@ -1494,5 +1522,17 @@ mod tests {
             Streaming::poll_next(Pin::new(&mut stream), cx)
         }));
         assert!(first.is_none(), "drop should close bidi response stream");
+    }
+
+    #[test]
+    fn channel_connect_rejects_non_loopback_host() {
+        let error = futures_lite::future::block_on(Channel::connect("http://localhost:50051"))
+            .expect_err("non-loopback target should fail closed");
+        match error {
+            GrpcError::Transport(message) => {
+                assert!(message.contains("loopback-only"));
+            }
+            other => panic!("expected transport error, got: {other:?}"),
+        }
     }
 }
