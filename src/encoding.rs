@@ -206,37 +206,10 @@ impl EncodingPipeline {
     }
 
     fn plan_blocks(&self, data: &[u8]) -> Result<(Vec<BlockPlan>, usize), EncodingError> {
+        let symbol_size = self.validate_config()?;
+
         if data.is_empty() {
-            return Ok((Vec::new(), usize::from(self.config.symbol_size)));
-        }
-
-        let symbol_size = usize::from(self.config.symbol_size);
-        if symbol_size == 0 {
-            return Err(EncodingError::InvalidConfig {
-                reason: "symbol_size must be non-zero".to_string(),
-            });
-        }
-
-        if self.config.max_block_size == 0 {
-            return Err(EncodingError::InvalidConfig {
-                reason: "max_block_size must be non-zero".to_string(),
-            });
-        }
-
-        if !self.config.repair_overhead.is_finite() || self.config.repair_overhead < 1.0 {
-            return Err(EncodingError::InvalidConfig {
-                reason: "repair_overhead must be finite and >= 1.0".to_string(),
-            });
-        }
-
-        if self.pool_enabled() && self.pool.config().symbol_size != self.config.symbol_size {
-            return Err(EncodingError::InvalidConfig {
-                reason: format!(
-                    "pool symbol_size {} does not match encoding symbol_size {}",
-                    self.pool.config().symbol_size,
-                    self.config.symbol_size
-                ),
-            });
+            return Ok((Vec::new(), symbol_size));
         }
 
         let max_total = max_object_size(self.config.max_block_size);
@@ -266,6 +239,39 @@ impl EncodingPipeline {
         }
 
         Ok((blocks, symbol_size))
+    }
+
+    fn validate_config(&self) -> Result<usize, EncodingError> {
+        let symbol_size = usize::from(self.config.symbol_size);
+        if symbol_size == 0 {
+            return Err(EncodingError::InvalidConfig {
+                reason: "symbol_size must be non-zero".to_string(),
+            });
+        }
+
+        if self.config.max_block_size == 0 {
+            return Err(EncodingError::InvalidConfig {
+                reason: "max_block_size must be non-zero".to_string(),
+            });
+        }
+
+        if !self.config.repair_overhead.is_finite() || self.config.repair_overhead < 1.0 {
+            return Err(EncodingError::InvalidConfig {
+                reason: "repair_overhead must be finite and >= 1.0".to_string(),
+            });
+        }
+
+        if self.pool_enabled() && self.pool.config().symbol_size != self.config.symbol_size {
+            return Err(EncodingError::InvalidConfig {
+                reason: format!(
+                    "pool symbol_size {} does not match encoding symbol_size {}",
+                    self.pool.config().symbol_size,
+                    self.config.symbol_size
+                ),
+            });
+        }
+
+        Ok(symbol_size)
     }
 
     fn pool_enabled(&self) -> bool {
@@ -965,6 +971,45 @@ mod tests {
         );
         let err = pipeline
             .encode(ObjectId::new_for_test(101), b"test")
+            .next()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, EncodingError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn empty_payload_still_rejects_zero_symbol_size() {
+        let mut pipeline = EncodingPipeline::new(
+            test_config(0, 16, 1.0),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let err = pipeline
+            .encode(ObjectId::new_for_test(102), &[])
+            .next()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, EncodingError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn empty_payload_still_rejects_invalid_repair_overhead() {
+        let mut pipeline = EncodingPipeline::new(
+            test_config(4, 16, f64::NAN),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let err = pipeline
+            .encode(ObjectId::new_for_test(103), &[])
+            .next()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, EncodingError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn empty_payload_still_rejects_pool_symbol_size_mismatch() {
+        let mut pipeline = EncodingPipeline::new(test_config(4, 16, 1.0), pool_for(8, 1));
+        let err = pipeline
+            .encode(ObjectId::new_for_test(104), &[])
             .next()
             .unwrap()
             .unwrap_err();
