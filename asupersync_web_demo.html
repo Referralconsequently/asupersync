@@ -746,6 +746,27 @@ input[type="text"]:focus, select:focus, textarea:focus {
   background-size: 30px 26px;
 }
 
+/* ── Result container entrance ──────────────────────────────────── */
+@keyframes resultFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.result-enter { animation: resultFadeIn 0.4s var(--ease-stripe) both; }
+.result-enter .handle-table tbody tr {
+  animation: resultFadeIn 0.35s var(--ease-stripe) both;
+}
+.result-enter .handle-table tbody tr:nth-child(1) { animation-delay: 0.05s; }
+.result-enter .handle-table tbody tr:nth-child(2) { animation-delay: 0.1s; }
+.result-enter .handle-table tbody tr:nth-child(3) { animation-delay: 0.15s; }
+.result-enter .handle-table tbody tr:nth-child(4) { animation-delay: 0.2s; }
+.result-enter .handle-table tbody tr:nth-child(5) { animation-delay: 0.25s; }
+
+/* ── Interactive element focus ─────────────────────────────────── */
+.outcome-card:focus-visible, .region-box:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 /* ── Scroll offset for fixed nav ───────────────────────────────── */
 .section[id] { scroll-margin-top: 72px; }
 
@@ -1044,7 +1065,7 @@ httpRegion.<span class="fn">close</span>();</div>
           </div>
         </div>
         <div id="region-tree-container">
-          <svg id="region-svg" viewBox="0 0 800 420" style="max-height: 420px;">
+          <svg id="region-svg" viewBox="0 0 800 420" style="max-height: 420px;" role="img" aria-label="Interactive region tree visualization — click any region to trigger cascading cancellation">
             <!-- Rendered by JS -->
           </svg>
         </div>
@@ -1096,7 +1117,7 @@ httpRegion.<span class="fn">close</span>();</div>
       <div class="reveal">
         <div class="viz" id="outcome-viz">
           <div class="viz-title">Severity Lattice</div>
-          <svg id="outcome-svg" viewBox="0 0 400 180" style="max-height: 180px;">
+          <svg id="outcome-svg" viewBox="0 0 400 180" style="max-height: 180px;" role="img" aria-label="Outcome severity lattice: Ok less than Err less than Cancelled less than Panicked">
             <!-- Rendered by JS -->
           </svg>
         </div>
@@ -1131,7 +1152,7 @@ httpRegion.<span class="fn">close</span>();</div>
           </div>
         </div>
 
-        <svg id="cancel-svg" viewBox="0 0 760 70" style="max-height: 70px;">
+        <svg id="cancel-svg" viewBox="0 0 760 70" style="max-height: 70px;" role="img" aria-label="Cancel protocol state machine: Running, Cancel Requested, Draining, Finalizing, Completed">
           <!-- State machine nodes rendered by JS -->
         </svg>
 
@@ -2099,6 +2120,21 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+// Render HTML into a container with entrance animation
+function renderWithEntrance(containerId, html) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = html;
+  el.classList.remove('result-enter');
+  void el.offsetWidth; // force reflow to restart animation
+  el.classList.add('result-enter');
+  // Spring animate with motion if available
+  if (motionLib) {
+    motionLib.animate(el, { opacity: [0.6, 1], transform: ['translateY(6px)', 'translateY(0)'] },
+      { type: 'spring', stiffness: 200, damping: 22 });
+  }
+}
+
 // ─── WASM Module Access (no simulation — real runtime only) ──────
 function requireWasm(consoleId) {
   if (wasmReady && mod) return mod;
@@ -2801,9 +2837,8 @@ window.runStaleDemo = function() {
   }
   rt.value.close();
 
-  // Render timeline
-  const container = document.getElementById('stale-result');
-  container.innerHTML = `
+  // Render timeline with entrance animation
+  renderWithEntrance('stale-result', `
     <table class="handle-table">
       <thead><tr><th>Step</th><th>Action</th><th>Slot</th><th>Gen</th><th>Label</th><th>Result</th></tr></thead>
       <tbody>${steps.map((s, i) => `
@@ -2820,7 +2855,7 @@ window.runStaleDemo = function() {
     <div style="margin-top:12px; padding:12px; border-radius:8px; background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.15); font-size:13px; color:var(--text2);">
       <strong style="color:var(--red);">Key insight:</strong> The runtime <em>reuses slots</em> for efficiency, but the generation counter ensures old references are rejected. This makes use-after-free <em>structurally impossible</em>.
     </div>
-  `;
+  `);
   showToast('Stale handle correctly rejected', 'ok');
 };
 
@@ -2992,9 +3027,8 @@ window.runProtocolDemo = function() {
   steps.push({ step: 'Join', state: 'Closed (unpinned, released)', slot: task.slot, gen: task.generation, badge: 'badge-blue', badgeText: 'Released' });
   clog('protocol-console', `Join succeeded → handle unpinned & released. Slot ${task.slot} recycled.`, 'ok');
 
-  // Render state table
-  const container = document.getElementById('protocol-result');
-  container.innerHTML = `
+  // Render state table with entrance animation
+  renderWithEntrance('protocol-result', `
     <table class="handle-table">
       <thead><tr><th>#</th><th>Action</th><th>Slot</th><th>State</th></tr></thead>
       <tbody>${steps.map((s, i) => `
@@ -3009,7 +3043,7 @@ window.runProtocolDemo = function() {
     <div style="margin-top:12px; padding:12px; border-radius:8px; background:rgba(6,182,212,0.06); border:1px solid rgba(6,182,212,0.15); font-size:13px; color:var(--text2);">
       <strong style="color:var(--cyan);">Protocol enforced:</strong> Cancel alone doesn't release the handle. The task must be <em>joined</em> to acknowledge the outcome and unpin the slot. Double-cancel is rejected because the task is no longer in Active state.
     </div>
-  `;
+  `);
 
   sc.close();
   rt.value.close();
@@ -3434,8 +3468,7 @@ window.runSeverityDemo = function() {
   const worstColor = [HEX.green, HEX.red, HEX.orange, HEX.violet][worst.idx];
   const worstBadge = ['badge-ok', 'badge-err', 'badge-cancel', 'badge-panic'][worst.idx];
 
-  const container = document.getElementById('severity-result');
-  container.innerHTML = `
+  renderWithEntrance('severity-result', `
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:16px;">
       ${results.map(r => `
         <div style="padding:12px;border-radius:var(--radius);border:1px solid ${r.color}33;background:${r.color}08;text-align:center;">
@@ -3454,7 +3487,7 @@ window.runSeverityDemo = function() {
       <strong style="color:var(--cyan);">Why this matters:</strong> In tokio, you get <code>Vec&lt;Result&gt;</code> and must manually scan for errors.
       Here, the lattice does it algebraically. Combinators like <code>join_all</code> and <code>race</code> use this to propagate the worst severity automatically.
     </div>
-  `;
+  `);
 
   sc.close();
   rt.value.close();
@@ -3491,8 +3524,7 @@ window.runForensicsDemo = function() {
 
   const kindColors = { user: HEX.blue, timeout: HEX.orange, fail_fast: HEX.red, race_lost: HEX.yellow, shutdown: HEX.violet };
 
-  const container = document.getElementById('forensics-result');
-  container.innerHTML = `
+  renderWithEntrance('forensics-result', `
     ${results.map(r => `
       <div style="padding:14px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);margin-bottom:8px;">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -3513,7 +3545,7 @@ window.runForensicsDemo = function() {
       There is no <code>kind</code>, no <code>origin_region</code>, no <code>message</code>, no <code>phase</code> — just gone.
       Debugging "why did this task stop?" requires manual logging and prayer. Asupersync gives you <em>forensic-grade</em> attribution.
     </div>
-  `;
+  `);
 
   sc.close();
   rt.value.close();
@@ -3552,8 +3584,7 @@ window.runRecyclingDemo = function() {
   const slots = Object.keys(slotUseCount).map(Number).sort((a, b) => a - b);
   const maxUse = Math.max(...Object.values(slotUseCount));
 
-  const container = document.getElementById('recycling-result');
-  container.innerHTML = `
+  renderWithEntrance('recycling-result', `
     <div style="margin-bottom:16px;">
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">
         ${slots.map(slot => {
@@ -3580,7 +3611,7 @@ window.runRecyclingDemo = function() {
       <strong style="color:var(--blue);">LIFO recycling:</strong> Notice how the most recently freed slot gets reused first (highest reuse count on the most recently allocated slots).
       This pattern is deterministic — running the same sequence again produces identical slot assignments, enabling perfect replay debugging.
     </div>
-  `;
+  `);
   showToast(`Slot heatmap: ${slots.length} slots, ${CYCLES} cycles`, 'ok');
 };
 
@@ -3715,8 +3746,7 @@ window.runReplayDemo = function() {
   const run2 = runSequence();
   const match = JSON.stringify(run1) === JSON.stringify(run2);
 
-  const container = document.getElementById('replay-result');
-  container.innerHTML = `
+  renderWithEntrance('replay-result', `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
       ${[{label:'Run 1', data:run1},{label:'Run 2', data:run2}].map(run => `
         <div>
@@ -3740,7 +3770,7 @@ window.runReplayDemo = function() {
       replay it on a different machine, and get <em>exactly the same behavior</em>. In tokio, re-running a concurrent test produces different
       task scheduling, making Heisenbugs nearly impossible to reproduce.
     </div>
-  `;
+  `);
   showToast(match ? 'Deterministic replay proven' : 'Non-deterministic!', match ? 'ok' : 'err');
 };
 
@@ -3788,8 +3818,7 @@ window.runLeakDetectDemo = function() {
 
   rt.value.close();
 
-  const container = document.getElementById('leakdetect-result');
-  container.innerHTML = `
+  renderWithEntrance('leakdetect-result', `
     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">
       ${tasks.map((t, i) => `
         <div style="text-align:center;padding:12px 8px;border-radius:var(--radius);border:1px solid ${HEX.green}33;background:${HEX.green}08;">
@@ -3804,7 +3833,7 @@ window.runLeakDetectDemo = function() {
       <div style="font-size:16px;font-weight:700;color:${HEX.green};">5/5 orphaned tasks cleaned up by scope cascade</div>
       <div style="font-size:13px;color:var(--text2);margin-top:4px;">In tokio, these 5 tasks would run forever as zombies, holding locks and leaking memory.</div>
     </div>
-  `;
+  `);
   showToast('5 orphaned tasks caught by cascade', 'ok');
 };
 
@@ -3993,8 +4022,7 @@ window.runBenchmark = async function() {
   const nsPerOp = Math.round((elapsed / ops) * 1000000);
   rt.value.close();
 
-  const container = document.getElementById('benchmark-result');
-  container.innerHTML = `
+  renderWithEntrance('benchmark-result', `
     <div style="text-align:center;padding:24px;">
       <div style="font-size:48px;font-weight:800;font-family:var(--mono);color:var(--cyan);">${opsPerSec.toLocaleString()}</div>
       <div style="font-size:14px;color:var(--text3);margin-top:4px;">scope create+close operations per second</div>
@@ -4017,7 +4045,7 @@ window.runBenchmark = async function() {
         All the bookkeeping for structured concurrency — at ${nsPerOp < 10000 ? '<strong style="color:var(--green);">microsecond</strong>' : 'millisecond'} latency.
       </div>
     </div>
-  `;
+  `);
 
   console.log(`${LOG_PREFIX} %cBenchmark: ${opsPerSec.toLocaleString()} ops/sec (${ops.toLocaleString()} total, ${nsPerOp}ns/op)`, LOG_STYLE, 'color:#06B6D4;font-weight:bold;');
   document.getElementById('btn-bench').disabled = false;
