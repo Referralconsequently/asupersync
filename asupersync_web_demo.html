@@ -1157,7 +1157,7 @@ httpRegion.<span class="fn">close</span>();</div>
       <div class="reveal">
         <div class="viz" id="outcome-viz">
           <div class="viz-title">Severity Lattice</div>
-          <svg id="outcome-svg" viewBox="0 0 400 180" style="max-height: 180px;" role="img" aria-label="Outcome severity lattice: Ok less than Err less than Cancelled less than Panicked">
+          <svg id="outcome-svg" viewBox="0 0 510 190" style="max-height: 190px;" role="img" aria-label="Outcome severity lattice: Ok less than Err less than Cancelled less than Panicked">
             <!-- Rendered by JS -->
           </svg>
         </div>
@@ -2493,11 +2493,17 @@ function renderOutcomeCards() {
 
 function renderOutcomeLattice(selected) {
   const svg = document.getElementById('outcome-svg');
+  // Wider spacing to fit "Cancelled" and "Panicked" labels
+  const nodeR = 30;
+  const spacing = 120;
+  const startX = 75;
   const nodes = outcomeTypes.map((o, i) => ({
     ...o,
-    cx: 60 + i * 95,
-    cy: 90,
+    cx: startX + i * spacing,
+    cy: 100,
   }));
+  // Update viewBox to fit wider layout
+  svg.setAttribute('viewBox', `0 0 ${startX * 2 + (outcomeTypes.length - 1) * spacing} 190`);
 
   let html = '';
   // Arrows
@@ -2505,20 +2511,22 @@ function renderOutcomeLattice(selected) {
     const from = nodes[i], to = nodes[i+1];
     const active = selected && outcomeTypes.findIndex(o=>o.id===selected) >= i;
     const arrowCol = active ? '#94A3B8' : HEX.border2;
-    html += `<line x1="${from.cx+30}" y1="${from.cy}" x2="${to.cx-30}" y2="${to.cy}" stroke="${arrowCol}" stroke-width="1.5"/>`;
-    html += `<polygon points="${to.cx-30},${to.cy-4} ${to.cx-24},${to.cy} ${to.cx-30},${to.cy+4}" fill="${arrowCol}"/>`;
+    html += `<line x1="${from.cx+nodeR+2}" y1="${from.cy}" x2="${to.cx-nodeR-8}" y2="${to.cy}" stroke="${arrowCol}" stroke-width="1.5"/>`;
+    html += `<polygon points="${to.cx-nodeR-8},${to.cy-4} ${to.cx-nodeR-2},${to.cy} ${to.cx-nodeR-8},${to.cy+4}" fill="${arrowCol}"/>`;
   }
   // Labels
-  html += `<text x="200" y="25" fill="${HEX.text3}" font-size="11" text-anchor="middle" font-weight="600" font-family="var(--sans)">SEVERITY LATTICE: Ok &lt; Err &lt; Cancelled &lt; Panicked</text>`;
+  const midX = startX + ((outcomeTypes.length - 1) * spacing) / 2;
+  html += `<text x="${midX}" y="25" fill="${HEX.text3}" font-size="11" text-anchor="middle" font-weight="600" font-family="var(--sans)">SEVERITY LATTICE: Ok &lt; Err &lt; Cancelled &lt; Panicked</text>`;
   // Nodes
   for (const n of nodes) {
     const isSelected = selected === n.id;
-    html += `<circle cx="${n.cx}" cy="${n.cy}" r="24" fill="${isSelected ? n.color+'22' : HEX.surface}" stroke="${n.color}" stroke-width="${isSelected?2.5:1.5}" ${isSelected?'filter="url(#glow)"':''}/>`;
+    html += `<circle cx="${n.cx}" cy="${n.cy}" r="${nodeR}" fill="${isSelected ? n.color+'22' : HEX.surface}" stroke="${n.color}" stroke-width="${isSelected?2.5:1.5}" ${isSelected?'filter="url(#glow)"':''}/>`;
     if (isSelected) {
-      html += `<circle cx="${n.cx}" cy="${n.cy}" r="24" fill="none" stroke="${n.color}" stroke-width="1" opacity="0.3"><animate attributeName="r" from="24" to="36" dur="1.5s" repeatCount="indefinite"/><animate attributeName="opacity" from="0.3" to="0" dur="1.5s" repeatCount="indefinite"/></circle>`;
+      html += `<circle cx="${n.cx}" cy="${n.cy}" r="${nodeR}" fill="none" stroke="${n.color}" stroke-width="1" opacity="0.3"><animate attributeName="r" from="${nodeR}" to="${nodeR+12}" dur="1.5s" repeatCount="indefinite"/><animate attributeName="opacity" from="0.3" to="0" dur="1.5s" repeatCount="indefinite"/></circle>`;
     }
-    html += `<text x="${n.cx}" y="${n.cy+4}" fill="${n.color}" font-size="11" text-anchor="middle" font-weight="700" font-family="var(--sans)">${n.title}</text>`;
-    html += `<text x="${n.cx}" y="${n.cy+46}" fill="${HEX.text3}" font-size="10" text-anchor="middle" font-family="var(--mono)">${n.severity}</text>`;
+    const fontSize = n.title.length > 5 ? 9 : 11;
+    html += `<text x="${n.cx}" y="${n.cy+4}" fill="${n.color}" font-size="${fontSize}" text-anchor="middle" font-weight="700" font-family="var(--sans)">${n.title}</text>`;
+    html += `<text x="${n.cx}" y="${n.cy+nodeR+16}" fill="${HEX.text3}" font-size="10" text-anchor="middle" font-family="var(--mono)">${n.severity}</text>`;
   }
 
   svg.innerHTML = html;
