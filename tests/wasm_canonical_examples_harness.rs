@@ -520,25 +520,33 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
         "worker_artifact_download_guard_marker",
         "worker_artifact_quota_guard_marker",
         "worker_artifact_cleanup_marker",
+        "RUST-BROWSER-CONSUMER",
+        "repository_maintained_rust_browser_fixture",
+        "L6-RUST-BROWSER-CONSUMER",
         "TS-TYPE-VANILLA",
         "react_ref.task_group_cancel",
         "next_ref.template_deploy",
         "tests/fixtures/vite-vanilla-consumer",
         "tests/fixtures/dedicated-worker-consumer",
+        "tests/fixtures/rust-browser-consumer",
         "tests/fixtures/next-turbopack-consumer",
         "scripts/validate_vite_vanilla_consumer.sh",
         "scripts/validate_dedicated_worker_consumer.sh",
+        "scripts/validate_rust_browser_consumer.sh",
         "scripts/validate_next_turbopack_consumer.sh",
         "target/e2e-results/vite_vanilla_consumer/",
         "target/e2e-results/dedicated_worker_consumer/",
+        "target/e2e-results/rust_browser_consumer/",
         "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
         "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
+        "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh",
         "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh",
         "python3 scripts/run_browser_onboarding_checks.py --scenario vanilla",
         "python3 scripts/run_browser_onboarding_checks.py --scenario worker",
         "python3 scripts/run_browser_onboarding_checks.py --scenario react",
         "python3 scripts/run_browser_onboarding_checks.py --scenario next",
         "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
+        "tests/wasm_rust_browser_example_contract.rs",
         "rch exec -- cargo test --test react_wasm_strictmode_harness -- --nocapture",
         "rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture",
     ] {
@@ -618,6 +626,54 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         assert!(
             bundle.contains(marker),
             "dedicated-worker bundle check missing marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn rust_browser_fixture_is_cataloged_as_a_maintained_end_user_example() {
+    let fixture_path = Path::new("tests/fixtures/rust-browser-consumer/README.md");
+    let fixture_readme = std::fs::read_to_string(fixture_path)
+        .unwrap_or_else(|_| panic!("missing {}", fixture_path.display()));
+    for marker in [
+        "repository-maintained example",
+        "scripts/validate_rust_browser_consumer.sh",
+        "RuntimeBuilder",
+        "target/e2e-results/rust_browser_consumer/",
+    ] {
+        assert!(
+            fixture_readme.contains(marker),
+            "rust-browser fixture README missing marker: {marker}"
+        );
+    }
+
+    let script_path = Path::new("scripts/validate_rust_browser_consumer.sh");
+    let script = std::fs::read_to_string(script_path)
+        .unwrap_or_else(|_| panic!("missing {}", script_path.display()));
+    for marker in [
+        "RUST-BROWSER-CONSUMER",
+        "L6-RUST-BROWSER-CONSUMER",
+        "browser-run.json",
+    ] {
+        assert!(
+            script.contains(marker),
+            "rust-browser validation script missing marker: {marker}"
+        );
+    }
+
+    let browser_check_path =
+        Path::new("tests/fixtures/rust-browser-consumer/scripts/check-browser-run.mjs");
+    let browser_check = std::fs::read_to_string(browser_check_path)
+        .unwrap_or_else(|_| panic!("missing {}", browser_check_path.display()));
+    for marker in [
+        "repository_maintained_rust_browser_fixture",
+        "ready_phase === \"ready\"",
+        "disposed_phase === \"disposed\"",
+        "cancel_event_count === 1",
+    ] {
+        assert!(
+            browser_check.contains(marker),
+            "rust-browser browser-run checker missing marker: {marker}"
         );
     }
 }

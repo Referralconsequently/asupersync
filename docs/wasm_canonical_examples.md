@@ -10,9 +10,10 @@ Define the canonical Browser Edition examples for:
 
 1. Vanilla JS runtime embedding plus durable storage/artifact exercise
 2. Dedicated-worker bootstrap, storage/artifact export handoff, and shutdown coordination
-3. TypeScript outcome/cancellation modeling
-4. React provider + hook lifecycle patterns
-5. Next.js App Router bootstrap boundaries
+3. Rust-authored browser fixture workflow with explicit lifecycle/capability boundaries
+4. TypeScript outcome/cancellation modeling
+5. React provider + hook lifecycle patterns
+6. Next.js App Router bootstrap boundaries
 
 Each example must stay deterministic, preserve structured-concurrency invariants,
 and provide replayable commands and artifact paths.
@@ -33,6 +34,7 @@ Every example in this catalog must preserve:
 | --- | --- | --- | --- |
 | Vanilla JS | `vanilla.storage_artifact_bundle`, `vanilla.behavior_loser_drain_replay`, `vanilla.negative_skipped_loser_detection`, `vanilla.timing_mid_computation_drain`, `L6-BUNDLER-VITE` | `tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs`, `scripts/validate_vite_vanilla_consumer.sh` | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `artifacts/onboarding/vanilla.behavior_loser_drain_replay.log`, `artifacts/onboarding/vanilla.negative_skipped_loser_detection.log` |
 | Dedicated Worker | `worker.runtime_support_matrix`, `worker.storage_artifact_diagnostics`, `worker.storage_artifact_export_handoff`, `worker.coordinator_protocol`, `L6-BUNDLER-DEDICATED-WORKER` | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `src/net/worker_channel.rs`, `scripts/validate_dedicated_worker_consumer.sh` | `artifacts/onboarding/worker.runtime_support_matrix.log`, `artifacts/onboarding/worker.storage_artifact_diagnostics.log`, `artifacts/onboarding/worker.coordinator_protocol.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json` |
+| Rust Browser | `RUST-BROWSER-CONSUMER`, `repository_maintained_rust_browser_fixture`, `L6-RUST-BROWSER-CONSUMER` | `tests/wasm_rust_browser_example_contract.rs`, `scripts/validate_rust_browser_consumer.sh` | `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json` |
 | TypeScript | `TS-TYPE-VANILLA`, `TS-TYPE-REACT`, `TS-TYPE-NEXT` | `scripts/check_wasm_typescript_type_model_policy.py` | `artifacts/wasm_typescript_type_model_summary.json`, `artifacts/wasm_typescript_type_model_log.ndjson` |
 | React | `react_ref.task_group_cancel`, `react_ref.retry_after_transient_failure`, `react_ref.bulkhead_isolation`, `react_ref.tracing_hook_transition` | `tests/react_wasm_strictmode_harness.rs` | `artifacts/onboarding/react.behavior_strict_mode_double_invocation.log`, `artifacts/onboarding/react.timing_restart_churn.log` |
 | Next.js | `next_ref.template_deploy`, `next_ref.cache_revalidation_reinit`, `next_ref.hard_navigation_rebootstrap`, `next_ref.cancel_retry_runtime_init` | `tests/nextjs_bootstrap_harness.rs` | `artifacts/onboarding/next.behavior_bootstrap_harness.log`, `artifacts/onboarding/next.timing_navigation_churn.log` |
@@ -106,6 +108,36 @@ python3 scripts/run_browser_onboarding_checks.py --scenario worker
 PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 ```
 
+## Maintained Rust Browser Example
+
+Maintained Rust-authored browser example source:
+
+- `tests/fixtures/rust-browser-consumer`
+- validation harness: `scripts/validate_rust_browser_consumer.sh`
+
+This fixture is the canonical Rust-authored browser example for:
+
+- the truthful repository-maintained browser-facing Rust workflow
+- a real wasm package layout that stages generated `pkg/` output next to a frontend consumer
+- provider/helper-driven structured-concurrency lifecycle evidence instead of a fabricated public browser `RuntimeBuilder` story
+- explicit browser capability reporting, one successful completion path, and one unmount-driven cancellation path
+- deterministic artifact output under `target/e2e-results/rust_browser_consumer/`
+
+The Rust-browser summary is expected to retain these contract markers:
+
+- `RUST-BROWSER-CONSUMER`
+- `repository_maintained_rust_browser_fixture`
+- `ready_phase = "ready"`
+- `disposed_phase = "disposed"`
+- `completed_task_outcome = "ok"`
+- `cancel_event_count = 1`
+
+Primary deterministic validation command:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh
+```
+
 ## Maintained Next.js Example
 
 Maintained Next App Router example source:
@@ -153,6 +185,12 @@ Run the maintained dedicated-worker fixture directly:
 
 ```bash
 PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
+```
+
+Run the maintained Rust-browser fixture directly:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh
 ```
 
 Run the maintained Next fixture directly:
