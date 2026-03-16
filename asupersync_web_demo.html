@@ -3975,17 +3975,22 @@ window.runReplayDemo = function() {
     events.push({ phase: 'free', label: 'scope-' + i, slot: scopes[i].slot, gen: scopes[i].generation });
   }
 
-  // Phase 3: Create 4 new scopes — LIFO means last-freed slot is reused first
+  // Phase 3: Create 4 new scopes WITHOUT closing them — each one pops from the free list.
+  // LIFO means last-freed slot is reused first.
   const reusedSlots = [];
+  const reusedScopes = [];
   for (let i = 0; i < 4; i++) {
     const s = rt.value.enterScope('reuse-' + i);
     if (s.outcome === 'ok') {
       reusedSlots.push(s.value.slot);
+      reusedScopes.push(s.value);
       events.push({ phase: 'reuse', label: 'reuse-' + i, slot: s.value.slot, gen: s.value.generation });
-      s.value.close();
+      // DO NOT close — keep the slot occupied so the next alloc pops the next item from the stack
     }
   }
 
+  // Cleanup
+  reusedScopes.forEach(s => s.close());
   rt.value.close();
 
   // Verify LIFO: reused order should be reverse of freed order
