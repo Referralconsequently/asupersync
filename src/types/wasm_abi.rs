@@ -847,6 +847,24 @@ pub enum WasmHandleError {
         /// Slot index.
         slot: u32,
     },
+    /// Cannot release a handle before its boundary lifecycle is closed.
+    #[error("handle slot {slot} is still {state:?}; close before releasing")]
+    ReleaseBeforeClosed {
+        /// Slot index.
+        slot: u32,
+        /// Current boundary state.
+        state: WasmBoundaryState,
+    },
+    /// Cannot release a handle while it still owns live descendants.
+    #[error(
+        "handle slot {slot} still has {live_descendants} live descendant(s); release children first"
+    )]
+    ReleaseWithLiveDescendants {
+        /// Slot index.
+        slot: u32,
+        /// Number of non-released descendants still attached to this handle.
+        live_descendants: usize,
+    },
     /// Boundary state transition was not legal under contract.
     #[error("invalid state transition for slot {slot}: {from:?} -> {to:?}")]
     InvalidStateTransition {
@@ -1103,12 +1121,28 @@ impl WasmHandleTable {
     /// # Errors
     ///
     /// Returns `ReleasePinned` if the handle is still pinned.
+    /// Returns `ReleaseBeforeClosed` if the boundary state is not `Closed`.
+    /// Returns `ReleaseWithLiveDescendants` if any descendants are still live.
     /// Returns `AlreadyReleased` if the handle was previously released.
     pub fn release(&mut self, handle: &WasmHandleRef) -> Result<(), WasmHandleError> {
-        let entry = self.get_mut(handle)?;
+        let entry = self.get(handle)?;
         if entry.pinned {
             return Err(WasmHandleError::ReleasePinned { slot: handle.slot });
         }
+        if entry.state != WasmBoundaryState::Closed {
+            return Err(WasmHandleError::ReleaseBeforeClosed {
+                slot: handle.slot,
+                state: entry.state,
+            });
+        }
+        let live_descendants = self.descendants_postorder(handle).len();
+        if live_descendants != 0 {
+            return Err(WasmHandleError::ReleaseWithLiveDescendants {
+                slot: handle.slot,
+                live_descendants,
+            });
+        }
+        let entry = self.get_mut(handle)?;
         entry.ownership = WasmHandleOwnership::Released;
         self.slots[handle.slot as usize] = None;
         self.generations[handle.slot as usize] =
@@ -4050,6 +4084,22 @@ mod tests {
     use super::*;
     use crate::types::{CancelKind, CancelReason, PanicPayload, RegionId, Time};
 
+    fn close_handle_for_release(table: &mut WasmHandleTable, handle: &WasmHandleRef) {
+        match table.get(handle).unwrap().state {
+            WasmBoundaryState::Unbound => {
+                table.transition(handle, WasmBoundaryState::Bound).unwrap();
+                table.transition(handle, WasmBoundaryState::Closed).unwrap();
+            }
+            WasmBoundaryState::Bound
+            | WasmBoundaryState::Active
+            | WasmBoundaryState::Cancelling
+            | WasmBoundaryState::Draining => {
+                table.transition(handle, WasmBoundaryState::Closed).unwrap();
+            }
+            WasmBoundaryState::Closed => {}
+        }
+    }
+
     #[test]
     fn abi_compatibility_rules_enforced() {
         let exact = classify_wasm_abi_compatibility(
@@ -4472,6 +4522,7 @@ mod tests {
         assert_eq!(h1.generation, 0);
 
         // Release h1
+        close_handle_for_release(&mut table, &h1);
         table.release(&h1).unwrap();
 
         // Allocate again — should reuse slot 0 with bumped generation
@@ -4498,6 +4549,7 @@ mod tests {
     fn handle_table_stale_handle_rejected() {
         let mut table = WasmHandleTable::new();
         let h = table.allocate(WasmHandleKind::CancelToken);
+        close_handle_for_release(&mut table, &h);
         table.release(&h).unwrap();
 
         // Try to use released handle
@@ -4545,6 +4597,7 @@ mod tests {
         assert!(!table.get(&h).unwrap().pinned);
 
         // Can release after unpin
+        close_handle_for_release(&mut table, &h);
         table.release(&h).unwrap();
         assert_eq!(table.live_count(), 0);
     }
@@ -4590,6 +4643,7 @@ mod tests {
         table.transition(&h2, WasmBoundaryState::Active).unwrap();
 
         // h3: properly released
+        close_handle_for_release(&mut table, &h3);
         table.release(&h3).unwrap();
 
         let leaks = table.detect_leaks();
@@ -4623,11 +4677,45 @@ mod tests {
     fn handle_table_release_already_released() {
         let mut table = WasmHandleTable::new();
         let h = table.allocate(WasmHandleKind::Task);
+        close_handle_for_release(&mut table, &h);
         table.release(&h).unwrap();
 
         // Stale generation
         let err = table.release(&h).unwrap_err();
         assert!(matches!(err, WasmHandleError::StaleGeneration { .. }));
+    }
+
+    #[test]
+    fn handle_table_release_requires_closed_and_quiescent_state() {
+        let mut table = WasmHandleTable::new();
+        let root = table.allocate(WasmHandleKind::Runtime);
+        let child = table.allocate_with_parent(WasmHandleKind::Task, Some(root));
+
+        let err = table.release(&root).unwrap_err();
+        assert_eq!(
+            err,
+            WasmHandleError::ReleaseBeforeClosed {
+                slot: root.slot,
+                state: WasmBoundaryState::Unbound,
+            }
+        );
+        assert_eq!(table.live_count(), 2);
+
+        close_handle_for_release(&mut table, &root);
+        let err = table.release(&root).unwrap_err();
+        assert_eq!(
+            err,
+            WasmHandleError::ReleaseWithLiveDescendants {
+                slot: root.slot,
+                live_descendants: 1,
+            }
+        );
+        assert_eq!(table.live_count(), 2);
+
+        close_handle_for_release(&mut table, &child);
+        table.release(&child).unwrap();
+        table.release(&root).unwrap();
+        assert_eq!(table.live_count(), 0);
     }
 
     #[test]

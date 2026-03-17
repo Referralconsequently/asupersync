@@ -42,7 +42,17 @@ enum BodyKind<B> {
     Stream(B),
 }
 
-impl IntoHttpBody<()> {
+/// A dummy stream type used for full bodies.
+pub struct EmptyStream;
+
+impl asupersync::stream::Stream for EmptyStream {
+    type Item = Result<bytes::Bytes, std::convert::Infallible>;
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        unreachable!("EmptyStream should never be polled")
+    }
+}
+
+impl IntoHttpBody<EmptyStream> {
     /// Create a body from a complete byte buffer.
     ///
     /// The entire payload is returned in a single `DATA` frame on the first
@@ -95,34 +105,51 @@ impl<B> std::fmt::Debug for IntoHttpBody<B> {
     }
 }
 
-// Implementation for full (non-streaming) bodies.
-impl http_body::Body for IntoHttpBody<()> {
+// Implementation for both full and streaming bodies.
+impl<B, E> http_body::Body for IntoHttpBody<B>
+where
+    B: asupersync::stream::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
+{
     type Data = bytes::Bytes;
-    type Error = std::convert::Infallible;
+    type Error = E;
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        match &mut self.inner {
+        let mut this = self.as_mut();
+        match &mut this.inner {
             BodyKind::Full(data) => {
                 if let Some(bytes) = data.take() {
                     if bytes.is_empty() {
                         // Skip empty data frame, go straight to trailers.
-                        self.trailers.take().map_or_else(
+                        this.trailers.take().map_or_else(
                             || Poll::Ready(None),
                             |trailers| Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
                         )
                     } else {
                         Poll::Ready(Some(Ok(Frame::data(bytes))))
                     }
-                } else if let Some(trailers) = self.trailers.take() {
+                } else if let Some(trailers) = this.trailers.take() {
                     Poll::Ready(Some(Ok(Frame::trailers(trailers))))
                 } else {
                     Poll::Ready(None)
                 }
             }
-            BodyKind::Stream(()) => unreachable!("IntoHttpBody<()> cannot be Stream"),
+            BodyKind::Stream(stream) => {
+                match Pin::new(stream).poll_next(cx) {
+                    Poll::Ready(Some(Ok(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
+                    Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+                    Poll::Ready(None) => {
+                        if let Some(trailers) = this.trailers.take() {
+                            Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+                        } else {
+                            Poll::Ready(None)
+                        }
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            }
         }
     }
 
@@ -137,7 +164,7 @@ impl http_body::Body for IntoHttpBody<()> {
         match &self.inner {
             BodyKind::Full(Some(data)) => http_body::SizeHint::with_exact(data.len() as u64),
             BodyKind::Full(None) => http_body::SizeHint::with_exact(0),
-            BodyKind::Stream(()) => http_body::SizeHint::default(),
+            BodyKind::Stream(_) => http_body::SizeHint::default(),
         }
     }
 }

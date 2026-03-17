@@ -69,6 +69,15 @@ where
     backend.service.lock().eq(expected)
 }
 
+fn backends_contain_service<S>(backends: &[Arc<Backend<S>>], expected: &S) -> bool
+where
+    S: Eq,
+{
+    backends
+        .iter()
+        .any(|backend| backend_matches_service(backend, expected))
+}
+
 // ─── Load metric ──────────────────────────────────────────────────────────
 
 /// Per-backend load tracking.
@@ -548,18 +557,13 @@ where
         let changes = discover
             .poll_discover()
             .map_err(DiscoverUpdateError::Discover)?;
-        if changes.is_empty() {
-            return Ok(());
-        }
+        let endpoints = discover.endpoints();
 
         let mut backends = self.backends.lock();
         for change in changes {
             match change {
                 Change::Insert(service) => {
-                    if backends
-                        .iter()
-                        .any(|backend| backend_matches_service(backend, &service))
-                    {
+                    if backends_contain_service(&backends, &service) {
                         continue;
                     }
 
@@ -580,6 +584,33 @@ where
                     }
                 }
             }
+        }
+
+        let mut index = 0;
+        while index < backends.len() {
+            if endpoints
+                .iter()
+                .any(|service| backend_matches_service(&backends[index], service))
+            {
+                index += 1;
+                continue;
+            }
+
+            backends.remove(index);
+            self.strategy.on_backend_removed(index);
+        }
+
+        for service in endpoints {
+            if backends_contain_service(&backends, &service) {
+                continue;
+            }
+
+            let index = backends.len();
+            backends.push(Arc::new(Backend {
+                service: Mutex::new(service),
+                load: Arc::new(LoadMetric::new()),
+            }));
+            self.strategy.on_backend_inserted(index);
         }
 
         drop(backends);
@@ -1582,6 +1613,40 @@ mod tests {
             vec!["backend-b".to_string(), "backend-c".to_string()]
         );
         crate::test_complete!("lb_update_from_discover_applies_insert_remove_and_dedupes");
+    }
+
+    #[test]
+    fn lb_update_from_discover_reconciles_late_joiner_against_snapshot() {
+        init_test("lb_update_from_discover_reconciles_late_joiner_against_snapshot");
+        let discover = ScriptedDiscover::<String, std::io::Error>::new(vec![Ok(vec![
+            Change::Insert("backend-a".to_string()),
+            Change::Insert("backend-b".to_string()),
+        ])]);
+        let first = LoadBalancer::empty(RoundRobin::new());
+        let late = LoadBalancer::empty(RoundRobin::new());
+
+        first
+            .update_from_discover(&discover)
+            .expect("first balancer should consume discovery inserts");
+        assert_eq!(
+            discover.endpoints(),
+            vec!["backend-a".to_string(), "backend-b".to_string()]
+        );
+
+        late.update_from_discover(&discover)
+            .expect("late balancer should reconcile from snapshot");
+        assert_eq!(late.len(), 2);
+
+        let mut remaining = vec![
+            late.remove(0).expect("backend-a should be present"),
+            late.remove(0).expect("backend-b should be present"),
+        ];
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec!["backend-a".to_string(), "backend-b".to_string()]
+        );
+        crate::test_complete!("lb_update_from_discover_reconciles_late_joiner_against_snapshot");
     }
 
     #[test]

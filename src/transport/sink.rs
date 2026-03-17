@@ -313,6 +313,7 @@ use std::collections::VecDeque;
 pub struct BufferedSink<S> {
     inner: S,
     buffer: VecDeque<AuthenticatedSymbol>,
+    pending_symbol: Option<AuthenticatedSymbol>,
     capacity: usize,
 }
 
@@ -322,6 +323,7 @@ impl<S> BufferedSink<S> {
         Self {
             inner,
             buffer: VecDeque::with_capacity(capacity),
+            pending_symbol: None,
             capacity,
         }
     }
@@ -344,7 +346,7 @@ impl<S: SymbolSink + Unpin> BufferedSink<S> {
 impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
-        if this.buffer.len() < this.capacity {
+        if this.buffer.len() < this.capacity && this.pending_symbol.is_none() {
             this.poll_inner_terminal_error(cx)
                 .map_or(Poll::Ready(Ok(())), |err| Poll::Ready(Err(err)))
         } else {
@@ -367,9 +369,17 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
         }
 
         if this.buffer.len() >= this.capacity {
-            // Must flush first
+            // Buffer is full. Stage the symbol before flushing so a Pending
+            // flush cannot drop caller-owned data.
+            debug_assert!(
+                this.pending_symbol.is_none(),
+                "BufferedSink::poll_send called with a staged pending symbol"
+            );
+            if this.pending_symbol.is_none() {
+                this.pending_symbol = Some(symbol);
+            }
             match Pin::new(&mut *this).poll_flush(cx) {
-                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
             }
@@ -381,7 +391,15 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.as_mut().get_mut();
 
-        while !this.buffer.is_empty() {
+        loop {
+            if this.buffer.is_empty() {
+                if let Some(symbol) = this.pending_symbol.take() {
+                    this.buffer.push_back(symbol);
+                } else {
+                    break;
+                }
+            }
+
             // Check if inner is ready
             match Pin::new(&mut this.inner).poll_ready(cx) {
                 Poll::Ready(Ok(())) => {}
@@ -1174,6 +1192,80 @@ mod tests {
             buffered.buffer.len()
         );
         crate::test_complete!("test_buffered_sink_ready_pending_when_inner_not_ready");
+    }
+
+    #[test]
+    fn test_buffered_sink_pending_full_send_retains_staged_symbol() {
+        init_test("test_buffered_sink_pending_full_send_retains_staged_symbol");
+        let inner = TrackingSink::new({
+            let mut state = TrackingSinkState::new();
+            // First send consumes one transient pending poll via the terminal
+            // probe. The second send then sees another transient pending in the
+            // full-buffer flush path and must retain the staged symbol.
+            state.ready_after = 3;
+            state
+        });
+        let mut buffered = BufferedSink::new(inner, 1);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let first = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(1));
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(()))),
+            "first symbol buffered",
+            true,
+            matches!(first, Poll::Ready(Ok(())))
+        );
+
+        let second = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(2));
+        crate::assert_with_log!(
+            matches!(second, Poll::Pending),
+            "second send backpressures instead of dropping",
+            true,
+            matches!(second, Poll::Pending)
+        );
+        crate::assert_with_log!(
+            buffered.buffer.len() == 1,
+            "full buffer still holds original symbol",
+            1usize,
+            buffered.buffer.len()
+        );
+        crate::assert_with_log!(
+            buffered.pending_symbol.is_some(),
+            "pending symbol retained across flush backpressure",
+            true,
+            buffered.pending_symbol.is_some()
+        );
+
+        let flushed = Pin::new(&mut buffered).poll_flush(&mut context);
+        crate::assert_with_log!(
+            matches!(flushed, Poll::Ready(Ok(()))),
+            "flush drains both buffered and pending symbols",
+            true,
+            matches!(flushed, Poll::Ready(Ok(())))
+        );
+
+        let sent_ids = {
+            let state = buffered.inner.state.lock();
+            state
+                .sent
+                .iter()
+                .map(|symbol| symbol.symbol().id().esi())
+                .collect::<Vec<_>>()
+        };
+        crate::assert_with_log!(
+            sent_ids == vec![1, 2],
+            "flush preserves symbol order and retention",
+            vec![1_u32, 2_u32],
+            sent_ids
+        );
+        crate::assert_with_log!(
+            buffered.pending_symbol.is_none(),
+            "pending slot cleared after flush",
+            true,
+            buffered.pending_symbol.is_none()
+        );
+        crate::test_complete!("test_buffered_sink_pending_full_send_retains_staged_symbol");
     }
 
     #[test]

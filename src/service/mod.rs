@@ -37,7 +37,7 @@ pub use concurrency_limit::{ConcurrencyLimit, ConcurrencyLimitError, Concurrency
 pub use discover::{
     Change, Discover, DnsDiscoveryConfig, DnsDiscoveryError, DnsServiceDiscovery, StaticList,
 };
-pub use filter::{AsyncFilter, Filter, FilterError, FilterFuture, FilterLayer};
+pub use filter::{Filter, FilterError, FilterFuture, FilterLayer};
 pub use hedge::{Hedge, HedgeConfig, HedgeError, HedgeFuture, HedgeLayer};
 pub use layer::{Identity, Layer, Stack};
 pub use load_balance::{

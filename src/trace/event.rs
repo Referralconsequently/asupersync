@@ -301,7 +301,9 @@ impl TraceEventKind {
             | Self::WorkerCancelAcknowledged
             | Self::WorkerDrainStarted
             | Self::WorkerDrainCompleted
-            | Self::WorkerFinalizeCompleted => "job_id, obligation, region, task, worker_id",
+            | Self::WorkerFinalizeCompleted => {
+                "decision_seq, job_id, obligation, region, replay_hash, task, worker_id"
+            }
             Self::RegionCloseBegin | Self::RegionCloseComplete | Self::RegionCreated => {
                 "region, parent"
             }
@@ -850,6 +852,24 @@ pub fn browser_trace_log_fields_with_capture(
             "invalid".to_string()
         },
     );
+    if let TraceData::Worker {
+        worker_id,
+        job_id,
+        decision_seq,
+        replay_hash,
+        task,
+        region,
+        obligation,
+    } = &event.data
+    {
+        fields.insert("decision_seq".to_string(), decision_seq.to_string());
+        fields.insert("job_id".to_string(), job_id.to_string());
+        fields.insert("obligation".to_string(), obligation.to_string());
+        fields.insert("region".to_string(), region.to_string());
+        fields.insert("replay_hash".to_string(), replay_hash.to_string());
+        fields.insert("task".to_string(), task.to_string());
+        fields.insert("worker_id".to_string(), worker_id.clone());
+    }
     fields
 }
 
@@ -920,6 +940,10 @@ pub enum TraceData {
         worker_id: String,
         /// Offloaded job identifier within the worker coordinator.
         job_id: u64,
+        /// Deterministic decision sequence carried by the worker envelope.
+        decision_seq: u64,
+        /// Stable replay digest carried by the worker envelope.
+        replay_hash: u64,
         /// The originating task that owns the offloaded work.
         task: TaskId,
         /// The originating region that owns the task.
@@ -1209,6 +1233,8 @@ impl TraceEvent {
         kind: TraceEventKind,
         worker_id: impl Into<String>,
         job_id: u64,
+        decision_seq: u64,
+        replay_hash: u64,
         task: TaskId,
         region: RegionId,
         obligation: ObligationId,
@@ -1220,6 +1246,8 @@ impl TraceEvent {
             TraceData::Worker {
                 worker_id: worker_id.into(),
                 job_id,
+                decision_seq,
+                replay_hash,
                 task,
                 region,
                 obligation,
@@ -1228,12 +1256,15 @@ impl TraceEvent {
     }
 
     /// Creates a worker-offload cancel-requested event.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn worker_cancel_requested(
         seq: u64,
         time: Time,
         worker_id: impl Into<String>,
         job_id: u64,
+        decision_seq: u64,
+        replay_hash: u64,
         task: TaskId,
         region: RegionId,
         obligation: ObligationId,
@@ -1244,6 +1275,8 @@ impl TraceEvent {
             TraceEventKind::WorkerCancelRequested,
             worker_id,
             job_id,
+            decision_seq,
+            replay_hash,
             task,
             region,
             obligation,
@@ -1251,12 +1284,15 @@ impl TraceEvent {
     }
 
     /// Creates a worker-offload cancel-acknowledged event.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn worker_cancel_acknowledged(
         seq: u64,
         time: Time,
         worker_id: impl Into<String>,
         job_id: u64,
+        decision_seq: u64,
+        replay_hash: u64,
         task: TaskId,
         region: RegionId,
         obligation: ObligationId,
@@ -1267,6 +1303,8 @@ impl TraceEvent {
             TraceEventKind::WorkerCancelAcknowledged,
             worker_id,
             job_id,
+            decision_seq,
+            replay_hash,
             task,
             region,
             obligation,
@@ -1274,12 +1312,15 @@ impl TraceEvent {
     }
 
     /// Creates a worker-offload drain-started event.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn worker_drain_started(
         seq: u64,
         time: Time,
         worker_id: impl Into<String>,
         job_id: u64,
+        decision_seq: u64,
+        replay_hash: u64,
         task: TaskId,
         region: RegionId,
         obligation: ObligationId,
@@ -1290,6 +1331,8 @@ impl TraceEvent {
             TraceEventKind::WorkerDrainStarted,
             worker_id,
             job_id,
+            decision_seq,
+            replay_hash,
             task,
             region,
             obligation,
@@ -1297,12 +1340,15 @@ impl TraceEvent {
     }
 
     /// Creates a worker-offload drain-completed event.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn worker_drain_completed(
         seq: u64,
         time: Time,
         worker_id: impl Into<String>,
         job_id: u64,
+        decision_seq: u64,
+        replay_hash: u64,
         task: TaskId,
         region: RegionId,
         obligation: ObligationId,
@@ -1313,6 +1359,8 @@ impl TraceEvent {
             TraceEventKind::WorkerDrainCompleted,
             worker_id,
             job_id,
+            decision_seq,
+            replay_hash,
             task,
             region,
             obligation,
@@ -1320,12 +1368,15 @@ impl TraceEvent {
     }
 
     /// Creates a worker-offload finalize-completed event.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn worker_finalize_completed(
         seq: u64,
         time: Time,
         worker_id: impl Into<String>,
         job_id: u64,
+        decision_seq: u64,
+        replay_hash: u64,
         task: TaskId,
         region: RegionId,
         obligation: ObligationId,
@@ -1336,6 +1387,8 @@ impl TraceEvent {
             TraceEventKind::WorkerFinalizeCompleted,
             worker_id,
             job_id,
+            decision_seq,
+            replay_hash,
             task,
             region,
             obligation,
@@ -1820,12 +1873,14 @@ impl fmt::Display for TraceEvent {
             TraceData::Worker {
                 worker_id,
                 job_id,
+                decision_seq,
+                replay_hash,
                 task,
                 region,
                 obligation,
             } => write!(
                 f,
-                " worker={worker_id} job_id={job_id} {task} in {region} obligation={obligation}"
+                " worker={worker_id} job_id={job_id} {task} in {region} obligation={obligation} decision_seq={decision_seq} replay_hash={replay_hash}"
             )?,
             TraceData::RegionCancel { region, reason } => {
                 write!(f, " {region} reason={reason}")?;
@@ -2537,6 +2592,8 @@ mod tests {
             Time::ZERO,
             "worker-a",
             77,
+            91,
+            0x00C0_FFEE,
             task(9),
             region(10),
             obligation(11),
@@ -2547,6 +2604,8 @@ mod tests {
             TraceData::Worker {
                 worker_id: "worker-a".into(),
                 job_id: 77,
+                decision_seq: 91,
+                replay_hash: 0x00C0_FFEE,
                 task: task(9),
                 region: region(10),
                 obligation: obligation(11),
@@ -3274,9 +3333,11 @@ mod tests {
             assert_eq!(
                 entry.required_fields,
                 vec![
+                    "decision_seq".to_string(),
                     "job_id".to_string(),
                     "obligation".to_string(),
                     "region".to_string(),
+                    "replay_hash".to_string(),
                     "task".to_string(),
                     "worker_id".to_string(),
                 ]
@@ -3458,5 +3519,28 @@ mod tests {
             fields.get("validation_failure_category"),
             Some(&"schema_version_mismatch".to_string())
         );
+    }
+
+    #[test]
+    fn browser_trace_log_fields_include_worker_replay_linkage() {
+        let event = TraceEvent::worker_cancel_requested(
+            21,
+            Time::from_nanos(55),
+            "worker-a",
+            77,
+            91,
+            0x00C0_FFEE,
+            task(9),
+            region(10),
+            obligation(11),
+        );
+        let fields = browser_trace_log_fields(&event, "trace-browser-worker-1", None);
+        assert_eq!(fields.get("decision_seq"), Some(&"91".to_string()));
+        assert_eq!(fields.get("job_id"), Some(&"77".to_string()));
+        assert_eq!(fields.get("obligation"), Some(&obligation(11).to_string()));
+        assert_eq!(fields.get("region"), Some(&region(10).to_string()));
+        assert_eq!(fields.get("replay_hash"), Some(&"12648430".to_string()));
+        assert_eq!(fields.get("task"), Some(&task(9).to_string()));
+        assert_eq!(fields.get("worker_id"), Some(&"worker-a".to_string()));
     }
 }

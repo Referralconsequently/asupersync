@@ -273,13 +273,13 @@ impl HealthService {
             let version = self.version();
             (status, version)
         } else {
-            let statuses = self.statuses.read();
-            let watch_versions = self.watch_versions.read();
-            let status = statuses
+            let status = self
+                .statuses
+                .read()
                 .get(service)
                 .copied()
                 .unwrap_or(ServingStatus::ServiceUnknown);
-            let version = watch_versions.get(service).copied().unwrap_or(0);
+            let version = self.watch_versions.read().get(service).copied().unwrap_or(0);
             (status, version)
         }
     }

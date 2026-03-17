@@ -258,44 +258,7 @@ where
     }
 }
 
-// ─── FilterAsync ──────────────────────────────────────────────────────────
 
-/// A filter with an async predicate.
-///
-/// Similar to [`Filter`] but the predicate returns a future that
-/// resolves to the decision. Useful for predicates that need I/O
-/// (e.g., checking rate limit state, looking up ACLs).
-pub struct AsyncFilter<S, P> {
-    inner: S,
-    predicate: P,
-}
-
-impl<S, P> AsyncFilter<S, P> {
-    /// Create a new async filter.
-    #[must_use]
-    pub fn new(inner: S, predicate: P) -> Self {
-        Self { inner, predicate }
-    }
-
-    /// Get a reference to the inner service.
-    #[must_use]
-    pub fn inner(&self) -> &S {
-        &self.inner
-    }
-
-    /// Get a mutable reference to the inner service.
-    pub fn inner_mut(&mut self) -> &mut S {
-        &mut self.inner
-    }
-}
-
-impl<S: fmt::Debug, P> fmt::Debug for AsyncFilter<S, P> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AsyncFilter")
-            .field("inner", &self.inner)
-            .finish_non_exhaustive()
-    }
-}
 
 // ─── Tests ───────────────────────────────────────────────────────────────
 
@@ -825,27 +788,4 @@ mod tests {
         ));
     }
 
-    // ================================================================
-    // AsyncFilter
-    // ================================================================
-
-    #[test]
-    fn async_filter_new() {
-        let af = AsyncFilter::new(MockSvc, |(): &()| true);
-        let _ = af.inner();
-    }
-
-    #[test]
-    fn async_filter_inner_mut() {
-        let mut af = AsyncFilter::new(42u32, |(): &()| true);
-        *af.inner_mut() = 99;
-        assert_eq!(*af.inner(), 99);
-    }
-
-    #[test]
-    fn async_filter_debug() {
-        let af = AsyncFilter::new(MockSvc, |(): &()| true);
-        let dbg = format!("{af:?}");
-        assert!(dbg.contains("AsyncFilter"));
-    }
 }
