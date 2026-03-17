@@ -135,6 +135,115 @@ The shipped JS/TS diagnostics expose this matrix directly:
   boundaries and adds `supportClass: "bridge_only"` plus explicit bridge-only
   reasons for Next `server` and `edge` targets.
 
+### Execution Ladder Contract
+
+Bead `asupersync-2jhnk.6.1` makes the policy artifact authoritative:
+
+- Canonical machine-readable source:
+  `.github/wasm_worker_offload_policy.json` under `execution_ladder`
+- Canonical prose source: this section
+- Canonical executable guards:
+  `tests/wasm_browser_feasibility_matrix.rs` and
+  `tests/wasm_js_exports_coverage_contract.rs`
+
+Stable lane identifiers:
+
+| Lane id | Kind | Rank | Admitted host roles | Selection law |
+|---|---|---:|---|---|
+| `lane.browser.main_thread.direct_runtime` | `direct_runtime` | 10 | `browser_main_thread` | Use only when the current host is the browser main thread and the normal Browser Edition prerequisites are present |
+| `lane.browser.dedicated_worker.direct_runtime` | `direct_runtime` | 20 | `dedicated_worker` | Use only when the current host is already a dedicated worker bootstrap |
+| `lane.next.server.bridge` | `bridge_only` | 30 | `next_server` | Downgrade to serialized server bridge instead of pretending direct runtime exists |
+| `lane.next.edge.bridge` | `bridge_only` | 40 | `next_edge` | Downgrade to serialized edge bridge instead of pretending direct runtime exists |
+| `lane.unsupported` | `unsupported` | 99 | `service_worker`, `shared_worker`, `non_browser_or_unknown` | Terminal fail-closed lane |
+
+Host-role classification and downgrade order:
+
+- `browser_main_thread`:
+  `lane.browser.main_thread.direct_runtime` -> `lane.unsupported`
+- `dedicated_worker`:
+  `lane.browser.dedicated_worker.direct_runtime` -> `lane.unsupported`
+- `next_server`:
+  `lane.next.server.bridge` -> `lane.unsupported`
+- `next_edge`:
+  `lane.next.edge.bridge` -> `lane.unsupported`
+- `service_worker`:
+  `lane.unsupported`
+- `shared_worker`:
+  `lane.unsupported`
+- `non_browser_or_unknown`:
+  `lane.unsupported`
+
+The important boundary is that the ladder is host-adaptive, not magical:
+
+- We do not silently "upgrade" a main-thread entrypoint into a dedicated worker
+  lane for the caller.
+- We do not silently "upgrade" service-worker or shared-worker hosts into
+  direct-runtime support.
+- A bridge lane is a downgrade, not partial direct-runtime parity.
+
+Canonical reason-code schema:
+
+- `supported`:
+  `supported`
+- `skip`:
+  `candidate_host_role_mismatch`, `candidate_prerequisite_missing`
+- `downgrade`:
+  `downgrade_to_server_bridge`, `downgrade_to_edge_bridge`,
+  `downgrade_to_websocket_or_fetch`, `downgrade_to_export_bytes_for_download`
+- `policy_denial`:
+  `service_worker_direct_runtime_not_shipped`,
+  `shared_worker_direct_runtime_not_shipped`,
+  `shared_array_buffer_requires_cross_origin_isolation`
+- `unsupported`:
+  `missing_global_this`, `missing_webassembly`,
+  `unsupported_runtime_context`, `non_browser_runtime`
+
+Current package diagnostics are narrower than the canonical ladder contract.
+Until bead `asupersync-2jhnk.6.2` lands, treat this alias mapping as the source
+of truth for cross-surface comparisons:
+
+| Current package reason | Canonical ladder reason |
+|---|---|
+| `service_worker_not_yet_shipped` | `service_worker_direct_runtime_not_shipped` |
+| `shared_worker_not_yet_shipped` | `shared_worker_direct_runtime_not_shipped` |
+| `bridge_only_server_target` | `downgrade_to_server_bridge` |
+| `bridge_only_edge_target` | `downgrade_to_edge_bridge` |
+
+Required log/event fields for all later ladder-selection artifacts:
+
+- `lane_id`
+- `lane_kind`
+- `lane_rank`
+- `host_role`
+- `support_class`
+- `reason_code`
+- `fallback_lane_id`
+- `policy_schema_version`
+- `repro_command`
+
+Required repro-command convention for later e2e scripts:
+
+```text
+pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>
+```
+
+Every persisted `repro_command` must include the tokens `--lane`,
+`--host-role`, and `--reason` exactly so logs and fixtures can be compared
+mechanically.
+
+Explicit non-goals of the current ladder contract:
+
+- `service_worker_general_runtime_without_bounded_broker_contract`
+- `shared_worker_general_runtime_without_tenancy_and_lifecycle_contract`
+- `ambient_message_channel_promotion`
+- `shared_array_buffer_multi_worker_default_lane`
+- `raw_socket_filesystem_process_parity`
+
+This is stricter than the broad feasibility matrix on purpose. Service-worker
+and shared-worker direct runtime remain architecturally plausible in the
+abstract, but the shipped execution ladder must still fail closed there until
+their dedicated contracts exist.
+
 ### Runtime contexts
 
 | Context | Classification | Live-tree evidence | Notes |

@@ -137,6 +137,8 @@ export interface BrowserRuntimeOptions {
   wasmInput?: InitInput;
   consumerVersion?: AbiVersion | null;
   eagerInit?: boolean;
+  globalObject?: Record<string, unknown>;
+  preferredLane?: BrowserExecutionLane | null;
 }
 
 export interface BrowserScopeOptions {
@@ -149,6 +151,7 @@ export interface BrowserSdkDiagnostics {
   abiFingerprint: number;
   abiMetadata: BrowserAbiMetadata;
   consumerVersion: AbiVersion | null;
+  executionLadder: BrowserExecutionLadderDiagnostics;
 }
 
 export interface CancellationTokenOptions {
@@ -195,6 +198,96 @@ export interface BrowserRuntimeSupportDiagnostics {
   message: string;
   guidance: string[];
   capabilities: BrowserCapabilitySnapshot;
+}
+
+export const BROWSER_EXECUTION_POLICY_SCHEMA_VERSION =
+  "wasm-browser-execution-ladder-v1";
+export const BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE =
+  "lane.browser.main_thread.direct_runtime";
+export const BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE =
+  "lane.browser.dedicated_worker.direct_runtime";
+export const BROWSER_UNSUPPORTED_LANE = "lane.unsupported";
+
+export type BrowserExecutionHostRole =
+  | "browser_main_thread"
+  | "dedicated_worker"
+  | "service_worker"
+  | "shared_worker"
+  | "non_browser_or_unknown";
+
+export type BrowserExecutionLane =
+  | typeof BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE
+  | typeof BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
+  | typeof BROWSER_UNSUPPORTED_LANE;
+
+export type BrowserExecutionLaneKind = "direct_runtime" | "unsupported";
+
+export type BrowserExecutionReasonCode =
+  | "supported"
+  | "candidate_host_role_mismatch"
+  | "candidate_prerequisite_missing"
+  | "downgrade_to_server_bridge"
+  | "downgrade_to_edge_bridge"
+  | "downgrade_to_websocket_or_fetch"
+  | "downgrade_to_export_bytes_for_download"
+  | "service_worker_direct_runtime_not_shipped"
+  | "shared_worker_direct_runtime_not_shipped"
+  | "shared_array_buffer_requires_cross_origin_isolation"
+  | "missing_global_this"
+  | "missing_webassembly"
+  | "unsupported_runtime_context"
+  | "non_browser_runtime";
+
+export type BrowserExecutionLaneReason = BrowserExecutionReasonCode;
+
+export interface BrowserExecutionLaneCandidate {
+  laneId: BrowserExecutionLane;
+  laneKind: BrowserExecutionLaneKind;
+  laneRank: number;
+  hostRole: BrowserExecutionHostRole;
+  supportClass: BrowserRuntimeSupportClass;
+  fallbackLaneId: BrowserExecutionLane | null;
+  available: boolean;
+  selected: boolean;
+  reasonCode: BrowserExecutionReasonCode;
+  message: string;
+  guidance: string[];
+}
+
+export interface BrowserExecutionLadderDiagnostics {
+  supported: boolean;
+  preferredLane: BrowserExecutionLane | null;
+  selectedLane: BrowserExecutionLane;
+  laneId: BrowserExecutionLane;
+  laneKind: BrowserExecutionLaneKind;
+  laneRank: number;
+  hostRole: BrowserExecutionHostRole;
+  supportClass: BrowserRuntimeSupportClass;
+  runtimeContext: BrowserRuntimeContext;
+  reason: BrowserExecutionReasonCode;
+  reasonCode: BrowserExecutionReasonCode;
+  message: string;
+  guidance: string[];
+  fallbackLaneId: BrowserExecutionLane | null;
+  downgradeOrder: BrowserExecutionLane[];
+  policySchemaVersion: typeof BROWSER_EXECUTION_POLICY_SCHEMA_VERSION;
+  reproCommand: string;
+  candidates: BrowserExecutionLaneCandidate[];
+  runtimeSupport: BrowserRuntimeSupportDiagnostics;
+  capabilities: BrowserCapabilitySnapshot;
+}
+
+export interface BrowserRuntimeSelectionResult {
+  executionLadder: BrowserExecutionLadderDiagnostics;
+  runtime: BrowserRuntime | null;
+  outcome: BrowserOutcome<BrowserRuntime> | null;
+}
+
+export interface BrowserScopeSelectionResult {
+  executionLadder: BrowserExecutionLadderDiagnostics;
+  runtime: BrowserRuntime | null;
+  scope: RegionHandle | null;
+  outcome: BrowserOutcome<RegionHandle> | null;
 }
 
 export const BROWSER_UNSUPPORTED_RUNTIME_CODE =
@@ -593,14 +686,34 @@ function deferredBrowserHostDiagnostics(
   return null;
 }
 
-function browserRuntimeContext(
+function browserExecutionHostRole(
   globalObject: Record<string, unknown> | undefined,
   capabilities: BrowserCapabilitySnapshot,
-): BrowserRuntimeContext {
+): BrowserExecutionHostRole {
+  if (isServiceWorkerLikeGlobal(globalObject)) {
+    return "service_worker";
+  }
+  if (isSharedWorkerLikeGlobal(globalObject)) {
+    return "shared_worker";
+  }
   if (isDedicatedWorkerGlobal(globalObject)) {
     return "dedicated_worker";
   }
   if (capabilities.hasWindow && capabilities.hasDocument) {
+    return "browser_main_thread";
+  }
+  return "non_browser_or_unknown";
+}
+
+function browserRuntimeContext(
+  globalObject: Record<string, unknown> | undefined,
+  capabilities: BrowserCapabilitySnapshot,
+): BrowserRuntimeContext {
+  const hostRole = browserExecutionHostRole(globalObject, capabilities);
+  if (hostRole === "dedicated_worker") {
+    return "dedicated_worker";
+  }
+  if (hostRole === "browser_main_thread") {
     return "browser_main_thread";
   }
   return "unknown";
@@ -721,6 +834,306 @@ export function assertBrowserRuntimeSupport(
     throw createUnsupportedRuntimeError(diagnostics);
   }
   return diagnostics;
+}
+
+function browserExecutionReasonCodeFromRuntimeSupport(
+  reason: BrowserRuntimeSupportReason,
+): BrowserExecutionReasonCode {
+  switch (reason) {
+    case "service_worker_not_yet_shipped":
+      return "service_worker_direct_runtime_not_shipped";
+    case "shared_worker_not_yet_shipped":
+      return "shared_worker_direct_runtime_not_shipped";
+    default:
+      return reason;
+  }
+}
+
+function browserExecutionLaneKind(
+  laneId: BrowserExecutionLane,
+): BrowserExecutionLaneKind {
+  return laneId === BROWSER_UNSUPPORTED_LANE ? "unsupported" : "direct_runtime";
+}
+
+function browserExecutionLaneRank(laneId: BrowserExecutionLane): number {
+  switch (laneId) {
+    case BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE:
+      return 10;
+    case BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE:
+      return 20;
+    case BROWSER_UNSUPPORTED_LANE:
+      return 99;
+  }
+}
+
+function browserExecutionFallbackLane(
+  laneId: BrowserExecutionLane,
+): BrowserExecutionLane | null {
+  return laneId === BROWSER_UNSUPPORTED_LANE ? null : BROWSER_UNSUPPORTED_LANE;
+}
+
+function browserExecutionDirectLaneForHostRole(
+  hostRole: BrowserExecutionHostRole,
+): BrowserExecutionLane | null {
+  switch (hostRole) {
+    case "browser_main_thread":
+      return BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE;
+    case "dedicated_worker":
+      return BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE;
+    default:
+      return null;
+  }
+}
+
+function browserExecutionDowngradeOrder(
+  hostRole: BrowserExecutionHostRole,
+): BrowserExecutionLane[] {
+  const directLane = browserExecutionDirectLaneForHostRole(hostRole);
+  return directLane === null
+    ? [BROWSER_UNSUPPORTED_LANE]
+    : [directLane, BROWSER_UNSUPPORTED_LANE];
+}
+
+function browserExecutionSelectedLane(
+  hostRole: BrowserExecutionHostRole,
+  runtimeSupport: BrowserRuntimeSupportDiagnostics,
+): BrowserExecutionLane {
+  if (!runtimeSupport.supported) {
+    return BROWSER_UNSUPPORTED_LANE;
+  }
+  return (
+    browserExecutionDirectLaneForHostRole(hostRole) ??
+    BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE
+  );
+}
+
+function browserExecutionReproCommand(
+  laneId: BrowserExecutionLane,
+  hostRole: BrowserExecutionHostRole,
+  reasonCode: BrowserExecutionReasonCode,
+): string {
+  return `pnpm --filter @asupersync/browser test:e2e -- --lane ${laneId} --host-role ${hostRole} --reason ${reasonCode}`;
+}
+
+function createBrowserExecutionLaneCandidate(
+  laneId: BrowserExecutionLane,
+  hostRole: BrowserExecutionHostRole,
+  supportClass: BrowserRuntimeSupportClass,
+  available: boolean,
+  selected: boolean,
+  reasonCode: BrowserExecutionReasonCode,
+  message: string,
+  guidance: string[],
+): BrowserExecutionLaneCandidate {
+  return {
+    laneId,
+    laneKind: browserExecutionLaneKind(laneId),
+    laneRank: browserExecutionLaneRank(laneId),
+    hostRole,
+    supportClass,
+    fallbackLaneId: browserExecutionFallbackLane(laneId),
+    available,
+    selected,
+    reasonCode,
+    message,
+    guidance,
+  };
+}
+
+function browserExecutionHostMismatchMessage(
+  laneId: BrowserExecutionLane,
+): string {
+  switch (laneId) {
+    case BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE:
+      return `${laneId} only applies when Browser Edition is running on the browser main thread.`;
+    case BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE:
+      return `${laneId} only applies when Browser Edition is already executing inside a dedicated worker bootstrap.`;
+    case BROWSER_UNSUPPORTED_LANE:
+      return `${laneId} is the terminal fail-closed lane and is only selected after a truthful downgrade.`;
+  }
+}
+
+function browserExecutionHostMismatchGuidance(
+  laneId: BrowserExecutionLane,
+): string[] {
+  switch (laneId) {
+    case BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE:
+      return [
+        "Initialize Browser Edition from a browser main-thread entrypoint before pinning this lane.",
+      ];
+    case BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE:
+      return [
+        "Move Browser Edition creation into a dedicated worker bootstrap before pinning this lane.",
+      ];
+    case BROWSER_UNSUPPORTED_LANE:
+      return [
+        "Treat lane.unsupported as the terminal fail-closed lane when no truthful runtime lane remains.",
+      ];
+  }
+}
+
+function browserExecutionMissingPrerequisiteMessage(
+  laneId: BrowserExecutionLane,
+): string {
+  if (laneId === BROWSER_UNSUPPORTED_LANE) {
+    return "lane.unsupported remains the terminal fail-closed fallback if the current direct-runtime lane loses truthful prerequisites.";
+  }
+  return `${laneId} matches the current host role but is unavailable until the required Browser Edition prerequisites are restored.`;
+}
+
+function browserExecutionMissingPrerequisiteGuidance(
+  laneId: BrowserExecutionLane,
+): string[] {
+  if (laneId === BROWSER_UNSUPPORTED_LANE) {
+    return [
+      "Expect Browser Edition to demote here instead of throwing when direct-runtime prerequisites disappear.",
+    ];
+  }
+  return [
+    "Restore the missing Browser Edition prerequisites before pinning this lane again.",
+  ];
+}
+
+function browserExecutionCandidates(
+  selectedLane: BrowserExecutionLane,
+  hostRole: BrowserExecutionHostRole,
+  supportClass: BrowserRuntimeSupportClass,
+  selectedReasonCode: BrowserExecutionReasonCode,
+  selectedMessage: string,
+  selectedGuidance: string[],
+): BrowserExecutionLaneCandidate[] {
+  const directLaneForHost = browserExecutionDirectLaneForHostRole(hostRole);
+
+  const laneIds: BrowserExecutionLane[] = [
+    BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE,
+    BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+    BROWSER_UNSUPPORTED_LANE,
+  ];
+
+  return laneIds.map((laneId) => {
+    if (laneId === selectedLane) {
+      return createBrowserExecutionLaneCandidate(
+        laneId,
+        hostRole,
+        supportClass,
+        true,
+        true,
+        selectedReasonCode,
+        selectedMessage,
+        selectedGuidance,
+      );
+    }
+
+    const prerequisiteMissing =
+      laneId === BROWSER_UNSUPPORTED_LANE
+        ? selectedLane !== BROWSER_UNSUPPORTED_LANE
+        : directLaneForHost === laneId && selectedLane === BROWSER_UNSUPPORTED_LANE;
+
+    if (prerequisiteMissing) {
+      return createBrowserExecutionLaneCandidate(
+        laneId,
+        hostRole,
+        supportClass,
+        false,
+        false,
+        "candidate_prerequisite_missing",
+        browserExecutionMissingPrerequisiteMessage(laneId),
+        browserExecutionMissingPrerequisiteGuidance(laneId),
+      );
+    }
+
+    return createBrowserExecutionLaneCandidate(
+      laneId,
+      hostRole,
+      supportClass,
+      false,
+      false,
+      "candidate_host_role_mismatch",
+      browserExecutionHostMismatchMessage(laneId),
+      browserExecutionHostMismatchGuidance(laneId),
+    );
+  });
+}
+
+function buildBrowserExecutionLadder(
+  runtimeSupport: BrowserRuntimeSupportDiagnostics,
+  preferredLane: BrowserExecutionLane | null,
+  globalObject: Record<string, unknown> | undefined,
+): BrowserExecutionLadderDiagnostics {
+  const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
+  const selectedLane = browserExecutionSelectedLane(hostRole, runtimeSupport);
+  const supportClass = runtimeSupport.supportClass;
+  const fallbackLaneId = browserExecutionFallbackLane(selectedLane);
+  const reasonCode = runtimeSupport.supported
+    ? "supported"
+    : browserExecutionReasonCodeFromRuntimeSupport(runtimeSupport.reason);
+  let message = runtimeSupport.message;
+  let guidance = [...runtimeSupport.guidance];
+
+  if (runtimeSupport.supported) {
+    message =
+      selectedLane === BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
+        ? `Browser Edition selected ${BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE} for the dedicated-worker host role.`
+        : `Browser Edition selected ${BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE} for the browser main-thread host role.`;
+    guidance = [
+      selectedLane === BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
+        ? "Keep Browser Edition inside the dedicated worker bootstrap to preserve the direct-runtime lane."
+        : "Keep Browser Edition inside the browser main-thread entrypoint while worker/offload lanes remain separate follow-on work.",
+    ];
+  }
+
+  if (preferredLane !== null && preferredLane !== selectedLane) {
+    message = `${message} Preferred lane ${preferredLane} is not truthful for host role ${hostRole}, so Browser Edition stayed on ${selectedLane}.`;
+    guidance = [
+      ...guidance,
+      `Use ${selectedLane} for this host role, or switch entrypoints before pinning ${preferredLane}.`,
+    ];
+  }
+
+  return {
+    supported: runtimeSupport.supported,
+    preferredLane,
+    selectedLane,
+    laneId: selectedLane,
+    laneKind: browserExecutionLaneKind(selectedLane),
+    laneRank: browserExecutionLaneRank(selectedLane),
+    hostRole,
+    supportClass,
+    runtimeContext: runtimeSupport.runtimeContext,
+    reason: reasonCode,
+    reasonCode,
+    message,
+    guidance,
+    fallbackLaneId,
+    downgradeOrder: browserExecutionDowngradeOrder(hostRole),
+    policySchemaVersion: BROWSER_EXECUTION_POLICY_SCHEMA_VERSION,
+    reproCommand: browserExecutionReproCommand(selectedLane, hostRole, reasonCode),
+    candidates: browserExecutionCandidates(
+      selectedLane,
+      hostRole,
+      supportClass,
+      reasonCode,
+      message,
+      guidance,
+    ),
+    runtimeSupport,
+    capabilities: runtimeSupport.capabilities,
+  };
+}
+
+export function detectBrowserExecutionLadder(
+  options: {
+    globalObject?: Record<string, unknown>;
+    preferredLane?: BrowserExecutionLane | null;
+  } = {},
+): BrowserExecutionLadderDiagnostics {
+  const preferredLane = options.preferredLane ?? null;
+  const runtimeSupport = detectBrowserRuntimeSupport(options.globalObject);
+  return buildBrowserExecutionLadder(
+    runtimeSupport,
+    preferredLane,
+    options.globalObject,
+  );
 }
 
 function errorMessage(error: unknown): string {
@@ -1656,12 +2069,14 @@ function createBrowserWebTransportState(
 
 export function createBrowserSdkDiagnostics(
   consumerVersion: AbiVersion | null = null,
+  executionLadder: BrowserExecutionLadderDiagnostics = detectBrowserExecutionLadder(),
 ): BrowserSdkDiagnostics {
   return {
     abiVersion: abiVersion(),
     abiFingerprint: abiFingerprint(),
     abiMetadata,
     consumerVersion,
+    executionLadder,
   };
 }
 
@@ -1691,8 +2106,9 @@ export class BrowserRuntime {
   constructor(
     readonly core: CoreRuntimeHandle,
     readonly consumerVersion: AbiVersion | null = null,
+    executionLadder: BrowserExecutionLadderDiagnostics = detectBrowserExecutionLadder(),
   ) {
-    this.diagnostics = createBrowserSdkDiagnostics(consumerVersion);
+    this.diagnostics = createBrowserSdkDiagnostics(consumerVersion, executionLadder);
   }
 
   toJSON(): HandleRef {
@@ -3493,17 +3909,88 @@ export function createBrowserArtifactStore(
   return store;
 }
 
-export async function createBrowserRuntime(
+export async function createBrowserRuntimeSelection(
   options: BrowserRuntimeOptions = {},
-): Promise<BrowserOutcome<BrowserRuntime>> {
+): Promise<BrowserRuntimeSelectionResult> {
   const consumerVersion = options.consumerVersion ?? null;
-  assertBrowserRuntimeSupport();
+  const executionLadder = detectBrowserExecutionLadder({
+    globalObject: options.globalObject,
+    preferredLane: options.preferredLane,
+  });
+
+  if (!executionLadder.supported) {
+    return {
+      executionLadder,
+      runtime: null,
+      outcome: null,
+    };
+  }
+
   if (options.eagerInit !== false) {
     await initWasm(options.wasmInput);
   }
-  return mapOutcome(runtimeCreate(consumerVersion), (handle) => {
-    return new BrowserRuntime(handle, consumerVersion);
+
+  const outcome = mapOutcome(runtimeCreate(consumerVersion), (handle) => {
+    return new BrowserRuntime(handle, consumerVersion, executionLadder);
   });
+
+  return {
+    executionLadder,
+    runtime: outcome.outcome === "ok" ? outcome.value : null,
+    outcome,
+  };
+}
+
+export async function createBrowserScopeSelection(
+  options: BrowserRuntimeOptions & BrowserScopeOptions = {},
+): Promise<BrowserScopeSelectionResult> {
+  const runtimeSelection = await createBrowserRuntimeSelection(options);
+  if (runtimeSelection.outcome !== null && runtimeSelection.outcome.outcome !== "ok") {
+    return {
+      executionLadder: runtimeSelection.executionLadder,
+      runtime: null,
+      scope: null,
+      outcome: runtimeSelection.outcome as BrowserOutcome<RegionHandle>,
+    };
+  }
+
+  if (runtimeSelection.runtime === null) {
+    return {
+      executionLadder: runtimeSelection.executionLadder,
+      runtime: null,
+      scope: null,
+      outcome: null,
+    };
+  }
+
+  const consumerVersion = options.consumerVersion ?? null;
+  const entered = runtimeSelection.runtime.enterScope(options.label, consumerVersion);
+  if (entered.outcome !== "ok") {
+    runtimeSelection.runtime.close(consumerVersion);
+    return {
+      executionLadder: runtimeSelection.executionLadder,
+      runtime: null,
+      scope: null,
+      outcome: entered,
+    };
+  }
+
+  return {
+    executionLadder: runtimeSelection.executionLadder,
+    runtime: runtimeSelection.runtime,
+    scope: entered.value,
+    outcome: entered,
+  };
+}
+
+export async function createBrowserRuntime(
+  options: BrowserRuntimeOptions = {},
+): Promise<BrowserOutcome<BrowserRuntime>> {
+  const selection = await createBrowserRuntimeSelection(options);
+  if (selection.outcome !== null) {
+    return selection.outcome;
+  }
+  throw createUnsupportedRuntimeError(selection.executionLadder.runtimeSupport);
 }
 
 export async function createBrowserScope(

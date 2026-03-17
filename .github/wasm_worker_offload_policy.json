@@ -99,6 +99,190 @@
     "host_turn_id_required": true,
     "replay_hash_required": true
   },
+  "execution_ladder": {
+    "schema_version": "wasm-browser-execution-ladder-v1",
+    "description": "Authoritative browser execution-ladder contract for lane selection, downgrade behavior, diagnostics fields, and explicit non-goals.",
+    "authoritative_contract_sources": [
+      "docs/WASM.md",
+      "docs/wasm_browser_scheduler_semantics.md",
+      "tests/wasm_browser_feasibility_matrix.rs",
+      "tests/wasm_js_exports_coverage_contract.rs"
+    ],
+    "lanes": [
+      {
+        "id": "lane.browser.main_thread.direct_runtime",
+        "rank": 10,
+        "lane_kind": "direct_runtime",
+        "host_roles": [
+          "browser_main_thread"
+        ],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "use_current_host_only"
+      },
+      {
+        "id": "lane.browser.dedicated_worker.direct_runtime",
+        "rank": 20,
+        "lane_kind": "direct_runtime",
+        "host_roles": [
+          "dedicated_worker"
+        ],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "use_current_host_only"
+      },
+      {
+        "id": "lane.next.server.bridge",
+        "rank": 30,
+        "lane_kind": "bridge_only",
+        "host_roles": [
+          "next_server"
+        ],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "host_adaptive_downgrade"
+      },
+      {
+        "id": "lane.next.edge.bridge",
+        "rank": 40,
+        "lane_kind": "bridge_only",
+        "host_roles": [
+          "next_edge"
+        ],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "host_adaptive_downgrade"
+      },
+      {
+        "id": "lane.unsupported",
+        "rank": 99,
+        "lane_kind": "unsupported",
+        "host_roles": [
+          "service_worker",
+          "shared_worker",
+          "non_browser_or_unknown"
+        ],
+        "fallback_lane_id": null,
+        "selection_mode": "terminal"
+      }
+    ],
+    "host_role_classification": [
+      {
+        "id": "browser_main_thread",
+        "support_class": "direct_runtime_supported",
+        "selection_order": [
+          "lane.browser.main_thread.direct_runtime",
+          "lane.unsupported"
+        ],
+        "default_reason_code": "supported"
+      },
+      {
+        "id": "dedicated_worker",
+        "support_class": "direct_runtime_supported",
+        "selection_order": [
+          "lane.browser.dedicated_worker.direct_runtime",
+          "lane.unsupported"
+        ],
+        "default_reason_code": "supported"
+      },
+      {
+        "id": "service_worker",
+        "support_class": "unsupported",
+        "selection_order": [
+          "lane.unsupported"
+        ],
+        "default_reason_code": "service_worker_direct_runtime_not_shipped"
+      },
+      {
+        "id": "shared_worker",
+        "support_class": "unsupported",
+        "selection_order": [
+          "lane.unsupported"
+        ],
+        "default_reason_code": "shared_worker_direct_runtime_not_shipped"
+      },
+      {
+        "id": "next_server",
+        "support_class": "bridge_only",
+        "selection_order": [
+          "lane.next.server.bridge",
+          "lane.unsupported"
+        ],
+        "default_reason_code": "downgrade_to_server_bridge"
+      },
+      {
+        "id": "next_edge",
+        "support_class": "bridge_only",
+        "selection_order": [
+          "lane.next.edge.bridge",
+          "lane.unsupported"
+        ],
+        "default_reason_code": "downgrade_to_edge_bridge"
+      },
+      {
+        "id": "non_browser_or_unknown",
+        "support_class": "unsupported",
+        "selection_order": [
+          "lane.unsupported"
+        ],
+        "default_reason_code": "unsupported_runtime_context"
+      }
+    ],
+    "reason_codes": {
+      "supported": [
+        "supported"
+      ],
+      "skip": [
+        "candidate_host_role_mismatch",
+        "candidate_prerequisite_missing"
+      ],
+      "downgrade": [
+        "downgrade_to_server_bridge",
+        "downgrade_to_edge_bridge",
+        "downgrade_to_websocket_or_fetch",
+        "downgrade_to_export_bytes_for_download"
+      ],
+      "policy_denial": [
+        "service_worker_direct_runtime_not_shipped",
+        "shared_worker_direct_runtime_not_shipped",
+        "shared_array_buffer_requires_cross_origin_isolation"
+      ],
+      "unsupported": [
+        "missing_global_this",
+        "missing_webassembly",
+        "unsupported_runtime_context",
+        "non_browser_runtime"
+      ]
+    },
+    "current_package_reason_aliases": {
+      "service_worker_not_yet_shipped": "service_worker_direct_runtime_not_shipped",
+      "shared_worker_not_yet_shipped": "shared_worker_direct_runtime_not_shipped",
+      "bridge_only_server_target": "downgrade_to_server_bridge",
+      "bridge_only_edge_target": "downgrade_to_edge_bridge"
+    },
+    "required_log_fields": [
+      "lane_id",
+      "lane_kind",
+      "lane_rank",
+      "host_role",
+      "support_class",
+      "reason_code",
+      "fallback_lane_id",
+      "policy_schema_version",
+      "repro_command"
+    ],
+    "repro_command_convention": {
+      "format": "pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>",
+      "must_include_tokens": [
+        "--lane",
+        "--host-role",
+        "--reason"
+      ]
+    },
+    "explicit_non_goals": [
+      "service_worker_general_runtime_without_bounded_broker_contract",
+      "shared_worker_general_runtime_without_tenancy_and_lifecycle_contract",
+      "ambient_message_channel_promotion",
+      "shared_array_buffer_multi_worker_default_lane",
+      "raw_socket_filesystem_process_parity"
+    ]
+  },
   "test_matrix": [
     {
       "id": "WKR-OFFLOAD-CPU-BURST",

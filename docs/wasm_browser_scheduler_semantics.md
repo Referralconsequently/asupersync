@@ -125,6 +125,39 @@ control. Canonical policy artifacts:
 - `scripts/check_wasm_worker_offload_policy.py`
 - `artifacts/wasm_worker_offload_summary.json`
 
+### W0: Browser Execution-Ladder Contract
+
+The worker-offload policy file now also carries the authoritative browser
+execution ladder under `execution_ladder`. Scheduler adaptation must stay
+consistent with that lane-selection contract:
+
+1. Lane ids are stable and ordered:
+   - `lane.browser.main_thread.direct_runtime`
+   - `lane.browser.dedicated_worker.direct_runtime`
+   - `lane.next.server.bridge`
+   - `lane.next.edge.bridge`
+   - `lane.unsupported`
+2. Host-role classification is explicit:
+   - `browser_main_thread` and `dedicated_worker` can resolve to direct-runtime
+     lanes
+   - `next_server` and `next_edge` resolve to bridge-only lanes
+   - `service_worker`, `shared_worker`, and `non_browser_or_unknown` fail
+     closed to `lane.unsupported`
+3. Lane selection is host-adaptive, not host-transforming:
+   - scheduler policy may choose the best lane for the current host role
+   - scheduler policy may not silently convert a caller into a different host
+     role just to preserve a direct-runtime claim
+4. Structured diagnostics emitted by later browser/Next adapters must include:
+   - `lane_id`
+   - `lane_kind`
+   - `lane_rank`
+   - `host_role`
+   - `support_class`
+   - `reason_code`
+   - `fallback_lane_id`
+   - `policy_schema_version`
+   - `repro_command`
+
 ### W1: Offload Trigger Law
 
 Offload from main-thread scheduler is permitted only when all of these are
