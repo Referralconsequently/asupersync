@@ -256,17 +256,7 @@ impl TraceEventSummary {
             } => format!(
                 "exit link_ref={link_ref} from={from} to={to} failure_vt={failure_vt} reason={reason}"
             ),
-            TraceData::Worker {
-                worker_id,
-                job_id,
-                task,
-                region,
-                obligation,
-                decision_seq,
-                replay_hash,
-            } => format!(
-                "worker={worker_id} job_id={job_id} task={task} region={region} obligation={obligation} decision_seq={decision_seq} replay_hash={replay_hash:016x}"
-            ),
+            TraceData::Worker { worker_id, job_id, task, region, obligation } => format!("worker={worker_id} job_id={job_id} task={task} region={region} obligation={obligation}"),
         }
     }
 }

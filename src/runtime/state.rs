@@ -3257,9 +3257,9 @@ pub enum EventDataSnapshot {
         /// Offloaded job identifier.
         job_id: u64,
         /// Deterministic decision sequence carried by the worker envelope.
-        decision_seq: u64,
+        
         /// Stable replay digest carried by the worker envelope.
-        replay_hash: u64,
+        
         /// Originating task identifier.
         task: IdSnapshot,
         /// Originating region identifier.
@@ -3423,16 +3423,12 @@ impl EventDataSnapshot {
             TraceData::Worker {
                 worker_id,
                 job_id,
-                decision_seq,
-                replay_hash,
                 task,
                 region,
                 obligation,
-            } => Self::Worker {
+            } => Self::Worker { 
                 worker_id: worker_id.clone(),
                 job_id: *job_id,
-                decision_seq: *decision_seq,
-                replay_hash: *replay_hash,
                 task: (*task).into(),
                 region: (*region).into(),
                 obligation: (*obligation).into(),
@@ -7161,8 +7157,8 @@ mod tests {
         let snapshot = EventDataSnapshot::from_trace_data(&TraceData::Worker {
             worker_id: "worker-a".to_string(),
             job_id: 77,
-            decision_seq: 91,
-            replay_hash: 0x00C0_FFEE,
+            
+            
             task,
             region,
             obligation,
@@ -7172,16 +7168,16 @@ mod tests {
             EventDataSnapshot::Worker {
                 worker_id,
                 job_id,
-                decision_seq,
-                replay_hash,
+                
+                
                 task: task_snapshot,
                 region: region_snapshot,
                 obligation: obligation_snapshot,
             } => {
                 assert_eq!(worker_id, "worker-a");
                 assert_eq!(job_id, 77);
-                assert_eq!(decision_seq, 91);
-                assert_eq!(replay_hash, 0x00C0_FFEE);
+                assert_eq!( 91);
+                assert_eq!( 0xC0FFEE);
                 assert_eq!(task_snapshot, IdSnapshot::from(task));
                 assert_eq!(region_snapshot, IdSnapshot::from(region));
                 assert_eq!(obligation_snapshot, IdSnapshot::from(obligation));
