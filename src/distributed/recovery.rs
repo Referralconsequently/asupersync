@@ -389,11 +389,29 @@ impl RecoveryCollector {
 
     /// Adds a collected symbol with basic verification.
     ///
-    /// Rejects symbols that have an ESI beyond the expected range if
-    /// object parameters are known.
+    /// Rejects symbols that do not match the known object identity or
+    /// whose `(SBN, ESI)` coordinates fall outside the expected range
+    /// once object parameters are known.
     #[inline]
     pub fn add_collected_with_verify(&mut self, cs: CollectedSymbol) -> Result<bool, Error> {
         if let Some(params) = &self.object_params {
+            if cs.symbol.object_id() != params.object_id {
+                self.metrics.symbols_corrupt += 1;
+                return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(format!(
+                    "symbol object {} does not match recovery object {}",
+                    cs.symbol.object_id(),
+                    params.object_id
+                )));
+            }
+
+            if u16::from(cs.symbol.sbn()) >= params.source_blocks {
+                self.metrics.symbols_corrupt += 1;
+                return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(format!(
+                    "SBN {} exceeds expected source block range for object",
+                    cs.symbol.sbn()
+                )));
+            }
+
             let max_expected = params
                 .total_source_symbols()
                 .saturating_add(self.config.min_symbols);
@@ -1656,6 +1674,66 @@ mod tests {
     }
 
     #[test]
+    fn collector_verify_rejects_foreign_object_before_dedup() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        collector.object_params = Some(ObjectParams::new(
+            ObjectId::new_for_test(1),
+            1280,
+            128,
+            1,
+            10,
+        ));
+
+        let foreign = CollectedSymbol {
+            symbol: Symbol::new_for_test(2, 0, 15, &[0u8; 128]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "foreign".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+        let accepted = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 15, &[1u8; 128]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "good".to_string(),
+            collected_at: Time::from_secs(1),
+            verified: false,
+        };
+
+        let foreign_result = collector.add_collected_with_verify(foreign);
+        assert!(foreign_result.is_err());
+        assert_eq!(collector.metrics.symbols_corrupt, 1);
+        assert_eq!(collector.symbols().len(), 0);
+
+        let accepted_result = collector.add_collected_with_verify(accepted);
+        assert!(accepted_result.is_ok());
+        assert!(accepted_result.unwrap());
+        assert_eq!(collector.symbols().len(), 1);
+        assert_eq!(collector.metrics.symbols_duplicate, 0);
+        assert_eq!(collector.symbols()[0].source_replica, "good");
+    }
+
+    #[test]
+    fn collector_verify_accepts_high_valid_sbn_at_256_block_boundary() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        collector.object_params =
+            Some(ObjectParams::new(ObjectId::new_for_test(1), 256, 1, 256, 1));
+
+        let high_sbn = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 255, 0, &[7u8]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+
+        let result = collector.add_collected_with_verify(high_sbn);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+        assert_eq!(collector.symbols().len(), 1);
+        assert_eq!(collector.metrics.symbols_corrupt, 0);
+    }
+
+    #[test]
     fn collector_verify_no_params_accepts_any() {
         // Without object_params set, verify skips range check
         let mut collector = RecoveryCollector::new(RecoveryConfig::default());
@@ -2146,6 +2224,76 @@ mod tests {
         );
         assert_eq!(collector.symbols().len(), 1);
         assert_eq!(collector.metrics.symbols_duplicate, 1);
+    }
+
+    #[test]
+    fn orchestrator_recovery_rejects_foreign_object_symbol_poisoning() {
+        let snapshot = create_test_snapshot();
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 0,
+            ..Default::default()
+        };
+        let mut enc = StateEncoder::new(config, DetRng::new(42));
+        let encoded = enc.encode(&snapshot, Time::ZERO).unwrap();
+        assert_eq!(encoded.params.source_blocks, 1);
+
+        let mut source_symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind().is_source())
+            .map(|symbol| CollectedSymbol {
+                symbol: symbol.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: "good".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+        assert_eq!(
+            source_symbols.len(),
+            usize::try_from(encoded.params.total_source_symbols()).unwrap()
+        );
+
+        let collided = source_symbols
+            .first()
+            .expect("source symbol fixture")
+            .symbol
+            .clone();
+        let foreign = CollectedSymbol {
+            symbol: Symbol::new(
+                SymbolId::new(ObjectId::new_for_test(999), collided.sbn(), collided.esi()),
+                collided.data().to_vec(),
+                collided.kind(),
+            ),
+            tag: AuthenticationTag::zero(),
+            source_replica: "foreign".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+
+        let mut poisoned_inputs = Vec::with_capacity(source_symbols.len() + 1);
+        poisoned_inputs.push(foreign);
+        poisoned_inputs.append(&mut source_symbols);
+
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: snapshot.region_id,
+            initiator: "test".to_string(),
+            reason: None,
+        };
+        let mut orchestrator =
+            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+
+        let result = orchestrator.recover_from_symbols(
+            &trigger,
+            &poisoned_inputs,
+            encoded.params,
+            Duration::from_millis(1),
+        );
+        assert!(
+            result.is_ok(),
+            "foreign-object symbol must be rejected before it can poison dedup"
+        );
     }
 
     /// Invariant: a cancelled orchestrator definitively refuses recovery.

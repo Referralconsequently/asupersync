@@ -5,9 +5,9 @@
 
 use crate::config::EncodingConfig as PipelineEncodingConfig;
 use crate::encoding::EncodingPipeline;
-use crate::types::Time;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
+use crate::types::Time;
 use crate::util::DetRng;
 use std::cmp::min;
 
@@ -25,7 +25,7 @@ pub struct EncodingConfig {
     /// Minimum repair symbols to generate (for redundancy).
     pub min_repair_symbols: u16,
     /// Maximum source blocks (for large objects).
-    pub max_source_blocks: u8,
+    pub max_source_blocks: u16,
     /// Repair symbol overhead factor (e.g., 1.2 = 20% overhead).
     pub repair_overhead: f32,
 }
@@ -89,7 +89,7 @@ impl StateEncoder {
         let layout = derive_block_layout(
             data.len(),
             self.config.symbol_size,
-            u16::from(self.config.max_source_blocks),
+            self.config.max_source_blocks,
         )?;
         let params = self.calculate_params(data.len(), object_id, layout)?;
         let mut symbols = Vec::new();
@@ -667,11 +667,9 @@ mod tests {
         assert_eq!(encoded.params.source_blocks, 2);
         assert_eq!(encoded.repair_count, 3);
         assert_eq!(encoded.repair_symbols().count(), 3);
-        assert!(
-            encoded
-                .repair_symbols()
-                .any(|symbol| symbol.id().sbn() == 1)
-        );
+        assert!(encoded
+            .repair_symbols()
+            .any(|symbol| symbol.id().sbn() == 1));
     }
 
     #[test]
@@ -691,6 +689,33 @@ mod tests {
         assert_eq!(additional.len(), 5);
         assert!(additional.iter().all(|symbol| symbol.kind().is_repair()));
         assert!(additional.iter().any(|symbol| symbol.id().sbn() == 1));
+    }
+
+    #[test]
+    fn encode_allows_full_256_block_boundary_via_config() {
+        let config = EncodingConfig {
+            symbol_size: 1,
+            min_repair_symbols: 0,
+            max_source_blocks: 256,
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(29));
+        let mut snapshot = create_test_snapshot();
+
+        while {
+            let len = snapshot.to_bytes().len();
+            len < 512 || !len.is_multiple_of(256)
+        } {
+            snapshot.metadata.push(0xAB);
+        }
+
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+
+        assert_eq!(encoded.params.source_blocks, 256);
+        assert!(encoded
+            .symbols
+            .iter()
+            .any(|symbol| symbol.id().sbn() == 255));
     }
 
     #[test]
