@@ -993,3 +993,18 @@
 {"file":"src/service/retry.rs","lines":923,"batch":388,"date":"2026-03-17","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deep audit: retry budget (value-based policy chain correct), no backoff overflow (immediate retries), cancel-clean drop, idempotency delegated to Policy trait, cooperative budget prevents monopolization"}
 {"file":"src/channel/session.rs","lines":708,"batch":388,"date":"2026-03-17","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deep audit: protocol enforcement via move semantics, ObligationToken drop guard with double-panic suppression, cancel-correctness, no deadlock risk — all SOUND"}
 {"file":"src/runtime/scheduler/three_lane.rs","lines":6796,"batch":388,"date":"2026-03-17","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deep re-audit: double-execution prevention (WakeState + lock), waker correctness (finish_poll re-schedule), cancel propagation (inject_cancel + cancel lane), Tarjan SCC deadlock detection, EXP3 adaptive (latent f64 overflow after ~700 epochs, degrades benignly) — all SOUND"}
+{"file":"src/http/compress.rs"}
+{"file":"src/distributed/consistent_hash.rs"}
+{"file":"src/io/write.rs"}
+{"file":"src/net/tcp/listener.rs"}
+{"file":"src/codec/framed_read.rs"}
+{"file":"src/channel/oneshot.rs"}
+{"file":"src/net/happy_eyeballs.rs"}
+{"file":"src/io/stream_adapters.rs"}
+{"file":"src/net/tcp/stream.rs"}
+{"file":"src/net/tcp/socket.rs"}
+{"file":"src/http/h2/settings.rs"}
+{"file":"src/http/h1/listener.rs"}
+{"file":"src/http/h1/http_client.rs"}
+{"file":"src/web/negotiate.rs"}
+{"file":"src/tls/types.rs"}
