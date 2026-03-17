@@ -3426,7 +3426,8 @@ impl EventDataSnapshot {
                 task,
                 region,
                 obligation,
-            } => Self::Worker { 
+                ..
+            } => Self::Worker {
                 worker_id: worker_id.clone(),
                 job_id: *job_id,
                 task: (*task).into(),
