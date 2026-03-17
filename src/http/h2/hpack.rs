@@ -1982,7 +1982,7 @@ mod tests {
 
     #[test]
     fn test_decode_literal_with_empty_name() {
-        // Literal header with empty name (valid per spec)
+        // Literal header with empty name (invalid per RFC 9113)
         let mut enc = Encoder::new();
         enc.set_use_huffman(false);
 
@@ -1991,11 +1991,9 @@ mod tests {
         enc.encode(&headers, &mut buf);
 
         let mut dec = Decoder::new();
-        let headers_out = dec.decode(&mut buf.freeze()).unwrap();
-
-        assert_eq!(headers_out.len(), 1);
-        assert_eq!(headers_out[0].name, "");
-        assert_eq!(headers_out[0].value, "value");
+        let mut src = buf.freeze();
+        let result = dec.decode(&mut src);
+        assert_compression_error(result);
     }
 
     #[test]

@@ -485,7 +485,7 @@ impl LoadBalancer {
         &self,
         endpoints: &'a [Arc<Endpoint>],
         n: usize,
-        _object_id: Option<ObjectId>,
+        object_id: Option<ObjectId>,
     ) -> Vec<&'a Arc<Endpoint>> {
         if n == 0 {
             return Vec::new();
@@ -691,9 +691,22 @@ impl LoadBalancer {
                     Self::compare_weighted_load(a.1, b.1).then(a.0.cmp(&b.0))
                 })
             }
-
-            // For others, fallback to first-available logic or simple selection
-            _ => available.into_iter().take(n).collect(),
+            LoadBalanceStrategy::HashBased => {
+                let start_idx = object_id.map_or_else(
+                    || self.rr_counter.fetch_add(n as u64, Ordering::Relaxed) as usize,
+                    |oid| oid.as_u128() as usize,
+                );
+                let len = available.len();
+                (0..n).map(|i| available[(start_idx + i) % len]).collect()
+            }
+            // For WeightedRoundRobin and FirstAvailable, fallback to simple round robin
+            // or first available logic.
+            LoadBalanceStrategy::WeightedRoundRobin => {
+                let start = self.rr_counter.fetch_add(n as u64, Ordering::Relaxed) as usize;
+                let len = available.len();
+                (0..n).map(|i| available[(start + i) % len]).collect()
+            }
+            LoadBalanceStrategy::FirstAvailable => available.into_iter().take(n).collect(),
         }
     }
 

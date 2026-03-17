@@ -946,13 +946,27 @@ impl Runtime {
         entropy_source: Option<Arc<dyn EntropySource>>,
     ) -> Result<Self, Error> {
         config.normalize();
-        let (inner, workers) =
-            RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source);
-        let inner = Arc::new(inner);
-        RuntimeInner::spawn_worker_threads(&inner, workers).map_err(|e| {
-            Error::new(crate::error::ErrorKind::Internal).with_message(format!("runtime init: {e}"))
-        })?;
-        Ok(Self { inner })
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (reactor, io_driver, timer_driver, entropy_source);
+            Err(Error::new(crate::error::ErrorKind::ConfigError).with_message(
+                "RuntimeBuilder browser bootstrap is not yet supported on wasm32 browser profiles; \
+                 runtime startup still depends on std::thread-backed worker/deadline-monitor \
+                 services. Use the Browser Edition JS/TS bindings or the repository-maintained \
+                 browser fixtures until the host-services seam lands.",
+            ))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (inner, workers) =
+                RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source);
+            let inner = Arc::new(inner);
+            RuntimeInner::spawn_worker_threads(&inner, workers).map_err(|e| {
+                Error::new(crate::error::ErrorKind::Internal)
+                    .with_message(format!("runtime init: {e}"))
+            })?;
+            Ok(Self { inner })
+        }
     }
 
     /// Returns a handle that can spawn tasks from outside the runtime.
@@ -1964,6 +1978,24 @@ mod tests {
             offload.cancellation_mode,
             crate::runtime::config::WorkerCancellationMode::BestEffortAbort,
             "cancellation mode should round-trip"
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn runtime_builder_fail_closes_browser_bootstrap_on_wasm() {
+        let err = RuntimeBuilder::current_thread()
+            .build()
+            .expect_err("public browser bootstrap must fail closed on wasm");
+        assert_eq!(
+            err.kind(),
+            crate::error::ErrorKind::ConfigError,
+            "unsupported wasm browser bootstrap must surface as ConfigError"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("browser bootstrap") && message.contains("host-services seam"),
+            "error should explain why wasm browser bootstrap is still unsupported: {message}"
         );
     }
 

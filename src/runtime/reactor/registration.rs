@@ -181,8 +181,11 @@ impl Registration {
         //
         // If it fails (and the error is not NotFound), we make a best-effort *second* attempt.
         // If that retry succeeds (or reports NotFound), this explicit deregistration succeeded
-        // and should return Ok. Only persistent failures return Err. We then disarm Drop to
-        // avoid repeated deregistration attempts on a consumed handle.
+        // and should return Ok.
+        //
+        // If the error persists, DO NOT disarm Drop. `self` is consumed here, so callers have no
+        // retry surface left. Leaving Drop armed gives the registration one final best-effort
+        // cleanup pass instead of stranding the reactor entry.
         let this = self;
 
         this.reactor.upgrade().map_or_else(
@@ -207,7 +210,9 @@ impl Registration {
                     // don't attempt a second deregister call.
                     None => panicked_deregister_result(),
                 };
-                this.disarmed.set(true);
+                if outcome.is_ok() {
+                    this.disarmed.set(true);
+                }
                 outcome
             },
         )
@@ -350,6 +355,44 @@ mod tests {
         fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
             self.deregister_count.fetch_add(1, Ordering::SeqCst);
             Err(io::Error::other("persistent failure"))
+        }
+
+        fn modify_interest(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ThirdTryReactor {
+        deregistered: AtomicBool,
+        deregister_count: AtomicUsize,
+    }
+
+    impl ThirdTryReactor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                deregistered: AtomicBool::new(false),
+                deregister_count: AtomicUsize::new(0),
+            })
+        }
+
+        fn was_deregistered(&self) -> bool {
+            self.deregistered.load(Ordering::SeqCst)
+        }
+
+        fn deregister_count(&self) -> usize {
+            self.deregister_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ReactorHandle for ThirdTryReactor {
+        fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
+            let call = self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                Err(io::Error::other("injected failure"))
+            } else {
+                self.deregistered.store(true, Ordering::SeqCst);
+                Ok(())
+            }
         }
 
         fn modify_interest(&self, _token: Token, _interest: Interest) -> io::Result<()> {
@@ -590,8 +633,49 @@ mod tests {
             result.is_err()
         );
         let count = reactor.deregister_count();
-        crate::assert_with_log!(count == 2, "retry attempted once", 2usize, count);
+        crate::assert_with_log!(
+            count == 4,
+            "explicit error path leaves Drop armed for final cleanup pass",
+            4usize,
+            count
+        );
         crate::test_complete!("explicit_deregister_persistent_error_returns_err_after_retry");
+    }
+
+    #[test]
+    fn explicit_deregister_error_still_allows_drop_cleanup_success() {
+        init_test("explicit_deregister_error_still_allows_drop_cleanup_success");
+        let reactor = ThirdTryReactor::new();
+        let token = Token::new(14);
+
+        let reg = Registration::new(
+            token,
+            Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
+            Interest::READABLE,
+        );
+
+        let result = reg.deregister();
+        crate::assert_with_log!(
+            result.is_err(),
+            "explicit deregister still reports the persistent two-attempt failure",
+            true,
+            result.is_err()
+        );
+        let was = reactor.was_deregistered();
+        crate::assert_with_log!(
+            was,
+            "drop cleanup gets a final successful deregister attempt",
+            true,
+            was
+        );
+        let count = reactor.deregister_count();
+        crate::assert_with_log!(
+            count == 3,
+            "two explicit attempts plus one drop cleanup attempt",
+            3usize,
+            count
+        );
+        crate::test_complete!("explicit_deregister_error_still_allows_drop_cleanup_success");
     }
 
     #[test]
@@ -672,7 +756,12 @@ mod tests {
             kind
         );
         let count = reactor.deregister_count();
-        crate::assert_with_log!(count == 1, "single deregister attempt", 1usize, count);
+        crate::assert_with_log!(
+            count == 2,
+            "drop retries cleanup once after explicit panic-path error",
+            2usize,
+            count
+        );
         crate::test_complete!("explicit_deregister_panicking_reactor_returns_error");
     }
 

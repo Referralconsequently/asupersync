@@ -939,6 +939,7 @@ impl Child {
         let mut status = None;
         let mut stdout_done = stdout_handle.is_none();
         let mut stderr_done = stderr_handle.is_none();
+        let mut backoff_ms = 1u64;
 
         while status.is_none() || !stdout_done || !stderr_done {
             let mut progressed = false;
@@ -977,8 +978,13 @@ impl Child {
                 break;
             }
 
-            if !progressed {
+            if progressed {
+                backoff_ms = 1;
                 crate::runtime::yield_now().await;
+            } else {
+                let now = crate::time::wall_now();
+                crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(50);
             }
         }
 

@@ -1494,41 +1494,43 @@ mod tests {
     use super::*;
     use crate::web::handler::FnHandler;
 
-    static TIMEOUT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
-    static CIRCUIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
-    static REQUEST_TRACE_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
-    static RATE_LIMIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static TIMEOUT_TEST_TIME_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static CIRCUIT_TEST_TIME_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static REQUEST_TRACE_TEST_TIME_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static RATE_LIMIT_TEST_TIME_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     fn set_timeout_test_time(ms: u64) {
-        TIMEOUT_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+        TIMEOUT_TEST_TIME_MS.with(|t| t.set(ms));
     }
 
     fn timeout_test_time() -> Time {
-        Time::from_millis(TIMEOUT_TEST_TIME_MS.load(Ordering::SeqCst))
+        Time::from_millis(TIMEOUT_TEST_TIME_MS.with(std::cell::Cell::get))
     }
 
     fn set_circuit_test_time(ms: u64) {
-        CIRCUIT_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+        CIRCUIT_TEST_TIME_MS.with(|t| t.set(ms));
     }
 
     fn circuit_test_time() -> Time {
-        Time::from_millis(CIRCUIT_TEST_TIME_MS.load(Ordering::SeqCst))
+        Time::from_millis(CIRCUIT_TEST_TIME_MS.with(std::cell::Cell::get))
     }
 
     fn set_request_trace_test_time(ms: u64) {
-        REQUEST_TRACE_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+        REQUEST_TRACE_TEST_TIME_MS.with(|t| t.set(ms));
     }
 
     fn request_trace_test_time() -> Time {
-        Time::from_millis(REQUEST_TRACE_TEST_TIME_MS.load(Ordering::SeqCst))
+        Time::from_millis(REQUEST_TRACE_TEST_TIME_MS.with(std::cell::Cell::get))
     }
 
     fn set_rate_limit_test_time(ms: u64) {
-        RATE_LIMIT_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+        RATE_LIMIT_TEST_TIME_MS.with(|t| t.set(ms));
     }
 
     fn rate_limit_test_time() -> Time {
-        Time::from_millis(RATE_LIMIT_TEST_TIME_MS.load(Ordering::SeqCst))
+        Time::from_millis(RATE_LIMIT_TEST_TIME_MS.with(std::cell::Cell::get))
     }
 
     fn ok_handler() -> &'static str {

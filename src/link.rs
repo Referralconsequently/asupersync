@@ -391,9 +391,12 @@ impl LinkSet {
 
         self.records.insert(link_ref, record);
 
-        // Index both sides
+        // Index both sides. Self-links are represented once so they remain a
+        // single logical link in peer views and exit resolution.
         self.task_index.entry(task_a).or_default().push(link_ref);
-        self.task_index.entry(task_b).or_default().push(link_ref);
+        if task_b != task_a {
+            self.task_index.entry(task_b).or_default().push(link_ref);
+        }
 
         // Index both regions (avoid duplicate if same region)
         self.region_index
@@ -848,6 +851,21 @@ mod tests {
     }
 
     #[test]
+    fn self_link_is_indexed_once_in_peer_views() {
+        let mut set = LinkSet::new();
+        let t1 = test_task_id(1, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref = set.establish(t1, r1, t1, r1);
+
+        let peers = set.peers_of(t1);
+        assert_eq!(peers, vec![(lref, t1)]);
+
+        let peers_with_policy = set.peers_with_policy(t1);
+        assert_eq!(peers_with_policy, vec![(lref, t1, ExitPolicy::Propagate)]);
+    }
+
+    #[test]
     fn establish_cross_region() {
         let mut set = LinkSet::new();
         let t1 = test_task_id(1, 0);
@@ -997,6 +1015,37 @@ mod tests {
                 assert_eq!(*link_ref, lref);
             }
             other => panic!("expected Ignored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exits_self_link_emits_single_action() {
+        let mut set = LinkSet::new();
+        let a = test_task_id(1, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref =
+            set.establish_with_policy(a, r1, ExitPolicy::Propagate, a, r1, ExitPolicy::Propagate);
+        let actions = set
+            .resolve_exits(
+                a,
+                Time::from_secs(1),
+                &DownReason::Error("boom".to_string()),
+            )
+            .into_sorted();
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            LinkExitAction::CancelPeer {
+                to,
+                reason,
+                link_ref,
+            } => {
+                assert_eq!(*to, a);
+                assert_eq!(reason.kind, CancelKind::LinkedExit);
+                assert_eq!(*link_ref, lref);
+            }
+            other => panic!("expected CancelPeer, got {other:?}"),
         }
     }
 
