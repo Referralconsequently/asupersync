@@ -153,12 +153,13 @@ impl E2eLabHarness {
             .runtime
             .state
             .cancel_request(region, &cancel_reason, None);
-        let count = 0usize;
+        let mut count = 0usize;
         for (task, priority) in tasks {
             self.runtime
                 .scheduler
                 .lock()
                 .schedule_cancel(task, priority);
+            count += 1;
         }
         count
     }
