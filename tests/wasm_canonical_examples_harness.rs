@@ -271,7 +271,8 @@ fn run_react_example_scenario() -> ReactExampleSnapshot {
 fn run_dedicated_worker_example_scenario() -> DedicatedWorkerExampleSnapshot {
     let mut coordinator = WorkerCoordinator::new(42);
     coordinator
-        .handle_inbound(&WorkerEnvelope::new(
+        .handle_inbound(&WorkerEnvelope::from_worker(
+            "canonical-worker",
             1,
             1,
             42,
@@ -291,7 +292,8 @@ fn run_dedicated_worker_example_scenario() -> DedicatedWorkerExampleSnapshot {
     assert!(matches!(spawn.op, WorkerOp::SpawnJob(_)));
 
     coordinator
-        .handle_inbound(&WorkerEnvelope::new(
+        .handle_inbound(&WorkerEnvelope::from_worker(
+            "canonical-worker",
             2,
             2,
             42,
@@ -319,7 +321,8 @@ fn run_dedicated_worker_example_scenario() -> DedicatedWorkerExampleSnapshot {
     );
 
     coordinator
-        .handle_inbound(&WorkerEnvelope::new(
+        .handle_inbound(&WorkerEnvelope::from_worker(
+            "canonical-worker",
             3,
             3,
             42,

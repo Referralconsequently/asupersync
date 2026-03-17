@@ -125,7 +125,7 @@ fn rollout_doc_defines_vnext_surface_stage_ceilings() {
     for token in [
         "## Surface-Specific Rollout Floors and Ceilings",
         "Dedicated Web Worker",
-        "IndexedDB durable storage + `BrowserArtifactStore`",
+        "`IndexedDB` durable storage + `BrowserArtifactStore`",
         "Rust-authored browser path",
         "`WebTransport` datagrams",
         "MessageChannel",

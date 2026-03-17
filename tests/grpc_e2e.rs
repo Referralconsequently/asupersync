@@ -577,7 +577,7 @@ fn e2e_grpc_channel_config() {
 
     test_section!("custom_builder");
     futures_lite::future::block_on(async {
-        let channel = Channel::builder("http://grpc.example.com:9090")
+        let channel = Channel::builder("http://loopback:9090")
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .max_recv_message_size(16 * 1024 * 1024)
@@ -590,9 +590,9 @@ fn e2e_grpc_channel_config() {
 
         tracing::info!(uri = channel.uri(), "channel connected");
         assert_with_log!(
-            channel.uri() == "http://grpc.example.com:9090",
+            channel.uri() == "http://loopback:9090",
             "channel uri",
-            "http://grpc.example.com:9090",
+            "http://loopback:9090",
             channel.uri()
         );
 

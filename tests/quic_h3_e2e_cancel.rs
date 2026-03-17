@@ -510,21 +510,16 @@ fn double_begin_close_is_idempotent() {
     assert_eq!(pair.client.state(), QuicConnectionState::Draining);
 
     // The close_code should still be 0xAA from the first call because
-    // start_draining_with_code calls start_draining first (which is idempotent
-    // at Draining -> Draining) and then overwrites the close_code.
-    // So it will actually be 0xBB.
-    assert_eq!(pair.client.transport().close_code(), Some(0xBB));
+    // start_draining_with_code is idempotent and preserves the original code
+    // when already draining.
+    assert_eq!(pair.client.transport().close_code(), Some(0xAA));
 
-    // The drain deadline was set by the first call.  Advance to the original
-    // deadline and verify the connection closes (the drain deadline is from
-    // the first begin_close, since the second call's transition() is a no-op
-    // for Draining->Draining, it does NOT reset the deadline... actually
-    // start_draining sets drain_deadline, but since transition() returns Ok
-    // for same-state, the deadline IS overwritten).
-    // Since the second call was at now+1000 with drain_timeout=2_000_000,
-    // the new deadline is now+1000+2_000_000.
-    // We are currently at now+1000. Advance to now+1000+2_000_000-1 => still Draining.
-    pair.clock.advance(2_000_000 - 1);
+    // The drain deadline was set by the first call to `now + 2_000_000`.
+    // The second call is idempotent and DOES NOT reset the deadline.
+    // We are currently at `now + 1000`.
+    // Advance to 1 microsecond before the original deadline:
+    // `2_000_000 - 1000 - 1 = 1_998_999`
+    pair.clock.advance(1_998_999);
     pair.client
         .poll(cx, pair.clock.now())
         .expect("poll before deadline");

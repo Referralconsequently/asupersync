@@ -283,7 +283,7 @@ fn release_docs_define_vnext_surface_promotion_and_packet_rows() {
     for token in [
         "## VNext Surface Promotion Ceilings",
         "Dedicated Web Worker",
-        "IndexedDB durable storage + `BrowserArtifactStore`",
+        "`IndexedDB` durable storage + `BrowserArtifactStore`",
         "Rust-authored browser path",
         "`WebTransport` datagrams",
         "MessageChannel",

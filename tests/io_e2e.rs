@@ -130,7 +130,7 @@ fn record_io_replay_trace(seed: u64) -> Option<ReplayTrace> {
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let task_id = spawn_cancellable_task(&mut runtime, region)?;
 
-    let io_op = IoOp::submit(
+    let mut io_op = IoOp::submit(
         &mut runtime.state,
         task_id,
         region,
@@ -465,7 +465,7 @@ fn io_e2e_lab_cancel_inflight_io_op() {
         region,
         Some("inflight read".to_string()),
     );
-    let io_op = match io_op {
+    let mut io_op = match io_op {
         Ok(op) => op,
         Err(err) => {
             assert_with_log!(false, "submit io op", "Ok", format!("{err:?}"));
@@ -520,7 +520,7 @@ fn io_e2e_lab_region_close_waits_for_io_op() {
         region,
         Some("region close io".to_string()),
     );
-    let io_op = match io_op {
+    let mut io_op = match io_op {
         Ok(op) => op,
         Err(err) => {
             assert_with_log!(false, "submit io op", "Ok", format!("{err:?}"));

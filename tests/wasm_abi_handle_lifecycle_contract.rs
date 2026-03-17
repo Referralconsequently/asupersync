@@ -7,6 +7,22 @@
 
 use asupersync::types::wasm_abi::*;
 
+fn close_handle_for_release(table: &mut WasmHandleTable, handle: &WasmHandleRef) {
+    match table.get(handle).unwrap().state {
+        WasmBoundaryState::Unbound => {
+            table.transition(handle, WasmBoundaryState::Bound).unwrap();
+            table.transition(handle, WasmBoundaryState::Closed).unwrap();
+        }
+        WasmBoundaryState::Bound
+        | WasmBoundaryState::Active
+        | WasmBoundaryState::Cancelling
+        | WasmBoundaryState::Draining => {
+            table.transition(handle, WasmBoundaryState::Closed).unwrap();
+        }
+        WasmBoundaryState::Closed => {}
+    }
+}
+
 // ── Handle Allocation ────────────────────────────────────────────────
 
 #[test]
@@ -75,6 +91,7 @@ fn get_with_out_of_range_slot_fails() {
 fn get_with_stale_generation_fails() {
     let mut table = WasmHandleTable::new();
     let h = table.allocate(WasmHandleKind::Task);
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
 
     // h now has stale generation
@@ -218,6 +235,7 @@ fn release_decrements_live_count() {
     let h = table.allocate(WasmHandleKind::Runtime);
     assert_eq!(table.live_count(), 1);
 
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
     assert_eq!(table.live_count(), 0);
 }
@@ -226,6 +244,7 @@ fn release_decrements_live_count() {
 fn double_release_fails() {
     let mut table = WasmHandleTable::new();
     let h = table.allocate(WasmHandleKind::Runtime);
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
 
     let err = table.release(&h).unwrap_err();
@@ -239,6 +258,7 @@ fn released_slot_is_recycled_with_new_generation() {
     let slot = h1.slot;
     let orig_gen = h1.generation;
 
+    close_handle_for_release(&mut table, &h1);
     table.release(&h1).unwrap();
     let h2 = table.allocate(WasmHandleKind::Region);
 
@@ -251,6 +271,7 @@ fn released_slot_is_recycled_with_new_generation() {
 fn stale_handle_after_recycling_cannot_access_new_entry() {
     let mut table = WasmHandleTable::new();
     let old = table.allocate(WasmHandleKind::Task);
+    close_handle_for_release(&mut table, &old);
     table.release(&old).unwrap();
     let _new = table.allocate(WasmHandleKind::Region);
 
@@ -277,7 +298,47 @@ fn unpin_then_release_succeeds() {
     let h = table.allocate(WasmHandleKind::CancelToken);
     table.pin(&h).unwrap();
     table.unpin(&h).unwrap();
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
+    assert_eq!(table.live_count(), 0);
+}
+
+#[test]
+fn release_before_closed_fails_without_recycling_slot() {
+    let mut table = WasmHandleTable::new();
+    let h = table.allocate(WasmHandleKind::Task);
+
+    let err = table.release(&h).unwrap_err();
+    assert_eq!(
+        err,
+        WasmHandleError::ReleaseBeforeClosed {
+            slot: h.slot,
+            state: WasmBoundaryState::Unbound,
+        }
+    );
+    assert_eq!(table.live_count(), 1);
+    assert_eq!(table.memory_report().free_slots, 0);
+}
+
+#[test]
+fn release_with_live_descendants_fails_until_children_are_released() {
+    let mut table = WasmHandleTable::new();
+    let root = table.allocate(WasmHandleKind::Runtime);
+    let child = table.allocate_with_parent(WasmHandleKind::Region, Some(root));
+
+    close_handle_for_release(&mut table, &root);
+    let err = table.release(&root).unwrap_err();
+    assert_eq!(
+        err,
+        WasmHandleError::ReleaseWithLiveDescendants {
+            slot: root.slot,
+            live_descendants: 1,
+        }
+    );
+
+    close_handle_for_release(&mut table, &child);
+    table.release(&child).unwrap();
+    table.release(&root).unwrap();
     assert_eq!(table.live_count(), 0);
 }
 
@@ -327,6 +388,7 @@ fn released_children_excluded_from_descendants() {
     let mut table = WasmHandleTable::new();
     let root = table.allocate(WasmHandleKind::Runtime);
     let child = table.allocate_with_parent(WasmHandleKind::Region, Some(root));
+    close_handle_for_release(&mut table, &child);
     table.release(&child).unwrap();
 
     let descendants = table.descendants_postorder(&root);
@@ -339,6 +401,7 @@ fn released_children_excluded_from_descendants() {
 fn no_leaks_when_all_handles_released() {
     let mut table = WasmHandleTable::new();
     let h = table.allocate(WasmHandleKind::Task);
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
     assert!(table.detect_leaks().is_empty());
 }
@@ -374,6 +437,7 @@ fn memory_report_reflects_live_state() {
     let _h2 = table.allocate(WasmHandleKind::Task);
     let h3 = table.allocate(WasmHandleKind::Task);
     table.pin(&h1).unwrap();
+    close_handle_for_release(&mut table, &h3);
     table.release(&h3).unwrap();
 
     let report = table.memory_report();

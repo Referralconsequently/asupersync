@@ -29,6 +29,22 @@ use asupersync::{
 };
 use std::path::Path;
 
+fn close_handle_for_release(table: &mut WasmHandleTable, handle: &WasmHandleRef) {
+    match table.get(handle).unwrap().state {
+        WasmBoundaryState::Unbound => {
+            table.transition(handle, WasmBoundaryState::Bound).unwrap();
+            table.transition(handle, WasmBoundaryState::Closed).unwrap();
+        }
+        WasmBoundaryState::Bound
+        | WasmBoundaryState::Active
+        | WasmBoundaryState::Cancelling
+        | WasmBoundaryState::Draining => {
+            table.transition(handle, WasmBoundaryState::Closed).unwrap();
+        }
+        WasmBoundaryState::Closed => {}
+    }
+}
+
 // ─── Policy document existence ──────────────────────────────────────
 
 #[test]
@@ -429,6 +445,7 @@ fn handle_allocate_get_release_cycle() {
     assert_eq!(entry.handle.kind, WasmHandleKind::Runtime);
     assert!(matches!(entry.ownership, WasmHandleOwnership::WasmOwned));
 
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
 
     // Accessing released handle returns stale generation error (generation bumped)
@@ -442,6 +459,7 @@ fn handle_generation_bumps_on_reuse() {
 
     let h1 = table.allocate(WasmHandleKind::Region);
     assert_eq!(h1.generation, 0);
+    close_handle_for_release(&mut table, &h1);
     table.release(&h1).unwrap();
 
     let h2 = table.allocate(WasmHandleKind::Task);
@@ -481,6 +499,7 @@ fn handle_pin_unpin_lifecycle() {
     let entry = table.get(&h).unwrap();
     assert!(!entry.pinned, "Handle must be unpinned after unpin()");
 
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
 }
 
@@ -501,6 +520,7 @@ fn handle_transfer_to_js() {
     ));
 
     // Can still release after transfer
+    close_handle_for_release(&mut table, &h);
     table.release(&h).unwrap();
 }
 
@@ -518,6 +538,8 @@ fn handle_leak_detection() {
     table.transition(&h2, WasmBoundaryState::Closed).unwrap();
 
     // Release h1 and h3 properly
+    close_handle_for_release(&mut table, &h1);
+    close_handle_for_release(&mut table, &h3);
     table.release(&h1).unwrap();
     table.release(&h3).unwrap();
 
@@ -537,6 +559,7 @@ fn handle_memory_report_is_consistent() {
     assert_eq!(report.live_handles, 2);
     assert_eq!(report.free_slots, 0);
 
+    close_handle_for_release(&mut table, &h1);
     table.release(&h1).unwrap();
     let report = table.memory_report();
     assert_eq!(report.live_handles, 1);
@@ -553,6 +576,7 @@ fn handle_descendants_postorder_is_deterministic_and_skips_released_children() {
     let child_b = table.allocate_with_parent(WasmHandleKind::FetchRequest, Some(root));
     let grandchild_b = table.allocate_with_parent(WasmHandleKind::Task, Some(child_b));
 
+    close_handle_for_release(&mut table, &grandchild_a);
     table.release(&grandchild_a).unwrap();
 
     let descendants = table.descendants_postorder(&root);
@@ -602,6 +626,7 @@ fn transfer_to_js_cannot_repeat_or_cross_release_boundary() {
         }
     );
 
+    close_handle_for_release(&mut table, &handle);
     table.release(&handle).unwrap();
     let err = table.transfer_to_js(&handle).unwrap_err();
     assert!(

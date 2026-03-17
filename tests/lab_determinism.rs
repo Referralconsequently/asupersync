@@ -1018,7 +1018,7 @@ fn run_io_cancel_scenario(seed: u64) -> (bool, usize, usize, u64) {
     // If we tie the obligation to `task_id` and allow the task to complete, the runtime will
     // correctly flag it as a leaked obligation (no task may complete while still holding one).
     let io_holder = asupersync::types::TaskId::new_for_test(99, 0);
-    let io_op = IoOp::submit(
+    let mut io_op = IoOp::submit(
         &mut runtime.state,
         io_holder,
         region,
@@ -1106,7 +1106,7 @@ fn test_lab_io_quiescence_waits_for_obligation() {
     // If we tie the obligation to `task_id` and allow the task to complete, the runtime will
     // correctly flag it as a leaked obligation (no task may complete while still holding one).
     let io_holder = asupersync::types::TaskId::new_for_test(99, 0);
-    let io_op = IoOp::submit(
+    let mut io_op = IoOp::submit(
         &mut runtime.state,
         io_holder,
         region,

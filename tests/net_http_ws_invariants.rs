@@ -733,12 +733,15 @@ fn close_code_is_valid_range_boundaries() {
     assert!(CloseCode::is_valid_code(1003));
     assert!(CloseCode::is_valid_code(1007));
     assert!(CloseCode::is_valid_code(1011));
+    assert!(CloseCode::is_valid_code(1012)); // Service Restart
+    assert!(CloseCode::is_valid_code(1013)); // Try Again Later
+    assert!(CloseCode::is_valid_code(1014)); // Bad Gateway
 
     // Invalid gaps.
     assert!(!CloseCode::is_valid_code(1004));
     assert!(!CloseCode::is_valid_code(1005));
     assert!(!CloseCode::is_valid_code(1006));
-    assert!(!CloseCode::is_valid_code(1012));
+    assert!(!CloseCode::is_valid_code(1015));
     assert!(!CloseCode::is_valid_code(2999));
 
     // IANA registered range.

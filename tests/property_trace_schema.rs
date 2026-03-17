@@ -317,9 +317,11 @@ fn browser_trace_schema_includes_worker_offload_lifecycle_events() {
         assert_eq!(
             entry.required_fields,
             vec![
+                "decision_seq".to_string(),
                 "job_id".to_string(),
                 "obligation".to_string(),
                 "region".to_string(),
+                "replay_hash".to_string(),
                 "task".to_string(),
                 "worker_id".to_string(),
             ]

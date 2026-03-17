@@ -702,7 +702,7 @@ fn io_cancel_009_io_op_cancel_clears_obligation() {
 
     runtime.scheduler.lock().schedule(task_id, 0);
 
-    let io_op = IoOp::submit(
+    let mut io_op = IoOp::submit(
         &mut runtime.state,
         task_id,
         region,
@@ -770,7 +770,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
 
     runtime.scheduler.lock().schedule(task_id, 0);
 
-    let io_op = IoOp::submit(
+    let mut io_op = IoOp::submit(
         &mut runtime.state,
         task_id,
         region,
@@ -873,13 +873,14 @@ fn io_cancel_011_oracle_detects_io_obligation_leak() {
 
     runtime.scheduler.lock().schedule(task_id, 0);
 
-    let _io_op = IoOp::submit(
+    let io_op = IoOp::submit(
         &mut runtime.state,
         task_id,
         region,
         Some("io op leak".to_string()),
     )
     .expect("submit io op");
+    let _obligation_id = io_op.into_raw();
 
     let cancel_reason = CancelReason::shutdown();
     if let Some(task) = runtime.state.task_mut(task_id) {
