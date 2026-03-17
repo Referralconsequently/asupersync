@@ -74,6 +74,12 @@ impl TcpSocket {
                     "address family does not match socket",
                 ));
             }
+            if state.bound.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "socket is already bound",
+                ));
+            }
             state.bound = Some(addr);
         }
         Ok(())
@@ -203,6 +209,39 @@ mod tests {
             err.kind()
         );
         crate::test_complete!("test_bind_family_mismatch");
+    }
+
+    #[test]
+    fn test_bind_rejects_rebind_and_preserves_original_local_identity() {
+        init_test("test_bind_rejects_rebind_and_preserves_original_local_identity");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        let first = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let second = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+
+        socket.bind(first).expect("first bind");
+        let err = socket.bind(second).expect_err("second bind should fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::InvalidInput,
+            "rebind rejected",
+            io::ErrorKind::InvalidInput,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            socket.state.lock().bound == Some(first),
+            "first bind preserved in socket state",
+            Some(first),
+            socket.state.lock().bound
+        );
+
+        let listener = socket.listen(128).expect("listen after rejected rebind");
+        let local = listener.local_addr().expect("listener local_addr");
+        crate::assert_with_log!(
+            local.ip() == first.ip(),
+            "listen uses original local identity",
+            first.ip(),
+            local.ip()
+        );
+        crate::test_complete!("test_bind_rejects_rebind_and_preserves_original_local_identity");
     }
 
     #[test]

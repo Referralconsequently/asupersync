@@ -103,12 +103,10 @@ where
 
         loop {
             // Try to decode a frame from buffered data.
-            if !this.eof {
-                match this.decoder.decode(&mut this.buffer) {
-                    Ok(Some(item)) => return Poll::Ready(Some(Ok(item))),
-                    Ok(None) => {} // Need more data
-                    Err(e) => return Poll::Ready(Some(Err(e))),
-                }
+            match this.decoder.decode(&mut this.buffer) {
+                Ok(Some(item)) => return Poll::Ready(Some(Ok(item))),
+                Ok(None) => {} // Need more data
+                Err(e) => return Poll::Ready(Some(Err(e))),
             }
 
             // If we hit EOF, give the decoder one last chance.

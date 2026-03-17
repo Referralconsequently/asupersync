@@ -718,8 +718,11 @@ impl AsyncWrite for UnixStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.inner.shutdown(Shutdown::Write)?;
-        Poll::Ready(Ok(()))
+        match self.inner.shutdown(Shutdown::Write) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => Poll::Ready(Ok(())),
+            Err(e) => Poll::Ready(Err(e)),
+        }
     }
 }
 
