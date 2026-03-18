@@ -148,8 +148,8 @@ impl WebSocketAcceptor {
             return Err(WsAcceptError::Cancelled);
         }
 
-        // Parse HTTP request
-        let request = HttpRequest::parse(request_bytes)?;
+        // Parse HTTP request and extract any trailing bytes (pipelined frames)
+        let (request, trailing) = HttpRequest::parse_with_trailing(request_bytes)?;
 
         // Validate and generate accept response
         let accept_response = self.handshake.accept(&request)?;
@@ -163,8 +163,8 @@ impl WebSocketAcceptor {
         let response_bytes = accept_response.response_bytes();
         stream.write_all(&response_bytes).await?;
 
-        // Create server WebSocket
-        let ws = ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response);
+        // Create server WebSocket, seeding any trailing bytes into the read buffer
+        let ws = ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response, trailing);
 
         Ok(ws)
     }
@@ -198,8 +198,8 @@ impl WebSocketAcceptor {
         let response_bytes = accept_response.response_bytes();
         stream.write_all(&response_bytes).await?;
 
-        // Create server WebSocket
-        let ws = ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response);
+        // Create server WebSocket with no trailing bytes (already parsed externally)
+        let ws = ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response, &[]);
 
         Ok(ws)
     }
@@ -254,13 +254,17 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     /// Create a WebSocket from an already-upgraded I/O stream.
-    fn from_upgraded(io: IO, config: WebSocketConfig, accept: AcceptResponse) -> Self {
+    fn from_upgraded(io: IO, config: WebSocketConfig, accept: AcceptResponse, trailing: &[u8]) -> Self {
         let max_message_size = config.max_message_size;
         let codec = FrameCodec::server().max_payload_size(config.max_frame_size);
+        let mut read_buf = BytesMut::with_capacity(8192);
+        if !trailing.is_empty() {
+            read_buf.extend_from_slice(trailing);
+        }
         Self {
             io,
             codec,
-            read_buf: BytesMut::with_capacity(8192),
+            read_buf,
             write_buf: BytesMut::with_capacity(8192),
             close_handshake: CloseHandshake::with_config(config.close_config.clone()),
             config,
@@ -876,7 +880,7 @@ mod tests {
                 extensions: Vec::new(),
             };
             let mut ws =
-                ServerWebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default(), accept);
+                ServerWebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default(), accept, &[]);
             let cx = Cx::for_testing();
 
             assert!(ws.is_open(), "connection should start open");
@@ -909,7 +913,7 @@ mod tests {
             };
             let io = TestIo::with_read_data(encode_client_frame(Frame::close(Some(1000), None)))
                 .with_write_failure();
-            let mut ws = ServerWebSocket::from_upgraded(io, WebSocketConfig::default(), accept);
+            let mut ws = ServerWebSocket::from_upgraded(io, WebSocketConfig::default(), accept, &[]);
             let cx = Cx::for_testing();
 
             let err = ws

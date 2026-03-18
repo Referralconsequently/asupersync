@@ -685,13 +685,21 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
-    /// Parse an HTTP request from bytes.
+    /// Parse an HTTP request from bytes, returning the parsed request and any trailing bytes.
     ///
     /// # Errors
     ///
     /// Returns `HandshakeError::InvalidRequest` if parsing fails.
-    pub fn parse(data: &[u8]) -> Result<Self, HandshakeError> {
-        let text = std::str::from_utf8(data)
+    pub fn parse_with_trailing(data: &[u8]) -> Result<(Self, &[u8]), HandshakeError> {
+        let (header_bytes, trailing) = if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+            (&data[..pos + 4], &data[pos + 4..])
+        } else if let Some(pos) = data.windows(2).position(|w| w == b"\n\n") {
+            (&data[..pos + 2], &data[pos + 2..])
+        } else {
+            (data, &[][..])
+        };
+
+        let text = std::str::from_utf8(header_bytes)
             .map_err(|_| HandshakeError::InvalidRequest("invalid UTF-8".into()))?;
 
         let mut lines = text.lines();
@@ -722,11 +730,23 @@ impl HttpRequest {
             }
         }
 
-        Ok(Self {
-            method,
-            path,
-            headers,
-        })
+        Ok((
+            Self {
+                method,
+                path,
+                headers,
+            },
+            trailing,
+        ))
+    }
+
+    /// Parse an HTTP request from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `HandshakeError::InvalidRequest` if parsing fails.
+    pub fn parse(data: &[u8]) -> Result<Self, HandshakeError> {
+        Self::parse_with_trailing(data).map(|(req, _)| req)
     }
 
     /// Get a header value by name (case-insensitive).

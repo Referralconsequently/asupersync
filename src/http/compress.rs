@@ -134,7 +134,7 @@ pub fn negotiate_encoding(
     accept_encoding: &str,
     supported: &[ContentEncoding],
 ) -> Option<ContentEncoding> {
-    if accept_encoding.is_empty() {
+    if accept_encoding.trim().is_empty() {
         // No Accept-Encoding header: identity is acceptable
         return if supported.contains(&ContentEncoding::Identity) {
             Some(ContentEncoding::Identity)
@@ -763,6 +763,21 @@ mod tests {
         let supported = &[ContentEncoding::Gzip];
         let best = negotiate_encoding("", supported);
         assert_eq!(best, Some(ContentEncoding::Gzip));
+    }
+
+    #[test]
+    fn negotiate_whitespace_only_accept_encoding_matches_empty_header() {
+        let gzip_only = &[ContentEncoding::Gzip];
+        assert_eq!(
+            negotiate_encoding("   ", gzip_only),
+            Some(ContentEncoding::Gzip)
+        );
+
+        let with_identity = &[ContentEncoding::Gzip, ContentEncoding::Identity];
+        assert_eq!(
+            negotiate_encoding("   ", with_identity),
+            Some(ContentEncoding::Identity)
+        );
     }
 
     #[test]

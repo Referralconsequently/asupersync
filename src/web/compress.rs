@@ -132,7 +132,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             .supported_encodings
             .iter()
             .copied()
-            .filter(content_encoding_available)
+            .filter(|encoding| content_encoding_available(*encoding))
             .collect();
 
         let accept = accept_encoding.as_deref().unwrap_or_default();
@@ -183,7 +183,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
     }
 }
 
-fn content_encoding_available(encoding: &ContentEncoding) -> bool {
+fn content_encoding_available(encoding: ContentEncoding) -> bool {
     match encoding {
         ContentEncoding::Identity => true,
         #[cfg(feature = "compression")]
