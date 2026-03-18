@@ -34,6 +34,9 @@ include = [
 
 [features]
 default = ["test-internals"]
+# Gate the native FABRIC messaging lane separately from the existing external
+# messaging integrations.
+messaging-fabric = []
 # Explicit opt-in for experimental browser-targeted builds.
 # This does not imply full wasm parity; it only enables guarded compilation paths.
 wasm-browser-preview = []

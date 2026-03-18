@@ -706,12 +706,11 @@ impl NatsClient {
         }
 
         // Wait for more data or report unknown
-        if self.read_buf.find_crlf().is_none() {
+        let Some(line_end) = self.read_buf.find_crlf() else {
             return Ok(None);
-        }
+        };
 
         // Unknown message type
-        let line_end = self.read_buf.find_crlf().unwrap();
         let line = String::from_utf8_lossy(&self.read_buf.available()[..line_end]);
         Err(NatsError::Protocol(format!("unknown message: {line}")))
     }
