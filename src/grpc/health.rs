@@ -274,7 +274,7 @@ impl HealthService {
             let statuses = self.statuses.read();
             let status = if statuses.is_empty() {
                 ServingStatus::ServiceUnknown
-            } else if statuses.values().all(|s| s.is_healthy()) {
+            } else if statuses.values().all(ServingStatus::is_healthy) {
                 ServingStatus::Serving
             } else {
                 ServingStatus::NotServing

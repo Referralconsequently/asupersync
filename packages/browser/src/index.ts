@@ -1333,8 +1333,14 @@ function browserExecutionCandidates(
       );
     }
 
+    // Only surface lane-health as the candidate rejection reason when the
+    // current ladder decision is an actual health-driven demotion. Hard
+    // prerequisite failures such as missing WebAssembly must remain visible
+    // even if the lane-health registry is still carrying older demotion state.
     const laneUnhealthy =
-      directLaneForHost === laneId && laneHealth.status === "demoted";
+      selectedReasonCode === "demote_due_to_lane_health" &&
+      directLaneForHost === laneId &&
+      laneHealth.status === "demoted";
     if (laneUnhealthy) {
       return createBrowserExecutionLaneCandidate(
         laneId,

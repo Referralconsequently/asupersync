@@ -703,6 +703,7 @@ fn ratio(usage: usize, limit: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -758,6 +759,31 @@ mod tests {
         assert_eq!(pool.stats().allocations, 2);
         assert_eq!(pool.stats().deallocations, 2);
         assert_eq!(pool.stats().pool_hits, 2);
+    }
+
+    #[test]
+    fn pool_deallocate_rejects_foreign_sized_buffers_without_mutating_state() {
+        let config = PoolConfig::new(8, 1, 1, false, 0);
+        let mut pool = SymbolPool::new(config);
+        let valid = pool.allocate().expect("alloc valid");
+
+        for invalid_len in [4_u16, 16_u16] {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                pool.deallocate(SymbolBuffer::new(invalid_len));
+            }));
+            assert!(
+                result.is_err(),
+                "invalid buffer length {invalid_len} must panic"
+            );
+            assert_eq!(pool.stats().deallocations, 0);
+            assert_eq!(pool.stats().current_usage, 1);
+            assert_eq!(pool.free_count(), 0);
+        }
+
+        pool.deallocate(valid);
+        assert_eq!(pool.stats().deallocations, 1);
+        assert_eq!(pool.stats().current_usage, 0);
+        assert_eq!(pool.free_count(), 1);
     }
 
     #[test]
