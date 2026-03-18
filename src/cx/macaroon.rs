@@ -437,6 +437,13 @@ pub struct MacaroonToken {
     signature: MacaroonSignature,
 }
 
+struct ThirdPartyVerification<'a> {
+    context: &'a VerificationContext,
+    discharges: &'a [MacaroonToken],
+    unbound_signature: &'a MacaroonSignature,
+    active_discharges: &'a mut Vec<usize>,
+}
+
 impl MacaroonToken {
     /// Mint a new Macaroon token with no caveats.
     ///
@@ -556,112 +563,194 @@ impl MacaroonToken {
         context: &VerificationContext,
         discharges: &[Self],
     ) -> Result<(), VerificationError> {
-        // Step 1: Verify HMAC chain.
-        if !self.verify_signature(root_key) {
+        let mut active_discharges = Vec::new();
+        self.verify_with_discharges_inner(
+            root_key,
+            context,
+            discharges,
+            None,
+            &mut active_discharges,
+        )
+        .map(|_| ())
+    }
+
+    fn verify_with_discharges_inner(
+        &self,
+        root_key: &AuthKey,
+        context: &VerificationContext,
+        discharges: &[Self],
+        binding_signature: Option<&MacaroonSignature>,
+        active_discharges: &mut Vec<usize>,
+    ) -> Result<MacaroonSignature, VerificationError> {
+        let unbound_signature = self.verify_discharge_signature(root_key, binding_signature)?;
+        let self_ptr = Self::discharge_stack_id(self);
+        if active_discharges.contains(&self_ptr) {
+            return Err(Self::discharge_invalid(0, &self.identifier));
+        }
+        active_discharges.push(self_ptr);
+
+        let result = self
+            .verify_caveat_chain(
+                root_key,
+                context,
+                discharges,
+                &unbound_signature,
+                active_discharges,
+            )
+            .map(|()| unbound_signature);
+
+        active_discharges.pop();
+        result
+    }
+
+    fn verify_discharge_signature(
+        &self,
+        root_key: &AuthKey,
+        binding_signature: Option<&MacaroonSignature>,
+    ) -> Result<MacaroonSignature, VerificationError> {
+        let unbound_signature = self.recompute_signature(root_key);
+        if let Some(binding_signature) = binding_signature {
+            let expected_bound = hmac_compute(
+                &AuthKey::from_bytes(*binding_signature.as_bytes()),
+                unbound_signature.as_bytes(),
+            );
+            let expected_bound_sig = MacaroonSignature::from_bytes(*expected_bound.as_bytes());
+            if !expected_bound_sig.constant_time_eq(&self.signature) {
+                return Err(Self::discharge_invalid(0, &self.identifier));
+            }
+        } else if !unbound_signature.constant_time_eq(&self.signature) {
             return Err(VerificationError::InvalidSignature);
         }
 
-        // Step 2: Check all caveats, walking the chain to recover
-        // intermediate signatures for third-party vid decryption.
+        Ok(unbound_signature)
+    }
+
+    fn verify_caveat_chain(
+        &self,
+        root_key: &AuthKey,
+        context: &VerificationContext,
+        discharges: &[Self],
+        unbound_signature: &MacaroonSignature,
+        active_discharges: &mut Vec<usize>,
+    ) -> Result<(), VerificationError> {
         let mut sig = hmac_compute(root_key, self.identifier.as_bytes());
-        for (i, caveat) in self.caveats.iter().enumerate() {
-            match caveat {
+        let mut third_party = ThirdPartyVerification {
+            context,
+            discharges,
+            unbound_signature,
+            active_discharges,
+        };
+        for (index, caveat) in self.caveats.iter().enumerate() {
+            sig = match caveat {
                 Caveat::FirstParty { predicate } => {
-                    if let Err(reason) = check_caveat(predicate, context) {
-                        return Err(VerificationError::CaveatFailed {
-                            index: i,
-                            predicate: predicate.display_string(),
-                            reason,
-                        });
-                    }
-                    let pred_bytes = predicate.to_bytes();
-                    sig = hmac_compute(&sig, &pred_bytes);
+                    Self::advance_first_party_caveat(index, predicate, context, &sig)?
                 }
                 Caveat::ThirdParty {
                     identifier: tp_id,
                     vid,
                     ..
-                } => {
-                    // Recover the caveat key from vid.
-                    if vid.len() != AUTH_KEY_SIZE {
-                        return Err(VerificationError::InvalidSignature);
-                    }
-                    let caveat_key_bytes = xor_pad(sig.as_bytes(), vid);
-                    let caveat_key = AuthKey::from_bytes(
-                        caveat_key_bytes
-                            .try_into()
-                            .map_err(|_| VerificationError::InvalidSignature)?,
-                    );
-
-                    // Find matching discharge.
-                    let discharge = discharges
-                        .iter()
-                        .find(|d| d.identifier() == tp_id)
-                        .ok_or_else(|| VerificationError::MissingDischarge {
-                            index: i,
-                            identifier: tp_id.clone(),
-                        })?;
-
-                    // Verify the discharge's chain against the caveat key.
-                    let unbound_sig = discharge.recompute_signature(&caveat_key);
-
-                    // Check binding: bound_sig == HMAC(auth_sig, unbound_sig).
-                    let expected_bound = hmac_compute(
-                        &AuthKey::from_bytes(*self.signature.as_bytes()),
-                        unbound_sig.as_bytes(),
-                    );
-                    let expected_bound_sig =
-                        MacaroonSignature::from_bytes(*expected_bound.as_bytes());
-                    if !expected_bound_sig.constant_time_eq(&discharge.signature) {
-                        return Err(VerificationError::DischargeInvalid {
-                            index: i,
-                            identifier: tp_id.clone(),
-                        });
-                    }
-
-                    // Check discharge's first-party caveats against context.
-                    // Per the Macaroon spec (Birgisson et al. 2014), all caveats
-                    // from both authorizing and discharge macaroons must pass.
-                    for (di, dc) in discharge.caveats.iter().enumerate() {
-                        match dc {
-                            Caveat::FirstParty { predicate } => {
-                                if let Err(reason) = check_caveat(predicate, context) {
-                                    return Err(VerificationError::CaveatFailed {
-                                        index: i,
-                                        predicate: format!(
-                                            "discharge[{}].caveat[{}]: {}",
-                                            tp_id,
-                                            di,
-                                            predicate.display_string()
-                                        ),
-                                        reason,
-                                    });
-                                }
-                            }
-                            Caveat::ThirdParty { identifier, .. } => {
-                                // Per Macaroon spec: third-party caveats on discharge
-                                // macaroons must also be satisfied by discharges.
-                                if !discharges.iter().any(|d| d.identifier == *identifier) {
-                                    return Err(VerificationError::CaveatFailed {
-                                        index: i,
-                                        predicate: format!(
-                                            "discharge[{tp_id}].caveat[{di}]: unsatisfied third-party caveat '{identifier}'",
-                                        ),
-                                        reason:
-                                            "no discharge provided for nested third-party caveat"
-                                                .to_owned(),
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    sig = hmac_compute(&sig, vid);
-                }
-            }
+                } => Self::advance_third_party_caveat(index, tp_id, vid, &sig, &mut third_party)?,
+            };
         }
 
         Ok(())
+    }
+
+    fn advance_first_party_caveat(
+        index: usize,
+        predicate: &CaveatPredicate,
+        context: &VerificationContext,
+        sig: &AuthKey,
+    ) -> Result<AuthKey, VerificationError> {
+        if let Err(reason) = check_caveat(predicate, context) {
+            return Err(VerificationError::CaveatFailed {
+                index,
+                predicate: predicate.display_string(),
+                reason,
+            });
+        }
+
+        let pred_bytes = predicate.to_bytes();
+        Ok(hmac_compute(sig, &pred_bytes))
+    }
+
+    fn advance_third_party_caveat(
+        index: usize,
+        tp_id: &str,
+        vid: &[u8],
+        sig: &AuthKey,
+        verification: &mut ThirdPartyVerification<'_>,
+    ) -> Result<AuthKey, VerificationError> {
+        if vid.len() != AUTH_KEY_SIZE {
+            return Err(VerificationError::InvalidSignature);
+        }
+
+        let caveat_key_bytes = xor_pad(sig.as_bytes(), vid);
+        let caveat_key = AuthKey::from_bytes(
+            caveat_key_bytes
+                .try_into()
+                .map_err(|_| VerificationError::InvalidSignature)?,
+        );
+        let discharge = Self::find_discharge(index, tp_id, verification.discharges)?;
+        let discharge_ptr = Self::discharge_stack_id(discharge);
+        if verification.active_discharges.contains(&discharge_ptr) {
+            return Err(Self::discharge_invalid(index, tp_id));
+        }
+
+        discharge
+            .verify_with_discharges_inner(
+                &caveat_key,
+                verification.context,
+                verification.discharges,
+                Some(verification.unbound_signature),
+                verification.active_discharges,
+            )
+            .map_err(|err| Self::map_discharge_error(index, tp_id, err))?;
+
+        Ok(hmac_compute(sig, vid))
+    }
+
+    fn find_discharge<'a>(
+        index: usize,
+        tp_id: &str,
+        discharges: &'a [Self],
+    ) -> Result<&'a Self, VerificationError> {
+        discharges
+            .iter()
+            .find(|discharge| discharge.identifier() == tp_id)
+            .ok_or_else(|| VerificationError::MissingDischarge {
+                index,
+                identifier: tp_id.to_string(),
+            })
+    }
+
+    fn discharge_stack_id(token: &Self) -> usize {
+        std::ptr::from_ref(token).cast::<()>() as usize
+    }
+
+    fn discharge_invalid(index: usize, identifier: &str) -> VerificationError {
+        VerificationError::DischargeInvalid {
+            index,
+            identifier: identifier.to_string(),
+        }
+    }
+
+    fn map_discharge_error(index: usize, tp_id: &str, err: VerificationError) -> VerificationError {
+        match err {
+            VerificationError::InvalidSignature | VerificationError::DischargeInvalid { .. } => {
+                Self::discharge_invalid(index, tp_id)
+            }
+            VerificationError::MissingDischarge { identifier, .. } => {
+                VerificationError::MissingDischarge { index, identifier }
+            }
+            VerificationError::CaveatFailed {
+                predicate, reason, ..
+            } => VerificationError::CaveatFailed {
+                index,
+                predicate: format!("discharge[{tp_id}]: {predicate}"),
+                reason,
+            },
+        }
     }
 
     /// Returns the capability identifier.
@@ -1835,6 +1924,61 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn nested_third_party_discharges_verify_recursively() {
+        let root_key = test_root_key();
+        let outer_key = AuthKey::from_seed(880);
+        let inner_key = AuthKey::from_seed(881);
+
+        let token = MacaroonToken::mint(&root_key, "cap", "svc").add_third_party_caveat(
+            "outer",
+            "outer_check",
+            &outer_key,
+        );
+
+        let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
+            .add_third_party_caveat("inner", "inner_check", &inner_key);
+        let inner_discharge = MacaroonToken::mint(&inner_key, "inner_check", "inner")
+            .add_caveat(CaveatPredicate::TimeBefore(1000));
+
+        let bound_inner = outer_discharge.bind_for_request(&inner_discharge);
+        let bound_outer = token.bind_for_request(&outer_discharge);
+
+        let ctx = VerificationContext::new().with_time(500);
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx, &[bound_outer, bound_inner])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn nested_unbound_discharge_is_rejected() {
+        let root_key = test_root_key();
+        let outer_key = AuthKey::from_seed(882);
+        let inner_key = AuthKey::from_seed(883);
+
+        let token = MacaroonToken::mint(&root_key, "cap", "svc").add_third_party_caveat(
+            "outer",
+            "outer_check",
+            &outer_key,
+        );
+
+        let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
+            .add_third_party_caveat("inner", "inner_check", &inner_key);
+        let unbound_inner = MacaroonToken::mint(&inner_key, "inner_check", "inner");
+        let bound_outer = token.bind_for_request(&outer_discharge);
+
+        let err = token
+            .verify_with_discharges(
+                &root_key,
+                &VerificationContext::new(),
+                &[bound_outer, unbound_inner],
+            )
+            .unwrap_err();
+        assert!(matches!(err, VerificationError::DischargeInvalid { .. }));
     }
 
     // --- ResourceScope caveat tests (bd-2lqyk.3) ---
