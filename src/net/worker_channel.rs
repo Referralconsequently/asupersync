@@ -561,9 +561,13 @@ impl JobState {
     }
 
     /// Whether a worker may report this state via `status_snapshot`.
+    ///
+    /// Only states the worker can observe organically are allowed.
+    /// `CancelRequested`, `Draining`, and `Finalizing` are driven by
+    /// the coordinator's explicit cancel protocol messages.
     #[must_use]
     pub const fn allowed_in_status_snapshot(self) -> bool {
-        matches!(self, Self::Queued | Self::Running | Self::CancelRequested)
+        matches!(self, Self::Queued | Self::Running)
     }
 
     /// Check whether the given transition is valid.
