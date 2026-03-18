@@ -278,6 +278,7 @@ impl Decompressor for IdentityDecompressor {
 #[cfg(feature = "compression")]
 pub struct GzipCompressor {
     encoder: flate2::write::GzEncoder<Vec<u8>>,
+    finished: bool,
 }
 
 #[cfg(feature = "compression")]
@@ -293,6 +294,7 @@ impl GzipCompressor {
     pub fn with_level(level: flate2::Compression) -> Self {
         Self {
             encoder: flate2::write::GzEncoder::new(Vec::new(), level),
+            finished: false,
         }
     }
 }
@@ -318,6 +320,9 @@ impl Compressor for GzipCompressor {
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
         use io::Write;
         self.encoder.flush()?;
         // Take the inner buffer, reset encoder with a new empty vec.
@@ -327,6 +332,7 @@ impl Compressor for GzipCompressor {
         );
         let finished = inner.finish()?;
         output.extend_from_slice(&finished);
+        self.finished = true;
         Ok(())
     }
 
@@ -391,6 +397,7 @@ impl Decompressor for GzipDecompressor {
 #[cfg(feature = "compression")]
 pub struct DeflateCompressor {
     encoder: flate2::write::DeflateEncoder<Vec<u8>>,
+    finished: bool,
 }
 
 #[cfg(feature = "compression")]
@@ -406,6 +413,7 @@ impl DeflateCompressor {
     pub fn with_level(level: flate2::Compression) -> Self {
         Self {
             encoder: flate2::write::DeflateEncoder::new(Vec::new(), level),
+            finished: false,
         }
     }
 }
@@ -431,6 +439,9 @@ impl Compressor for DeflateCompressor {
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
         use io::Write;
         self.encoder.flush()?;
         let inner = std::mem::replace(
@@ -439,6 +450,7 @@ impl Compressor for DeflateCompressor {
         );
         let finished = inner.finish()?;
         output.extend_from_slice(&finished);
+        self.finished = true;
         Ok(())
     }
 
@@ -1226,6 +1238,40 @@ mod tests {
             "gzip should compress chunked repetitive data efficiently: {} -> {}",
             input.len(),
             compressed.len()
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_double_finish_is_idempotent() {
+        // Regression: calling finish() twice used to append a spurious
+        // empty gzip stream, corrupting the output.
+        let mut comp = GzipCompressor::new();
+        let mut out = Vec::new();
+        comp.compress(b"hello", &mut out).unwrap();
+        comp.finish(&mut out).unwrap();
+        let len_after_first = out.len();
+        comp.finish(&mut out).unwrap();
+        assert_eq!(
+            out.len(),
+            len_after_first,
+            "second finish must not append extra bytes"
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_double_finish_is_idempotent() {
+        let mut comp = DeflateCompressor::new();
+        let mut out = Vec::new();
+        comp.compress(b"hello", &mut out).unwrap();
+        comp.finish(&mut out).unwrap();
+        let len_after_first = out.len();
+        comp.finish(&mut out).unwrap();
+        assert_eq!(
+            out.len(),
+            len_after_first,
+            "second finish must not append extra bytes"
         );
     }
 }
