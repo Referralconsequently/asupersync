@@ -70,7 +70,14 @@
 //! - what downgrade or fallback path keeps the common case truthful, and
 //! - what evidence or replay surface makes the behavior inspectable.
 
-pub mod fabric;
+#[cfg(feature = "messaging-fabric")]
+pub mod fabric {
+    //! Placeholder namespace for the future native FABRIC surface.
+    //!
+    //! The feature is intentionally exposed as an empty module for now so
+    //! explicit opt-in builds stay green while the real implementation is
+    //! developed behind this boundary.
+}
 pub mod jetstream;
 pub mod kafka;
 pub mod kafka_consumer;
