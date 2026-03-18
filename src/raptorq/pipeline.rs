@@ -94,8 +94,9 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
         }
 
         // Encode.
-        let repair_count = compute_repair_count(
+        let total_repair_symbols = compute_total_repair_count(
             data.len(),
+            self.config.encoding.max_block_size,
             self.config.encoding.symbol_size as usize,
             self.config.encoding.repair_overhead,
         );
@@ -111,7 +112,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
         let (pool_initial, pool_max) = sender_pool_bounds(
             self.config.resources.symbol_pool_size,
             source_count,
-            repair_count,
+            total_repair_symbols,
         );
         let pool = SymbolPool::new(PoolConfig {
             symbol_size: self.config.encoding.symbol_size,
@@ -121,7 +122,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
             growth_increment: 64,
         });
         let mut encoder = EncodingPipeline::new(self.config.encoding.clone(), pool);
-        let symbol_iter = encoder.encode_with_repair(object_id, data, repair_count);
+        let symbol_iter = encoder.encode(object_id, data);
 
         // Collect encoded symbols, sign them, and transmit.
         let mut symbols_sent = 0usize;
@@ -320,9 +321,44 @@ fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> u
         return 0;
     }
     let source_count = data_len.div_ceil(symbol_size);
+    compute_repair_count_for_source_symbols(source_count, overhead)
+}
+
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_sign_loss)]
+fn compute_repair_count_for_source_symbols(source_count: usize, overhead: f64) -> usize {
+    if source_count == 0 || overhead <= 1.0 {
+        return 0;
+    }
+
     let total = (source_count as f64 * overhead).ceil() as usize;
     // If overhead > 1.0, we always want at least one repair symbol.
     total.saturating_sub(source_count).max(1)
+}
+
+fn compute_total_repair_count(
+    data_len: usize,
+    max_block_size: usize,
+    symbol_size: usize,
+    overhead: f64,
+) -> usize {
+    if max_block_size == 0 || symbol_size == 0 || data_len == 0 || overhead <= 1.0 {
+        return 0;
+    }
+
+    let mut remaining = data_len;
+    let mut total_repairs = 0usize;
+    while remaining > 0 {
+        let block_len = remaining.min(max_block_size);
+        let source_symbols = block_len.div_ceil(symbol_size);
+        total_repairs = total_repairs.saturating_add(compute_repair_count_for_source_symbols(
+            source_symbols,
+            overhead,
+        ));
+        remaining -= block_len;
+    }
+
+    total_repairs
 }
 
 /// Derives deterministic symbol-pool bounds for a single send operation.
@@ -643,6 +679,20 @@ mod tests {
     }
 
     #[test]
+    fn compute_total_repair_count_uses_per_block_ceilings() {
+        let data_len = 161;
+        let max_block_size = 80;
+        let symbol_size = 8;
+        let overhead = 1.05;
+
+        assert_eq!(compute_repair_count(data_len, symbol_size, overhead), 2);
+        assert_eq!(
+            compute_total_repair_count(data_len, max_block_size, symbol_size, overhead),
+            3
+        );
+    }
+
+    #[test]
     fn sender_pool_bounds_caps_initial_allocation_to_object_need() {
         let configured_pool_size = 1024;
         let source_symbols = 256;
@@ -781,6 +831,28 @@ mod tests {
             .expect("byte-valid payload should not be rejected early");
 
         assert!(outcome.symbols_sent >= outcome.source_symbols);
+        assert_eq!(sender.transport_mut().symbols.len(), outcome.symbols_sent);
+    }
+
+    #[test]
+    fn test_send_object_multiblock_uses_per_block_repair_budget() {
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 8;
+        config.encoding.max_block_size = 80;
+        config.encoding.repair_overhead = 1.05;
+        config.resources.symbol_pool_size = 1;
+        let mut sender = RaptorQSender::new(config, sink, None, None);
+
+        let data = vec![0xA5u8; 161];
+        let outcome = sender
+            .send_object(&cx, ObjectId::new_for_test(22), &data)
+            .expect("multi-block send should size repairs and pool from block-local needs");
+
+        assert_eq!(outcome.source_symbols, 21);
+        assert_eq!(outcome.repair_symbols, 3);
+        assert_eq!(outcome.symbols_sent, 24);
         assert_eq!(sender.transport_mut().symbols.len(), outcome.symbols_sent);
     }
 
