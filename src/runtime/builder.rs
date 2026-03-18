@@ -161,6 +161,8 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::{Budget, CancelAttributionConfig};
 use crate::util::EntropySource;
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Reflect, global};
 use parking_lot::{Mutex, MutexGuard};
 use std::cell::RefCell;
 use std::future::Future;
@@ -169,6 +171,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
 
 // ---------------------------------------------------------------------------
 // Thread-local RuntimeHandle (issue #21)
@@ -421,6 +425,881 @@ fn unsupported_browser_bootstrap_message(host_services: &dyn RuntimeHostServices
         host_services.kind().as_str(),
         contract.diagnostic_requirements(),
     )
+}
+
+/// Browser execution API capabilities used for runtime support diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserExecutionApiCapabilities {
+    /// Whether `AbortController` is available.
+    pub has_abort_controller: bool,
+    /// Whether `fetch` is available.
+    pub has_fetch: bool,
+    /// Whether `WebAssembly` is available.
+    pub has_webassembly: bool,
+}
+
+/// Browser DOM capabilities used for runtime support diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserDomCapabilities {
+    /// Whether `document` is available.
+    pub has_document: bool,
+    /// Whether `window` is available.
+    pub has_window: bool,
+}
+
+/// Browser storage capabilities used for runtime support diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserStorageCapabilities {
+    /// Whether `indexedDB` is available.
+    pub has_indexed_db: bool,
+    /// Whether `localStorage` is available.
+    pub has_local_storage: bool,
+}
+
+/// Browser transport capabilities used for runtime support diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserTransportCapabilities {
+    /// Whether `WebSocket` is available.
+    pub has_web_socket: bool,
+    /// Whether `WebTransport` is available.
+    pub has_web_transport: bool,
+}
+
+/// Browser capability snapshot used for runtime support diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserCapabilitySnapshot {
+    /// Execution-related browser APIs.
+    pub execution_api: BrowserExecutionApiCapabilities,
+    /// DOM-related capabilities.
+    pub dom: BrowserDomCapabilities,
+    /// Storage-related capabilities.
+    pub storage: BrowserStorageCapabilities,
+    /// Transport-related capabilities.
+    pub transport: BrowserTransportCapabilities,
+}
+
+/// Browser runtime support classes aligned with the Browser Edition control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserRuntimeSupportClass {
+    /// The current host context truthfully supports direct runtime execution.
+    DirectRuntimeSupported,
+    /// The current host context does not support a direct browser runtime lane.
+    Unsupported,
+}
+
+impl BrowserRuntimeSupportClass {
+    /// Stable string label aligned with the Browser Edition package surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectRuntimeSupported => "direct_runtime_supported",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Browser runtime context classification aligned with the Browser Edition package surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserRuntimeContext {
+    /// Browser main-thread context (`window` + `document`).
+    BrowserMainThread,
+    /// Dedicated worker context.
+    DedicatedWorker,
+    /// Anything outside the currently shipped direct-runtime contexts.
+    Unknown,
+}
+
+impl BrowserRuntimeContext {
+    /// Stable string label aligned with the Browser Edition package surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BrowserMainThread => "browser_main_thread",
+            Self::DedicatedWorker => "dedicated_worker",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Browser runtime support reasons aligned with the Browser Edition diagnostics model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserRuntimeSupportReason {
+    /// `globalThis` or an equivalent global object is missing.
+    MissingGlobalThis,
+    /// The current context is a service worker, which is not yet a shipped lane.
+    ServiceWorkerNotYetShipped,
+    /// The current context is a shared worker, which is not yet a shipped lane.
+    SharedWorkerNotYetShipped,
+    /// The current context is not a shipped direct-runtime browser role.
+    UnsupportedRuntimeContext,
+    /// `WebAssembly` is unavailable in the current host.
+    MissingWebAssembly,
+    /// The current context is supported.
+    Supported,
+}
+
+/// Runtime support diagnostics for the Rust-authored browser surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserRuntimeSupportDiagnostics {
+    /// Whether the current host truthfully supports direct runtime execution.
+    pub supported: bool,
+    /// High-level support class.
+    pub support_class: BrowserRuntimeSupportClass,
+    /// Browser runtime context classification.
+    pub runtime_context: BrowserRuntimeContext,
+    /// Support reason code.
+    pub reason: BrowserRuntimeSupportReason,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Operator guidance for this support decision.
+    pub guidance: Vec<String>,
+    /// Capability snapshot used to reach the decision.
+    pub capabilities: BrowserCapabilitySnapshot,
+}
+
+/// Browser execution host-role classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserExecutionHostRole {
+    /// Browser main-thread entrypoint.
+    BrowserMainThread,
+    /// Dedicated worker entrypoint.
+    DedicatedWorker,
+    /// Service worker entrypoint.
+    ServiceWorker,
+    /// Shared worker entrypoint.
+    SharedWorker,
+    /// Anything else, including non-browser hosts.
+    NonBrowserOrUnknown,
+}
+
+impl BrowserExecutionHostRole {
+    /// Stable string label aligned with the shared execution-ladder contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BrowserMainThread => "browser_main_thread",
+            Self::DedicatedWorker => "dedicated_worker",
+            Self::ServiceWorker => "service_worker",
+            Self::SharedWorker => "shared_worker",
+            Self::NonBrowserOrUnknown => "non_browser_or_unknown",
+        }
+    }
+}
+
+/// Browser execution lane identifiers aligned with the shared execution ladder contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserExecutionLane {
+    /// Browser main-thread direct-runtime lane.
+    BrowserMainThreadDirectRuntime,
+    /// Dedicated-worker direct-runtime lane.
+    DedicatedWorkerDirectRuntime,
+    /// Terminal fail-closed lane.
+    Unsupported,
+}
+
+impl BrowserExecutionLane {
+    /// Stable lane identifier aligned with the shared execution-ladder contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BrowserMainThreadDirectRuntime => "lane.browser.main_thread.direct_runtime",
+            Self::DedicatedWorkerDirectRuntime => "lane.browser.dedicated_worker.direct_runtime",
+            Self::Unsupported => "lane.unsupported",
+        }
+    }
+
+    const fn lane_kind(self) -> BrowserExecutionLaneKind {
+        match self {
+            Self::Unsupported => BrowserExecutionLaneKind::Unsupported,
+            Self::BrowserMainThreadDirectRuntime | Self::DedicatedWorkerDirectRuntime => {
+                BrowserExecutionLaneKind::DirectRuntime
+            }
+        }
+    }
+
+    const fn lane_rank(self) -> u16 {
+        match self {
+            Self::BrowserMainThreadDirectRuntime => 10,
+            Self::DedicatedWorkerDirectRuntime => 20,
+            Self::Unsupported => 99,
+        }
+    }
+
+    const fn fallback_lane(self) -> Option<Self> {
+        match self {
+            Self::Unsupported => None,
+            Self::BrowserMainThreadDirectRuntime | Self::DedicatedWorkerDirectRuntime => {
+                Some(Self::Unsupported)
+            }
+        }
+    }
+}
+
+/// Browser execution lane kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserExecutionLaneKind {
+    /// Direct browser runtime execution.
+    DirectRuntime,
+    /// Terminal fail-closed lane.
+    Unsupported,
+}
+
+/// Browser execution reason codes aligned with the shared ladder semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserExecutionReasonCode {
+    /// The selected lane is directly supported.
+    Supported,
+    /// The candidate lane does not match the current host role.
+    CandidateHostRoleMismatch,
+    /// The candidate lane matches the host role but prerequisites are missing.
+    CandidatePrerequisiteMissing,
+    /// The current context is a service worker and that lane is not yet shipped.
+    ServiceWorkerDirectRuntimeNotShipped,
+    /// The current context is a shared worker and that lane is not yet shipped.
+    SharedWorkerDirectRuntimeNotShipped,
+    /// `globalThis` is unavailable.
+    MissingGlobalThis,
+    /// `WebAssembly` is unavailable.
+    MissingWebAssembly,
+    /// The runtime context is unsupported.
+    UnsupportedRuntimeContext,
+    /// The current host is not a browser runtime.
+    NonBrowserRuntime,
+}
+
+impl BrowserExecutionReasonCode {
+    /// Stable string label aligned with the shared execution-ladder contract.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::CandidateHostRoleMismatch => "candidate_host_role_mismatch",
+            Self::CandidatePrerequisiteMissing => "candidate_prerequisite_missing",
+            Self::ServiceWorkerDirectRuntimeNotShipped => {
+                "service_worker_direct_runtime_not_shipped"
+            }
+            Self::SharedWorkerDirectRuntimeNotShipped => "shared_worker_direct_runtime_not_shipped",
+            Self::MissingGlobalThis => "missing_global_this",
+            Self::MissingWebAssembly => "missing_webassembly",
+            Self::UnsupportedRuntimeContext => "unsupported_runtime_context",
+            Self::NonBrowserRuntime => "non_browser_runtime",
+        }
+    }
+}
+
+/// Candidate diagnostics for one browser execution lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserExecutionLaneCandidate {
+    /// Candidate lane id.
+    pub lane_id: BrowserExecutionLane,
+    /// Candidate lane kind.
+    pub lane_kind: BrowserExecutionLaneKind,
+    /// Candidate lane rank.
+    pub lane_rank: u16,
+    /// Host role used for candidate evaluation.
+    pub host_role: BrowserExecutionHostRole,
+    /// Support class inherited from runtime support diagnostics.
+    pub support_class: BrowserRuntimeSupportClass,
+    /// Terminal fallback lane, if any.
+    pub fallback_lane_id: Option<BrowserExecutionLane>,
+    /// Whether the candidate is currently available.
+    pub available: bool,
+    /// Whether the candidate was selected.
+    pub selected: bool,
+    /// Candidate reason code.
+    pub reason_code: BrowserExecutionReasonCode,
+    /// Candidate explanation.
+    pub message: String,
+    /// Candidate operator guidance.
+    pub guidance: Vec<String>,
+}
+
+/// Rust-side Browser Edition execution ladder diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserExecutionLadderDiagnostics {
+    /// Whether the selected lane is a supported direct-runtime lane.
+    pub supported: bool,
+    /// Operator-requested preferred lane, if any.
+    pub preferred_lane: Option<BrowserExecutionLane>,
+    /// Selected lane id.
+    pub selected_lane: BrowserExecutionLane,
+    /// Selected lane kind.
+    pub lane_kind: BrowserExecutionLaneKind,
+    /// Selected lane rank.
+    pub lane_rank: u16,
+    /// Host role classification.
+    pub host_role: BrowserExecutionHostRole,
+    /// Support class inherited from runtime support diagnostics.
+    pub support_class: BrowserRuntimeSupportClass,
+    /// Runtime context classification.
+    pub runtime_context: BrowserRuntimeContext,
+    /// Selected reason code.
+    pub reason_code: BrowserExecutionReasonCode,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Operator guidance.
+    pub guidance: Vec<String>,
+    /// Terminal fallback lane, if any.
+    pub fallback_lane_id: Option<BrowserExecutionLane>,
+    /// Truthful lane downgrade order for the current host role.
+    pub downgrade_order: Vec<BrowserExecutionLane>,
+    /// Reproduction command for the maintained Rust browser fixture.
+    pub repro_command: String,
+    /// Candidate diagnostics across the ladder.
+    pub candidates: Vec<BrowserExecutionLaneCandidate>,
+    /// Underlying runtime support diagnostics.
+    pub runtime_support: BrowserRuntimeSupportDiagnostics,
+    /// Capability snapshot copied from runtime support diagnostics.
+    pub capabilities: BrowserCapabilitySnapshot,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BrowserExecutionProbe {
+    has_global_this: bool,
+    runtime_context: BrowserRuntimeContext,
+    host_role: BrowserExecutionHostRole,
+    capabilities: BrowserCapabilitySnapshot,
+}
+
+impl BrowserExecutionProbe {
+    const fn non_browser() -> Self {
+        Self {
+            has_global_this: false,
+            runtime_context: BrowserRuntimeContext::Unknown,
+            host_role: BrowserExecutionHostRole::NonBrowserOrUnknown,
+            capabilities: BrowserCapabilitySnapshot {
+                execution_api: BrowserExecutionApiCapabilities {
+                    has_abort_controller: false,
+                    has_fetch: false,
+                    has_webassembly: false,
+                },
+                dom: BrowserDomCapabilities {
+                    has_document: false,
+                    has_window: false,
+                },
+                storage: BrowserStorageCapabilities {
+                    has_indexed_db: false,
+                    has_local_storage: false,
+                },
+                transport: BrowserTransportCapabilities {
+                    has_web_socket: false,
+                    has_web_transport: false,
+                },
+            },
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_capability_snapshot(global_object: &JsValue) -> BrowserCapabilitySnapshot {
+    BrowserCapabilitySnapshot {
+        execution_api: BrowserExecutionApiCapabilities {
+            has_abort_controller: browser_global_has(global_object, "AbortController"),
+            has_fetch: browser_global_has(global_object, "fetch"),
+            has_webassembly: browser_global_has(global_object, "WebAssembly"),
+        },
+        dom: BrowserDomCapabilities {
+            has_document: browser_global_has(global_object, "document"),
+            has_window: browser_global_has(global_object, "window"),
+        },
+        storage: BrowserStorageCapabilities {
+            has_indexed_db: browser_global_has(global_object, "indexedDB"),
+            has_local_storage: browser_global_has(global_object, "localStorage"),
+        },
+        transport: BrowserTransportCapabilities {
+            has_web_socket: browser_global_has(global_object, "WebSocket"),
+            has_web_transport: browser_global_has(global_object, "WebTransport"),
+        },
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_global_has(global_object: &JsValue, key: &str) -> bool {
+    Reflect::has(global_object, &JsValue::from_str(key)).unwrap_or(false)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_global_constructor_name(global_object: &JsValue) -> Option<String> {
+    let constructor = Reflect::get(global_object, &JsValue::from_str("constructor")).ok()?;
+    let name = Reflect::get(&constructor, &JsValue::from_str("name")).ok()?;
+    name.as_string()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn detect_browser_execution_probe() -> BrowserExecutionProbe {
+    let global_object = global();
+    let has_global_this = global_object.is_object();
+    let capabilities = browser_capability_snapshot(&global_object);
+    let constructor_name = browser_global_constructor_name(&global_object);
+
+    let host_role = match constructor_name.as_deref() {
+        Some("ServiceWorkerGlobalScope") => BrowserExecutionHostRole::ServiceWorker,
+        Some("SharedWorkerGlobalScope") => BrowserExecutionHostRole::SharedWorker,
+        Some("DedicatedWorkerGlobalScope") => BrowserExecutionHostRole::DedicatedWorker,
+        _ if capabilities.dom.has_window && capabilities.dom.has_document => {
+            BrowserExecutionHostRole::BrowserMainThread
+        }
+        _ => BrowserExecutionHostRole::NonBrowserOrUnknown,
+    };
+
+    let runtime_context = match host_role {
+        BrowserExecutionHostRole::BrowserMainThread => BrowserRuntimeContext::BrowserMainThread,
+        BrowserExecutionHostRole::DedicatedWorker => BrowserRuntimeContext::DedicatedWorker,
+        BrowserExecutionHostRole::ServiceWorker
+        | BrowserExecutionHostRole::SharedWorker
+        | BrowserExecutionHostRole::NonBrowserOrUnknown => BrowserRuntimeContext::Unknown,
+    };
+
+    BrowserExecutionProbe {
+        has_global_this,
+        runtime_context,
+        host_role,
+        capabilities,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn detect_browser_execution_probe() -> BrowserExecutionProbe {
+    BrowserExecutionProbe::non_browser()
+}
+
+fn browser_runtime_support_diagnostics(
+    probe: BrowserExecutionProbe,
+    supported: bool,
+    support_class: BrowserRuntimeSupportClass,
+    reason: BrowserRuntimeSupportReason,
+    message: &str,
+    guidance: &[&str],
+) -> BrowserRuntimeSupportDiagnostics {
+    BrowserRuntimeSupportDiagnostics {
+        supported,
+        support_class,
+        runtime_context: probe.runtime_context,
+        reason,
+        message: message.to_string(),
+        guidance: guidance.iter().map(|entry| (*entry).to_string()).collect(),
+        capabilities: probe.capabilities,
+    }
+}
+
+fn browser_runtime_support_missing_global_this(
+    probe: BrowserExecutionProbe,
+) -> BrowserRuntimeSupportDiagnostics {
+    browser_runtime_support_diagnostics(
+        probe,
+        false,
+        BrowserRuntimeSupportClass::Unsupported,
+        BrowserRuntimeSupportReason::MissingGlobalThis,
+        "Rust Browser Edition runtime inspection could not find a browser global object.",
+        &[
+            "Run this inspection from a browser main-thread or dedicated-worker entrypoint.",
+            "Use the maintained Rust browser fixture when validating browser support outside a browser host.",
+        ],
+    )
+}
+
+fn browser_runtime_support_not_yet_shipped(
+    probe: BrowserExecutionProbe,
+    reason: BrowserRuntimeSupportReason,
+) -> BrowserRuntimeSupportDiagnostics {
+    let (message, guidance) = match reason {
+        BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped => (
+            "Rust Browser Edition does not yet ship a service-worker direct-runtime lane.",
+            "Use the maintained browser fixture or a bridge-oriented surface instead of treating service workers as a direct runtime lane.",
+        ),
+        BrowserRuntimeSupportReason::SharedWorkerNotYetShipped => (
+            "Rust Browser Edition does not yet ship a shared-worker direct-runtime lane.",
+            "Use the maintained browser fixture or a bridge-oriented surface instead of treating shared workers as a direct runtime lane.",
+        ),
+        BrowserRuntimeSupportReason::MissingGlobalThis
+        | BrowserRuntimeSupportReason::UnsupportedRuntimeContext
+        | BrowserRuntimeSupportReason::MissingWebAssembly
+        | BrowserRuntimeSupportReason::Supported => {
+            unreachable!("only not-yet-shipped reasons are valid here")
+        }
+    };
+    browser_runtime_support_diagnostics(
+        probe,
+        false,
+        BrowserRuntimeSupportClass::Unsupported,
+        reason,
+        message,
+        &[guidance],
+    )
+}
+
+fn browser_runtime_support_unsupported_context(
+    probe: BrowserExecutionProbe,
+) -> BrowserRuntimeSupportDiagnostics {
+    browser_runtime_support_diagnostics(
+        probe,
+        false,
+        BrowserRuntimeSupportClass::Unsupported,
+        BrowserRuntimeSupportReason::UnsupportedRuntimeContext,
+        "Rust Browser Edition inspection only recognizes browser main-thread and dedicated-worker direct-runtime contexts.",
+        &[
+            "Move the call into a browser main-thread or dedicated-worker entrypoint before expecting a direct runtime lane.",
+        ],
+    )
+}
+
+fn browser_runtime_support_missing_webassembly(
+    probe: BrowserExecutionProbe,
+) -> BrowserRuntimeSupportDiagnostics {
+    browser_runtime_support_diagnostics(
+        probe,
+        false,
+        BrowserRuntimeSupportClass::Unsupported,
+        BrowserRuntimeSupportReason::MissingWebAssembly,
+        "Rust Browser Edition runtime inspection found no WebAssembly support in the current host.",
+        &[
+            "Enable WebAssembly in the target browser/runtime before expecting a direct runtime lane.",
+        ],
+    )
+}
+
+fn browser_runtime_support_supported(
+    probe: BrowserExecutionProbe,
+) -> BrowserRuntimeSupportDiagnostics {
+    let message = match probe.runtime_context {
+        BrowserRuntimeContext::DedicatedWorker => {
+            "Rust Browser Edition runtime inspection found a dedicated-worker direct-runtime context."
+        }
+        BrowserRuntimeContext::BrowserMainThread | BrowserRuntimeContext::Unknown => {
+            "Rust Browser Edition runtime inspection found a browser main-thread direct-runtime context."
+        }
+    };
+    browser_runtime_support_diagnostics(
+        probe,
+        true,
+        BrowserRuntimeSupportClass::DirectRuntimeSupported,
+        BrowserRuntimeSupportReason::Supported,
+        message,
+        &[],
+    )
+}
+
+fn browser_runtime_support_from_probe(
+    probe: BrowserExecutionProbe,
+) -> BrowserRuntimeSupportDiagnostics {
+    if !probe.has_global_this {
+        return browser_runtime_support_missing_global_this(probe);
+    }
+
+    match probe.host_role {
+        BrowserExecutionHostRole::ServiceWorker => browser_runtime_support_not_yet_shipped(
+            probe,
+            BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped,
+        ),
+        BrowserExecutionHostRole::SharedWorker => browser_runtime_support_not_yet_shipped(
+            probe,
+            BrowserRuntimeSupportReason::SharedWorkerNotYetShipped,
+        ),
+        BrowserExecutionHostRole::BrowserMainThread
+        | BrowserExecutionHostRole::DedicatedWorker
+        | BrowserExecutionHostRole::NonBrowserOrUnknown => {
+            if probe.runtime_context == BrowserRuntimeContext::Unknown {
+                return browser_runtime_support_unsupported_context(probe);
+            }
+
+            if !probe.capabilities.execution_api.has_webassembly {
+                return browser_runtime_support_missing_webassembly(probe);
+            }
+
+            browser_runtime_support_supported(probe)
+        }
+    }
+}
+
+const fn browser_execution_direct_lane_for_host_role(
+    host_role: BrowserExecutionHostRole,
+) -> Option<BrowserExecutionLane> {
+    match host_role {
+        BrowserExecutionHostRole::BrowserMainThread => {
+            Some(BrowserExecutionLane::BrowserMainThreadDirectRuntime)
+        }
+        BrowserExecutionHostRole::DedicatedWorker => {
+            Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime)
+        }
+        BrowserExecutionHostRole::ServiceWorker
+        | BrowserExecutionHostRole::SharedWorker
+        | BrowserExecutionHostRole::NonBrowserOrUnknown => None,
+    }
+}
+
+fn browser_execution_downgrade_order(
+    host_role: BrowserExecutionHostRole,
+) -> Vec<BrowserExecutionLane> {
+    browser_execution_direct_lane_for_host_role(host_role).map_or_else(
+        || vec![BrowserExecutionLane::Unsupported],
+        |direct| vec![direct, BrowserExecutionLane::Unsupported],
+    )
+}
+
+fn browser_execution_reason_from_support(
+    support: &BrowserRuntimeSupportDiagnostics,
+    host_role: BrowserExecutionHostRole,
+) -> BrowserExecutionReasonCode {
+    match support.reason {
+        BrowserRuntimeSupportReason::MissingGlobalThis => {
+            BrowserExecutionReasonCode::MissingGlobalThis
+        }
+        BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped => {
+            BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped
+        }
+        BrowserRuntimeSupportReason::SharedWorkerNotYetShipped => {
+            BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped
+        }
+        BrowserRuntimeSupportReason::UnsupportedRuntimeContext => {
+            if host_role == BrowserExecutionHostRole::NonBrowserOrUnknown {
+                BrowserExecutionReasonCode::NonBrowserRuntime
+            } else {
+                BrowserExecutionReasonCode::UnsupportedRuntimeContext
+            }
+        }
+        BrowserRuntimeSupportReason::MissingWebAssembly => {
+            BrowserExecutionReasonCode::MissingWebAssembly
+        }
+        BrowserRuntimeSupportReason::Supported => BrowserExecutionReasonCode::Supported,
+    }
+}
+
+fn browser_execution_repro_command() -> String {
+    "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh".to_string()
+}
+
+fn browser_execution_host_mismatch_message(lane_id: BrowserExecutionLane) -> String {
+    match lane_id {
+        BrowserExecutionLane::BrowserMainThreadDirectRuntime => {
+            "lane.browser.main_thread.direct_runtime only applies when Rust Browser Edition is running on the browser main thread."
+                .to_string()
+        }
+        BrowserExecutionLane::DedicatedWorkerDirectRuntime => {
+            "lane.browser.dedicated_worker.direct_runtime only applies when Rust Browser Edition is already executing inside a dedicated worker."
+                .to_string()
+        }
+        BrowserExecutionLane::Unsupported => {
+            "lane.unsupported is the terminal fail-closed lane and is only selected after a truthful downgrade."
+                .to_string()
+        }
+    }
+}
+
+fn browser_execution_host_mismatch_guidance(lane_id: BrowserExecutionLane) -> Vec<String> {
+    match lane_id {
+        BrowserExecutionLane::BrowserMainThreadDirectRuntime => vec![
+            "Initialize the Rust browser surface from a browser main-thread entrypoint before pinning this lane."
+                .to_string(),
+        ],
+        BrowserExecutionLane::DedicatedWorkerDirectRuntime => vec![
+            "Move the Rust browser surface into a dedicated-worker entrypoint before pinning this lane."
+                .to_string(),
+        ],
+        BrowserExecutionLane::Unsupported => vec![
+            "Treat lane.unsupported as the terminal fail-closed lane when no truthful direct-runtime browser lane remains."
+                .to_string(),
+        ],
+    }
+}
+
+fn browser_execution_missing_prerequisite_message(lane_id: BrowserExecutionLane) -> String {
+    match lane_id {
+        BrowserExecutionLane::Unsupported => {
+            "lane.unsupported remains the terminal fail-closed fallback if the current direct-runtime lane loses truthful prerequisites."
+                .to_string()
+        }
+        BrowserExecutionLane::BrowserMainThreadDirectRuntime
+        | BrowserExecutionLane::DedicatedWorkerDirectRuntime => {
+            format!(
+                "{} matches the current host role but is unavailable until the required Browser Edition prerequisites are restored.",
+                match lane_id {
+                    BrowserExecutionLane::BrowserMainThreadDirectRuntime => {
+                        "lane.browser.main_thread.direct_runtime"
+                    }
+                    BrowserExecutionLane::DedicatedWorkerDirectRuntime => {
+                        "lane.browser.dedicated_worker.direct_runtime"
+                    }
+                    BrowserExecutionLane::Unsupported => unreachable!(),
+                }
+            )
+        }
+    }
+}
+
+fn browser_execution_missing_prerequisite_guidance(lane_id: BrowserExecutionLane) -> Vec<String> {
+    match lane_id {
+        BrowserExecutionLane::Unsupported => vec![
+            "Expect Rust Browser Edition to demote here instead of pretending a direct-runtime lane exists when prerequisites disappear."
+                .to_string(),
+        ],
+        BrowserExecutionLane::BrowserMainThreadDirectRuntime
+        | BrowserExecutionLane::DedicatedWorkerDirectRuntime => vec![
+            "Restore the missing Browser Edition prerequisites before pinning this lane again."
+                .to_string(),
+        ],
+    }
+}
+
+struct BrowserExecutionLaneCandidateInput {
+    lane_id: BrowserExecutionLane,
+    host_role: BrowserExecutionHostRole,
+    support_class: BrowserRuntimeSupportClass,
+    available: bool,
+    selected: bool,
+    reason_code: BrowserExecutionReasonCode,
+    message: String,
+    guidance: Vec<String>,
+}
+
+fn create_browser_execution_lane_candidate(
+    input: BrowserExecutionLaneCandidateInput,
+) -> BrowserExecutionLaneCandidate {
+    BrowserExecutionLaneCandidate {
+        lane_id: input.lane_id,
+        lane_kind: input.lane_id.lane_kind(),
+        lane_rank: input.lane_id.lane_rank(),
+        host_role: input.host_role,
+        support_class: input.support_class,
+        fallback_lane_id: input.lane_id.fallback_lane(),
+        available: input.available,
+        selected: input.selected,
+        reason_code: input.reason_code,
+        message: input.message,
+        guidance: input.guidance,
+    }
+}
+
+fn browser_execution_candidates(
+    selected_lane: BrowserExecutionLane,
+    host_role: BrowserExecutionHostRole,
+    support_class: BrowserRuntimeSupportClass,
+    selected_reason_code: BrowserExecutionReasonCode,
+    selected_message: &str,
+    selected_guidance: &[String],
+) -> Vec<BrowserExecutionLaneCandidate> {
+    let direct_lane_for_host = browser_execution_direct_lane_for_host_role(host_role);
+    let lane_ids = [
+        BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+        BrowserExecutionLane::DedicatedWorkerDirectRuntime,
+        BrowserExecutionLane::Unsupported,
+    ];
+
+    lane_ids
+        .into_iter()
+        .map(|lane_id| {
+            if lane_id == selected_lane {
+                return create_browser_execution_lane_candidate(
+                    BrowserExecutionLaneCandidateInput {
+                        lane_id,
+                        host_role,
+                        support_class,
+                        available: true,
+                        selected: true,
+                        reason_code: selected_reason_code,
+                        message: selected_message.to_string(),
+                        guidance: selected_guidance.to_vec(),
+                    },
+                );
+            }
+
+            let prerequisite_missing = if lane_id == BrowserExecutionLane::Unsupported {
+                selected_lane != BrowserExecutionLane::Unsupported
+            } else {
+                direct_lane_for_host == Some(lane_id)
+                    && selected_lane == BrowserExecutionLane::Unsupported
+            };
+
+            if prerequisite_missing {
+                return create_browser_execution_lane_candidate(
+                    BrowserExecutionLaneCandidateInput {
+                        lane_id,
+                        host_role,
+                        support_class,
+                        available: false,
+                        selected: false,
+                        reason_code: BrowserExecutionReasonCode::CandidatePrerequisiteMissing,
+                        message: browser_execution_missing_prerequisite_message(lane_id),
+                        guidance: browser_execution_missing_prerequisite_guidance(lane_id),
+                    },
+                );
+            }
+
+            create_browser_execution_lane_candidate(BrowserExecutionLaneCandidateInput {
+                lane_id,
+                host_role,
+                support_class,
+                available: false,
+                selected: false,
+                reason_code: BrowserExecutionReasonCode::CandidateHostRoleMismatch,
+                message: browser_execution_host_mismatch_message(lane_id),
+                guidance: browser_execution_host_mismatch_guidance(lane_id),
+            })
+        })
+        .collect()
+}
+
+fn build_browser_execution_ladder_from_probe(
+    preferred_lane: Option<BrowserExecutionLane>,
+    probe: BrowserExecutionProbe,
+) -> BrowserExecutionLadderDiagnostics {
+    let runtime_support = browser_runtime_support_from_probe(probe);
+    let host_role = probe.host_role;
+    let selected_lane = runtime_support
+        .supported
+        .then(|| browser_execution_direct_lane_for_host_role(host_role))
+        .flatten()
+        .unwrap_or(BrowserExecutionLane::Unsupported);
+    let mut reason_code = browser_execution_reason_from_support(&runtime_support, host_role);
+    let mut message = runtime_support.message.clone();
+    let mut guidance = runtime_support.guidance.clone();
+
+    if let Some(preferred_lane) = preferred_lane.filter(|lane| *lane != selected_lane) {
+        if reason_code == BrowserExecutionReasonCode::Supported {
+            reason_code = BrowserExecutionReasonCode::CandidateHostRoleMismatch;
+        }
+        message = format!(
+            "{message} Preferred lane {} is not truthful for host role {}, so Rust Browser Edition stayed on {}.",
+            preferred_lane.as_str(),
+            host_role.as_str(),
+            selected_lane.as_str(),
+        );
+        guidance.push(format!(
+            "Use {} for this host role, or switch entrypoints before pinning {}.",
+            selected_lane.as_str(),
+            preferred_lane.as_str(),
+        ));
+    }
+
+    let support_class = runtime_support.support_class;
+    let candidates = browser_execution_candidates(
+        selected_lane,
+        host_role,
+        support_class,
+        reason_code,
+        &message,
+        &guidance,
+    );
+    let capabilities = runtime_support.capabilities;
+
+    BrowserExecutionLadderDiagnostics {
+        supported: selected_lane != BrowserExecutionLane::Unsupported,
+        preferred_lane,
+        selected_lane,
+        lane_kind: selected_lane.lane_kind(),
+        lane_rank: selected_lane.lane_rank(),
+        host_role,
+        support_class,
+        runtime_context: runtime_support.runtime_context,
+        reason_code,
+        message,
+        guidance,
+        fallback_lane_id: selected_lane.fallback_lane(),
+        downgrade_order: browser_execution_downgrade_order(host_role),
+        repro_command: browser_execution_repro_command(),
+        candidates,
+        runtime_support,
+        capabilities,
+    }
 }
 
 /// Builder for constructing an Asupersync [`Runtime`] with custom configuration.
@@ -890,6 +1769,35 @@ impl RuntimeBuilder {
             timer_driver,
             entropy_source,
             host_services.as_ref(),
+        )
+    }
+
+    /// Inspect the truthful browser execution ladder for the current host.
+    ///
+    /// This surfaces Rust-side lane negotiation diagnostics that stay aligned
+    /// with the shared Browser Edition execution-ladder contract without
+    /// claiming that a public direct browser-runtime constructor already
+    /// exists on every target.
+    #[must_use]
+    pub fn inspect_browser_execution_ladder(&self) -> BrowserExecutionLadderDiagnostics {
+        let _ = self;
+        build_browser_execution_ladder_from_probe(None, detect_browser_execution_probe())
+    }
+
+    /// Inspect the truthful browser execution ladder while requesting a preferred lane.
+    ///
+    /// When the preferred lane is not truthful for the current host role, the
+    /// returned diagnostics preserve the truthful selected lane and annotate
+    /// the mismatch in the message and guidance.
+    #[must_use]
+    pub fn inspect_browser_execution_ladder_with_preferred_lane(
+        &self,
+        preferred_lane: BrowserExecutionLane,
+    ) -> BrowserExecutionLadderDiagnostics {
+        let _ = self;
+        build_browser_execution_ladder_from_probe(
+            Some(preferred_lane),
+            detect_browser_execution_probe(),
         )
     }
 
@@ -2011,6 +2919,176 @@ mod tests {
         );
     }
 
+    fn browser_probe(
+        host_role: BrowserExecutionHostRole,
+        runtime_context: BrowserRuntimeContext,
+        has_window: bool,
+        has_document: bool,
+        has_webassembly: bool,
+    ) -> BrowserExecutionProbe {
+        BrowserExecutionProbe {
+            has_global_this: true,
+            runtime_context,
+            host_role,
+            capabilities: BrowserCapabilitySnapshot {
+                execution_api: BrowserExecutionApiCapabilities {
+                    has_abort_controller: true,
+                    has_fetch: true,
+                    has_webassembly,
+                },
+                dom: BrowserDomCapabilities {
+                    has_document,
+                    has_window,
+                },
+                storage: BrowserStorageCapabilities {
+                    has_indexed_db: false,
+                    has_local_storage: false,
+                },
+                transport: BrowserTransportCapabilities {
+                    has_web_socket: true,
+                    has_web_transport: false,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn browser_execution_ladder_selects_main_thread_lane_for_supported_probe() {
+        let diagnostics = build_browser_execution_ladder_from_probe(
+            None,
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                true,
+            ),
+        );
+
+        assert!(
+            diagnostics.supported,
+            "main-thread probe should be supported"
+        );
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "main-thread probe should select the main-thread direct-runtime lane"
+        );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::Supported,
+            "supported probe should keep the supported reason code"
+        );
+        assert_eq!(
+            diagnostics.host_role,
+            BrowserExecutionHostRole::BrowserMainThread,
+            "host role should stay on the browser main thread"
+        );
+        assert_eq!(
+            diagnostics.runtime_context,
+            BrowserRuntimeContext::BrowserMainThread,
+            "runtime context should stay on the browser main thread"
+        );
+        let selected_candidate = diagnostics
+            .candidates
+            .iter()
+            .find(|candidate| candidate.selected)
+            .expect("one selected candidate");
+        assert_eq!(
+            selected_candidate.lane_id,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "selected candidate should match the selected lane"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_preserves_truthful_lane_when_preferred_lane_mismatches() {
+        let diagnostics = build_browser_execution_ladder_from_probe(
+            Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime),
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                true,
+            ),
+        );
+
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "preferred-lane mismatch must not override the truthful selected lane"
+        );
+        assert!(
+            diagnostics
+                .message
+                .contains("lane.browser.dedicated_worker.direct_runtime"),
+            "message should name the preferred lane mismatch"
+        );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("switch entrypoints")),
+            "guidance should explain how to satisfy the preferred lane"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_fail_closes_non_browser_probe() {
+        let diagnostics =
+            build_browser_execution_ladder_from_probe(None, BrowserExecutionProbe::non_browser());
+
+        assert!(!diagnostics.supported, "non-browser probe must fail closed");
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::Unsupported,
+            "non-browser probe must demote to the terminal unsupported lane"
+        );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::MissingGlobalThis,
+            "non-browser probe should surface the missing-global diagnostic"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_keeps_missing_webassembly_visible_in_candidates() {
+        let diagnostics = build_browser_execution_ladder_from_probe(
+            None,
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                false,
+            ),
+        );
+
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::Unsupported,
+            "missing WebAssembly must fail closed to the unsupported lane"
+        );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::MissingWebAssembly,
+            "selected reason should preserve the real missing-prerequisite failure"
+        );
+        let direct_candidate = diagnostics
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.lane_id == BrowserExecutionLane::BrowserMainThreadDirectRuntime
+            })
+            .expect("main-thread candidate");
+        assert_eq!(
+            direct_candidate.reason_code,
+            BrowserExecutionReasonCode::CandidatePrerequisiteMissing,
+            "direct lane candidate should remain a prerequisite-missing rejection"
+        );
+    }
+
     #[test]
     fn runtime_builder_routes_native_startup_through_host_services_seam() {
         init_test_logging();
@@ -2594,6 +3672,11 @@ mod tests {
             ENV_THREAD_STACK_SIZE,
             ENV_THREAD_NAME_PREFIX,
             ENV_STEAL_BATCH_SIZE,
+            ENV_CANCEL_LANE_MAX_STREAK,
+            ENV_ENABLE_GOVERNOR,
+            ENV_GOVERNOR_INTERVAL,
+            ENV_ENABLE_ADAPTIVE_CANCEL_STREAK,
+            ENV_ADAPTIVE_CANCEL_EPOCH_STEPS,
             ENV_BLOCKING_MIN_THREADS,
             ENV_BLOCKING_MAX_THREADS,
             ENV_ENABLE_PARKING,
@@ -2654,8 +3737,42 @@ mod tests {
                 .expect("env overrides")
                 .build()
                 .expect("runtime build");
+            assert_eq!(
+                runtime.config().cancel_lane_max_streak,
+                defaults.cancel_lane_max_streak
+            );
+            assert_eq!(runtime.config().enable_governor, defaults.enable_governor);
+            assert_eq!(
+                runtime.config().governor_interval,
+                defaults.governor_interval
+            );
+            assert_eq!(
+                runtime.config().enable_adaptive_cancel_streak,
+                defaults.enable_adaptive_cancel_streak
+            );
+            assert_eq!(
+                runtime.config().adaptive_cancel_streak_epoch_steps,
+                defaults.adaptive_cancel_streak_epoch_steps
+            );
             assert_eq!(runtime.config().poll_budget, defaults.poll_budget);
         });
+    }
+
+    #[test]
+    fn with_env_overrides_applies_governor_settings() {
+        use crate::runtime::env_config::*;
+        with_envs(
+            &[(ENV_ENABLE_GOVERNOR, "true"), (ENV_GOVERNOR_INTERVAL, "41")],
+            || {
+                let runtime = RuntimeBuilder::new()
+                    .with_env_overrides()
+                    .expect("env overrides")
+                    .build()
+                    .expect("runtime build");
+                assert!(runtime.config().enable_governor);
+                assert_eq!(runtime.config().governor_interval, 41);
+            },
+        );
     }
 
     #[cfg(feature = "config-file")]
@@ -2672,6 +3789,22 @@ poll_budget = 32
             .expect("runtime build");
         assert_eq!(runtime.config().worker_threads, 2);
         assert_eq!(runtime.config().poll_budget, 32);
+    }
+
+    #[cfg(feature = "config-file")]
+    #[test]
+    fn from_toml_str_applies_governor_settings() {
+        let toml = r"
+[scheduler]
+enable_governor = true
+governor_interval = 80
+";
+        let runtime = RuntimeBuilder::from_toml_str(toml)
+            .expect("from_toml_str")
+            .build()
+            .expect("runtime build");
+        assert!(runtime.config().enable_governor);
+        assert_eq!(runtime.config().governor_interval, 80);
     }
 
     #[cfg(feature = "config-file")]
