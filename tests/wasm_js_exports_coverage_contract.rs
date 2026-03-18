@@ -31,6 +31,27 @@ fn read_json(path: &str) -> serde_json::Value {
     serde_json::from_str(&content).unwrap_or_else(|_| panic!("invalid JSON {}", path.display()))
 }
 
+fn slice_between<'a>(content: &'a str, start: &str, end: &str) -> &'a str {
+    let start_index = content
+        .find(start)
+        .unwrap_or_else(|| panic!("missing start marker: {start}"));
+    let remainder = &content[start_index..];
+    let end_index = remainder
+        .find(end)
+        .unwrap_or_else(|| panic!("missing end marker after {start}: {end}"));
+    &remainder[..end_index]
+}
+
+fn assert_markers_in_order(content: &str, markers: &[&str], failure_context: &str) {
+    let mut offset = 0;
+    for marker in markers {
+        let next = content[offset..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("{failure_context}: missing ordered marker: {marker}"));
+        offset += next + marker.len();
+    }
+}
+
 // ── Export Map Structure ─────────────────────────────────────────────
 
 #[test]
@@ -248,6 +269,113 @@ fn browser_src_index_exposes_no_throw_selection_helpers() {
             "browser src/index.ts must preserve no-throw selection marker: {marker}"
         );
     }
+}
+
+#[test]
+fn browser_src_index_pins_runtime_selection_no_throw_fail_closed_semantics() {
+    let content = read_source("packages/browser/src/index.ts");
+    let function = slice_between(
+        &content,
+        "export async function createBrowserRuntimeSelection(",
+        "\nexport async function createBrowserScopeSelection(",
+    );
+
+    assert_markers_in_order(
+        function,
+        &[
+            "let executionLadder = detectBrowserExecutionLadder({",
+            "if (!executionLadder.supported) {",
+            "return {",
+            "executionLadder,",
+            "runtime: null,",
+            "outcome: null,",
+        ],
+        "createBrowserRuntimeSelection must preserve the unsupported no-throw branch",
+    );
+    assert!(
+        function.contains("recordBrowserLaneHealthEvent("),
+        "createBrowserRuntimeSelection must record lane-health failures before re-evaluating the ladder"
+    );
+    assert!(
+        function.contains("outcome: executionLadder.supported ? outcome : null,"),
+        "createBrowserRuntimeSelection must fail closed after init demotion instead of surfacing a throwing-only outcome"
+    );
+    assert!(
+        function.contains("outcome: health.status === \"demoted\" ? null : outcome,"),
+        "createBrowserRuntimeSelection must suppress runtimeCreate failures once lane health demotes the caller to the fail-closed lane"
+    );
+}
+
+#[test]
+fn browser_src_index_keeps_throwing_runtime_api_separate_from_selection_helpers() {
+    let content = read_source("packages/browser/src/index.ts");
+    let function = slice_between(
+        &content,
+        "export async function createBrowserRuntime(",
+        "\nexport async function createBrowserScope(",
+    );
+
+    assert_markers_in_order(
+        function,
+        &[
+            "const selection = await createBrowserRuntimeSelection(options);",
+            "if (selection.outcome !== null) {",
+            "return selection.outcome;",
+            "}",
+            "throw createUnsupportedRuntimeError(selection.executionLadder.runtimeSupport);",
+        ],
+        "createBrowserRuntime must remain the throwing wrapper over the additive no-throw selection helper",
+    );
+}
+
+#[test]
+fn browser_src_index_pins_scope_selection_equivalence_to_runtime_selection() {
+    let content = read_source("packages/browser/src/index.ts");
+    let function = slice_between(
+        &content,
+        "export async function createBrowserScopeSelection(",
+        "\nexport async function createBrowserRuntime(",
+    );
+
+    assert_markers_in_order(
+        function,
+        &[
+            "const runtimeSelection = await createBrowserRuntimeSelection(options);",
+            "if (runtimeSelection.outcome !== null && runtimeSelection.outcome.outcome !== \"ok\") {",
+            "return {",
+            "executionLadder: runtimeSelection.executionLadder,",
+            "runtime: null,",
+            "scope: null,",
+            "outcome: runtimeSelection.outcome as BrowserOutcome<RegionHandle>,",
+        ],
+        "createBrowserScopeSelection must forward non-ok runtime-selection outcomes without throwing",
+    );
+    assert_markers_in_order(
+        function,
+        &[
+            "if (runtimeSelection.runtime === null) {",
+            "return {",
+            "executionLadder: runtimeSelection.executionLadder,",
+            "runtime: null,",
+            "scope: null,",
+            "outcome: null,",
+        ],
+        "createBrowserScopeSelection must keep the unsupported no-throw branch aligned with runtime selection",
+    );
+    assert_markers_in_order(
+        function,
+        &[
+            "const entered = runtimeSelection.runtime.enterScope(options.label, consumerVersion);",
+            "if (entered.outcome !== \"ok\") {",
+            "runtimeSelection.runtime.close(consumerVersion);",
+            "return {",
+            "executionLadder: runtimeSelection.executionLadder,",
+            "runtime: null,",
+            "scope: null,",
+            "outcome: entered,",
+        ],
+        "createBrowserScopeSelection must close the temporary runtime and preserve explicit enterScope failures",
+    );
 }
 
 #[test]
@@ -893,6 +1021,70 @@ fn browser_src_index_exports_lane_health_control_plane_markers() {
             "browser src/index.ts must preserve lane-health marker: {marker}"
         );
     }
+}
+
+#[test]
+fn browser_src_index_pins_lane_availability_recoverability_to_ladder_reason() {
+    let content = read_source("packages/browser/src/index.ts");
+    let method = slice_between(
+        &content,
+        "  laneAvailabilityOutcome(",
+        "\n\n  laneHealth(): BrowserLaneHealthDiagnostics {",
+    );
+
+    assert_markers_in_order(
+        method,
+        &[
+            "const ladder = this.refreshDiagnostics();",
+            "if (ladder.supported) {",
+            "return null;",
+            "}",
+            "const recoverability: Recoverability =",
+            "ladder.reasonCode === \"demote_due_to_lane_health\"",
+            "? \"transient\"",
+            ": \"permanent\";",
+            "return OutcomeFactory.err(",
+            "\"capability_denied\",",
+            "recoverability,",
+        ],
+        "laneAvailabilityOutcome must map health demotion to transient recoverability and hard unsupported states to permanent denial",
+    );
+}
+
+#[test]
+fn browser_src_index_pins_candidate_reason_precedence_for_health_vs_prerequisites() {
+    let content = read_source("packages/browser/src/index.ts");
+    let function = slice_between(
+        &content,
+        "function browserExecutionCandidates(",
+        "\nfunction buildBrowserExecutionLadder(",
+    );
+
+    assert!(
+        function.contains("Only surface lane-health as the candidate rejection reason when the"),
+        "browserExecutionCandidates must document why stale demotion state cannot mask harder prerequisite failures"
+    );
+    assert_markers_in_order(
+        function,
+        &[
+            "const laneUnhealthy =",
+            "selectedReasonCode === \"demote_due_to_lane_health\" &&",
+            "directLaneForHost === laneId &&",
+            "laneHealth.status === \"demoted\";",
+        ],
+        "browserExecutionCandidates must only use candidate_lane_unhealthy during an actual health-driven demotion",
+    );
+    assert_markers_in_order(
+        function,
+        &[
+            "const prerequisiteMissing =",
+            "laneId === BROWSER_UNSUPPORTED_LANE",
+            "selectedLane !== BROWSER_UNSUPPORTED_LANE &&",
+            "selectedReasonCode !== \"demote_due_to_lane_health\"",
+            ": directLaneForHost === laneId && selectedLane === BROWSER_UNSUPPORTED_LANE;",
+        ],
+        "browserExecutionCandidates must preserve prerequisite-missing semantics when the ladder downgrades for non-health reasons",
+    );
 }
 
 #[test]

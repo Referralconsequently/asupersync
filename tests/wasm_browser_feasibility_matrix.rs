@@ -118,30 +118,59 @@ fn shared_worker_is_feasible_not_shipped() {
 fn rust_authored_wasm_consumer_path_is_feasible_not_shipped() {
     // Evidence: the semantic core compiles to wasm32 (BrowserReactor exists,
     // types are target-agnostic), but there is no public RuntimeBuilder or
-    // Rust-callable API for constructing a wasm32 runtime and the current
-    // startup path still assumes std::thread-backed worker/monitor threads.
+    // Rust-callable API for constructing a wasm32 runtime. Startup now routes
+    // through an explicit host-services seam, but the crate still only ships
+    // the native std-thread host implementation and therefore fail-closes the
+    // public browser builder path.
     assert!(
         file_exists("src/runtime/reactor/browser.rs"),
         "browser reactor substrate must exist"
     );
-    // Negative evidence: no public wasm32 RuntimeBuilder path and no thread-free
-    // browser startup contract yet.
+    // Negative evidence: no public wasm32 RuntimeBuilder path yet, but the
+    // remaining blocker is now an explicit browser host-services contract
+    // rather than an implicit std::thread assumption.
     let builder_src = read_file("src/runtime/builder.rs");
     assert!(
         !builder_src.contains("pub fn build_wasm") && !builder_src.contains("pub fn build_browser"),
         "RuntimeBuilder must not yet expose a public wasm32 build path"
     );
     assert!(
-        builder_src.contains("spawn_worker_threads"),
-        "runtime startup evidence should still show worker-thread bootstrapping"
+        builder_src.contains("RuntimeHostServices"),
+        "runtime startup evidence should name the host-services seam"
     );
     assert!(
-        builder_src.contains("start_deadline_monitor"),
-        "runtime startup evidence should still show deadline-monitor bootstrapping"
+        builder_src.contains("BrowserHostServicesContract"),
+        "runtime startup evidence should pin the browser host contract"
     );
     assert!(
-        builder_src.contains("std::thread::Builder"),
-        "runtime startup evidence should still show std::thread-backed startup"
+        builder_src.contains("NativeThreadHostServices"),
+        "runtime startup evidence should isolate the shipped native implementation"
+    );
+    assert!(
+        builder_src.contains("threadless startup"),
+        "runtime startup diagnostics should explain the threadless browser target"
+    );
+}
+
+#[test]
+fn rust_browser_host_services_smoke_harness_is_pinned() {
+    assert!(
+        file_exists("scripts/validate_rust_browser_consumer.sh"),
+        "browser smoke harness script must stay in-tree"
+    );
+    assert!(
+        file_exists("tests/fixtures/rust-browser-consumer/README.md"),
+        "browser smoke harness fixture docs must stay in-tree"
+    );
+
+    let doc = read_file("docs/WASM.md");
+    assert!(
+        doc.contains("validate_rust_browser_consumer.sh"),
+        "WASM guide must point to the maintained browser smoke harness"
+    );
+    assert!(
+        doc.contains("rust-browser-consumer"),
+        "WASM guide must point to the maintained Rust browser fixture"
     );
 }
 

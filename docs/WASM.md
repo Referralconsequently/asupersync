@@ -89,7 +89,7 @@ live tree actually supports, not what is architecturally plausible later.
 |---|---|---|---|
 | Compile the semantic core under `wasm32` with one canonical browser profile | Supported today for contributors, CI, and contract validation | root `Cargo.toml` browser profile features; `src/lib.rs` compile-error gates; wasm profile commands in this doc and `docs/wasm_quickstart_migration.md` | This proves cfg/feature closure, not a public browser runtime bootstrap API |
 | Maintain the wasm ABI and package boundary from Rust | Supported today inside the repository via `asupersync-browser-core` and `asupersync-wasm` | `asupersync-browser-core/Cargo.toml`, `asupersync-wasm/Cargo.toml`, `packages/browser-core/`, `packages/browser/` | These crates exist to feed the JS/TS Browser Edition surface; they are not the ergonomic public Browser Edition API for external Rust consumers |
-| Build a browser app that creates Browser Edition runtimes directly from Rust consumer code | Not yet a public supported lane | `tests/wasm_browser_feasibility_matrix.rs` asserts feasibility-not-shipped; `src/runtime/builder.rs` has no public wasm/browser runtime builder path and runtime startup still routes through `spawn_worker_threads()` / `start_deadline_monitor()` with `std::thread` | Do not document direct `Cx`/`Scope` browser bootstrapping from external Rust app code as supported today |
+| Build a browser app that creates Browser Edition runtimes directly from Rust consumer code | Not yet a public supported lane | `tests/wasm_browser_feasibility_matrix.rs` asserts feasibility-not-shipped; `src/runtime/builder.rs` now routes startup through `RuntimeHostServices` plus `BrowserHostServicesContract`, but only `NativeThreadHostServices` ships today | Do not document direct `Cx`/`Scope` browser bootstrapping from external Rust app code as supported today |
 
 Current rule of thumb:
 
@@ -102,8 +102,26 @@ Current rule of thumb:
   validate browser-safe semantic-core closure, not as a guarantee of native
   `RuntimeBuilder` parity on `wasm32`.
 - Treat the remaining Rust-authored browser gap as a real runtime bootstrap
-  problem, not as a naming/docs cleanup: startup still assumes `std::thread`
-  worker and deadline-monitor threads.
+  problem, not as a naming/docs cleanup: startup now has an explicit
+  `RuntimeHostServices` seam, but only the native std-thread host
+  implementation ships today.
+
+### Browser host-services seam
+
+`src/runtime/builder.rs` now makes the remaining Rust-authored browser blocker
+explicit instead of implicit:
+
+- `RuntimeHostServices` is the startup seam used by `RuntimeBuilder`.
+- `BrowserHostServicesContract` pins the current browser requirements:
+  host-turn wakeups, worker bootstrap hooks, timer/deadline driving, and
+  lane-health callbacks for threadless startup.
+- `NativeThreadHostServices` is the only shipped implementation today, so the
+  public wasm/browser builder path still fail-closes instead of pretending the
+  browser already has native-thread parity.
+- The maintained smoke harness remains
+  `tests/fixtures/rust-browser-consumer/` plus
+  `scripts/validate_rust_browser_consumer.sh`; use that fixture for end-to-end
+  diagnostics until the public Rust browser builder bead lands.
 
 ### Practical lane selection for Rust authors
 
@@ -115,7 +133,7 @@ lanes and avoid blending them together:
 | Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
 | Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
 | Validate the maintained browser-facing Rust example that the repository actually proves end-to-end | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `scripts/validate_rust_browser_consumer.sh`, `tests/wasm_rust_browser_example_contract.rs` |
-| Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Not yet a public supported lane | `src/runtime/builder.rs` still has no public wasm/browser runtime constructor and runtime startup still assumes `std::thread` worker/monitor threads; use the JS/TS Browser Edition packages or an explicit bridge instead |
+| Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Not yet a public supported lane | `src/runtime/builder.rs` still has no public wasm/browser runtime constructor; startup now routes through `RuntimeHostServices`, but only `NativeThreadHostServices` ships, so use the JS/TS Browser Edition packages or an explicit bridge instead |
 
 For the command-first version of this workflow, see
 `docs/wasm_quickstart_migration.md`.
