@@ -69,6 +69,8 @@ pub struct TaskLeakOracle {
     completed_tasks: HashSet<TaskId>,
     /// Region close records: region -> close_time.
     region_closes: HashMap<RegionId, Time>,
+    /// Violations captured at the moment a region closes.
+    violations: Vec<TaskLeakViolation>,
 }
 
 impl TaskLeakOracle {
@@ -91,6 +93,25 @@ impl TaskLeakOracle {
     /// Records a region close event.
     pub fn on_region_close(&mut self, region: RegionId, time: Time) {
         self.region_closes.insert(region, time);
+
+        let Some(tasks) = self.tasks_by_region.get(&region) else {
+            return;
+        };
+
+        let mut leaked: Vec<TaskId> = tasks
+            .iter()
+            .copied()
+            .filter(|task| !self.completed_tasks.contains(task))
+            .collect();
+        leaked.sort();
+
+        if !leaked.is_empty() {
+            self.violations.push(TaskLeakViolation {
+                region,
+                leaked_tasks: leaked,
+                region_close_time: time,
+            });
+        }
     }
 
     /// Verifies the invariant holds.
@@ -102,30 +123,12 @@ impl TaskLeakOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(TaskLeakViolation)` if a violation is detected
     pub fn check(&self, _now: Time) -> Result<(), TaskLeakViolation> {
-        let mut regions: Vec<RegionId> = self.region_closes.keys().copied().collect();
-        regions.sort();
-        for region in regions {
-            let Some(&close_time) = self.region_closes.get(&region) else {
-                continue;
-            };
-            let Some(tasks) = self.tasks_by_region.get(&region) else {
-                continue; // No tasks spawned in this region
-            };
-
-            let mut leaked: Vec<TaskId> = tasks
-                .iter()
-                .copied()
-                .filter(|task| !self.completed_tasks.contains(task))
-                .collect();
-            leaked.sort();
-
-            if !leaked.is_empty() {
-                return Err(TaskLeakViolation {
-                    region,
-                    leaked_tasks: leaked,
-                    region_close_time: close_time,
-                });
-            }
+        if let Some(violation) = self
+            .violations
+            .iter()
+            .min_by_key(|violation| (violation.region, violation.region_close_time))
+        {
+            return Err(violation.clone());
         }
 
         Ok(())
@@ -136,6 +139,7 @@ impl TaskLeakOracle {
         self.tasks_by_region.clear();
         self.completed_tasks.clear();
         self.region_closes.clear();
+        self.violations.clear();
     }
 
     /// Returns the number of tracked tasks.
@@ -408,6 +412,39 @@ mod tests {
         let has_four = violation.leaked_tasks.contains(&task(4));
         crate::assert_with_log!(has_four, "contains task4", true, has_four);
         crate::test_complete!("many_tasks_some_leaked");
+    }
+
+    #[test]
+    fn completion_after_close_still_violates() {
+        init_test("completion_after_close_still_violates");
+        let mut oracle = TaskLeakOracle::new();
+
+        oracle.on_spawn(task(1), region(0), t(10));
+        oracle.on_region_close(region(0), t(100));
+        oracle.on_complete(task(1), t(110));
+
+        let violation = oracle
+            .check(t(110))
+            .expect_err("task completion after close must not erase the violation");
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.leaked_tasks == vec![task(1)],
+            "leaked_tasks",
+            vec![task(1)],
+            violation.leaked_tasks
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(100),
+            "close_time",
+            t(100),
+            violation.region_close_time
+        );
+        crate::test_complete!("completion_after_close_still_violates");
     }
 
     #[test]

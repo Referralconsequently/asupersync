@@ -152,11 +152,7 @@ impl FulfillmentProgress {
     /// Returns the percentage complete (0.0 to 1.0).
     #[must_use]
     pub fn percent(&self) -> f64 {
-        if self.total == 0 {
-            1.0
-        } else {
-            f64::from(self.fulfilled()) / f64::from(self.total)
-        }
+        percent_complete(self.total, self.fulfilled())
     }
 
     /// Returns a snapshot of the current progress.
@@ -166,7 +162,7 @@ impl FulfillmentProgress {
         FulfillmentSnapshot {
             total: self.total,
             fulfilled,
-            percent: self.percent(),
+            percent: percent_complete(self.total, fulfilled),
             complete: fulfilled >= self.total,
         }
     }
@@ -175,6 +171,14 @@ impl FulfillmentProgress {
     #[must_use]
     pub fn remaining(&self) -> u32 {
         self.total.saturating_sub(self.fulfilled())
+    }
+}
+
+fn percent_complete(total: u32, fulfilled: u32) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        f64::from(fulfilled.min(total)) / f64::from(total)
     }
 }
 
@@ -1063,6 +1067,28 @@ mod tests {
         progress.increment();
         assert_eq!(progress.fulfilled(), u32::MAX);
         assert!(progress.is_complete());
+    }
+
+    #[test]
+    fn fulfillment_progress_percent_clamps_at_one() {
+        let progress = FulfillmentProgress::new(3);
+        progress.add(5);
+
+        assert_eq!(progress.fulfilled(), 5);
+        assert!((progress.percent() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fulfillment_progress_snapshot_clamps_percent_from_captured_fulfillment() {
+        let progress = FulfillmentProgress::new(2);
+        progress.add(5);
+
+        let snapshot = progress.snapshot();
+
+        assert_eq!(snapshot.total, 2);
+        assert_eq!(snapshot.fulfilled, 5);
+        assert!(snapshot.complete);
+        assert!((snapshot.percent - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

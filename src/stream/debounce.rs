@@ -207,7 +207,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Poll, Wake, Waker};
 
-    static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static TEST_NOW_NANOS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    }
 
     struct NoopWaker;
 
@@ -237,11 +239,11 @@ mod tests {
     }
 
     fn set_test_time(nanos: u64) {
-        TEST_NOW_NANOS.store(nanos, Ordering::SeqCst);
+        TEST_NOW_NANOS.with(|t| t.set(nanos));
     }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW_NANOS.load(Ordering::SeqCst))
+        Time::from_nanos(TEST_NOW_NANOS.with(|t| t.get()))
     }
 
     #[test]

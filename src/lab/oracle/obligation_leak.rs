@@ -70,6 +70,7 @@ struct ObligationSnapshot {
 pub struct ObligationLeakOracle {
     obligations: BTreeMap<ObligationId, ObligationSnapshot>,
     region_closes: Vec<(RegionId, Time)>,
+    violations: Vec<ObligationLeakViolation>,
 }
 
 impl ObligationLeakOracle {
@@ -83,6 +84,7 @@ impl ObligationLeakOracle {
     pub fn reset(&mut self) {
         self.obligations.clear();
         self.region_closes.clear();
+        self.violations.clear();
     }
 
     /// Records an obligation creation event.
@@ -114,6 +116,27 @@ impl ObligationLeakOracle {
     /// Records a region close event for leak checking.
     pub fn on_region_close(&mut self, region: RegionId, time: Time) {
         self.region_closes.push((region, time));
+
+        let mut leaked = Vec::new();
+        for (id, snapshot) in &self.obligations {
+            if snapshot.region == region && !snapshot.state.is_success() {
+                leaked.push(ObligationLeak {
+                    obligation: *id,
+                    kind: snapshot.kind,
+                    holder: snapshot.holder,
+                    region: snapshot.region,
+                });
+            }
+        }
+        leaked.sort_by_key(|leak| leak.obligation);
+
+        if !leaked.is_empty() {
+            self.violations.push(ObligationLeakViolation {
+                region,
+                leaked,
+                region_close_time: time,
+            });
+        }
     }
 
     /// Builds oracle state from a runtime snapshot.
@@ -132,10 +155,16 @@ impl ObligationLeakOracle {
             );
         }
 
+        let mut closed_regions = Vec::new();
         for (_, region) in state.regions_iter() {
             if region.state().is_terminal() {
-                self.region_closes.push((region.id, now));
+                closed_regions.push(region.id);
             }
+        }
+        closed_regions.sort();
+
+        for region in closed_regions {
+            self.on_region_close(region, now);
         }
     }
 
@@ -153,27 +182,12 @@ impl ObligationLeakOracle {
 
     /// Checks for leaked obligations at region close.
     pub fn check(&self, _now: Time) -> Result<(), ObligationLeakViolation> {
-        for (region, close_time) in &self.region_closes {
-            let mut leaked = Vec::new();
-            for (id, snapshot) in &self.obligations {
-                if snapshot.region == *region && !snapshot.state.is_success() {
-                    leaked.push(ObligationLeak {
-                        obligation: *id,
-                        kind: snapshot.kind,
-                        holder: snapshot.holder,
-                        region: snapshot.region,
-                    });
-                }
-            }
-            leaked.sort_by_key(|leak| leak.obligation);
-
-            if !leaked.is_empty() {
-                return Err(ObligationLeakViolation {
-                    region: *region,
-                    leaked,
-                    region_close_time: *close_time,
-                });
-            }
+        if let Some(violation) = self
+            .violations
+            .iter()
+            .min_by_key(|violation| (violation.region, violation.region_close_time))
+        {
+            return Err(violation.clone());
         }
 
         Ok(())
@@ -407,6 +421,26 @@ mod tests {
         let err = oracle
             .check(Time::ZERO)
             .expect_err("leaked obligation must still violate the invariant");
+        assert_eq!(err.region, region);
+        assert_eq!(err.leaked.len(), 1);
+        assert_eq!(err.leaked[0].obligation, obligation);
+        assert_eq!(err.leaked[0].kind, ObligationKind::Lease);
+    }
+
+    #[test]
+    fn resolution_after_close_still_violates() {
+        let mut oracle = ObligationLeakOracle::new();
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        oracle.on_create(obligation, ObligationKind::Lease, task, region);
+        oracle.on_region_close(region, Time::ZERO);
+        oracle.on_resolve(obligation, ObligationState::Committed);
+
+        let err = oracle
+            .check(Time::ZERO)
+            .expect_err("resolving after close must not erase the violation");
         assert_eq!(err.region, region);
         assert_eq!(err.leaked.len(), 1);
         assert_eq!(err.leaked[0].obligation, obligation);

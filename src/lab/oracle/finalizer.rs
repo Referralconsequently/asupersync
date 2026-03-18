@@ -90,6 +90,8 @@ pub struct FinalizerOracle {
     ran_finalizers: HashSet<FinalizerId>,
     /// Region close records: region -> close_time.
     region_closes: HashMap<RegionId, Time>,
+    /// Violations captured at the moment a region closes.
+    violations: Vec<FinalizerViolation>,
     /// Next finalizer ID for auto-generation.
     next_id: u64,
 }
@@ -138,6 +140,26 @@ impl FinalizerOracle {
     /// Called when a region reaches the Closed state.
     pub fn on_region_close(&mut self, region: RegionId, time: Time) {
         self.region_closes.insert(region, time);
+
+        let Some(finalizers) = self.finalizers_by_region.get(&region) else {
+            return;
+        };
+
+        let mut unrun = Vec::new();
+        for &finalizer_id in finalizers {
+            if !self.ran_finalizers.contains(&finalizer_id) {
+                unrun.push(finalizer_id);
+            }
+        }
+        unrun.sort_by_key(|id| id.0);
+
+        if !unrun.is_empty() {
+            self.violations.push(FinalizerViolation {
+                region,
+                unrun_finalizers: unrun,
+                region_close_time: time,
+            });
+        }
     }
 
     /// Verifies the invariant holds.
@@ -149,34 +171,12 @@ impl FinalizerOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(FinalizerViolation)` if a violation is detected
     pub fn check(&self) -> Result<(), FinalizerViolation> {
-        let mut regions: Vec<(RegionId, Time)> = self
-            .region_closes
+        if let Some(violation) = self
+            .violations
             .iter()
-            .map(|(&region, &close_time)| (region, close_time))
-            .collect();
-        regions.sort_by_key(|(region, _)| *region);
-
-        for (region, close_time) in regions {
-            let Some(finalizers) = self.finalizers_by_region.get(&region) else {
-                continue; // No finalizers registered for this region
-            };
-
-            let mut unrun = Vec::new();
-
-            for &finalizer_id in finalizers {
-                if !self.ran_finalizers.contains(&finalizer_id) {
-                    unrun.push(finalizer_id);
-                }
-            }
-            unrun.sort_by_key(|id| id.0);
-
-            if !unrun.is_empty() {
-                return Err(FinalizerViolation {
-                    region,
-                    unrun_finalizers: unrun,
-                    region_close_time: close_time,
-                });
-            }
+            .min_by_key(|violation| (violation.region, violation.region_close_time))
+        {
+            return Err(violation.clone());
         }
 
         Ok(())
@@ -188,6 +188,7 @@ impl FinalizerOracle {
         self.finalizers_by_region.clear();
         self.ran_finalizers.clear();
         self.region_closes.clear();
+        self.violations.clear();
         // Don't reset next_id to avoid ID collisions across tests
     }
 
@@ -386,9 +387,9 @@ mod tests {
             violation.region
         );
         crate::assert_with_log!(
-            violation.unrun_finalizers == vec![region0_f0, region0_f1],
+            violation.unrun_finalizers == vec![region0_f1, region0_f0],
             "sorted unrun finalizers",
-            vec![region0_f0, region0_f1],
+            vec![region0_f1, region0_f0],
             violation.unrun_finalizers
         );
         crate::assert_with_log!(
@@ -398,6 +399,40 @@ mod tests {
             violation.region_close_time
         );
         crate::test_complete!("check_reports_regions_and_finalizers_in_stable_order");
+    }
+
+    #[test]
+    fn finalizer_run_after_close_still_violates() {
+        init_test("finalizer_run_after_close_still_violates");
+        let mut oracle = FinalizerOracle::new();
+
+        let finalizer = oracle.generate_id();
+        oracle.on_register(finalizer, region(0), t(10));
+        oracle.on_region_close(region(0), t(100));
+        oracle.on_run(finalizer, t(110));
+
+        let violation = oracle
+            .check()
+            .expect_err("running a finalizer after close must not erase the violation");
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "violation region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.unrun_finalizers == vec![finalizer],
+            "unrun finalizers",
+            vec![finalizer],
+            violation.unrun_finalizers
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(100),
+            "region close time",
+            t(100),
+            violation.region_close_time
+        );
+        crate::test_complete!("finalizer_run_after_close_still_violates");
     }
 
     #[test]

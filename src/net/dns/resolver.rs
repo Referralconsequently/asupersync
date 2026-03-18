@@ -172,13 +172,12 @@ impl Resolver {
             ));
         }
 
-        // Normalize FQDN trailing dot so "example.com." and "example.com"
-        // share the same cache key and don't trigger redundant lookups.
-        let normalized = host.strip_suffix('.').unwrap_or(host);
-
-        // Check cache first
+        // Preserve absolute-name semantics in the cache: `example.com.` may be
+        // resolved differently from `example.com` when the system resolver
+        // applies search domains to the non-dotted form.
+        // Only validation trims one trailing root dot.
         if self.config.cache_enabled {
-            if let Some(cached) = self.cache.get_ip_result(normalized) {
+            if let Some(cached) = self.cache.get_ip_result(host) {
                 return cached;
             }
         }
@@ -187,8 +186,8 @@ impl Resolver {
 
         if self.config.cache_enabled {
             match &result {
-                Ok(lookup) => self.cache.put_ip(normalized, lookup),
-                Err(DnsError::NoRecords(_)) => self.cache.put_negative_ip_no_records(normalized),
+                Ok(lookup) => self.cache.put_ip(host, lookup),
+                Err(DnsError::NoRecords(_)) => self.cache.put_negative_ip_no_records(host),
                 Err(_) => {}
             }
         }
@@ -762,6 +761,55 @@ mod tests {
         let stats = resolver2.cache_stats();
         crate::assert_with_log!(stats.size > 0, "cache size", ">0", stats.size);
         crate::test_complete!("resolver_cache_shared");
+    }
+
+    #[test]
+    fn resolver_does_not_alias_trailing_dot_cache_entries() {
+        init_test("resolver_does_not_alias_trailing_dot_cache_entries");
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            ..ResolverConfig::default()
+        });
+
+        resolver.cache.put_ip(
+            "search-sensitive.example",
+            &LookupIp::new(vec!["192.0.2.44".parse().unwrap()], Duration::from_mins(5)),
+        );
+
+        let result =
+            future::block_on(async { resolver.lookup_ip("search-sensitive.example.").await });
+        crate::assert_with_log!(
+            matches!(result, Err(DnsError::Timeout)),
+            "absolute hostname should not reuse non-dotted cache entry",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_does_not_alias_trailing_dot_cache_entries");
+    }
+
+    #[test]
+    fn resolver_does_not_alias_trailing_dot_negative_cache_entries() {
+        init_test("resolver_does_not_alias_trailing_dot_negative_cache_entries");
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            ..ResolverConfig::default()
+        });
+
+        resolver
+            .cache
+            .put_negative_ip_no_records("search-sensitive.example");
+
+        let result =
+            future::block_on(async { resolver.lookup_ip("search-sensitive.example.").await });
+        crate::assert_with_log!(
+            matches!(result, Err(DnsError::Timeout)),
+            "absolute hostname should not reuse non-dotted negative cache entry",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_does_not_alias_trailing_dot_negative_cache_entries");
     }
 
     #[test]

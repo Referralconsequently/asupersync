@@ -471,6 +471,45 @@ mod tests {
     }
 
     #[test]
+    fn cache_distinguishes_absolute_trailing_dot_hostnames() {
+        init_test("cache_distinguishes_absolute_trailing_dot_hostnames");
+        let cache = DnsCache::new();
+        let dotted = LookupIp::new(
+            vec!["192.0.2.20".parse::<IpAddr>().unwrap()],
+            Duration::from_mins(5),
+        );
+        let plain = LookupIp::new(
+            vec!["192.0.2.21".parse::<IpAddr>().unwrap()],
+            Duration::from_mins(5),
+        );
+        let expected_dotted: IpAddr = "192.0.2.20".parse().unwrap();
+        let expected_plain: IpAddr = "192.0.2.21".parse().unwrap();
+
+        cache.put_ip("example.com.", &dotted);
+        cache.put_ip("example.com", &plain);
+
+        let dotted_result = cache.get_ip("EXAMPLE.COM.");
+        let plain_result = cache.get_ip("EXAMPLE.COM");
+        crate::assert_with_log!(
+            dotted_result.as_ref().and_then(LookupIp::first) == Some(expected_dotted),
+            "absolute hostname cache key stays distinct",
+            Some(expected_dotted),
+            format!("{dotted_result:?}")
+        );
+        crate::assert_with_log!(
+            plain_result.as_ref().and_then(LookupIp::first) == Some(expected_plain),
+            "relative hostname cache key stays distinct",
+            Some(expected_plain),
+            format!("{plain_result:?}")
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 2, "cache size", 2, stats.size);
+        crate::assert_with_log!(stats.hits == 2, "cache hits", 2, stats.hits);
+        crate::test_complete!("cache_distinguishes_absolute_trailing_dot_hostnames");
+    }
+
+    #[test]
     fn cache_negative_no_records_hits_and_expires() {
         init_test("cache_negative_no_records_hits_and_expires");
         set_test_time(0);
