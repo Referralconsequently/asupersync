@@ -968,8 +968,10 @@ impl<P: Policy> Scope<'_, P> {
         mut h1: TaskHandle<T1>,
         mut h2: TaskHandle<T2>,
     ) -> (Result<T1, JoinError>, Result<T2, JoinError>) {
-        let r1 = h1.join(cx).await;
-        let r2 = h2.join(cx).await;
+        let mut f1 = h1.join(cx);
+        let mut f2 = h2.join(cx);
+        let r1 = std::pin::Pin::new(&mut f1).await;
+        let r2 = std::pin::Pin::new(&mut f2).await;
         (r1, r2)
     }
 
@@ -1285,11 +1287,12 @@ impl<P: Policy> Scope<'_, P> {
     pub async fn join_all<T>(
         &self,
         cx: &Cx,
-        handles: Vec<TaskHandle<T>>,
+        mut handles: Vec<TaskHandle<T>>,
     ) -> Vec<Result<T, JoinError>> {
-        let mut results = Vec::with_capacity(handles.len());
-        for mut handle in handles {
-            results.push(handle.join(cx).await);
+        let mut futures: Vec<_> = handles.iter_mut().map(|h| h.join(cx)).collect();
+        let mut results = Vec::with_capacity(futures.len());
+        for fut in &mut futures {
+            results.push(std::pin::Pin::new(fut).await);
         }
         results
     }

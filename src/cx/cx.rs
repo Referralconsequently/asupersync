@@ -56,6 +56,18 @@ use super::macaroon::{MacaroonToken, VerificationContext, VerificationError};
 use super::registry::RegistryHandle;
 use crate::combinator::select::SelectAll;
 use crate::evidence_sink::EvidenceSink;
+#[cfg(feature = "messaging-fabric")]
+use crate::messaging::capability::{
+    FabricCapability, FabricCapabilityGrant, FabricCapabilityGrantError, FabricCapabilityId,
+    FabricCapabilityRegistry, FabricCapabilityScope, GrantedFabricToken, PublishPermit,
+    SubjectFamilyTag, SubscribeToken,
+};
+#[cfg(feature = "messaging-fabric")]
+use crate::messaging::class::DeliveryClass;
+#[cfg(feature = "messaging-fabric")]
+use crate::messaging::ir::CapabilityTokenSchema;
+#[cfg(feature = "messaging-fabric")]
+use crate::messaging::subject::SubjectPattern;
 use crate::observability::{
     DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
 };
@@ -117,6 +129,8 @@ struct CxHandles {
     pressure: Option<Arc<SystemPressure>>,
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
     macaroon: Option<Arc<MacaroonToken>>,
+    #[cfg(feature = "messaging-fabric")]
+    fabric_capabilities: Arc<FabricCapabilityRegistry>,
 }
 
 /// The capability context for a task.
@@ -312,6 +326,8 @@ impl<Caps> Cx<Caps> {
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
+                #[cfg(feature = "messaging-fabric")]
+                fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
             _caps: PhantomData,
         }
@@ -409,6 +425,8 @@ impl<Caps> Cx<Caps> {
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
+                #[cfg(feature = "messaging-fabric")]
+                fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
             _caps: PhantomData,
         }
@@ -531,6 +549,76 @@ impl<Caps> Cx<Caps> {
     #[must_use]
     pub fn has_registry(&self) -> bool {
         self.handles.registry.is_some()
+    }
+
+    /// Grant a shared FABRIC capability for runtime and distributed-path checks.
+    #[cfg(feature = "messaging-fabric")]
+    pub fn grant_fabric_capability(
+        &self,
+        capability: FabricCapability,
+    ) -> Result<FabricCapabilityGrant, FabricCapabilityGrantError> {
+        self.handles.fabric_capabilities.grant(capability)
+    }
+
+    /// Return the current FABRIC capability grants attached to this context.
+    #[cfg(feature = "messaging-fabric")]
+    #[must_use]
+    pub fn fabric_capabilities(&self) -> Vec<FabricCapabilityGrant> {
+        self.handles.fabric_capabilities.snapshot()
+    }
+
+    /// Grant a publish capability and mint the corresponding linear token.
+    #[cfg(feature = "messaging-fabric")]
+    pub fn grant_publish_capability<S: SubjectFamilyTag>(
+        &self,
+        subject: SubjectPattern,
+        schema: &CapabilityTokenSchema,
+        delivery_class: DeliveryClass,
+    ) -> Result<GrantedFabricToken<PublishPermit<S>>, FabricCapabilityGrantError> {
+        let token = PublishPermit::<S>::authorize(schema, delivery_class)?;
+        let grant = self.grant_fabric_capability(FabricCapability::Publish { subject })?;
+        Ok(GrantedFabricToken::new(grant, token))
+    }
+
+    /// Grant a subscription capability and mint the corresponding linear token.
+    #[cfg(feature = "messaging-fabric")]
+    pub fn grant_subscribe_capability<S: SubjectFamilyTag>(
+        &self,
+        subject: SubjectPattern,
+        schema: &CapabilityTokenSchema,
+        delivery_class: DeliveryClass,
+    ) -> Result<GrantedFabricToken<SubscribeToken<S>>, FabricCapabilityGrantError> {
+        let token = SubscribeToken::<S>::authorize(schema, delivery_class)?;
+        let grant = self.grant_fabric_capability(FabricCapability::Subscribe { subject })?;
+        Ok(GrantedFabricToken::new(grant, token))
+    }
+
+    /// Return true when the requested FABRIC capability is currently attached.
+    #[cfg(feature = "messaging-fabric")]
+    #[must_use]
+    pub fn check_fabric_capability(&self, capability: &FabricCapability) -> bool {
+        self.handles.fabric_capabilities.check(capability)
+    }
+
+    /// Revoke one FABRIC capability by its stable grant identifier.
+    #[cfg(feature = "messaging-fabric")]
+    #[must_use]
+    pub fn revoke_fabric_capability(&self, id: FabricCapabilityId) -> Option<FabricCapability> {
+        self.handles.fabric_capabilities.revoke_by_id(id)
+    }
+
+    /// Revoke every FABRIC capability whose subject space overlaps `subject`.
+    #[cfg(feature = "messaging-fabric")]
+    #[must_use]
+    pub fn revoke_fabric_capability_by_subject(&self, subject: &SubjectPattern) -> usize {
+        self.handles.fabric_capabilities.revoke_by_subject(subject)
+    }
+
+    /// Revoke every FABRIC capability in the provided coarse scope.
+    #[cfg(feature = "messaging-fabric")]
+    #[must_use]
+    pub fn revoke_fabric_capability_scope(&self, scope: FabricCapabilityScope) -> usize {
+        self.handles.fabric_capabilities.revoke_scope(scope)
     }
 
     /// Attaches an evidence sink for runtime decision tracing.
@@ -2430,6 +2518,14 @@ impl<Caps> Drop for SpanGuard<Caps> {
 mod tests {
     use super::*;
     use crate::cx::macaroon::CaveatPredicate;
+    #[cfg(feature = "messaging-fabric")]
+    use crate::messaging::capability::{CommandFamily, FabricCapability, FabricCapabilityScope};
+    #[cfg(feature = "messaging-fabric")]
+    use crate::messaging::class::DeliveryClass;
+    #[cfg(feature = "messaging-fabric")]
+    use crate::messaging::ir::{CapabilityPermission, CapabilityTokenSchema, SubjectFamily};
+    #[cfg(feature = "messaging-fabric")]
+    use crate::messaging::subject::SubjectPattern;
     use crate::trace::TraceBufferHandle;
     use crate::util::{ArenaIndex, DetEntropy};
 
@@ -2450,6 +2546,19 @@ mod tests {
             None,
             Some(Arc::new(DetEntropy::new(seed))),
         )
+    }
+
+    #[cfg(feature = "messaging-fabric")]
+    fn capability_schema(
+        families: Vec<SubjectFamily>,
+        permissions: Vec<CapabilityPermission>,
+    ) -> CapabilityTokenSchema {
+        CapabilityTokenSchema {
+            name: "fabric.cx.demo".to_owned(),
+            families,
+            delivery_classes: vec![DeliveryClass::EphemeralInteractive],
+            permissions,
+        }
     }
 
     #[test]
@@ -3179,5 +3288,111 @@ mod tests {
         let entries = sink.entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].action, "verify_fail_signature");
+    }
+
+    #[cfg(feature = "messaging-fabric")]
+    #[test]
+    fn cx_grant_publish_capability_mints_token_and_runtime_grant() {
+        let cx = test_cx();
+        let schema = capability_schema(
+            vec![SubjectFamily::Command],
+            vec![CapabilityPermission::Publish],
+        );
+
+        let granted = cx
+            .grant_publish_capability::<CommandFamily>(
+                SubjectPattern::new("orders.>"),
+                &schema,
+                DeliveryClass::EphemeralInteractive,
+            )
+            .expect("publish capability should mint");
+
+        assert_eq!(granted.token().family(), SubjectFamily::Command);
+        assert!(cx.check_fabric_capability(&FabricCapability::Publish {
+            subject: SubjectPattern::new("orders.created"),
+        }));
+        assert!(!cx.check_fabric_capability(&FabricCapability::Publish {
+            subject: SubjectPattern::new("payments.created"),
+        }));
+        assert_eq!(cx.fabric_capabilities().len(), 1);
+    }
+
+    #[cfg(feature = "messaging-fabric")]
+    #[test]
+    fn cx_revoke_fabric_capabilities_by_id_and_scope_propagates_to_children() {
+        let cx = test_cx();
+        let child = cx.restrict::<cap::None>();
+        let publish = cx
+            .grant_fabric_capability(FabricCapability::Publish {
+                subject: SubjectPattern::new("orders.>"),
+            })
+            .expect("publish grant");
+        let subscribe = cx
+            .grant_fabric_capability(FabricCapability::Subscribe {
+                subject: SubjectPattern::new("orders.created"),
+            })
+            .expect("subscribe grant");
+
+        assert!(child.check_fabric_capability(&FabricCapability::Publish {
+            subject: SubjectPattern::new("orders.created"),
+        }));
+        assert_eq!(
+            child.revoke_fabric_capability_scope(FabricCapabilityScope::Publish),
+            1
+        );
+        assert!(!cx.check_fabric_capability(&FabricCapability::Publish {
+            subject: SubjectPattern::new("orders.created"),
+        }));
+        assert_eq!(
+            cx.revoke_fabric_capability(subscribe.id()),
+            Some(FabricCapability::Subscribe {
+                subject: SubjectPattern::new("orders.created"),
+            })
+        );
+        assert!(
+            !child.check_fabric_capability(&FabricCapability::Subscribe {
+                subject: SubjectPattern::new("orders.created"),
+            })
+        );
+        assert_eq!(publish.id().raw(), 1);
+    }
+
+    #[cfg(feature = "messaging-fabric")]
+    #[test]
+    fn cx_revoke_fabric_capability_by_subject_is_overlap_based() {
+        let cx = test_cx();
+        cx.grant_fabric_capability(FabricCapability::Publish {
+            subject: SubjectPattern::new("orders.>"),
+        })
+        .expect("publish grant");
+        cx.grant_fabric_capability(FabricCapability::Subscribe {
+            subject: SubjectPattern::new("payments.>"),
+        })
+        .expect("subscribe grant");
+
+        assert_eq!(
+            cx.revoke_fabric_capability_by_subject(&SubjectPattern::new("orders.created")),
+            1
+        );
+        assert!(!cx.check_fabric_capability(&FabricCapability::Publish {
+            subject: SubjectPattern::new("orders.created"),
+        }));
+        assert!(cx.check_fabric_capability(&FabricCapability::Subscribe {
+            subject: SubjectPattern::new("payments.captured"),
+        }));
+    }
+
+    #[cfg(feature = "messaging-fabric")]
+    #[test]
+    fn cx_rejects_empty_stream_capability_names() {
+        let cx = test_cx();
+
+        let error = cx
+            .grant_fabric_capability(FabricCapability::ConsumeStream {
+                stream: "   ".to_owned(),
+            })
+            .expect_err("blank stream names must fail");
+
+        assert_eq!(error, FabricCapabilityGrantError::EmptyStreamName);
     }
 }
