@@ -3602,7 +3602,9 @@ mod tests {
     fn capture_terminal_from_outcome_cancelled() {
         init_test("capture_terminal_from_outcome_cancelled");
         let outcome: crate::types::outcome::Outcome<i32, String> =
-            crate::types::outcome::Outcome::Cancelled(crate::types::CancelReason::explicit());
+            crate::types::outcome::Outcome::Cancelled(crate::types::CancelReason::new(
+                crate::types::CancelKind::User,
+            ));
         let t = capture_terminal_outcome(&outcome);
         assert_eq!(t.class, OutcomeClass::Cancelled);
         assert!(t.cancel_reason_class.is_some());
@@ -3610,13 +3612,19 @@ mod tests {
     }
 
     #[test]
-    fn capture_terminal_from_result() {
-        init_test("capture_terminal_from_result");
+    fn capture_terminal_from_result_ok_and_err() {
+        init_test("capture_terminal_from_result_ok_and_err");
         let ok: Result<i32, String> = Ok(42);
         let err: Result<i32, String> = Err("fail".to_string());
-        assert_eq!(capture_terminal_from_result(&ok).class, OutcomeClass::Ok);
-        assert_eq!(capture_terminal_from_result(&err).class, OutcomeClass::Err);
-        crate::test_complete!("capture_terminal_from_result");
+        assert_eq!(
+            super::capture_terminal_from_result(&ok).class,
+            OutcomeClass::Ok
+        );
+        assert_eq!(
+            super::capture_terminal_from_result(&err).class,
+            OutcomeClass::Err
+        );
+        crate::test_complete!("capture_terminal_from_result_ok_and_err");
     }
 
     #[test]
