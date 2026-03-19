@@ -1,0 +1,2016 @@
+//! Core FABRIC intermediate-representation types.
+//!
+//! These data structures give the messaging fabric a deterministic schema that
+//! higher-layer declarations can compile into and inspect before runtime
+//! behavior exists. The types here deliberately model declarations, policies,
+//! and contracts rather than live protocol machinery.
+
+use super::class::{AckKind, DeliveryClass};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::time::Duration;
+use thiserror::Error;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "subject.rs"]
+mod subject_defs;
+
+#[cfg(not(test))]
+pub use super::subject::SubjectPattern;
+#[cfg(test)]
+pub use subject_defs::SubjectPattern;
+
+/// Schema version for the current FABRIC IR layout.
+pub const FABRIC_IR_SCHEMA_VERSION: u16 = 1;
+
+/// Root FABRIC IR document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FabricIr {
+    /// Schema version for forward-compatible upgrades.
+    pub schema_version: u16,
+    /// Subject declarations that define semantic routing intent.
+    pub subjects: Vec<SubjectSchema>,
+    /// Namespace or semantics transforms applied during lowering.
+    pub morphisms: Vec<MorphismPlan>,
+    /// Service interface declarations.
+    pub services: Vec<ServiceContract>,
+    /// Session-typed protocol declarations.
+    pub protocols: Vec<ProtocolContract>,
+    /// Reusable consumer-policy declarations.
+    pub consumers: Vec<ConsumerPolicy>,
+    /// Reusable privacy-policy declarations.
+    pub privacy_policies: Vec<PrivacyPolicy>,
+    /// Reusable cut-policy declarations.
+    pub cut_policies: Vec<CutPolicy>,
+    /// Reusable branch-policy declarations.
+    pub branch_policies: Vec<BranchPolicy>,
+    /// Reusable quantitative obligation contracts.
+    pub obligation_contracts: Vec<QuantitativeObligationContract>,
+    /// Capability token schemas that constrain privileged actions.
+    pub capability_tokens: Vec<CapabilityTokenSchema>,
+}
+
+impl Default for FabricIr {
+    fn default() -> Self {
+        Self {
+            schema_version: FABRIC_IR_SCHEMA_VERSION,
+            subjects: Vec::new(),
+            morphisms: Vec::new(),
+            services: Vec::new(),
+            protocols: Vec::new(),
+            consumers: Vec::new(),
+            privacy_policies: Vec::new(),
+            cut_policies: Vec::new(),
+            branch_policies: Vec::new(),
+            obligation_contracts: Vec::new(),
+            capability_tokens: Vec::new(),
+        }
+    }
+}
+
+impl FabricIr {
+    /// Validate the IR document for structural correctness.
+    #[must_use]
+    pub fn validate(&self) -> Vec<FabricIrValidationError> {
+        let mut errors = Vec::new();
+
+        if self.schema_version != FABRIC_IR_SCHEMA_VERSION {
+            errors.push(FabricIrValidationError::new(
+                "schema_version",
+                format!(
+                    "unsupported FABRIC IR version {}, expected {FABRIC_IR_SCHEMA_VERSION}",
+                    self.schema_version
+                ),
+            ));
+        }
+
+        self.validate_unique_names(&mut errors);
+        self.validate_entries(&mut errors);
+
+        errors
+    }
+
+    fn validate_unique_names(&self, errors: &mut Vec<FabricIrValidationError>) {
+        validate_unique_keys(
+            self.subjects
+                .iter()
+                .map(|subject| subject.pattern.as_str().to_owned()),
+            "subjects",
+            "subject pattern must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.morphisms.iter().map(|morphism| morphism.name.clone()),
+            "morphisms",
+            "morphism name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.services.iter().map(|service| service.name.clone()),
+            "services",
+            "service name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.protocols.iter().map(|protocol| protocol.name.clone()),
+            "protocols",
+            "protocol name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.consumers.iter().map(|consumer| consumer.name.clone()),
+            "consumers",
+            "consumer policy name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.privacy_policies
+                .iter()
+                .map(|policy| policy.name.clone()),
+            "privacy_policies",
+            "privacy policy name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.cut_policies.iter().map(|policy| policy.name.clone()),
+            "cut_policies",
+            "cut policy name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.branch_policies
+                .iter()
+                .map(|policy| policy.name.clone()),
+            "branch_policies",
+            "branch policy name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.obligation_contracts
+                .iter()
+                .map(|contract| contract.name.clone()),
+            "obligation_contracts",
+            "quantitative obligation contract name must be unique within a FabricIr document",
+            errors,
+        );
+        validate_unique_keys(
+            self.capability_tokens
+                .iter()
+                .map(|capability| capability.name.clone()),
+            "capability_tokens",
+            "capability token schema name must be unique within a FabricIr document",
+            errors,
+        );
+    }
+
+    fn validate_entries(&self, errors: &mut Vec<FabricIrValidationError>) {
+        for (index, subject) in self.subjects.iter().enumerate() {
+            subject.validate_at(&format!("subjects[{index}]"), errors);
+        }
+        for (index, morphism) in self.morphisms.iter().enumerate() {
+            morphism.validate_at(&format!("morphisms[{index}]"), errors);
+        }
+        for (index, service) in self.services.iter().enumerate() {
+            service.validate_at(&format!("services[{index}]"), errors);
+        }
+        for (index, protocol) in self.protocols.iter().enumerate() {
+            protocol.validate_at(&format!("protocols[{index}]"), errors);
+        }
+        for (index, consumer) in self.consumers.iter().enumerate() {
+            consumer.validate_at(&format!("consumers[{index}]"), errors);
+        }
+        for (index, policy) in self.privacy_policies.iter().enumerate() {
+            policy.validate_at(&format!("privacy_policies[{index}]"), errors);
+        }
+        for (index, policy) in self.cut_policies.iter().enumerate() {
+            policy.validate_at(&format!("cut_policies[{index}]"), errors);
+        }
+        for (index, policy) in self.branch_policies.iter().enumerate() {
+            policy.validate_at(&format!("branch_policies[{index}]"), errors);
+        }
+        for (index, contract) in self.obligation_contracts.iter().enumerate() {
+            contract.validate_at(&format!("obligation_contracts[{index}]"), errors);
+        }
+        for (index, capability) in self.capability_tokens.iter().enumerate() {
+            capability.validate_at(&format!("capability_tokens[{index}]"), errors);
+        }
+    }
+}
+
+/// Validation error for a FABRIC IR declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[error("{field}: {message}")]
+pub struct FabricIrValidationError {
+    /// Logical field path that failed validation.
+    pub field: String,
+    /// Human-readable problem description.
+    pub message: String,
+}
+
+impl FabricIrValidationError {
+    fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Canonical subject pattern schema used by the FABRIC IR.
+impl SubjectPattern {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        let pattern = self.as_str().trim();
+        if pattern.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                field,
+                "subject pattern must not be empty",
+            ));
+            return;
+        }
+        if pattern.chars().any(char::is_whitespace) {
+            errors.push(FabricIrValidationError::new(
+                field,
+                "subject pattern must not contain whitespace",
+            ));
+        }
+
+        let segments = pattern.split('.').collect::<Vec<_>>();
+        if segments.iter().any(|segment| segment.is_empty()) {
+            errors.push(FabricIrValidationError::new(
+                field,
+                "subject pattern must not contain empty segments",
+            ));
+        }
+
+        let tail_count = segments.iter().filter(|segment| **segment == ">").count();
+        if tail_count > 1 {
+            errors.push(FabricIrValidationError::new(
+                field,
+                "subject pattern may contain at most one tail wildcard",
+            ));
+        }
+
+        if let Some(position) = segments.iter().position(|segment| *segment == ">")
+            && position + 1 != segments.len()
+        {
+            errors.push(FabricIrValidationError::new(
+                field,
+                "tail wildcard must be the terminal segment",
+            ));
+        }
+
+        for segment in segments {
+            if segment != "*" && segment != ">" && (segment.contains('*') || segment.contains('>'))
+            {
+                errors.push(FabricIrValidationError::new(
+                    field,
+                    format!("subject segment `{segment}` embeds a wildcard token"),
+                ));
+            }
+        }
+    }
+}
+
+/// Semantic family attached to a subject declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectFamily {
+    /// Imperative action request.
+    Command,
+    /// Notification that something happened.
+    #[default]
+    Event,
+    /// Response to a command or service request.
+    Reply,
+    /// Control-plane or runtime-management traffic.
+    Control,
+    /// Step inside a session-typed protocol.
+    ProtocolStep,
+    /// Stream or consumer capture selector.
+    CaptureSelector,
+    /// Read-only projected or derived view.
+    DerivedView,
+}
+
+impl SubjectFamily {
+    /// Exhaustive list of subject families.
+    pub const ALL: [Self; 7] = [
+        Self::Command,
+        Self::Event,
+        Self::Reply,
+        Self::Control,
+        Self::ProtocolStep,
+        Self::CaptureSelector,
+        Self::DerivedView,
+    ];
+}
+
+/// Reply-space contract for request/reply or service subjects.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplySpaceRule {
+    /// Use the caller-provided inbox.
+    #[default]
+    CallerInbox,
+    /// Route replies into a shared reply subject prefix.
+    SharedPrefix {
+        /// Reply-subject prefix shared across callers.
+        prefix: String,
+    },
+    /// Allocate a dedicated reply prefix per requestor or tenant.
+    DedicatedPrefix {
+        /// Reply-subject prefix allocated to one requestor or tenant.
+        prefix: String,
+    },
+}
+
+impl ReplySpaceRule {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        let prefix = match self {
+            Self::CallerInbox => return,
+            Self::SharedPrefix { prefix } | Self::DedicatedPrefix { prefix } => prefix,
+        };
+
+        if prefix.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                field,
+                "reply-space prefix must not be empty",
+            ));
+        }
+    }
+}
+
+/// Whether a subject may move across stewardship or topology boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobilityPermission {
+    /// Subject is pinned to the local authority boundary.
+    #[default]
+    LocalOnly,
+    /// Subject may traverse federated boundaries.
+    Federated,
+    /// Subject may change stewardship with explicit control-plane support.
+    StewardshipTransfer,
+}
+
+impl MobilityPermission {
+    /// Exhaustive list of mobility permissions.
+    pub const ALL: [Self; 3] = [Self::LocalOnly, Self::Federated, Self::StewardshipTransfer];
+}
+
+/// Subject declaration in the FABRIC IR.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SubjectSchema {
+    /// Subject or subject-pattern declaration.
+    pub pattern: SubjectPattern,
+    /// Semantic family classification.
+    pub family: SubjectFamily,
+    /// Default service class for this subject family.
+    pub delivery_class: DeliveryClass,
+    /// Evidence capture policy.
+    pub evidence_policy: EvidencePolicy,
+    /// Privacy and metadata disclosure policy.
+    pub privacy_policy: PrivacyPolicy,
+    /// Optional reply-space contract.
+    pub reply_space: Option<ReplySpaceRule>,
+    /// Stewardship and federation mobility constraint.
+    pub mobility: MobilityPermission,
+    /// Optional quantitative obligation for the subject.
+    pub quantitative_obligation: Option<QuantitativeObligationContract>,
+}
+
+impl SubjectSchema {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        self.pattern
+            .validate_at(&format!("{field}.pattern"), errors);
+        self.evidence_policy
+            .validate_at(&format!("{field}.evidence_policy"), errors);
+        self.privacy_policy
+            .validate_at(&format!("{field}.privacy_policy"), errors);
+        if let Some(rule) = &self.reply_space {
+            rule.validate_at(&format!("{field}.reply_space"), errors);
+        }
+        if let Some(contract) = &self.quantitative_obligation {
+            contract.validate_at(&format!("{field}.quantitative_obligation"), errors);
+            if contract.class != self.delivery_class {
+                errors.push(FabricIrValidationError::new(
+                    format!("{field}.quantitative_obligation.class"),
+                    "quantitative obligation class must match the subject delivery class",
+                ));
+            }
+        }
+
+        match self.family {
+            SubjectFamily::Command => {
+                if self.reply_space.is_none() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.reply_space"),
+                        "command subjects must declare a reply-space rule",
+                    ));
+                }
+            }
+            SubjectFamily::Event | SubjectFamily::Reply | SubjectFamily::DerivedView => {
+                if self.reply_space.is_some() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.reply_space"),
+                        "event, reply, and derived-view subjects must not declare reply-space rules",
+                    ));
+                }
+            }
+            SubjectFamily::Control => {
+                if !self.pattern.as_str().starts_with("$SYS.")
+                    && !self.pattern.as_str().starts_with("sys.")
+                {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.pattern"),
+                        "control subjects must live under `$SYS.` or `sys.`",
+                    ));
+                }
+            }
+            SubjectFamily::CaptureSelector => {
+                if !self.pattern.as_str().contains('*') && !self.pattern.as_str().contains('>') {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.pattern"),
+                        "capture-selector subjects must include `*` or `>`",
+                    ));
+                }
+            }
+            SubjectFamily::ProtocolStep => {}
+        }
+    }
+}
+
+/// Namespace transform or semantics rewrite plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MorphismPlan {
+    /// Human-readable plan name.
+    pub name: String,
+    /// Source subject pattern to match.
+    pub source_pattern: SubjectPattern,
+    /// Canonical target prefix after rewriting.
+    pub target_prefix: String,
+    /// Families this transform is allowed to rewrite.
+    pub allowed_families: Vec<SubjectFamily>,
+    /// Concrete transform steps.
+    pub transforms: Vec<MorphismTransform>,
+}
+
+impl Default for MorphismPlan {
+    fn default() -> Self {
+        Self {
+            name: "identity".to_owned(),
+            source_pattern: SubjectPattern::default(),
+            target_prefix: "fabric".to_owned(),
+            allowed_families: vec![SubjectFamily::Event],
+            transforms: vec![MorphismTransform::PreserveReplySpace],
+        }
+    }
+}
+
+impl MorphismPlan {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "morphism plan name must not be empty",
+            ));
+        }
+        self.source_pattern
+            .validate_at(&format!("{field}.source_pattern"), errors);
+        if self.target_prefix.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.target_prefix"),
+                "morphism target prefix must not be empty",
+            ));
+        }
+        if self.allowed_families.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.allowed_families"),
+                "morphism plan must admit at least one subject family",
+            ));
+        }
+        if self.transforms.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.transforms"),
+                "morphism plan must declare at least one transform step",
+            ));
+        }
+        for (index, transform) in self.transforms.iter().enumerate() {
+            transform.validate_at(&format!("{field}.transforms[{index}]"), errors);
+        }
+    }
+}
+
+/// Individual transform step in a morphism plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MorphismTransform {
+    /// Rename one namespace prefix to another.
+    RenamePrefix {
+        /// Source namespace prefix.
+        from: String,
+        /// Target namespace prefix.
+        to: String,
+    },
+    /// Restrict the plan to a single family.
+    FilterFamily {
+        /// Admitted subject family.
+        family: SubjectFamily,
+    },
+    /// Escalate the delivery class during lowering.
+    EscalateDeliveryClass {
+        /// Delivery class applied after the transform.
+        class: DeliveryClass,
+    },
+    /// Preserve reply-space declarations.
+    PreserveReplySpace,
+    /// Attach a stricter evidence policy to rewritten subjects.
+    AttachEvidencePolicy {
+        /// Evidence policy attached by the transform.
+        policy: EvidencePolicy,
+    },
+}
+
+impl MorphismTransform {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        match self {
+            Self::RenamePrefix { from, to } => {
+                if from.trim().is_empty() || to.trim().is_empty() {
+                    errors.push(FabricIrValidationError::new(
+                        field,
+                        "rename-prefix transform requires non-empty `from` and `to`",
+                    ));
+                } else if from == to {
+                    errors.push(FabricIrValidationError::new(
+                        field,
+                        "rename-prefix transform must change the prefix",
+                    ));
+                }
+            }
+            Self::FilterFamily { .. }
+            | Self::EscalateDeliveryClass { .. }
+            | Self::PreserveReplySpace => {}
+            Self::AttachEvidencePolicy { policy } => {
+                policy.validate_at(&format!("{field}.policy"), errors);
+            }
+        }
+    }
+}
+
+/// Service interface contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServiceContract {
+    /// Human-readable service name.
+    pub name: String,
+    /// Concrete service operations.
+    pub operations: Vec<ServiceOperation>,
+    /// Default consumer-policy expectations.
+    pub default_consumer_policy: ConsumerPolicy,
+    /// Optional capability token schema name required by the service.
+    pub required_capability: Option<String>,
+    /// Optional quantitative obligation for the service boundary.
+    pub quantitative_obligation: Option<QuantitativeObligationContract>,
+}
+
+impl Default for ServiceContract {
+    fn default() -> Self {
+        Self {
+            name: "service".to_owned(),
+            operations: vec![ServiceOperation::default()],
+            default_consumer_policy: ConsumerPolicy::default(),
+            required_capability: None,
+            quantitative_obligation: None,
+        }
+    }
+}
+
+impl ServiceContract {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "service contract name must not be empty",
+            ));
+        }
+        if self.operations.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.operations"),
+                "service contract must declare at least one operation",
+            ));
+        }
+        self.default_consumer_policy
+            .validate_at(&format!("{field}.default_consumer_policy"), errors);
+        if let Some(required_capability) = &self.required_capability
+            && required_capability.trim().is_empty()
+        {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.required_capability"),
+                "required capability token name must not be empty",
+            ));
+        }
+        if let Some(contract) = &self.quantitative_obligation {
+            contract.validate_at(&format!("{field}.quantitative_obligation"), errors);
+        }
+        for (index, operation) in self.operations.iter().enumerate() {
+            operation.validate_at(&format!("{field}.operations[{index}]"), errors);
+        }
+    }
+}
+
+/// Individual service operation declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceOperation {
+    /// Operation name.
+    pub name: String,
+    /// Request subject pattern.
+    pub request: SubjectPattern,
+    /// Reply-space rule for request/reply operations.
+    pub reply_space: Option<ReplySpaceRule>,
+    /// Delivery class promised by the service boundary.
+    pub delivery_class: DeliveryClass,
+    /// Whether retries are safe without semantic duplication.
+    pub idempotent: bool,
+}
+
+impl Default for ServiceOperation {
+    fn default() -> Self {
+        Self {
+            name: "handle".to_owned(),
+            request: SubjectPattern::default(),
+            reply_space: Some(ReplySpaceRule::CallerInbox),
+            delivery_class: DeliveryClass::default(),
+            idempotent: true,
+        }
+    }
+}
+
+impl ServiceOperation {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "service operation name must not be empty",
+            ));
+        }
+        self.request
+            .validate_at(&format!("{field}.request"), errors);
+        if let Some(rule) = &self.reply_space {
+            rule.validate_at(&format!("{field}.reply_space"), errors);
+        } else if self.delivery_class >= DeliveryClass::ObligationBacked {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.reply_space"),
+                "obligation-backed and stronger service operations must declare a reply-space rule",
+            ));
+        }
+    }
+}
+
+/// Protocol contract for session-typed interactions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProtocolContract {
+    /// Protocol name.
+    pub name: String,
+    /// Distinct protocol roles.
+    pub roles: Vec<String>,
+    /// Entry subject for protocol initiation.
+    pub entry_subject: SubjectPattern,
+    /// Session grammar for the protocol.
+    pub session: SessionSchema,
+    /// Counterfactual branch policy for replay or audit.
+    pub branch_policy: BranchPolicy,
+}
+
+impl Default for ProtocolContract {
+    fn default() -> Self {
+        Self {
+            name: "protocol".to_owned(),
+            roles: vec!["caller".to_owned(), "callee".to_owned()],
+            entry_subject: SubjectPattern::default(),
+            session: SessionSchema::default(),
+            branch_policy: BranchPolicy::default(),
+        }
+    }
+}
+
+impl ProtocolContract {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "protocol contract name must not be empty",
+            ));
+        }
+        self.entry_subject
+            .validate_at(&format!("{field}.entry_subject"), errors);
+        self.branch_policy
+            .validate_at(&format!("{field}.branch_policy"), errors);
+        self.session
+            .validate_at(&format!("{field}.session"), errors);
+
+        if self.roles.len() < 2 {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.roles"),
+                "protocol contract must declare at least two distinct roles",
+            ));
+        }
+        validate_unique_keys(
+            self.roles.iter().cloned(),
+            &format!("{field}.roles"),
+            "protocol role names must be unique and non-empty",
+            errors,
+        );
+    }
+}
+
+/// Session-typed protocol schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionSchema {
+    /// Session schema name.
+    pub name: String,
+    /// Ordered session steps.
+    pub steps: Vec<SessionStep>,
+}
+
+impl Default for SessionSchema {
+    fn default() -> Self {
+        Self {
+            name: "session".to_owned(),
+            steps: vec![SessionStep::End],
+        }
+    }
+}
+
+impl SessionSchema {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "session schema name must not be empty",
+            ));
+        }
+        if self.steps.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.steps"),
+                "session schema must contain at least one step",
+            ));
+            return;
+        }
+
+        for (index, step) in self.steps.iter().enumerate() {
+            step.validate_at(&format!("{field}.steps[{index}]"), errors);
+        }
+
+        if !matches!(self.steps.last(), Some(SessionStep::End)) {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.steps"),
+                "session schema must terminate with an `end` step",
+            ));
+        }
+    }
+}
+
+/// Individual session-typed protocol step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionStep {
+    /// Sender emits a message on a subject.
+    Send {
+        /// Role performing the send.
+        role: String,
+        /// Subject emitted by the role.
+        subject: SubjectPattern,
+    },
+    /// Receiver consumes a message on a subject.
+    Receive {
+        /// Role performing the receive.
+        role: String,
+        /// Subject consumed by the role.
+        subject: SubjectPattern,
+    },
+    /// Branching choice driven by one role.
+    Choice {
+        /// Role deciding which branch to take.
+        decider_role: String,
+        /// Branches available to the decider.
+        branches: Vec<SessionBranch>,
+    },
+    /// Terminal step.
+    End,
+}
+
+impl SessionStep {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        match self {
+            Self::Send { role, subject } | Self::Receive { role, subject } => {
+                if role.trim().is_empty() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.role"),
+                        "session step role must not be empty",
+                    ));
+                }
+                subject.validate_at(&format!("{field}.subject"), errors);
+            }
+            Self::Choice {
+                decider_role,
+                branches,
+            } => {
+                if decider_role.trim().is_empty() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.decider_role"),
+                        "session choice decider role must not be empty",
+                    ));
+                }
+                if branches.is_empty() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.branches"),
+                        "session choice must include at least one branch",
+                    ));
+                }
+                validate_unique_keys(
+                    branches.iter().map(|branch| branch.label.clone()),
+                    &format!("{field}.branches"),
+                    "session branch labels must be unique and non-empty",
+                    errors,
+                );
+                for (index, branch) in branches.iter().enumerate() {
+                    branch.validate_at(&format!("{field}.branches[{index}]"), errors);
+                }
+            }
+            Self::End => {}
+        }
+    }
+}
+
+/// Named branch in a session choice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionBranch {
+    /// Branch label.
+    pub label: String,
+    /// Steps executed if the branch is chosen.
+    pub steps: Vec<SessionStep>,
+}
+
+impl Default for SessionBranch {
+    fn default() -> Self {
+        Self {
+            label: "ok".to_owned(),
+            steps: vec![SessionStep::End],
+        }
+    }
+}
+
+impl SessionBranch {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.label.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.label"),
+                "session branch label must not be empty",
+            ));
+        }
+        if self.steps.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.steps"),
+                "session branch must contain at least one step",
+            ));
+            return;
+        }
+        for (index, step) in self.steps.iter().enumerate() {
+            step.validate_at(&format!("{field}.steps[{index}]"), errors);
+        }
+        if !matches!(self.steps.last(), Some(SessionStep::End)) {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.steps"),
+                "session branch must terminate with an `end` step",
+            ));
+        }
+    }
+}
+
+/// Delivery policy configuration for consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumerPolicy {
+    /// Consumer policy name.
+    pub name: String,
+    /// Consumer durability / replay mode.
+    pub mode: ConsumerMode,
+    /// Delivery class expected by the consumer.
+    pub delivery_class: DeliveryClass,
+    /// Acknowledgement boundary emitted by the consumer.
+    pub ack_kind: AckKind,
+    /// Maximum buffered messages before applying backpressure.
+    pub max_pending: u32,
+    /// Maximum delivery attempts before policy escalation.
+    pub max_deliver: u16,
+    /// Optional replay window.
+    pub replay_window: Option<Duration>,
+}
+
+impl Default for ConsumerPolicy {
+    fn default() -> Self {
+        Self {
+            name: "consumer".to_owned(),
+            mode: ConsumerMode::default(),
+            delivery_class: DeliveryClass::default(),
+            ack_kind: DeliveryClass::default().minimum_ack(),
+            max_pending: 256,
+            max_deliver: 1,
+            replay_window: None,
+        }
+    }
+}
+
+impl ConsumerPolicy {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "consumer policy name must not be empty",
+            ));
+        }
+        if self.max_pending == 0 {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.max_pending"),
+                "consumer policy max_pending must be greater than zero",
+            ));
+        }
+        if self.max_deliver == 0 {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.max_deliver"),
+                "consumer policy max_deliver must be greater than zero",
+            ));
+        }
+        if self.ack_kind < self.delivery_class.minimum_ack() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.ack_kind"),
+                format!(
+                    "consumer policy ack boundary `{}` is weaker than the minimum `{}` for delivery class `{}`",
+                    self.ack_kind,
+                    self.delivery_class.minimum_ack(),
+                    self.delivery_class
+                ),
+            ));
+        }
+        match self.replay_window {
+            Some(window) if window.is_zero() => errors.push(FabricIrValidationError::new(
+                format!("{field}.replay_window"),
+                "consumer replay window must be greater than zero when present",
+            )),
+            Some(_) if self.mode != ConsumerMode::Replayable => {
+                errors.push(FabricIrValidationError::new(
+                    format!("{field}.replay_window"),
+                    "consumer replay window is only valid for replayable consumers",
+                ));
+            }
+            None if self.mode == ConsumerMode::Replayable => {
+                errors.push(FabricIrValidationError::new(
+                    format!("{field}.replay_window"),
+                    "replayable consumers must declare a replay window",
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Consumer durability mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumerMode {
+    /// Stateless or best-effort consumption.
+    #[default]
+    Ephemeral,
+    /// Durable cursor without replay inspection.
+    Durable,
+    /// Durable cursor with replay inspection and auditing.
+    Replayable,
+}
+
+impl ConsumerMode {
+    /// Exhaustive list of consumer modes.
+    pub const ALL: [Self; 3] = [Self::Ephemeral, Self::Durable, Self::Replayable];
+}
+
+/// Capability token schema that binds privileges to fabric declarations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityTokenSchema {
+    /// Capability schema name.
+    pub name: String,
+    /// Subject families this token may authorize.
+    pub families: Vec<SubjectFamily>,
+    /// Delivery classes this token may request.
+    pub delivery_classes: Vec<DeliveryClass>,
+    /// Permissions granted by the token.
+    pub permissions: Vec<CapabilityPermission>,
+}
+
+impl Default for CapabilityTokenSchema {
+    fn default() -> Self {
+        Self {
+            name: "fabric.token".to_owned(),
+            families: vec![SubjectFamily::Event],
+            delivery_classes: vec![DeliveryClass::default()],
+            permissions: vec![CapabilityPermission::Publish],
+        }
+    }
+}
+
+impl CapabilityTokenSchema {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "capability token schema name must not be empty",
+            ));
+        }
+        if self.families.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.families"),
+                "capability token schema must authorize at least one subject family",
+            ));
+        }
+        if self.delivery_classes.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.delivery_classes"),
+                "capability token schema must authorize at least one delivery class",
+            ));
+        }
+        if self.permissions.is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.permissions"),
+                "capability token schema must authorize at least one permission",
+            ));
+        }
+    }
+}
+
+/// Capability permission granted by a token schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityPermission {
+    /// Publish on authorized subjects.
+    #[default]
+    Publish,
+    /// Subscribe on authorized subjects.
+    Subscribe,
+    /// Initiate request/reply interactions.
+    Request,
+    /// Reply on authorized subjects.
+    Reply,
+    /// Attach or inspect counterfactual branches.
+    BranchAttach,
+}
+
+impl CapabilityPermission {
+    /// Exhaustive list of capability permissions.
+    pub const ALL: [Self; 5] = [
+        Self::Publish,
+        Self::Subscribe,
+        Self::Request,
+        Self::Reply,
+        Self::BranchAttach,
+    ];
+}
+
+/// Evidence capture and retention policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidencePolicy {
+    /// Sampling ratio in the closed interval `[0.0, 1.0]`.
+    pub sampling_ratio: f64,
+    /// Evidence retention policy.
+    pub retention: RetentionPolicy,
+    /// Whether payload hashes are recorded.
+    pub record_payload_hashes: bool,
+    /// Whether control transitions are always recorded.
+    pub record_control_transitions: bool,
+    /// Whether branch attachments are recorded.
+    pub record_counterfactual_branches: bool,
+}
+
+impl Default for EvidencePolicy {
+    fn default() -> Self {
+        Self {
+            sampling_ratio: 1.0,
+            retention: RetentionPolicy::default(),
+            record_payload_hashes: true,
+            record_control_transitions: true,
+            record_counterfactual_branches: false,
+        }
+    }
+}
+
+impl EvidencePolicy {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if !self.sampling_ratio.is_finite() || !(0.0..=1.0).contains(&self.sampling_ratio) {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.sampling_ratio"),
+                format!(
+                    "evidence sampling ratio must be a finite value in [0.0, 1.0], got {}",
+                    self.sampling_ratio
+                ),
+            ));
+        }
+        self.retention
+            .validate_at(&format!("{field}.retention"), errors);
+    }
+}
+
+/// Metadata disclosure policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrivacyPolicy {
+    /// Policy name.
+    pub name: String,
+    /// Boundary-crossing metadata disclosure mode.
+    pub metadata_disclosure: MetadataDisclosure,
+    /// Whether literal subject segments should be redacted.
+    pub redact_subject_literals: bool,
+    /// Optional finite privacy-noise budget.
+    pub noise_budget: Option<f64>,
+    /// Whether cross-tenant metadata movement is allowed.
+    pub allow_cross_tenant_flow: bool,
+}
+
+impl Default for PrivacyPolicy {
+    fn default() -> Self {
+        Self {
+            name: "privacy".to_owned(),
+            metadata_disclosure: MetadataDisclosure::default(),
+            redact_subject_literals: false,
+            noise_budget: None,
+            allow_cross_tenant_flow: false,
+        }
+    }
+}
+
+impl PrivacyPolicy {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "privacy policy name must not be empty",
+            ));
+        }
+        if let Some(noise_budget) = self.noise_budget
+            && (!noise_budget.is_finite() || noise_budget <= 0.0)
+        {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.noise_budget"),
+                "privacy noise budget must be a finite value greater than zero",
+            ));
+        }
+    }
+}
+
+/// Metadata disclosure modes across boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataDisclosure {
+    /// Full metadata is visible.
+    Full,
+    /// Metadata stays visible only as hashed or opaque identifiers.
+    #[default]
+    Hashed,
+    /// Metadata is redacted at the boundary.
+    Redacted,
+}
+
+impl MetadataDisclosure {
+    /// Exhaustive list of disclosure modes.
+    pub const ALL: [Self; 3] = [Self::Full, Self::Hashed, Self::Redacted];
+}
+
+/// Cut, checkpoint, and materialization policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CutPolicy {
+    /// Policy name.
+    pub name: String,
+    /// When a cut should be materialized.
+    pub trigger: CutTrigger,
+    /// How long the cut metadata or snapshot is retained.
+    pub retention: RetentionPolicy,
+    /// What degree of state gets materialized.
+    pub materialization: MaterializationPolicy,
+}
+
+impl Default for CutPolicy {
+    fn default() -> Self {
+        Self {
+            name: "cut".to_owned(),
+            trigger: CutTrigger::default(),
+            retention: RetentionPolicy::default(),
+            materialization: MaterializationPolicy::default(),
+        }
+    }
+}
+
+impl CutPolicy {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "cut policy name must not be empty",
+            ));
+        }
+        self.trigger
+            .validate_at(&format!("{field}.trigger"), errors);
+        self.retention
+            .validate_at(&format!("{field}.retention"), errors);
+    }
+}
+
+/// Trigger that decides when to create a cut.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CutTrigger {
+    /// Operator- or policy-driven manual cut.
+    #[default]
+    Manual,
+    /// Create a cut when stewardship changes.
+    OnStewardshipChange,
+    /// Cut when evidence reaches a threshold.
+    AtEvidenceBudgetBytes {
+        /// Evidence-budget threshold in bytes.
+        bytes: u64,
+    },
+    /// Cut on a deterministic interval.
+    Every {
+        /// Interval between cuts.
+        interval: Duration,
+    },
+}
+
+impl CutTrigger {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        match self {
+            Self::AtEvidenceBudgetBytes { bytes } if *bytes == 0 => {
+                errors.push(FabricIrValidationError::new(
+                    format!("{field}.bytes"),
+                    "cut evidence budget must be greater than zero",
+                ));
+            }
+            Self::Every { interval } if interval.is_zero() => {
+                errors.push(FabricIrValidationError::new(
+                    format!("{field}.interval"),
+                    "cut interval must be greater than zero",
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a cut materializes when emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationPolicy {
+    /// Materialize only metadata references.
+    #[default]
+    MetadataOnly,
+    /// Materialize control-plane artifacts and cursors.
+    ControlPlaneOnly,
+    /// Materialize a full replayable snapshot.
+    FullReplayable,
+}
+
+impl MaterializationPolicy {
+    /// Exhaustive list of materialization policies.
+    pub const ALL: [Self; 3] = [
+        Self::MetadataOnly,
+        Self::ControlPlaneOnly,
+        Self::FullReplayable,
+    ];
+}
+
+/// Counterfactual branch-attachment policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchPolicy {
+    /// Policy name.
+    pub name: String,
+    /// Who may attach branches.
+    pub attachment: BranchAttachment,
+    /// Whether the branch may mutate or stays read-only.
+    pub mutation_mode: BranchMutationMode,
+    /// How long branch artifacts are retained.
+    pub retention: RetentionPolicy,
+}
+
+impl Default for BranchPolicy {
+    fn default() -> Self {
+        Self {
+            name: "branch".to_owned(),
+            attachment: BranchAttachment::default(),
+            mutation_mode: BranchMutationMode::default(),
+            retention: RetentionPolicy::default(),
+        }
+    }
+}
+
+impl BranchPolicy {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "branch policy name must not be empty",
+            ));
+        }
+        self.retention
+            .validate_at(&format!("{field}.retention"), errors);
+    }
+}
+
+/// Authorized branch-attachment identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchAttachment {
+    /// Only the service owner may attach branches.
+    #[default]
+    ServiceOwnerOnly,
+    /// Any matching capability holder may attach branches.
+    CapabilityHolder,
+    /// Only explicitly audited analysts may attach branches.
+    AuditedAnalyst,
+}
+
+impl BranchAttachment {
+    /// Exhaustive list of branch-attachment policies.
+    pub const ALL: [Self; 3] = [
+        Self::ServiceOwnerOnly,
+        Self::CapabilityHolder,
+        Self::AuditedAnalyst,
+    ];
+}
+
+/// Whether a branch is read-only or may mutate inside a sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchMutationMode {
+    /// Branch cannot mutate authority-bearing state.
+    #[default]
+    ReadOnly,
+    /// Branch may mutate inside a sandboxed control envelope.
+    SandboxedMutation,
+}
+
+impl BranchMutationMode {
+    /// Exhaustive list of mutation modes.
+    pub const ALL: [Self; 2] = [Self::ReadOnly, Self::SandboxedMutation];
+}
+
+/// Retention policy used by evidence, cuts, and branches.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RetentionPolicy {
+    /// Retain nothing after the immediate action.
+    #[default]
+    DropImmediately,
+    /// Retain for a fixed amount of time.
+    RetainFor {
+        /// Retention duration.
+        duration: Duration,
+    },
+    /// Retain for a fixed number of events.
+    RetainForEvents {
+        /// Retention event budget.
+        events: u64,
+    },
+    /// Retain indefinitely.
+    Forever,
+}
+
+impl RetentionPolicy {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        match self {
+            Self::RetainFor { duration } if duration.is_zero() => {
+                errors.push(FabricIrValidationError::new(
+                    format!("{field}.duration"),
+                    "retention duration must be greater than zero",
+                ));
+            }
+            Self::RetainForEvents { events } if *events == 0 => {
+                errors.push(FabricIrValidationError::new(
+                    format!("{field}.events"),
+                    "retention event count must be greater than zero",
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SLO-style quantitative contract for an obligation-bearing flow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuantitativeObligationContract {
+    /// Contract name.
+    pub name: String,
+    /// Delivery class the quantitative contract applies to.
+    pub class: DeliveryClass,
+    /// Target end-to-end latency.
+    pub target_latency: Duration,
+    /// Probability threshold for meeting the target latency.
+    pub target_probability: f64,
+    /// Retry law that may be used before degrading.
+    pub retry_law: RetryLaw,
+    /// Degradation behavior after the retry law is exhausted.
+    pub degradation_policy: DegradationPolicy,
+}
+
+impl Default for QuantitativeObligationContract {
+    fn default() -> Self {
+        Self {
+            name: "obligation".to_owned(),
+            class: DeliveryClass::default(),
+            target_latency: Duration::from_millis(50),
+            target_probability: 0.99,
+            retry_law: RetryLaw::default(),
+            degradation_policy: DegradationPolicy::default(),
+        }
+    }
+}
+
+impl QuantitativeObligationContract {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        if self.name.trim().is_empty() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.name"),
+                "quantitative obligation contract name must not be empty",
+            ));
+        }
+        if self.target_latency.is_zero() {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.target_latency"),
+                "quantitative target latency must be greater than zero",
+            ));
+        }
+        if !(self.target_probability.is_finite()
+            && 0.0 < self.target_probability
+            && self.target_probability <= 1.0)
+        {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.target_probability"),
+                format!(
+                    "quantitative target probability must be a finite value in (0.0, 1.0], got {}",
+                    self.target_probability
+                ),
+            ));
+        }
+        self.retry_law
+            .validate_at(&format!("{field}.retry_law"), errors);
+        self.degradation_policy.validate_at(
+            &format!("{field}.degradation_policy"),
+            self.class,
+            errors,
+        );
+    }
+}
+
+/// Retry policy before degradation.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RetryLaw {
+    /// Do not retry.
+    #[default]
+    Never,
+    /// Retry with a fixed delay.
+    Fixed {
+        /// Maximum retry attempts after the first failure.
+        max_retries: u16,
+        /// Delay between retries.
+        delay: Duration,
+    },
+    /// Retry with exponential backoff.
+    Exponential {
+        /// Maximum retry attempts after the first failure.
+        max_retries: u16,
+        /// Starting backoff delay.
+        base_delay: Duration,
+        /// Maximum backoff delay.
+        max_delay: Duration,
+    },
+}
+
+impl RetryLaw {
+    fn validate_at(&self, field: &str, errors: &mut Vec<FabricIrValidationError>) {
+        match self {
+            Self::Never => {}
+            Self::Fixed { max_retries, delay } => {
+                if *max_retries == 0 {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.max_retries"),
+                        "fixed retry law must allow at least one retry",
+                    ));
+                }
+                if delay.is_zero() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.delay"),
+                        "fixed retry delay must be greater than zero",
+                    ));
+                }
+            }
+            Self::Exponential {
+                max_retries,
+                base_delay,
+                max_delay,
+            } => {
+                if *max_retries == 0 {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.max_retries"),
+                        "exponential retry law must allow at least one retry",
+                    ));
+                }
+                if base_delay.is_zero() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.base_delay"),
+                        "exponential retry base delay must be greater than zero",
+                    ));
+                }
+                if max_delay.is_zero() {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.max_delay"),
+                        "exponential retry max delay must be greater than zero",
+                    ));
+                }
+                if max_delay < base_delay {
+                    errors.push(FabricIrValidationError::new(
+                        format!("{field}.max_delay"),
+                        "exponential retry max delay must be greater than or equal to the base delay",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Degradation behavior after retries or budgets are exhausted.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DegradationPolicy {
+    /// Stop and fail the operation.
+    #[default]
+    FailClosed,
+    /// Shed load and reject new work.
+    ShedLoad,
+    /// Downgrade to a weaker delivery class.
+    DowngradeTo {
+        /// Weaker delivery class selected after degradation.
+        class: DeliveryClass,
+    },
+    /// Escalate evidence capture while preserving behavior.
+    EscalateEvidence,
+}
+
+impl DegradationPolicy {
+    fn validate_at(
+        &self,
+        field: &str,
+        baseline_class: DeliveryClass,
+        errors: &mut Vec<FabricIrValidationError>,
+    ) {
+        if let Self::DowngradeTo { class } = self
+            && *class >= baseline_class
+        {
+            errors.push(FabricIrValidationError::new(
+                format!("{field}.class"),
+                "degradation downgrade target must be strictly weaker than the baseline delivery class",
+            ));
+        }
+    }
+}
+
+fn validate_unique_keys<I>(
+    values: I,
+    field: &str,
+    message: &str,
+    errors: &mut Vec<FabricIrValidationError>,
+) where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen = BTreeSet::new();
+    for value in values {
+        if value.trim().is_empty() || !seen.insert(value) {
+            errors.push(FabricIrValidationError::new(field, message));
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(clippy::too_many_lines)]
+    fn sample_fabric_ir() -> FabricIr {
+        FabricIr {
+            schema_version: FABRIC_IR_SCHEMA_VERSION,
+            subjects: vec![
+                SubjectSchema {
+                    pattern: SubjectPattern::new("tenant.orders.command"),
+                    family: SubjectFamily::Command,
+                    delivery_class: DeliveryClass::ObligationBacked,
+                    evidence_policy: EvidencePolicy {
+                        sampling_ratio: 1.0,
+                        retention: RetentionPolicy::RetainForEvents { events: 64 },
+                        record_payload_hashes: true,
+                        record_control_transitions: true,
+                        record_counterfactual_branches: true,
+                    },
+                    privacy_policy: PrivacyPolicy {
+                        name: "orders-subject".to_owned(),
+                        metadata_disclosure: MetadataDisclosure::Hashed,
+                        redact_subject_literals: false,
+                        noise_budget: Some(0.5),
+                        allow_cross_tenant_flow: false,
+                    },
+                    reply_space: Some(ReplySpaceRule::DedicatedPrefix {
+                        prefix: "_INBOX.orders".to_owned(),
+                    }),
+                    mobility: MobilityPermission::Federated,
+                    quantitative_obligation: Some(QuantitativeObligationContract {
+                        name: "orders-command-slo".to_owned(),
+                        class: DeliveryClass::ObligationBacked,
+                        target_latency: Duration::from_millis(150),
+                        target_probability: 0.995,
+                        retry_law: RetryLaw::Fixed {
+                            max_retries: 3,
+                            delay: Duration::from_millis(10),
+                        },
+                        degradation_policy: DegradationPolicy::DowngradeTo {
+                            class: DeliveryClass::DurableOrdered,
+                        },
+                    }),
+                },
+                SubjectSchema {
+                    pattern: SubjectPattern::new("$SYS.health.*"),
+                    family: SubjectFamily::Control,
+                    delivery_class: DeliveryClass::DurableOrdered,
+                    evidence_policy: EvidencePolicy::default(),
+                    privacy_policy: PrivacyPolicy::default(),
+                    reply_space: None,
+                    mobility: MobilityPermission::LocalOnly,
+                    quantitative_obligation: None,
+                },
+                SubjectSchema {
+                    pattern: SubjectPattern::new("tenant.capture.>"),
+                    family: SubjectFamily::CaptureSelector,
+                    delivery_class: DeliveryClass::EphemeralInteractive,
+                    evidence_policy: EvidencePolicy::default(),
+                    privacy_policy: PrivacyPolicy::default(),
+                    reply_space: None,
+                    mobility: MobilityPermission::Federated,
+                    quantitative_obligation: None,
+                },
+            ],
+            morphisms: vec![MorphismPlan {
+                name: "orders-to-audit".to_owned(),
+                source_pattern: SubjectPattern::new("tenant.orders.>"),
+                target_prefix: "audit.orders".to_owned(),
+                allowed_families: vec![SubjectFamily::Event, SubjectFamily::Command],
+                transforms: vec![
+                    MorphismTransform::RenamePrefix {
+                        from: "tenant.orders".to_owned(),
+                        to: "audit.orders".to_owned(),
+                    },
+                    MorphismTransform::PreserveReplySpace,
+                    MorphismTransform::EscalateDeliveryClass {
+                        class: DeliveryClass::ForensicReplayable,
+                    },
+                ],
+            }],
+            services: vec![ServiceContract {
+                name: "orders.lookup".to_owned(),
+                operations: vec![ServiceOperation {
+                    name: "lookup".to_owned(),
+                    request: SubjectPattern::new("service.orders.lookup"),
+                    reply_space: Some(ReplySpaceRule::CallerInbox),
+                    delivery_class: DeliveryClass::ObligationBacked,
+                    idempotent: true,
+                }],
+                default_consumer_policy: ConsumerPolicy {
+                    name: "orders-default".to_owned(),
+                    mode: ConsumerMode::Replayable,
+                    delivery_class: DeliveryClass::ObligationBacked,
+                    ack_kind: AckKind::Served,
+                    max_pending: 1024,
+                    max_deliver: 4,
+                    replay_window: Some(Duration::from_secs(30)),
+                },
+                required_capability: Some("fabric.orders.read".to_owned()),
+                quantitative_obligation: Some(QuantitativeObligationContract {
+                    name: "orders-service-slo".to_owned(),
+                    class: DeliveryClass::ObligationBacked,
+                    target_latency: Duration::from_millis(200),
+                    target_probability: 0.99,
+                    retry_law: RetryLaw::Exponential {
+                        max_retries: 5,
+                        base_delay: Duration::from_millis(10),
+                        max_delay: Duration::from_millis(250),
+                    },
+                    degradation_policy: DegradationPolicy::ShedLoad,
+                }),
+            }],
+            protocols: vec![ProtocolContract {
+                name: "orders.checkout".to_owned(),
+                roles: vec![
+                    "client".to_owned(),
+                    "inventory".to_owned(),
+                    "billing".to_owned(),
+                ],
+                entry_subject: SubjectPattern::new("protocol.checkout.begin"),
+                session: SessionSchema {
+                    name: "checkout-session".to_owned(),
+                    steps: vec![
+                        SessionStep::Send {
+                            role: "client".to_owned(),
+                            subject: SubjectPattern::new("protocol.checkout.begin"),
+                        },
+                        SessionStep::Choice {
+                            decider_role: "inventory".to_owned(),
+                            branches: vec![
+                                SessionBranch {
+                                    label: "reserved".to_owned(),
+                                    steps: vec![
+                                        SessionStep::Receive {
+                                            role: "billing".to_owned(),
+                                            subject: SubjectPattern::new(
+                                                "protocol.checkout.billing",
+                                            ),
+                                        },
+                                        SessionStep::End,
+                                    ],
+                                },
+                                SessionBranch {
+                                    label: "rejected".to_owned(),
+                                    steps: vec![SessionStep::End],
+                                },
+                            ],
+                        },
+                        SessionStep::End,
+                    ],
+                },
+                branch_policy: BranchPolicy {
+                    name: "orders-audit".to_owned(),
+                    attachment: BranchAttachment::AuditedAnalyst,
+                    mutation_mode: BranchMutationMode::ReadOnly,
+                    retention: RetentionPolicy::RetainFor {
+                        duration: Duration::from_mins(1),
+                    },
+                },
+            }],
+            consumers: vec![ConsumerPolicy {
+                name: "orders-replay".to_owned(),
+                mode: ConsumerMode::Replayable,
+                delivery_class: DeliveryClass::DurableOrdered,
+                ack_kind: AckKind::Recoverable,
+                max_pending: 512,
+                max_deliver: 8,
+                replay_window: Some(Duration::from_mins(5)),
+            }],
+            privacy_policies: vec![PrivacyPolicy {
+                name: "tenant-safe".to_owned(),
+                metadata_disclosure: MetadataDisclosure::Hashed,
+                redact_subject_literals: true,
+                noise_budget: Some(0.25),
+                allow_cross_tenant_flow: false,
+            }],
+            cut_policies: vec![CutPolicy {
+                name: "evidence-budget".to_owned(),
+                trigger: CutTrigger::AtEvidenceBudgetBytes { bytes: 4096 },
+                retention: RetentionPolicy::RetainForEvents { events: 16 },
+                materialization: MaterializationPolicy::ControlPlaneOnly,
+            }],
+            branch_policies: vec![BranchPolicy {
+                name: "analyst-read-only".to_owned(),
+                attachment: BranchAttachment::AuditedAnalyst,
+                mutation_mode: BranchMutationMode::ReadOnly,
+                retention: RetentionPolicy::RetainFor {
+                    duration: Duration::from_mins(1),
+                },
+            }],
+            obligation_contracts: vec![QuantitativeObligationContract {
+                name: "orders-p99".to_owned(),
+                class: DeliveryClass::ObligationBacked,
+                target_latency: Duration::from_millis(150),
+                target_probability: 0.995,
+                retry_law: RetryLaw::Fixed {
+                    max_retries: 3,
+                    delay: Duration::from_millis(10),
+                },
+                degradation_policy: DegradationPolicy::DowngradeTo {
+                    class: DeliveryClass::DurableOrdered,
+                },
+            }],
+            capability_tokens: vec![CapabilityTokenSchema {
+                name: "fabric.orders.read".to_owned(),
+                families: vec![SubjectFamily::Command, SubjectFamily::Reply],
+                delivery_classes: vec![
+                    DeliveryClass::DurableOrdered,
+                    DeliveryClass::ObligationBacked,
+                ],
+                permissions: vec![CapabilityPermission::Request, CapabilityPermission::Reply],
+            }],
+        }
+    }
+
+    #[test]
+    fn default_construction_produces_a_valid_empty_document() {
+        let ir = FabricIr::default();
+        assert!(
+            ir.validate().is_empty(),
+            "default IR should be valid: {ir:?}"
+        );
+    }
+
+    #[test]
+    fn fabric_ir_round_trips_through_serde() {
+        let ir = sample_fabric_ir();
+        let json = serde_json::to_string_pretty(&ir).expect("serialize FABRIC IR");
+        let decoded: FabricIr = serde_json::from_str(&json).expect("deserialize FABRIC IR");
+        assert_eq!(decoded, ir);
+    }
+
+    #[test]
+    fn enum_coverage_stays_exhaustive_for_core_fieldless_enums() {
+        assert_eq!(SubjectFamily::ALL.len(), 7);
+        assert!(SubjectFamily::ALL.contains(&SubjectFamily::ProtocolStep));
+
+        assert_eq!(MobilityPermission::ALL.len(), 3);
+        assert!(MobilityPermission::ALL.contains(&MobilityPermission::StewardshipTransfer));
+
+        assert_eq!(ConsumerMode::ALL.len(), 3);
+        assert!(ConsumerMode::ALL.contains(&ConsumerMode::Replayable));
+
+        assert_eq!(MetadataDisclosure::ALL.len(), 3);
+        assert!(MetadataDisclosure::ALL.contains(&MetadataDisclosure::Redacted));
+
+        assert_eq!(MaterializationPolicy::ALL.len(), 3);
+        assert!(MaterializationPolicy::ALL.contains(&MaterializationPolicy::FullReplayable));
+
+        assert_eq!(BranchAttachment::ALL.len(), 3);
+        assert!(BranchAttachment::ALL.contains(&BranchAttachment::AuditedAnalyst));
+
+        assert_eq!(BranchMutationMode::ALL.len(), 2);
+        assert!(BranchMutationMode::ALL.contains(&BranchMutationMode::SandboxedMutation));
+
+        assert_eq!(CapabilityPermission::ALL.len(), 5);
+        assert!(CapabilityPermission::ALL.contains(&CapabilityPermission::BranchAttach));
+    }
+
+    #[test]
+    fn tagged_variant_enums_serialize_every_variant_shape() {
+        for value in [
+            serde_json::to_value(ReplySpaceRule::CallerInbox).expect("serialize caller inbox"),
+            serde_json::to_value(ReplySpaceRule::SharedPrefix {
+                prefix: "_INBOX.shared".to_owned(),
+            })
+            .expect("serialize shared prefix"),
+            serde_json::to_value(ReplySpaceRule::DedicatedPrefix {
+                prefix: "_INBOX.dedicated".to_owned(),
+            })
+            .expect("serialize dedicated prefix"),
+            serde_json::to_value(MorphismTransform::PreserveReplySpace)
+                .expect("serialize morphism preserve"),
+            serde_json::to_value(MorphismTransform::RenamePrefix {
+                from: "a".to_owned(),
+                to: "b".to_owned(),
+            })
+            .expect("serialize morphism rename"),
+            serde_json::to_value(CutTrigger::Manual).expect("serialize cut manual"),
+            serde_json::to_value(CutTrigger::AtEvidenceBudgetBytes { bytes: 1 })
+                .expect("serialize cut budget"),
+            serde_json::to_value(RetryLaw::Never).expect("serialize retry never"),
+            serde_json::to_value(RetryLaw::Fixed {
+                max_retries: 1,
+                delay: Duration::from_millis(1),
+            })
+            .expect("serialize retry fixed"),
+            serde_json::to_value(DegradationPolicy::FailClosed)
+                .expect("serialize degrade fail closed"),
+            serde_json::to_value(DegradationPolicy::DowngradeTo {
+                class: DeliveryClass::DurableOrdered,
+            })
+            .expect("serialize degrade downgrade"),
+            serde_json::to_value(SessionStep::End).expect("serialize session end"),
+            serde_json::to_value(SessionStep::Send {
+                role: "caller".to_owned(),
+                subject: SubjectPattern::new("fabric.test"),
+            })
+            .expect("serialize session send"),
+        ] {
+            assert!(
+                value.get("kind").is_some(),
+                "expected tagged enum payload: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn cut_policy_is_constructible_and_validates() {
+        let cut = CutPolicy {
+            name: "periodic-cut".to_owned(),
+            trigger: CutTrigger::Every {
+                interval: Duration::from_secs(5),
+            },
+            retention: RetentionPolicy::RetainForEvents { events: 32 },
+            materialization: MaterializationPolicy::ControlPlaneOnly,
+        };
+
+        let value = serde_json::to_value(&cut).expect("serialize cut policy");
+        assert_eq!(value["trigger"]["kind"], "every");
+
+        let mut errors = Vec::new();
+        cut.validate_at("cut_policy", &mut errors);
+        assert!(
+            errors.is_empty(),
+            "expected valid cut policy, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validation_rejects_invalid_configurations() {
+        let mut ir = sample_fabric_ir();
+        ir.subjects[0].reply_space = None;
+        ir.subjects[1].pattern = SubjectPattern::new("control.health");
+        ir.subjects[2].pattern = SubjectPattern::new("tenant.capture.literal");
+        ir.morphisms[0].transforms = Vec::new();
+        ir.services[0].default_consumer_policy.ack_kind = AckKind::Accepted;
+        ir.services[0].default_consumer_policy.replay_window = None;
+        ir.protocols[0].roles = vec!["client".to_owned(), "client".to_owned()];
+        ir.capability_tokens[0].delivery_classes = Vec::new();
+        ir.capability_tokens[0].permissions = Vec::new();
+        ir.subjects[0].quantitative_obligation = Some(QuantitativeObligationContract {
+            name: "subject-slo".to_owned(),
+            class: DeliveryClass::DurableOrdered,
+            target_latency: Duration::ZERO,
+            target_probability: 2.0,
+            retry_law: RetryLaw::Exponential {
+                max_retries: 0,
+                base_delay: Duration::ZERO,
+                max_delay: Duration::from_millis(1),
+            },
+            degradation_policy: DegradationPolicy::DowngradeTo {
+                class: DeliveryClass::ForensicReplayable,
+            },
+        });
+
+        let errors = ir.validate();
+        let messages = errors
+            .iter()
+            .map(|error| format!("{} => {}", error.field, error.message))
+            .collect::<Vec<_>>();
+
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("command subjects must declare a reply-space rule"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message
+                    .contains("control subjects must live under `$SYS.` or `sys.`"))
+        );
+        assert!(
+            messages.iter().any(
+                |message| message.contains("capture-selector subjects must include `*` or `>`")
+            )
+        );
+        assert!(messages.iter().any(|message| {
+            message.contains("morphism plan must declare at least one transform step")
+        }));
+        assert!(messages.iter().any(|message| {
+            message.contains("weaker than the minimum") || message.contains("replayable consumers")
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("protocol role names must be unique and non-empty"))
+        );
+        assert!(messages.iter().any(|message| {
+            message.contains("capability token schema must authorize at least one delivery class")
+        }));
+        assert!(messages.iter().any(|message| {
+            message.contains("capability token schema must authorize at least one permission")
+        }));
+        assert!(messages.iter().any(|message| {
+            message.contains("quantitative obligation class must match the subject delivery class")
+        }));
+        assert!(messages.iter().any(|message| {
+            message.contains("quantitative target latency must be greater than zero")
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("quantitative target probability must be"))
+        );
+        assert!(messages.iter().any(|message| {
+            message.contains("exponential retry law must allow at least one retry")
+                || message.contains("exponential retry base delay must be greater than zero")
+        }));
+        assert!(
+            messages.iter().any(|message| {
+                message.contains(
+                    "degradation downgrade target must be strictly weaker than the baseline delivery class",
+                )
+            })
+        );
+    }
+}
