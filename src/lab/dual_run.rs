@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Dual-run scenario types for lab-vs-live differential testing.
 //!
 //! This module implements the shared seed plumbing and replay metadata
@@ -2054,8 +2055,8 @@ pub fn capture_region_close(
             RegionState::Open
         },
         quiescent,
-        live_children: if all_children_joined { 0 } else { 1 },
-        finalizers_pending: if all_finalizers_done { 0 } else { 1 },
+        live_children: u32::from(!all_children_joined),
+        finalizers_pending: u32::from(!all_finalizers_done),
         close_completed: quiescent,
     }
 }
@@ -2113,6 +2114,173 @@ pub fn capture_cancellation(
         terminal_phase,
         checkpoint_observed,
     }
+}
+
+// ============================================================================
+// Lab Evidence Normalizer
+// ============================================================================
+
+/// Normalize a `LabRunReport` into `NormalizedSemantics`.
+///
+/// Extracts semantic facts from the lab report and oracle results:
+/// - Terminal outcome from oracle pass/fail status
+/// - Region quiescence from `report.quiescent`
+/// - Obligation leaks from invariant violations
+/// - Cancellation and loser drain from oracle entries
+///
+/// Returns `(NormalizedSemantics, CaptureManifest)` so callers know
+/// exactly how each field was derived.
+pub fn normalize_lab_report(
+    report: &crate::lab::runtime::LabRunReport,
+    surface_scope: &str,
+) -> (NormalizedSemantics, CaptureManifest) {
+    let mut manifest = CaptureManifest::new();
+
+    // Terminal outcome: if oracle failed or invariant violations, it's an error.
+    let terminal_outcome = if !report.invariant_violations.is_empty() {
+        manifest.observed("terminal_outcome", "invariant_violations");
+        TerminalOutcome::err("invariant_violation")
+    } else if !report.oracle_report.all_passed() {
+        manifest.observed("terminal_outcome", "oracle_report.failures");
+        TerminalOutcome::err("oracle_failure")
+    } else {
+        manifest.observed("terminal_outcome", "oracle_report.all_passed");
+        TerminalOutcome::ok()
+    };
+
+    // Region close: directly from quiescence flag.
+    manifest.observed("region_close.quiescent", "LabRunReport.quiescent");
+    let region_close = RegionCloseRecord {
+        root_state: if report.quiescent {
+            RegionState::Closed
+        } else {
+            RegionState::Open
+        },
+        quiescent: report.quiescent,
+        live_children: 0,
+        finalizers_pending: 0,
+        close_completed: report.quiescent,
+    };
+
+    // Obligation balance: check for leak oracle or invariant violations.
+    let has_leak = report
+        .invariant_violations
+        .iter()
+        .any(|v| v.contains("obligation") || v.contains("leak"));
+    let obligation_oracle_failed = report
+        .oracle_report
+        .entry("obligation_leak")
+        .is_some_and(|e| !e.passed);
+    manifest.observed("obligation_balance", "oracle.obligation_leak + invariants");
+    let obligation_balance = if has_leak || obligation_oracle_failed {
+        ObligationBalanceRecord {
+            reserved: 0,
+            committed: 0,
+            aborted: 0,
+            leaked: 1,
+            unresolved: 0,
+            balanced: false,
+        }
+    } else {
+        ObligationBalanceRecord::zero()
+    };
+
+    // Loser drain: check for loser_drain oracle.
+    let loser_drain_entry = report.oracle_report.entry("loser_drain");
+    let loser_drain = match loser_drain_entry {
+        Some(entry) => {
+            manifest.observed("loser_drain", "oracle.loser_drain");
+            if entry.passed {
+                // Oracle passed but we don't know exact counts.
+                LoserDrainRecord {
+                    applicable: true,
+                    expected_losers: 0,
+                    drained_losers: 0,
+                    status: DrainStatus::Complete,
+                    evidence: Some("oracle.loser_drain.passed".to_string()),
+                }
+            } else {
+                LoserDrainRecord {
+                    applicable: true,
+                    expected_losers: 0,
+                    drained_losers: 0,
+                    status: DrainStatus::Incomplete,
+                    evidence: Some("oracle.loser_drain.failed".to_string()),
+                }
+            }
+        }
+        None => {
+            manifest.inferred("loser_drain", "no_oracle_entry");
+            LoserDrainRecord::not_applicable()
+        }
+    };
+
+    // Cancellation: check for cancellation_protocol oracle.
+    let cancel_entry = report.oracle_report.entry("cancellation_protocol");
+    let cancellation = match cancel_entry {
+        Some(entry) => {
+            manifest.observed("cancellation", "oracle.cancellation_protocol");
+            if entry.passed {
+                CancellationRecord::completed()
+            } else {
+                CancellationRecord {
+                    requested: true,
+                    acknowledged: false,
+                    cleanup_completed: false,
+                    finalization_completed: false,
+                    terminal_phase: CancelTerminalPhase::CancelRequested,
+                    checkpoint_observed: None,
+                }
+            }
+        }
+        None => {
+            manifest.inferred("cancellation", "no_oracle_entry");
+            CancellationRecord::none()
+        }
+    };
+
+    let semantics = NormalizedSemantics {
+        terminal_outcome,
+        cancellation,
+        loser_drain,
+        region_close,
+        obligation_balance,
+        resource_surface: ResourceSurfaceRecord::empty(surface_scope),
+    };
+
+    (semantics, manifest)
+}
+
+/// Build a complete `NormalizedObservable` from a lab run.
+///
+/// Combines `normalize_lab_report` with identity and provenance.
+pub fn normalize_lab_observable(
+    identity: &DualRunScenarioIdentity,
+    report: &crate::lab::runtime::LabRunReport,
+) -> NormalizedObservable {
+    let (semantics, _manifest) = normalize_lab_report(report, &identity.surface_id);
+    let mut prov = ReplayMetadata::for_lab(identity.family_id(), &identity.seed_plan);
+    prov = prov.with_lab_report(
+        report.trace_fingerprint,
+        report.trace_certificate.event_hash,
+        report.trace_certificate.event_count,
+        report.trace_certificate.schedule_hash,
+        report.steps_total,
+    );
+    NormalizedObservable::new(identity, RuntimeKind::Lab, semantics, prov)
+}
+
+/// Build a complete `NormalizedObservable` from a live run result.
+pub fn normalize_live_observable(
+    identity: &DualRunScenarioIdentity,
+    live_result: &LiveRunResult,
+) -> NormalizedObservable {
+    NormalizedObservable::new(
+        identity,
+        RuntimeKind::Live,
+        live_result.semantics.clone(),
+        live_result.metadata.replay.clone(),
+    )
 }
 
 // ============================================================================
@@ -2325,14 +2493,13 @@ impl DualRunHarness {
 ///
 /// Panics with a detailed message if the test fails.
 pub fn assert_dual_run_passes(result: &DualRunResult) {
-    if !result.passed() {
-        panic!(
-            "Dual-run test failed for scenario '{}' on surface '{}':\n{}",
-            result.verdict.scenario_id,
-            result.verdict.surface_id,
-            result.summary()
-        );
-    }
+    assert!(
+        result.passed(),
+        "Dual-run test failed for scenario '{}' on surface '{}':\n{}",
+        result.verdict.scenario_id,
+        result.verdict.surface_id,
+        result.summary()
+    );
 }
 
 // ============================================================================
@@ -3732,5 +3899,126 @@ mod tests {
         let c = capture_cancellation(true, true, true, false, None);
         assert_eq!(c.terminal_phase, CancelTerminalPhase::Finalizing);
         crate::test_complete!("capture_cancellation_finalizing");
+    }
+
+    // --- Lab Normalizer ---
+
+    fn make_passing_oracle_report() -> crate::lab::oracle::OracleReport {
+        crate::lab::oracle::OracleReport {
+            entries: vec![],
+            total: 0,
+            passed: 0,
+            failed: 0,
+            check_time_nanos: 0,
+        }
+    }
+
+    fn make_passing_lab_report(seed: u64) -> crate::lab::runtime::LabRunReport {
+        crate::lab::runtime::LabRunReport {
+            seed,
+            steps_delta: 100,
+            steps_total: 100,
+            quiescent: true,
+            now_nanos: 0,
+            trace_len: 10,
+            trace_fingerprint: 0xABCD,
+            trace_certificate: crate::lab::runtime::LabTraceCertificateSummary {
+                event_hash: 0x1234,
+                event_count: 10,
+                schedule_hash: 0x5678,
+            },
+            oracle_report: make_passing_oracle_report(),
+            invariant_violations: vec![],
+            temporal_invariant_failures: vec![],
+            temporal_counterexample_prefix_len: None,
+            refinement_firewall_rule_id: None,
+            refinement_firewall_event_index: None,
+            refinement_firewall_event_seq: None,
+            refinement_counterexample_prefix_len: None,
+            refinement_firewall_skipped_due_to_trace_truncation: false,
+        }
+    }
+
+    #[test]
+    fn normalize_lab_report_happy_path() {
+        init_test("normalize_lab_report_happy_path");
+        let report = make_passing_lab_report(42);
+        let (sem, manifest) = normalize_lab_report(&report, "test.surface");
+        assert_eq!(sem.terminal_outcome.class, OutcomeClass::Ok);
+        assert!(sem.region_close.quiescent);
+        assert!(sem.obligation_balance.balanced);
+        assert!(manifest.total_fields() > 0);
+        crate::test_complete!("normalize_lab_report_happy_path");
+    }
+
+    #[test]
+    fn normalize_lab_report_invariant_violation() {
+        init_test("normalize_lab_report_invariant_violation");
+        let mut report = make_passing_lab_report(42);
+        report.invariant_violations = vec!["obligation leak detected".to_string()];
+        let (sem, _) = normalize_lab_report(&report, "test");
+        assert_eq!(sem.terminal_outcome.class, OutcomeClass::Err);
+        assert!(!sem.obligation_balance.balanced);
+        crate::test_complete!("normalize_lab_report_invariant_violation");
+    }
+
+    #[test]
+    fn normalize_lab_report_not_quiescent() {
+        init_test("normalize_lab_report_not_quiescent");
+        let mut report = make_passing_lab_report(42);
+        report.quiescent = false;
+        let (sem, _) = normalize_lab_report(&report, "test");
+        assert!(!sem.region_close.quiescent);
+        assert!(!sem.region_close.close_completed);
+        crate::test_complete!("normalize_lab_report_not_quiescent");
+    }
+
+    #[test]
+    fn normalize_lab_observable_preserves_provenance() {
+        init_test("normalize_lab_observable_preserves_provenance");
+        let ident = DualRunScenarioIdentity::phase1("test", "s", "v1", "d", 42);
+        let report = make_passing_lab_report(42);
+        let obs = normalize_lab_observable(&ident, &report);
+        assert_eq!(obs.runtime_kind, RuntimeKind::Lab);
+        assert_eq!(obs.provenance.trace_fingerprint, Some(0xABCD));
+        assert_eq!(obs.provenance.event_hash, Some(0x1234));
+        assert_eq!(obs.provenance.steps_total, Some(100));
+        crate::test_complete!("normalize_lab_observable_preserves_provenance");
+    }
+
+    #[test]
+    fn normalize_live_observable_from_result() {
+        init_test("normalize_live_observable_from_result");
+        let ident = DualRunScenarioIdentity::phase1("test", "s", "v1", "d", 42);
+        let live_result = run_live_adapter(&ident, |_, witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.record_counter("items", 5);
+        });
+        let obs = normalize_live_observable(&ident, &live_result);
+        assert_eq!(obs.runtime_kind, RuntimeKind::Live);
+        assert_eq!(obs.semantics.terminal_outcome.class, OutcomeClass::Ok);
+        assert_eq!(obs.semantics.resource_surface.counters["items"], 5);
+        crate::test_complete!("normalize_live_observable_from_result");
+    }
+
+    #[test]
+    fn normalize_and_compare_lab_vs_live() {
+        init_test("normalize_and_compare_lab_vs_live");
+        let ident = DualRunScenarioIdentity::phase1("test", "s", "v1", "d", 42);
+
+        // Lab side
+        let report = make_passing_lab_report(42);
+        let lab_obs = normalize_lab_observable(&ident, &report);
+
+        // Live side
+        let live_result = run_live_adapter(&ident, |_, _| {});
+        let live_obs = normalize_live_observable(&ident, &live_result);
+
+        // Compare
+        let lineage = ident.seed_lineage();
+        let verdict = compare_observables(&lab_obs, &live_obs, lineage);
+        // Both should have ok outcomes and quiescent regions
+        assert!(verdict.passed, "Verdict: {}", verdict.summary());
+        crate::test_complete!("normalize_and_compare_lab_vs_live");
     }
 }

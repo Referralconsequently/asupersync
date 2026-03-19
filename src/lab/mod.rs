@@ -88,7 +88,8 @@ pub use dual_run::{
     TerminalOutcome, assert_dual_run_passes, assert_semantics, capture_cancellation,
     capture_loser_drain, capture_obligation_balance, capture_region_close,
     capture_terminal_from_result, capture_terminal_outcome, check_core_invariants,
-    compare_observables, run_live_adapter,
+    compare_observables, normalize_lab_observable, normalize_lab_report, normalize_live_observable,
+    run_live_adapter,
 };
 pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
