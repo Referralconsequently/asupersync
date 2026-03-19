@@ -2041,18 +2041,27 @@ mod tests {
         })
         .run();
 
-        result.lab.provenance = result
+        let mut lab_provenance = result
             .lab
             .provenance
             .clone()
             .with_artifact_path("crashpack-divergence.registry.case.json")
             .with_repro_command("cargo test divergence.registry.case -- --nocapture");
-        result.live.provenance = result
+        if lab_provenance.trace_fingerprint.is_none() {
+            lab_provenance.trace_fingerprint = Some(0xC0DE_CAFE);
+        }
+        result.lab.provenance = lab_provenance;
+
+        let mut live_provenance = result
             .live
             .provenance
             .clone()
             .with_artifact_path("artifacts/live/divergence.registry.case.json")
             .with_repro_command("cargo test divergence.registry.case -- --nocapture --live");
+        if live_provenance.trace_fingerprint.is_none() {
+            live_provenance.trace_fingerprint = Some(0xBEEF_BAAD);
+        }
+        result.live.provenance = live_provenance;
         result
     }
 
