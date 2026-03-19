@@ -50,6 +50,7 @@
 pub mod chaos;
 pub mod config;
 pub mod conformal;
+pub mod dual_run;
 pub mod explorer;
 pub mod fuzz;
 pub mod http;
@@ -74,6 +75,16 @@ pub use config::LabConfig;
 pub use conformal::{
     CalibrationReport, ConformalCalibrator, ConformalConfig, ConformityScore, CoverageTracker,
     PredictionSet,
+};
+pub use dual_run::{
+    CancelTerminalPhase, CancellationRecord, ComparisonVerdict, CounterTolerance,
+    DUAL_RUN_SCHEMA_VERSION, DrainStatus, DualRunHarness, DualRunResult, DualRunScenarioIdentity,
+    ExecutionInstanceId, LoserDrainRecord, NORMALIZED_OBSERVABLE_SCHEMA_VERSION,
+    NormalizedObservable, NormalizedSemantics, ObligationBalanceRecord, OutcomeClass, Phase,
+    RegionCloseRecord, RegionState as DualRunRegionState, ReplayMetadata, ReplayPolicy,
+    ResourceSurfaceRecord, RuntimeKind, ScenarioFamilyId, SeedLineageRecord, SeedMode, SeedPlan,
+    SemanticMismatch, TerminalOutcome, assert_dual_run_passes, assert_semantics,
+    check_core_invariants, compare_observables,
 };
 pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
