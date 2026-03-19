@@ -410,4 +410,84 @@ mod tests {
             "expected validation error to mention the invalid default, got {err}"
         );
     }
+
+    #[test]
+    fn delivery_class_display_and_minimum_ack_cover_every_variant() {
+        let cases = [
+            (
+                DeliveryClass::EphemeralInteractive,
+                "ephemeral-interactive",
+                AckKind::Accepted,
+            ),
+            (
+                DeliveryClass::DurableOrdered,
+                "durable-ordered",
+                AckKind::Recoverable,
+            ),
+            (
+                DeliveryClass::ObligationBacked,
+                "obligation-backed",
+                AckKind::Served,
+            ),
+            (
+                DeliveryClass::MobilitySafe,
+                "mobility-safe",
+                AckKind::Received,
+            ),
+            (
+                DeliveryClass::ForensicReplayable,
+                "forensic-replayable",
+                AckKind::Received,
+            ),
+        ];
+
+        for (class, expected_display, expected_ack) in cases {
+            assert_eq!(class.to_string(), expected_display);
+            assert_eq!(class.minimum_ack(), expected_ack);
+        }
+    }
+
+    #[test]
+    fn provider_policy_allows_valid_requested_classes_and_round_trips() {
+        let policy = DeliveryClassPolicy::new(
+            DeliveryClass::DurableOrdered,
+            [
+                DeliveryClass::MobilitySafe,
+                DeliveryClass::DurableOrdered,
+                DeliveryClass::ObligationBacked,
+            ],
+        )
+        .expect("valid provider policy");
+
+        assert!(policy.allows(DeliveryClass::DurableOrdered));
+        assert!(policy.allows(DeliveryClass::ObligationBacked));
+        assert!(policy.allows(DeliveryClass::MobilitySafe));
+        assert!(!policy.allows(DeliveryClass::ForensicReplayable));
+
+        assert_eq!(
+            policy
+                .select_for_caller(Some(DeliveryClass::ObligationBacked))
+                .expect("caller request within provider envelope"),
+            DeliveryClass::ObligationBacked
+        );
+        assert_eq!(
+            policy
+                .select_for_caller(Some(DeliveryClass::MobilitySafe))
+                .expect("caller request within provider envelope"),
+            DeliveryClass::MobilitySafe
+        );
+
+        let json = serde_json::to_string(&policy).expect("serialize provider policy");
+        let decoded: DeliveryClassPolicy =
+            serde_json::from_str(&json).expect("deserialize provider policy");
+        assert_eq!(decoded, policy);
+        assert_eq!(
+            decoded.admissible_classes(),
+            &[
+                DeliveryClass::DurableOrdered,
+                DeliveryClass::ObligationBacked,
+                DeliveryClass::MobilitySafe,
+            ]
+        );
+    }
 }

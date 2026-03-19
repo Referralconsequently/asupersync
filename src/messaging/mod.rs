@@ -75,14 +75,20 @@
 #[cfg(feature = "messaging-fabric")]
 pub mod class;
 #[cfg(feature = "messaging-fabric")]
+pub mod consumer;
+#[cfg(feature = "messaging-fabric")]
 pub mod fabric;
 #[cfg(feature = "messaging-fabric")]
 pub mod ir;
 pub mod jetstream;
 pub mod kafka;
 pub mod kafka_consumer;
+#[cfg(feature = "messaging-fabric")]
+pub mod morphism;
 pub mod nats;
 pub mod redis;
+#[cfg(feature = "messaging-fabric")]
+pub mod stream;
 #[cfg(feature = "messaging-fabric")]
 pub mod subject;
 
@@ -101,6 +107,12 @@ pub use kafka::{
 pub use kafka_consumer::{
     AutoOffsetReset, ConsumerConfig as KafkaConsumerConfig, ConsumerRecord as KafkaConsumerRecord,
     IsolationLevel, KafkaConsumer, TopicPartitionOffset,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use morphism::{
+    AuthorityFacet, CostFacet, FabricCapability, Morphism, MorphismCertificate, MorphismClass,
+    MorphismFacetSet, MorphismValidationError, ObservabilityFacet, QuotaPolicy, ResponsePolicy,
+    ReversibilityFacet, ReversibilityRequirement, SecrecyFacet, SharingPolicy, SubjectTransform,
 };
 pub use nats::{Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription};
 pub use redis::{RedisClient, RedisConfig, RedisError};

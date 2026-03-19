@@ -6,14 +6,301 @@
 //! It does not attempt to implement the full control log, cursor leasing, or
 //! stream semantics yet.
 
+use super::class::{AckKind, DeliveryClass};
 pub use super::subject::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
+use crate::cx::Cx;
 use crate::distributed::HashRing;
+use crate::error::{Error as AsupersyncError, ErrorKind};
 use crate::remote::NodeId;
 use crate::util::DetHasher;
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
+
+fn fabric_input_error(message: impl Into<String>) -> AsupersyncError {
+    AsupersyncError::new(ErrorKind::User).with_message(message)
+}
+
+fn parse_subject(raw: impl AsRef<str>) -> Result<Subject, AsupersyncError> {
+    Subject::parse(raw.as_ref()).map_err(|error| fabric_input_error(error.to_string()))
+}
+
+fn parse_subject_pattern(raw: impl AsRef<str>) -> Result<SubjectPattern, AsupersyncError> {
+    SubjectPattern::parse(raw.as_ref()).map_err(|error| fabric_input_error(error.to_string()))
+}
+
+/// Minimal public Browser/Native FABRIC handle.
+///
+/// This surface intentionally models the NATS-small API promised by the FABRIC
+/// plan without pretending the full distributed data plane is implemented yet.
+/// The current behavior is an in-process semantic seam that:
+///
+/// - validates subjects and subject patterns,
+/// - preserves explicit `&Cx` propagation on every async entry point, and
+/// - keeps Layer 0 publish/subscribe on the default
+///   [`DeliveryClass::EphemeralInteractive`] path.
+#[derive(Debug, Clone)]
+pub struct Fabric {
+    endpoint: String,
+    state: Arc<Mutex<FabricState>>,
+}
+
+#[derive(Debug, Default)]
+struct FabricState {
+    published: Vec<FabricMessage>,
+}
+
+/// Published or received packet-plane message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricMessage {
+    /// Concrete subject of the message.
+    pub subject: Subject,
+    /// Message payload bytes.
+    pub payload: Vec<u8>,
+    /// Semantic class applied to the message.
+    pub delivery_class: DeliveryClass,
+}
+
+/// Packet-plane publish acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishReceipt {
+    /// Subject accepted by the packet plane.
+    pub subject: Subject,
+    /// Number of payload bytes accepted.
+    pub payload_len: usize,
+    /// Acknowledgement boundary reached by the operation.
+    pub ack_kind: AckKind,
+    /// Delivery class used for the publish.
+    pub delivery_class: DeliveryClass,
+}
+
+/// Request/reply response envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricReply {
+    /// Reply subject echoed by the current semantic seam.
+    pub subject: Subject,
+    /// Reply payload bytes.
+    pub payload: Vec<u8>,
+    /// Acknowledgement boundary observed for the request.
+    pub ack_kind: AckKind,
+    /// Delivery class used for the request.
+    pub delivery_class: DeliveryClass,
+}
+
+/// Capture policy for stream declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapturePolicy {
+    /// Stream capture is disabled.
+    #[default]
+    Disabled,
+    /// Capture only when the caller explicitly opts into the stream.
+    ExplicitOptIn,
+}
+
+/// Public stream configuration for `Fabric::stream`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricStreamConfig {
+    /// Subjects captured by the stream declaration.
+    pub subjects: Vec<SubjectPattern>,
+    /// Requested delivery class for the stream surface.
+    pub delivery_class: DeliveryClass,
+    /// Capture behavior for matching packet-plane traffic.
+    pub capture_policy: CapturePolicy,
+    /// Optional request timeout carried into stream operations.
+    pub request_timeout: Option<Duration>,
+}
+
+impl Default for FabricStreamConfig {
+    fn default() -> Self {
+        Self {
+            subjects: Vec::new(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            capture_policy: CapturePolicy::ExplicitOptIn,
+            request_timeout: None,
+        }
+    }
+}
+
+impl FabricStreamConfig {
+    fn validate(&self) -> Result<(), AsupersyncError> {
+        if self.subjects.is_empty() {
+            return Err(AsupersyncError::new(ErrorKind::ConfigError)
+                .with_message("stream config must declare at least one subject pattern"));
+        }
+
+        SubjectPattern::validate_non_overlapping(&self.subjects)
+            .map_err(|error| fabric_input_error(error.to_string()))?;
+        Ok(())
+    }
+}
+
+/// Ergonomic alias matching the planned user-facing `stream(...)` example.
+pub type StreamConfig = FabricStreamConfig;
+
+/// Handle returned by `Fabric::stream`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricStreamHandle {
+    endpoint: String,
+    config: FabricStreamConfig,
+}
+
+impl FabricStreamHandle {
+    /// Return the configured stream declaration.
+    #[must_use]
+    pub fn config(&self) -> &FabricStreamConfig {
+        &self.config
+    }
+
+    /// Return the endpoint that created the stream declaration.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+}
+
+/// Subscription handle returned by `Fabric::subscribe`.
+#[derive(Debug, Clone)]
+pub struct FabricSubscription {
+    pattern: SubjectPattern,
+    next_index: usize,
+    state: Arc<Mutex<FabricState>>,
+}
+
+impl FabricSubscription {
+    /// Return the subscribed pattern.
+    #[must_use]
+    pub fn pattern(&self) -> &SubjectPattern {
+        &self.pattern
+    }
+
+    /// Return the next matching message, if one is currently available.
+    ///
+    /// Cancellation propagates by returning `None` once the supplied `Cx`
+    /// observes a cancellation request.
+    pub async fn next(&mut self, cx: &Cx) -> Option<FabricMessage> {
+        if cx.checkpoint().is_err() {
+            return None;
+        }
+
+        let state = self.state.lock();
+        let published = &state.published;
+
+        while self.next_index < published.len() {
+            let message = published[self.next_index].clone();
+            self.next_index += 1;
+            if self.pattern.matches(&message.subject) {
+                return Some(message);
+            }
+        }
+
+        None
+    }
+}
+
+impl Fabric {
+    /// Connect to a known fabric endpoint.
+    pub async fn connect(cx: &Cx, endpoint: impl AsRef<str>) -> Result<Self, AsupersyncError> {
+        cx.checkpoint()?;
+
+        let endpoint = endpoint.as_ref().trim();
+        if endpoint.is_empty() {
+            return Err(AsupersyncError::new(ErrorKind::ConfigError)
+                .with_message("fabric endpoint must not be empty"));
+        }
+
+        Ok(Self {
+            endpoint: endpoint.to_owned(),
+            state: Arc::new(Mutex::new(FabricState::default())),
+        })
+    }
+
+    /// Return the endpoint used for the current handle.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Publish a packet-plane message with the default delivery class.
+    pub async fn publish(
+        &self,
+        cx: &Cx,
+        subject: impl AsRef<str>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Result<PublishReceipt, AsupersyncError> {
+        cx.checkpoint()?;
+
+        let subject = parse_subject(subject)?;
+        let payload = payload.into();
+        let message = FabricMessage {
+            subject: subject.clone(),
+            payload: payload.clone(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+        };
+        self.state.lock().published.push(message);
+
+        Ok(PublishReceipt {
+            subject,
+            payload_len: payload.len(),
+            ack_kind: AckKind::Accepted,
+            delivery_class: DeliveryClass::EphemeralInteractive,
+        })
+    }
+
+    /// Subscribe to a packet-plane subject pattern.
+    pub async fn subscribe(
+        &self,
+        cx: &Cx,
+        subject_pattern: impl AsRef<str>,
+    ) -> Result<FabricSubscription, AsupersyncError> {
+        cx.checkpoint()?;
+
+        Ok(FabricSubscription {
+            pattern: parse_subject_pattern(subject_pattern)?,
+            next_index: 0,
+            state: Arc::clone(&self.state),
+        })
+    }
+
+    /// Issue a bounded request/reply interaction.
+    ///
+    /// The current API-design seam performs an immediate loopback reply so the
+    /// public surface is testable before the full authority/data plane lands.
+    pub async fn request(
+        &self,
+        cx: &Cx,
+        subject: impl AsRef<str>,
+        payload: impl Into<Vec<u8>>,
+    ) -> Result<FabricReply, AsupersyncError> {
+        let payload = payload.into();
+        let receipt = self.publish(cx, subject, payload.clone()).await?;
+
+        Ok(FabricReply {
+            subject: receipt.subject,
+            payload,
+            ack_kind: receipt.ack_kind,
+            delivery_class: receipt.delivery_class,
+        })
+    }
+
+    /// Opt into a stream declaration with explicit configuration.
+    pub async fn stream(
+        &self,
+        cx: &Cx,
+        config: FabricStreamConfig,
+    ) -> Result<FabricStreamHandle, AsupersyncError> {
+        cx.checkpoint()?;
+        config.validate()?;
+
+        Ok(FabricStreamHandle {
+            endpoint: self.endpoint.clone(),
+            config,
+        })
+    }
+}
 
 /// Compact identifier for a subject cell.
 ///
@@ -946,6 +1233,8 @@ fn contains_node(nodes: &[NodeId], candidate: &NodeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::run_test_with_cx;
+    use std::time::Duration;
 
     fn candidate(
         name: &str,
@@ -958,6 +1247,110 @@ mod tests {
             .with_role(NodeRole::RepairWitness)
             .with_storage_class(storage_class)
             .with_latency_millis(latency_millis)
+    }
+
+    #[test]
+    fn stream_config_defaults_to_ephemeral_interactive() {
+        let config = FabricStreamConfig::default();
+        assert_eq!(config.delivery_class, DeliveryClass::EphemeralInteractive);
+        assert_eq!(config.capture_policy, CapturePolicy::ExplicitOptIn);
+        assert!(config.subjects.is_empty());
+    }
+
+    #[test]
+    fn stream_config_rejects_empty_subject_lists() {
+        let err = FabricStreamConfig::default()
+            .validate()
+            .expect_err("empty stream declarations must fail closed");
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+    }
+
+    #[test]
+    fn stream_config_rejects_overlapping_subjects() {
+        let config = FabricStreamConfig {
+            subjects: vec![
+                SubjectPattern::parse("orders.>").expect("orders wildcard"),
+                SubjectPattern::parse("orders.created").expect("orders literal"),
+            ],
+            ..FabricStreamConfig::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("overlapping capture declarations must be rejected");
+        assert_eq!(err.kind(), ErrorKind::User);
+    }
+
+    #[test]
+    fn connect_rejects_blank_endpoints() {
+        run_test_with_cx(|cx| async move {
+            let err = Fabric::connect(&cx, "   ")
+                .await
+                .expect_err("blank endpoint must fail");
+            assert_eq!(err.kind(), ErrorKind::ConfigError);
+        });
+    }
+
+    #[test]
+    fn publish_and_subscribe_round_trip_with_ephemeral_defaults() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222").await.expect("connect");
+            let mut subscription = fabric.subscribe(&cx, "orders.>").await.expect("subscribe");
+
+            let receipt = fabric
+                .publish(&cx, "orders.created", b"payload".to_vec())
+                .await
+                .expect("publish");
+            let message = subscription.next(&cx).await.expect("message");
+
+            assert_eq!(receipt.ack_kind, AckKind::Accepted);
+            assert_eq!(receipt.delivery_class, DeliveryClass::EphemeralInteractive);
+            assert_eq!(message.delivery_class, DeliveryClass::EphemeralInteractive);
+            assert_eq!(message.subject.as_str(), "orders.created");
+            assert_eq!(message.payload, b"payload".to_vec());
+        });
+    }
+
+    #[test]
+    fn request_uses_same_surface_and_returns_reply() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222").await.expect("connect");
+            let reply = fabric
+                .request(&cx, "service.lookup", b"lookup".to_vec())
+                .await
+                .expect("request");
+
+            assert_eq!(reply.ack_kind, AckKind::Accepted);
+            assert_eq!(reply.delivery_class, DeliveryClass::EphemeralInteractive);
+            assert_eq!(reply.subject.as_str(), "service.lookup");
+            assert_eq!(reply.payload, b"lookup".to_vec());
+        });
+    }
+
+    #[test]
+    fn stream_accepts_explicit_subjects_and_preserves_endpoint() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222").await.expect("connect");
+            let handle = fabric
+                .stream(
+                    &cx,
+                    FabricStreamConfig {
+                        subjects: vec![SubjectPattern::parse("orders.>").expect("pattern")],
+                        delivery_class: DeliveryClass::DurableOrdered,
+                        capture_policy: CapturePolicy::ExplicitOptIn,
+                        request_timeout: Some(Duration::from_secs(5)),
+                    },
+                )
+                .await
+                .expect("stream");
+
+            assert_eq!(handle.endpoint(), "node1:4222");
+            assert_eq!(
+                handle.config().delivery_class,
+                DeliveryClass::DurableOrdered
+            );
+            assert_eq!(handle.config().subjects.len(), 1);
+        });
     }
 
     #[test]

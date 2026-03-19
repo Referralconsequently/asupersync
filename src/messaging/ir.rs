@@ -2013,4 +2013,451 @@ mod tests {
             })
         );
     }
+
+    fn error_messages(errors: &[FabricIrValidationError]) -> Vec<String> {
+        errors
+            .iter()
+            .map(|error| format!("{} => {}", error.field, error.message))
+            .collect()
+    }
+
+    #[test]
+    fn subject_family_defaults_and_mobility_lists_remain_stable() {
+        assert_eq!(SubjectFamily::default(), SubjectFamily::Event);
+        assert_eq!(
+            SubjectFamily::ALL,
+            [
+                SubjectFamily::Command,
+                SubjectFamily::Event,
+                SubjectFamily::Reply,
+                SubjectFamily::Control,
+                SubjectFamily::ProtocolStep,
+                SubjectFamily::CaptureSelector,
+                SubjectFamily::DerivedView,
+            ]
+        );
+        assert_eq!(
+            MobilityPermission::ALL,
+            [
+                MobilityPermission::LocalOnly,
+                MobilityPermission::Federated,
+                MobilityPermission::StewardshipTransfer,
+            ]
+        );
+        assert_eq!(
+            MetadataDisclosure::ALL,
+            [
+                MetadataDisclosure::Full,
+                MetadataDisclosure::Hashed,
+                MetadataDisclosure::Redacted,
+            ]
+        );
+    }
+
+    #[test]
+    fn reply_space_rules_reject_empty_prefixes() {
+        for rule in [
+            ReplySpaceRule::SharedPrefix {
+                prefix: "   ".to_owned(),
+            },
+            ReplySpaceRule::DedicatedPrefix {
+                prefix: String::new(),
+            },
+        ] {
+            let mut errors = Vec::new();
+            rule.validate_at("reply_space", &mut errors);
+            let messages = error_messages(&errors);
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains("reply-space prefix must not be empty")),
+                "expected empty-prefix validation error, got {messages:?}"
+            );
+        }
+
+        let mut errors = Vec::new();
+        ReplySpaceRule::CallerInbox.validate_at("reply_space", &mut errors);
+        assert!(errors.is_empty(), "caller inbox should always validate");
+    }
+
+    #[test]
+    fn subject_schema_family_specific_rules_validate() {
+        let default_subject = SubjectSchema::default();
+        let mut errors = Vec::new();
+        default_subject.validate_at("subject", &mut errors);
+        assert!(errors.is_empty(), "default subject schema should validate");
+
+        let command_subject = SubjectSchema {
+            pattern: SubjectPattern::new("tenant.orders.command"),
+            family: SubjectFamily::Command,
+            delivery_class: DeliveryClass::ObligationBacked,
+            evidence_policy: EvidencePolicy::default(),
+            privacy_policy: PrivacyPolicy::default(),
+            reply_space: Some(ReplySpaceRule::CallerInbox),
+            mobility: MobilityPermission::Federated,
+            quantitative_obligation: None,
+        };
+        let mut errors = Vec::new();
+        command_subject.validate_at("command", &mut errors);
+        assert!(errors.is_empty(), "command subject should validate");
+
+        let reply_subject = SubjectSchema {
+            family: SubjectFamily::Reply,
+            reply_space: Some(ReplySpaceRule::CallerInbox),
+            ..SubjectSchema::default()
+        };
+        let mut errors = Vec::new();
+        reply_subject.validate_at("reply", &mut errors);
+        let messages = error_messages(&errors);
+        assert!(
+            messages.iter().any(|message| message.contains(
+                "event, reply, and derived-view subjects must not declare reply-space rules"
+            )),
+            "expected reply-space rejection for reply subject, got {messages:?}"
+        );
+
+        let control_subject = SubjectSchema {
+            pattern: SubjectPattern::new("$SYS.health.ok"),
+            family: SubjectFamily::Control,
+            ..SubjectSchema::default()
+        };
+        let mut errors = Vec::new();
+        control_subject.validate_at("control", &mut errors);
+        assert!(
+            errors.is_empty(),
+            "control subject under $SYS should validate"
+        );
+
+        let capture_selector = SubjectSchema {
+            pattern: SubjectPattern::new("tenant.capture.>"),
+            family: SubjectFamily::CaptureSelector,
+            ..SubjectSchema::default()
+        };
+        let mut errors = Vec::new();
+        capture_selector.validate_at("capture", &mut errors);
+        assert!(
+            errors.is_empty(),
+            "capture selector with wildcard should validate"
+        );
+    }
+
+    #[test]
+    fn service_contract_and_protocol_defaults_are_constructible() {
+        let service = ServiceContract::default();
+        let mut errors = Vec::new();
+        service.validate_at("service", &mut errors);
+        assert!(
+            errors.is_empty(),
+            "default service contract should validate"
+        );
+
+        let protocol = ProtocolContract::default();
+        let mut errors = Vec::new();
+        protocol.validate_at("protocol", &mut errors);
+        assert!(
+            errors.is_empty(),
+            "default protocol contract should validate"
+        );
+
+        let invalid_operation = ServiceOperation {
+            reply_space: None,
+            delivery_class: DeliveryClass::ObligationBacked,
+            ..ServiceOperation::default()
+        };
+        let mut errors = Vec::new();
+        invalid_operation.validate_at("operation", &mut errors);
+        let messages = error_messages(&errors);
+        assert!(
+            messages.iter().any(|message| message.contains(
+                "obligation-backed and stronger service operations must declare a reply-space rule"
+            )),
+            "expected missing reply-space error, got {messages:?}"
+        );
+    }
+
+    #[test]
+    fn session_schema_validates_send_receive_choice_branch_and_end_shapes() {
+        let session = SessionSchema {
+            name: "checkout".to_owned(),
+            steps: vec![
+                SessionStep::Send {
+                    role: "client".to_owned(),
+                    subject: SubjectPattern::new("protocol.checkout.begin"),
+                },
+                SessionStep::Receive {
+                    role: "inventory".to_owned(),
+                    subject: SubjectPattern::new("protocol.checkout.reserve"),
+                },
+                SessionStep::Choice {
+                    decider_role: "inventory".to_owned(),
+                    branches: vec![
+                        SessionBranch {
+                            label: "reserved".to_owned(),
+                            steps: vec![SessionStep::End],
+                        },
+                        SessionBranch {
+                            label: "rejected".to_owned(),
+                            steps: vec![SessionStep::End],
+                        },
+                    ],
+                },
+                SessionStep::End,
+            ],
+        };
+
+        let mut errors = Vec::new();
+        session.validate_at("session", &mut errors);
+        assert!(errors.is_empty(), "session shape should validate");
+
+        let invalid_choice = SessionSchema {
+            name: "invalid-choice".to_owned(),
+            steps: vec![
+                SessionStep::Choice {
+                    decider_role: String::new(),
+                    branches: vec![SessionBranch {
+                        label: String::new(),
+                        steps: Vec::new(),
+                    }],
+                },
+                SessionStep::End,
+            ],
+        };
+        let mut errors = Vec::new();
+        invalid_choice.validate_at("session", &mut errors);
+        let messages = error_messages(&errors);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("session choice decider role must not be empty")),
+            "expected empty decider-role error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message
+                    .contains("session branch labels must be unique and non-empty")),
+            "expected branch-label validation error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("session branch must contain at least one step")),
+            "expected empty-branch validation error, got {messages:?}"
+        );
+    }
+
+    #[test]
+    fn consumer_policy_validation_enforces_ack_and_replay_mode_constraints() {
+        let replayable = ConsumerPolicy {
+            mode: ConsumerMode::Replayable,
+            delivery_class: DeliveryClass::ObligationBacked,
+            ack_kind: AckKind::Served,
+            replay_window: Some(Duration::from_secs(30)),
+            ..ConsumerPolicy::default()
+        };
+        let mut errors = Vec::new();
+        replayable.validate_at("consumer", &mut errors);
+        assert!(errors.is_empty(), "replayable consumer should validate");
+
+        let missing_window = ConsumerPolicy {
+            replay_window: None,
+            ..replayable.clone()
+        };
+        let mut errors = Vec::new();
+        missing_window.validate_at("consumer", &mut errors);
+        let messages = error_messages(&errors);
+        assert!(
+            messages.iter().any(
+                |message| message.contains("replayable consumers must declare a replay window")
+            ),
+            "expected missing replay-window error, got {messages:?}"
+        );
+
+        let window_on_durable = ConsumerPolicy {
+            mode: ConsumerMode::Durable,
+            replay_window: Some(Duration::from_secs(5)),
+            ..ConsumerPolicy::default()
+        };
+        let mut errors = Vec::new();
+        window_on_durable.validate_at("consumer", &mut errors);
+        let messages = error_messages(&errors);
+        assert!(
+            messages.iter().any(|message| message
+                .contains("consumer replay window is only valid for replayable consumers")),
+            "expected replay-window mode error, got {messages:?}"
+        );
+
+        let weak_ack = ConsumerPolicy {
+            delivery_class: DeliveryClass::DurableOrdered,
+            ack_kind: AckKind::Accepted,
+            ..ConsumerPolicy::default()
+        };
+        let mut errors = Vec::new();
+        weak_ack.validate_at("consumer", &mut errors);
+        let messages = error_messages(&errors);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("is weaker than the minimum")),
+            "expected weak-ack validation error, got {messages:?}"
+        );
+    }
+
+    #[test]
+    fn schema_policies_and_quantitative_contracts_validate_boundary_values() {
+        let capability = CapabilityTokenSchema {
+            name: String::new(),
+            families: Vec::new(),
+            delivery_classes: Vec::new(),
+            permissions: Vec::new(),
+        };
+        let mut errors = Vec::new();
+        capability.validate_at("capability", &mut errors);
+        let capability_messages = error_messages(&errors);
+        assert!(
+            capability_messages
+                .iter()
+                .any(|message| message.contains("capability token schema name must not be empty"))
+        );
+        assert!(capability_messages.iter().any(|message| {
+            message.contains("capability token schema must authorize at least one subject family")
+        }));
+        assert!(capability_messages.iter().any(|message| {
+            message.contains("capability token schema must authorize at least one delivery class")
+        }));
+        assert!(capability_messages.iter().any(|message| {
+            message.contains("capability token schema must authorize at least one permission")
+        }));
+
+        let evidence = EvidencePolicy {
+            sampling_ratio: 1.5,
+            ..EvidencePolicy::default()
+        };
+        let privacy = PrivacyPolicy {
+            name: String::new(),
+            noise_budget: Some(0.0),
+            ..PrivacyPolicy::default()
+        };
+        let cut = CutPolicy {
+            name: String::new(),
+            trigger: CutTrigger::AtEvidenceBudgetBytes { bytes: 0 },
+            retention: RetentionPolicy::RetainForEvents { events: 0 },
+            materialization: MaterializationPolicy::MetadataOnly,
+        };
+        let branch = BranchPolicy {
+            name: String::new(),
+            retention: RetentionPolicy::RetainFor {
+                duration: Duration::ZERO,
+            },
+            ..BranchPolicy::default()
+        };
+        let contract = QuantitativeObligationContract {
+            name: String::new(),
+            target_latency: Duration::ZERO,
+            target_probability: 0.0,
+            retry_law: RetryLaw::Fixed {
+                max_retries: 0,
+                delay: Duration::ZERO,
+            },
+            degradation_policy: DegradationPolicy::DowngradeTo {
+                class: DeliveryClass::ForensicReplayable,
+            },
+            ..QuantitativeObligationContract::default()
+        };
+
+        let mut errors = Vec::new();
+        evidence.validate_at("evidence", &mut errors);
+        privacy.validate_at("privacy", &mut errors);
+        cut.validate_at("cut", &mut errors);
+        branch.validate_at("branch", &mut errors);
+        contract.validate_at("contract", &mut errors);
+        let messages = error_messages(&errors);
+
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("evidence sampling ratio must be a finite value in [0.0, 1.0]")
+            }),
+            "expected sampling-ratio validation error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("privacy policy name must not be empty")),
+            "expected privacy-name validation error, got {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| message
+                .contains("privacy noise budget must be a finite value greater than zero")),
+            "expected privacy-budget validation error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("cut policy name must not be empty")),
+            "expected cut-name validation error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("cut evidence budget must be greater than zero")),
+            "expected cut-trigger validation error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("retention event count must be greater than zero")),
+            "expected retention validation error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("branch policy name must not be empty")),
+            "expected branch-name validation error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("retention duration must be greater than zero")),
+            "expected branch-retention validation error, got {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("quantitative obligation contract name must not be empty")
+            }),
+            "expected quantitative-contract name error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message
+                    .contains("quantitative target latency must be greater than zero")),
+            "expected quantitative latency error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("quantitative target probability must be")),
+            "expected quantitative probability error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("fixed retry law must allow at least one retry")),
+            "expected fixed-retry count error, got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("fixed retry delay must be greater than zero")),
+            "expected fixed-retry delay error, got {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| {
+                message.contains(
+                    "degradation downgrade target must be strictly weaker than the baseline delivery class",
+                )
+            }),
+            "expected downgrade-target validation error, got {messages:?}"
+        );
+    }
 }
