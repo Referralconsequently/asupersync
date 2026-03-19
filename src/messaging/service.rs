@@ -1457,6 +1457,385 @@ mod tests {
         assert_eq!(ledger.pending_count(), 0);
     }
 
+    // ========================================================================
+    // Comprehensive service contract tests (bead 8w83i.10.2)
+    // ========================================================================
+
+    // -- PayloadShape validation ---------------------------------------------
+
+    #[test]
+    fn payload_shape_named_schema_rejects_empty() {
+        let shape = PayloadShape::NamedSchema {
+            schema: "  ".to_owned(),
+        };
+        assert!(shape.validate("test").is_err());
+    }
+
+    #[test]
+    fn payload_shape_named_schema_accepts_non_empty() {
+        let shape = PayloadShape::NamedSchema {
+            schema: "orders.v1".to_owned(),
+        };
+        assert!(shape.validate("test").is_ok());
+    }
+
+    #[test]
+    fn payload_shape_non_named_variants_validate() {
+        for shape in [
+            PayloadShape::Empty,
+            PayloadShape::JsonDocument,
+            PayloadShape::BinaryBlob,
+            PayloadShape::SubjectEncoded,
+        ] {
+            assert!(shape.validate("test").is_ok());
+        }
+    }
+
+    // -- ReplyShape validation -----------------------------------------------
+
+    #[test]
+    fn reply_shape_none_validates() {
+        assert!(ReplyShape::None.validate("test").is_ok());
+    }
+
+    #[test]
+    fn reply_shape_unary_with_empty_named_schema_rejects() {
+        let shape = ReplyShape::Unary {
+            shape: PayloadShape::NamedSchema {
+                schema: "".to_owned(),
+            },
+        };
+        assert!(shape.validate("test").is_err());
+    }
+
+    #[test]
+    fn reply_shape_stream_validates_inner_shape() {
+        let shape = ReplyShape::Stream {
+            shape: PayloadShape::JsonDocument,
+        };
+        assert!(shape.validate("test").is_ok());
+    }
+
+    // -- BudgetSemantics validation ------------------------------------------
+
+    #[test]
+    fn budget_semantics_rejects_zero_timeout() {
+        let budget = BudgetSemantics {
+            default_timeout: Some(Duration::ZERO),
+            ..BudgetSemantics::default()
+        };
+        match budget.validate() {
+            Err(ServiceContractError::ZeroDuration { field }) => {
+                assert!(field.contains("default_timeout"));
+            }
+            other => panic!("expected ZeroDuration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn budget_semantics_none_timeout_validates() {
+        let budget = BudgetSemantics {
+            default_timeout: None,
+            ..BudgetSemantics::default()
+        };
+        assert!(budget.validate().is_ok());
+    }
+
+    // -- MobilityConstraint satisfies ----------------------------------------
+
+    #[test]
+    fn mobility_unrestricted_satisfies_any_requirement() {
+        assert!(MobilityConstraint::Unrestricted.satisfies(&MobilityConstraint::Unrestricted));
+    }
+
+    #[test]
+    fn mobility_pinned_satisfies_pinned() {
+        assert!(MobilityConstraint::Pinned.satisfies(&MobilityConstraint::Pinned));
+    }
+
+    #[test]
+    fn mobility_pinned_satisfies_bounded_region() {
+        assert!(MobilityConstraint::Pinned.satisfies(&MobilityConstraint::BoundedRegion {
+            region: "us-east".to_owned(),
+        }));
+    }
+
+    #[test]
+    fn mobility_bounded_satisfies_same_region() {
+        let constraint = MobilityConstraint::BoundedRegion {
+            region: "eu-west".to_owned(),
+        };
+        let required = MobilityConstraint::BoundedRegion {
+            region: "eu-west".to_owned(),
+        };
+        assert!(constraint.satisfies(&required));
+    }
+
+    #[test]
+    fn mobility_bounded_does_not_satisfy_different_region() {
+        let constraint = MobilityConstraint::BoundedRegion {
+            region: "us-east".to_owned(),
+        };
+        let required = MobilityConstraint::BoundedRegion {
+            region: "eu-west".to_owned(),
+        };
+        assert!(!constraint.satisfies(&required));
+    }
+
+    #[test]
+    fn mobility_unrestricted_does_not_satisfy_bounded() {
+        assert!(!MobilityConstraint::Unrestricted.satisfies(&MobilityConstraint::BoundedRegion {
+            region: "any".to_owned(),
+        }));
+    }
+
+    #[test]
+    fn mobility_unrestricted_does_not_satisfy_pinned() {
+        assert!(!MobilityConstraint::Unrestricted.satisfies(&MobilityConstraint::Pinned));
+    }
+
+    #[test]
+    fn mobility_bounded_rejects_empty_region() {
+        let mc = MobilityConstraint::BoundedRegion {
+            region: "  ".to_owned(),
+        };
+        assert!(mc.validate("test").is_err());
+    }
+
+    // -- OverloadPolicy validation -------------------------------------------
+
+    #[test]
+    fn overload_queue_rejects_zero_capacity() {
+        let policy = OverloadPolicy::QueueWithinBudget { max_pending: 0 };
+        assert_eq!(
+            policy.validate().unwrap_err(),
+            ServiceContractError::InvalidQueueCapacity
+        );
+    }
+
+    #[test]
+    fn overload_queue_accepts_nonzero_capacity() {
+        let policy = OverloadPolicy::QueueWithinBudget { max_pending: 100 };
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn overload_non_queue_variants_validate() {
+        for policy in [
+            OverloadPolicy::RejectNew,
+            OverloadPolicy::DropEphemeral,
+            OverloadPolicy::FailFast,
+        ] {
+            assert!(policy.validate().is_ok());
+        }
+    }
+
+    // -- ServiceContractSchema validation ------------------------------------
+
+    #[test]
+    fn default_contract_schema_validates() {
+        assert!(ServiceContractSchema::default().validate().is_ok());
+    }
+
+    #[test]
+    fn contract_schema_rejects_invalid_overload_policy() {
+        let mut schema = ServiceContractSchema::default();
+        schema.overload_policy = OverloadPolicy::QueueWithinBudget { max_pending: 0 };
+        assert!(schema.validate().is_err());
+    }
+
+    // -- ProviderTerms validation against contract ---------------------------
+
+    #[test]
+    fn provider_terms_reject_compensation_below_contract() {
+        let provider = ProviderTerms {
+            compensation_policy: CompensationSemantics::None,
+            ..provider_terms()
+        };
+        let err = provider.validate_against(&contract()).unwrap_err();
+        assert!(matches!(
+            err,
+            ServiceContractError::ProviderCompensationBelowContract { .. }
+        ));
+    }
+
+    #[test]
+    fn provider_terms_reject_evidence_below_contract() {
+        let c = ServiceContractSchema {
+            evidence_requirements: EvidenceLevel::Forensic,
+            ..contract()
+        };
+        let provider = ProviderTerms {
+            evidence_level: EvidenceLevel::Standard,
+            ..provider_terms()
+        };
+        let err = provider.validate_against(&c).unwrap_err();
+        assert!(matches!(
+            err,
+            ServiceContractError::ProviderEvidenceBelowContract { .. }
+        ));
+    }
+
+    #[test]
+    fn provider_terms_reject_incompatible_mobility() {
+        let c = ServiceContractSchema {
+            mobility_constraints: MobilityConstraint::Pinned,
+            ..contract()
+        };
+        let provider = ProviderTerms {
+            mobility_constraint: MobilityConstraint::Unrestricted,
+            ..provider_terms()
+        };
+        let err = provider.validate_against(&c).unwrap_err();
+        assert!(matches!(
+            err,
+            ServiceContractError::ProviderMobilityIncompatible { .. }
+        ));
+    }
+
+    // -- ServiceFailure abort_reason mapping ---------------------------------
+
+    #[test]
+    fn service_failure_maps_to_correct_abort_reasons() {
+        assert_eq!(
+            ServiceFailure::Cancelled.abort_reason(),
+            ObligationAbortReason::Cancel
+        );
+        assert_eq!(
+            ServiceFailure::TimedOut.abort_reason(),
+            ObligationAbortReason::Explicit
+        );
+        assert_eq!(
+            ServiceFailure::Rejected.abort_reason(),
+            ObligationAbortReason::Explicit
+        );
+        assert_eq!(
+            ServiceFailure::Overloaded.abort_reason(),
+            ObligationAbortReason::Error
+        );
+        assert_eq!(
+            ServiceFailure::TransportError.abort_reason(),
+            ObligationAbortReason::Error
+        );
+        assert_eq!(
+            ServiceFailure::ApplicationError.abort_reason(),
+            ObligationAbortReason::Error
+        );
+    }
+
+    // -- Display implementations ---------------------------------------------
+
+    #[test]
+    fn cleanup_urgency_display() {
+        assert_eq!(format!("{}", CleanupUrgency::Background), "background");
+        assert_eq!(format!("{}", CleanupUrgency::Prompt), "prompt");
+        assert_eq!(format!("{}", CleanupUrgency::Immediate), "immediate");
+    }
+
+    #[test]
+    fn cancellation_obligations_display() {
+        assert_eq!(
+            format!("{}", CancellationObligations::BestEffortDrain),
+            "best-effort-drain"
+        );
+        assert_eq!(
+            format!("{}", CancellationObligations::DrainBeforeReply),
+            "drain-before-reply"
+        );
+        assert_eq!(
+            format!("{}", CancellationObligations::DrainAndCompensate),
+            "drain-and-compensate"
+        );
+    }
+
+    #[test]
+    fn service_failure_display() {
+        assert_eq!(format!("{}", ServiceFailure::Cancelled), "cancelled");
+        assert_eq!(format!("{}", ServiceFailure::TimedOut), "timed_out");
+        assert_eq!(format!("{}", ServiceFailure::Overloaded), "overloaded");
+    }
+
+    // -- Serialization round-trips -------------------------------------------
+
+    #[test]
+    fn service_contract_schema_json_round_trip() {
+        let schema = ServiceContractSchema::default();
+        let json = serde_json::to_string(&schema).expect("serialize");
+        let rt: ServiceContractSchema = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(schema, rt);
+    }
+
+    #[test]
+    fn payload_shape_all_variants_json_round_trip() {
+        for shape in [
+            PayloadShape::Empty,
+            PayloadShape::JsonDocument,
+            PayloadShape::BinaryBlob,
+            PayloadShape::SubjectEncoded,
+            PayloadShape::NamedSchema {
+                schema: "test.v1".to_owned(),
+            },
+        ] {
+            let json = serde_json::to_string(&shape).expect("serialize");
+            let rt: PayloadShape = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(shape, rt);
+        }
+    }
+
+    #[test]
+    fn mobility_constraint_all_variants_json_round_trip() {
+        for mc in [
+            MobilityConstraint::Unrestricted,
+            MobilityConstraint::BoundedRegion {
+                region: "us-west".to_owned(),
+            },
+            MobilityConstraint::Pinned,
+        ] {
+            let json = serde_json::to_string(&mc).expect("serialize");
+            let rt: MobilityConstraint = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(mc, rt);
+        }
+    }
+
+    #[test]
+    fn overload_policy_all_variants_json_round_trip() {
+        for policy in [
+            OverloadPolicy::RejectNew,
+            OverloadPolicy::QueueWithinBudget { max_pending: 50 },
+            OverloadPolicy::DropEphemeral,
+            OverloadPolicy::FailFast,
+        ] {
+            let json = serde_json::to_string(&policy).expect("serialize");
+            let rt: OverloadPolicy = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(policy, rt);
+        }
+    }
+
+    // -- Default enum values -------------------------------------------------
+
+    #[test]
+    fn default_enum_values_match_expected() {
+        assert_eq!(PayloadShape::default(), PayloadShape::Empty);
+        assert_eq!(ReplyShape::default(), ReplyShape::None);
+        assert_eq!(CleanupUrgency::default(), CleanupUrgency::Prompt);
+        assert_eq!(
+            CancellationObligations::default(),
+            CancellationObligations::DrainBeforeReply
+        );
+        assert_eq!(
+            CompensationSemantics::default(),
+            CompensationSemantics::None
+        );
+        assert_eq!(
+            MobilityConstraint::default(),
+            MobilityConstraint::Unrestricted
+        );
+        assert_eq!(EvidenceLevel::default(), EvidenceLevel::Standard);
+        assert_eq!(OverloadPolicy::default(), OverloadPolicy::RejectNew);
+    }
+
+    // -- Previously existing tests below ------------------------------------
+
     #[test]
     fn unresolved_service_obligation_is_visible_to_leak_checks() {
         let mut ledger = ObligationLedger::new();
