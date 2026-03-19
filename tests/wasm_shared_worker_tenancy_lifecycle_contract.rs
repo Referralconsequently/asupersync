@@ -1,0 +1,130 @@
+//! Contract checks for the SharedWorker tenancy/lifecycle/downgrade policy
+//! (`asupersync-n6kwt.6.1`).
+
+use std::path::{Path, PathBuf};
+
+const DOC_PATH: &str = "docs/wasm_shared_worker_tenancy_lifecycle_contract.md";
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read_file(path: &str) -> String {
+    let path = repo_root().join(path);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        !content.is_empty(),
+        "expected non-empty contract file at {}",
+        path.display()
+    );
+    content
+}
+
+#[test]
+fn doc_exists_and_pins_bead_and_contract_id() {
+    assert!(Path::new(DOC_PATH).exists(), "contract doc must exist");
+    let doc = read_file(DOC_PATH);
+    for marker in [
+        "asupersync-n6kwt.6.1",
+        "wasm-shared-worker-tenancy-lifecycle-v1",
+        "Current Truthful Runtime Status",
+        "src/runtime/builder.rs",
+    ] {
+        assert!(doc.contains(marker), "doc missing marker: {marker}");
+    }
+}
+
+#[test]
+fn doc_defines_tenancy_tuple_and_registration_identity() {
+    let doc = read_file(DOC_PATH);
+    for marker in [
+        "(origin, app_namespace, app_version_major, coordinator_protocol_version, run_profile)",
+        "same-origin only",
+        "client_instance_id",
+        "client_epoch",
+        "client_kind",
+        "client_artifact_namespace",
+        "registration is explicit and idempotent",
+    ] {
+        assert!(doc.contains(marker), "doc missing tenancy marker: {marker}");
+    }
+}
+
+#[test]
+fn doc_distinguishes_ephemeral_and_durable_state() {
+    let doc = read_file(DOC_PATH);
+    for marker in [
+        "Ephemeral coordinator state",
+        "Durable state",
+        "IndexedDB-backed artifacts",
+        "live port registry",
+        "artifact manifests and retained evidence indexes",
+        "replay bundles and crashpack metadata",
+        "The SharedWorker coordinator owns no irreplaceable authoritative state.",
+    ] {
+        assert!(doc.contains(marker), "doc missing state marker: {marker}");
+    }
+}
+
+#[test]
+fn doc_pins_lifecycle_quiescence_and_downgrade_rules() {
+    let doc = read_file(DOC_PATH);
+    for marker in [
+        "1. `bootstrapping`",
+        "2. `joining`",
+        "3. `active`",
+        "4. `draining`",
+        "5. `quiescent`",
+        "6. `terminated`",
+        "coordinator loss is never treated as impossible or exceptional for semantic correctness",
+        "shared_worker_api_missing",
+        "coordinator_crash_or_browser_reclaim",
+        "lane_health_demoted",
+        "downgrade chooses the next truthful lower lane",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "doc missing lifecycle marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn runtime_builder_exposes_shared_worker_fail_closed_markers() {
+    let builder = read_file("src/runtime/builder.rs");
+    for marker in [
+        "Some(\"SharedWorkerGlobalScope\") => BrowserExecutionHostRole::SharedWorker",
+        "BrowserRuntimeSupportReason::SharedWorkerNotYetShipped",
+        "BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped",
+        "\"shared_worker_direct_runtime_not_shipped\"",
+        "Rust Browser Edition does not yet ship a shared-worker direct-runtime lane.",
+    ] {
+        assert!(
+            builder.contains(marker),
+            "runtime builder missing shared-worker fail-closed marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn canonical_browser_docs_reference_the_contract() {
+    let wasm = read_file("docs/WASM.md");
+    let integration = read_file("docs/integration.md");
+
+    assert!(
+        wasm.contains("docs/wasm_shared_worker_tenancy_lifecycle_contract.md"),
+        "WASM guide must reference the SharedWorker contract"
+    );
+    assert!(
+        wasm.contains("shared_worker_direct_runtime_not_shipped"),
+        "WASM guide must preserve the shared-worker fail-closed reason"
+    );
+    assert!(
+        integration.contains("docs/wasm_shared_worker_tenancy_lifecycle_contract.md"),
+        "integration guide must reference the SharedWorker contract"
+    );
+    assert!(
+        integration.contains("Browser shared worker"),
+        "integration guide must carry a dedicated shared-worker environment row"
+    );
+}
