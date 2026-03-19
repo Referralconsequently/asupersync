@@ -77,15 +77,18 @@ pub use conformal::{
     PredictionSet,
 };
 pub use dual_run::{
-    CancelTerminalPhase, CancellationRecord, ComparisonVerdict, CounterTolerance,
-    DUAL_RUN_SCHEMA_VERSION, DrainStatus, DualRunHarness, DualRunResult, DualRunScenarioIdentity,
-    ExecutionInstanceId, LiveExecutionProfile, LiveRunMetadata, LiveRunResult, LiveRunnerConfig,
-    LiveWitnessCollector, LoserDrainRecord, NORMALIZED_OBSERVABLE_SCHEMA_VERSION,
-    NormalizedObservable, NormalizedSemantics, ObligationBalanceRecord, OutcomeClass, Phase,
-    RegionCloseRecord, RegionState as DualRunRegionState, ReplayMetadata, ReplayPolicy,
-    ResourceSurfaceRecord, RuntimeKind, ScenarioFamilyId, SeedLineageRecord, SeedMode, SeedPlan,
-    SemanticMismatch, TerminalOutcome, assert_dual_run_passes, assert_semantics,
-    check_core_invariants, compare_observables, run_live_adapter,
+    CancelTerminalPhase, CancellationRecord, CaptureAnnotation, CaptureManifest, ComparisonVerdict,
+    CounterTolerance, DUAL_RUN_SCHEMA_VERSION, DrainStatus, DualRunHarness, DualRunResult,
+    DualRunScenarioIdentity, ExecutionInstanceId, FieldObservability, LiveExecutionProfile,
+    LiveRunMetadata, LiveRunResult, LiveRunnerConfig, LiveWitnessCollector, LoserDrainRecord,
+    NORMALIZED_OBSERVABLE_SCHEMA_VERSION, NormalizedObservable, NormalizedSemantics,
+    ObligationBalanceRecord, OutcomeClass, Phase, RegionCloseRecord,
+    RegionState as DualRunRegionState, ReplayMetadata, ReplayPolicy, ResourceSurfaceRecord,
+    RuntimeKind, ScenarioFamilyId, SeedLineageRecord, SeedMode, SeedPlan, SemanticMismatch,
+    TerminalOutcome, assert_dual_run_passes, assert_semantics, capture_cancellation,
+    capture_loser_drain, capture_obligation_balance, capture_region_close,
+    capture_terminal_from_result, capture_terminal_outcome, check_core_invariants,
+    compare_observables, run_live_adapter,
 };
 pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,

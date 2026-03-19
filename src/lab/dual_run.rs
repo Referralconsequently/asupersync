@@ -1883,6 +1883,239 @@ pub fn run_live_adapter(
 }
 
 // ============================================================================
+// Semantic Capture Hooks
+// ============================================================================
+
+/// Observability status for a captured field.
+///
+/// When a live adapter cannot observe a semantic field, it must declare
+/// the limitation explicitly rather than fabricating a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldObservability {
+    /// Field was observed from a stable semantic hook.
+    Observed,
+    /// Field was inferred from indirect evidence.
+    Inferred,
+    /// Field is not observable on this adapter and was set to a default.
+    Unsupported,
+}
+
+/// Evidence annotation for a single captured field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureAnnotation {
+    /// Dot-path of the field (e.g., `"cancellation.checkpoint_observed"`).
+    pub field: String,
+    /// How the field was captured.
+    pub observability: FieldObservability,
+    /// Source of the evidence (e.g., `"task_handle.join"`, `"oracle.loser_drain"`).
+    pub source: String,
+}
+
+/// Semantic capture manifest for a live run.
+///
+/// Records how each normalized field was captured, enabling downstream
+/// tools to distinguish strongly-observed from weakly-inferred evidence.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaptureManifest {
+    /// Per-field capture annotations.
+    pub annotations: Vec<CaptureAnnotation>,
+    /// Fields that are unsupported on this adapter.
+    pub unsupported_fields: Vec<String>,
+}
+
+impl CaptureManifest {
+    /// Create an empty manifest.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that a field was directly observed.
+    pub fn observed(&mut self, field: impl Into<String>, source: impl Into<String>) {
+        self.annotations.push(CaptureAnnotation {
+            field: field.into(),
+            observability: FieldObservability::Observed,
+            source: source.into(),
+        });
+    }
+
+    /// Record that a field was inferred from indirect evidence.
+    pub fn inferred(&mut self, field: impl Into<String>, source: impl Into<String>) {
+        self.annotations.push(CaptureAnnotation {
+            field: field.into(),
+            observability: FieldObservability::Inferred,
+            source: source.into(),
+        });
+    }
+
+    /// Record that a field is unsupported and was defaulted.
+    pub fn unsupported(&mut self, field: impl Into<String>) {
+        let f = field.into();
+        self.annotations.push(CaptureAnnotation {
+            field: f.clone(),
+            observability: FieldObservability::Unsupported,
+            source: "default".to_string(),
+        });
+        self.unsupported_fields.push(f);
+    }
+
+    /// How many fields were captured total.
+    #[must_use]
+    pub fn total_fields(&self) -> usize {
+        self.annotations.len()
+    }
+
+    /// How many fields are unsupported.
+    #[must_use]
+    pub fn unsupported_count(&self) -> usize {
+        self.unsupported_fields.len()
+    }
+
+    /// Whether all fields were directly observed (no inferred or unsupported).
+    #[must_use]
+    pub fn fully_observed(&self) -> bool {
+        self.annotations
+            .iter()
+            .all(|a| a.observability == FieldObservability::Observed)
+    }
+}
+
+/// Capture a `TerminalOutcome` from an `Outcome<T, E>`.
+///
+/// Maps the four-valued `Outcome` enum to the normalized
+/// `TerminalOutcome` record. Error and cancel reason classes are
+/// derived from `Display` on the error/reason values.
+pub fn capture_terminal_outcome<T, E: fmt::Display>(
+    outcome: &crate::types::outcome::Outcome<T, E>,
+) -> TerminalOutcome {
+    match outcome {
+        crate::types::outcome::Outcome::Ok(_) => TerminalOutcome::ok(),
+        crate::types::outcome::Outcome::Err(e) => TerminalOutcome::err(format!("{e}")),
+        crate::types::outcome::Outcome::Cancelled(reason) => {
+            TerminalOutcome::cancelled(format!("{reason}"))
+        }
+        crate::types::outcome::Outcome::Panicked(_) => TerminalOutcome {
+            class: OutcomeClass::Panicked,
+            severity: OutcomeClass::Panicked,
+            surface_result: None,
+            error_class: None,
+            cancel_reason_class: None,
+            panic_class: Some("caught_panic".to_string()),
+        },
+    }
+}
+
+/// Capture a `TerminalOutcome` from a `Result<T, E>`.
+///
+/// Maps `Ok` to `OutcomeClass::Ok` and `Err` to `OutcomeClass::Err`.
+pub fn capture_terminal_from_result<T, E: fmt::Display>(result: &Result<T, E>) -> TerminalOutcome {
+    match result {
+        Ok(_) => TerminalOutcome::ok(),
+        Err(e) => TerminalOutcome::err(format!("{e}")),
+    }
+}
+
+/// Capture obligation balance from explicit counters.
+///
+/// This is a convenience for live adapters that track obligations
+/// via explicit counters rather than a full ledger.
+#[must_use]
+pub fn capture_obligation_balance(
+    reserved: u32,
+    committed: u32,
+    aborted: u32,
+) -> ObligationBalanceRecord {
+    let leaked = reserved.saturating_sub(committed + aborted);
+    ObligationBalanceRecord {
+        reserved,
+        committed,
+        aborted,
+        leaked,
+        unresolved: 0,
+        balanced: leaked == 0,
+    }
+    .recompute()
+}
+
+/// Capture region close evidence from explicit flags.
+///
+/// For live adapters that check quiescence by joining all child tasks.
+#[must_use]
+pub fn capture_region_close(
+    all_children_joined: bool,
+    all_finalizers_done: bool,
+) -> RegionCloseRecord {
+    let quiescent = all_children_joined && all_finalizers_done;
+    RegionCloseRecord {
+        root_state: if quiescent {
+            RegionState::Closed
+        } else {
+            RegionState::Open
+        },
+        quiescent,
+        live_children: if all_children_joined { 0 } else { 1 },
+        finalizers_pending: if all_finalizers_done { 0 } else { 1 },
+        close_completed: quiescent,
+    }
+}
+
+/// Capture loser drain evidence from join results.
+///
+/// `loser_joined` is a list of booleans indicating whether each loser
+/// task was successfully joined (true = drained).
+#[must_use]
+pub fn capture_loser_drain(loser_joined: &[bool]) -> LoserDrainRecord {
+    if loser_joined.is_empty() {
+        return LoserDrainRecord::not_applicable();
+    }
+    let expected = loser_joined.len() as u32;
+    let drained = loser_joined.iter().filter(|&&x| x).count() as u32;
+    LoserDrainRecord {
+        applicable: true,
+        expected_losers: expected,
+        drained_losers: drained,
+        status: if drained == expected {
+            DrainStatus::Complete
+        } else {
+            DrainStatus::Incomplete
+        },
+        evidence: Some("task_handle.join".to_string()),
+    }
+}
+
+/// Capture cancellation evidence from explicit lifecycle flags.
+#[must_use]
+pub fn capture_cancellation(
+    requested: bool,
+    acknowledged: bool,
+    cleanup_completed: bool,
+    finalization_completed: bool,
+    checkpoint_observed: Option<bool>,
+) -> CancellationRecord {
+    let terminal_phase = if !requested {
+        CancelTerminalPhase::NotCancelled
+    } else if finalization_completed {
+        CancelTerminalPhase::Completed
+    } else if cleanup_completed {
+        CancelTerminalPhase::Finalizing
+    } else if acknowledged {
+        CancelTerminalPhase::Cancelling
+    } else {
+        CancelTerminalPhase::CancelRequested
+    };
+
+    CancellationRecord {
+        requested,
+        acknowledged,
+        cleanup_completed,
+        finalization_completed,
+        terminal_phase,
+        checkpoint_observed,
+    }
+}
+
+// ============================================================================
 // Dual-Run Harness Entrypoint
 // ============================================================================
 
@@ -3299,5 +3532,197 @@ mod tests {
         // The harness detects this properly.
         assert!(!result.verdict.passed); // Different resource surfaces
         crate::test_complete!("live_adapter_integrates_with_harness");
+    }
+
+    // --- Semantic Capture Hooks ---
+
+    #[test]
+    fn capture_manifest_tracking() {
+        init_test("capture_manifest_tracking");
+        let mut manifest = CaptureManifest::new();
+        manifest.observed("terminal_outcome", "outcome_match");
+        manifest.inferred("cancellation.acknowledged", "task_handle.join");
+        manifest.unsupported("cancellation.checkpoint_observed");
+
+        assert_eq!(manifest.total_fields(), 3);
+        assert_eq!(manifest.unsupported_count(), 1);
+        assert!(!manifest.fully_observed());
+        assert_eq!(
+            manifest.unsupported_fields,
+            vec!["cancellation.checkpoint_observed"]
+        );
+        crate::test_complete!("capture_manifest_tracking");
+    }
+
+    #[test]
+    fn capture_manifest_fully_observed() {
+        init_test("capture_manifest_fully_observed");
+        let mut manifest = CaptureManifest::new();
+        manifest.observed("outcome", "match");
+        manifest.observed("cancel", "hook");
+        assert!(manifest.fully_observed());
+        crate::test_complete!("capture_manifest_fully_observed");
+    }
+
+    #[test]
+    fn capture_manifest_serde() {
+        init_test("capture_manifest_serde");
+        let mut manifest = CaptureManifest::new();
+        manifest.observed("outcome", "match");
+        manifest.unsupported("checkpoint");
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: CaptureManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total_fields(), 2);
+        crate::test_complete!("capture_manifest_serde");
+    }
+
+    #[test]
+    fn capture_terminal_from_outcome_ok() {
+        init_test("capture_terminal_from_outcome_ok");
+        let outcome: crate::types::outcome::Outcome<i32, String> =
+            crate::types::outcome::Outcome::Ok(42);
+        let t = capture_terminal_outcome(&outcome);
+        assert_eq!(t.class, OutcomeClass::Ok);
+        assert_eq!(t.severity, OutcomeClass::Ok);
+        crate::test_complete!("capture_terminal_from_outcome_ok");
+    }
+
+    #[test]
+    fn capture_terminal_from_outcome_err() {
+        init_test("capture_terminal_from_outcome_err");
+        let outcome: crate::types::outcome::Outcome<i32, String> =
+            crate::types::outcome::Outcome::Err("network_error".to_string());
+        let t = capture_terminal_outcome(&outcome);
+        assert_eq!(t.class, OutcomeClass::Err);
+        assert_eq!(t.error_class.as_deref(), Some("network_error"));
+        crate::test_complete!("capture_terminal_from_outcome_err");
+    }
+
+    #[test]
+    fn capture_terminal_from_outcome_cancelled() {
+        init_test("capture_terminal_from_outcome_cancelled");
+        let outcome: crate::types::outcome::Outcome<i32, String> =
+            crate::types::outcome::Outcome::Cancelled(crate::types::CancelReason::explicit());
+        let t = capture_terminal_outcome(&outcome);
+        assert_eq!(t.class, OutcomeClass::Cancelled);
+        assert!(t.cancel_reason_class.is_some());
+        crate::test_complete!("capture_terminal_from_outcome_cancelled");
+    }
+
+    #[test]
+    fn capture_terminal_from_result() {
+        init_test("capture_terminal_from_result");
+        let ok: Result<i32, String> = Ok(42);
+        let err: Result<i32, String> = Err("fail".to_string());
+        assert_eq!(capture_terminal_from_result(&ok).class, OutcomeClass::Ok);
+        assert_eq!(capture_terminal_from_result(&err).class, OutcomeClass::Err);
+        crate::test_complete!("capture_terminal_from_result");
+    }
+
+    #[test]
+    fn capture_obligation_balanced() {
+        init_test("capture_obligation_balanced");
+        let b = capture_obligation_balance(10, 8, 2);
+        assert!(b.balanced);
+        assert_eq!(b.leaked, 0);
+        assert_eq!(b.unresolved, 0);
+        crate::test_complete!("capture_obligation_balanced");
+    }
+
+    #[test]
+    fn capture_obligation_leaked() {
+        init_test("capture_obligation_leaked");
+        let b = capture_obligation_balance(10, 5, 2);
+        assert!(!b.balanced);
+        assert_eq!(b.leaked, 3);
+        crate::test_complete!("capture_obligation_leaked");
+    }
+
+    #[test]
+    fn capture_region_close_quiescent() {
+        init_test("capture_region_close_quiescent");
+        let r = capture_region_close(true, true);
+        assert!(r.quiescent);
+        assert!(r.close_completed);
+        assert_eq!(r.root_state, RegionState::Closed);
+        assert_eq!(r.live_children, 0);
+        crate::test_complete!("capture_region_close_quiescent");
+    }
+
+    #[test]
+    fn capture_region_close_not_quiescent() {
+        init_test("capture_region_close_not_quiescent");
+        let r = capture_region_close(false, true);
+        assert!(!r.quiescent);
+        assert!(!r.close_completed);
+        assert_eq!(r.live_children, 1);
+        crate::test_complete!("capture_region_close_not_quiescent");
+    }
+
+    #[test]
+    fn capture_loser_drain_not_applicable() {
+        init_test("capture_loser_drain_not_applicable");
+        let d = capture_loser_drain(&[]);
+        assert!(!d.applicable);
+        assert_eq!(d.status, DrainStatus::NotApplicable);
+        crate::test_complete!("capture_loser_drain_not_applicable");
+    }
+
+    #[test]
+    fn capture_loser_drain_all_drained() {
+        init_test("capture_loser_drain_all_drained");
+        let d = capture_loser_drain(&[true, true, true]);
+        assert!(d.applicable);
+        assert_eq!(d.status, DrainStatus::Complete);
+        assert_eq!(d.expected_losers, 3);
+        assert_eq!(d.drained_losers, 3);
+        crate::test_complete!("capture_loser_drain_all_drained");
+    }
+
+    #[test]
+    fn capture_loser_drain_partial() {
+        init_test("capture_loser_drain_partial");
+        let d = capture_loser_drain(&[true, false, true]);
+        assert_eq!(d.status, DrainStatus::Incomplete);
+        assert_eq!(d.drained_losers, 2);
+        crate::test_complete!("capture_loser_drain_partial");
+    }
+
+    #[test]
+    fn capture_cancellation_not_cancelled() {
+        init_test("capture_cancellation_not_cancelled");
+        let c = capture_cancellation(false, false, false, false, None);
+        assert_eq!(c.terminal_phase, CancelTerminalPhase::NotCancelled);
+        assert!(!c.requested);
+        crate::test_complete!("capture_cancellation_not_cancelled");
+    }
+
+    #[test]
+    fn capture_cancellation_completed() {
+        init_test("capture_cancellation_completed");
+        let c = capture_cancellation(true, true, true, true, Some(true));
+        assert_eq!(c.terminal_phase, CancelTerminalPhase::Completed);
+        assert!(c.requested);
+        assert!(c.acknowledged);
+        assert!(c.cleanup_completed);
+        assert!(c.finalization_completed);
+        assert_eq!(c.checkpoint_observed, Some(true));
+        crate::test_complete!("capture_cancellation_completed");
+    }
+
+    #[test]
+    fn capture_cancellation_in_progress() {
+        init_test("capture_cancellation_in_progress");
+        let c = capture_cancellation(true, true, false, false, None);
+        assert_eq!(c.terminal_phase, CancelTerminalPhase::Cancelling);
+        crate::test_complete!("capture_cancellation_in_progress");
+    }
+
+    #[test]
+    fn capture_cancellation_finalizing() {
+        init_test("capture_cancellation_finalizing");
+        let c = capture_cancellation(true, true, true, false, None);
+        assert_eq!(c.terminal_phase, CancelTerminalPhase::Finalizing);
+        crate::test_complete!("capture_cancellation_finalizing");
     }
 }
