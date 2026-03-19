@@ -316,6 +316,27 @@ same stable file set used by the broader differential program:
 - `lab_normalized.json`
 - `live_normalized.json`
 
+`differential_failures.json` is the runtime-artifact index for the divergence
+and must retain, per side:
+
+- `failure_artifacts`
+- `runtime_kind`
+- `normalized_record_path`
+- `artifact_path`
+- `repro_command`
+- `crashpack_link` when the retained artifact is a crashpack
+
+`differential_repro_manifest.json` is the replay/minimization control plane for
+the bundle and must retain at least:
+
+- `summary_path`
+- `deviations_path`
+- `failure_artifacts_path`
+- `lab_normalized_path`
+- `live_normalized_path`
+- `repro_commands`
+- `promoted_scenario_id` when the case has already become a durable regression
+
 ### Lifecycle and Promotion Rules
 
 `regression_promotion_state` must follow an explicit lifecycle instead of ad-hoc

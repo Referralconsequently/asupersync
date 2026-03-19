@@ -163,6 +163,23 @@ fn browser_package_and_runtime_builder_preserve_service_worker_fail_closed_marke
 }
 
 #[test]
+fn browser_package_fail_closes_foreign_requested_lane_in_durable_broker_records() {
+    let browser = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "function parseBrowserServiceWorkerBrokerDescriptor(",
+        "function parseBrowserServiceWorkerBrokerHandoffRecord(",
+        "candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE",
+        "service-worker broker descriptor is missing required fields",
+        "service-worker broker handoff record is missing required fields",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser package missing requested-lane fail-closed marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn canonical_browser_docs_reference_the_contract_and_current_reason_codes() {
     let wasm = read_file("docs/WASM.md");
     let integration = read_file("docs/integration.md");
