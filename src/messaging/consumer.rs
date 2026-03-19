@@ -12,10 +12,13 @@
 
 use super::fabric::{CellEpoch, CellId, SubjectCell, SubjectPattern};
 use super::jetstream::{AckPolicy, DeliverPolicy};
+use crate::obligation::ledger::{LedgerStats, ObligationLedger, ObligationToken};
+use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
 use crate::remote::NodeId;
-use crate::types::ObligationId;
+use crate::types::{ObligationId, RegionId, TaskId, Time};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::panic::Location;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -375,6 +378,8 @@ pub struct AttemptCertificate {
     pub delivery_attempt: u32,
     /// Obligation backing the attempt.
     pub obligation_id: ObligationId,
+    /// Previous obligation superseded by a redelivery, when applicable.
+    pub supersedes_obligation_id: Option<ObligationId>,
 }
 
 /// Coverage map for symbols retained in recoverable capsules.
@@ -571,6 +576,7 @@ impl FabricConsumerCursor {
             delivery_mode,
             delivery_attempt,
             obligation_id,
+            supersedes_obligation_id: None,
         })
     }
 
@@ -869,6 +875,24 @@ impl Default for FabricConsumerDeliveryPolicy {
     }
 }
 
+/// Runtime ownership bound to the consumer's obligation ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FabricConsumerOwner {
+    /// Task currently holding the consumer's delivery obligations.
+    pub holder: TaskId,
+    /// Region that must quiesce before all consumer obligations resolve.
+    pub region: RegionId,
+}
+
+impl Default for FabricConsumerOwner {
+    fn default() -> Self {
+        Self {
+            holder: TaskId::new_ephemeral(),
+            region: RegionId::new_ephemeral(),
+        }
+    }
+}
+
 /// Pull request admitted into the consumer wait queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
@@ -950,12 +974,16 @@ struct QueuedPullRequest {
 /// Pending acknowledgement tracked against an obligation id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAckState {
+    /// Original request shape that produced this pending delivery.
+    pub request: ScheduledConsumerRequest,
     /// Inclusive sequence window still awaiting acknowledgement.
     pub window: SequenceWindow,
     /// Cursor delivery mode used when the attempt was issued.
     pub delivery_mode: CursorDeliveryMode,
     /// Monotonic attempt number for the logical delivery.
     pub delivery_attempt: u32,
+    /// Prior obligation superseded by this attempt, when the delivery is a retry.
+    pub supersedes_obligation_id: Option<ObligationId>,
 }
 
 /// Dynamic consumer state surfaced to policy and tests.
@@ -1005,18 +1033,79 @@ pub struct ScheduledConsumerDelivery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PullDispatchOutcome {
     /// A concrete delivery was scheduled immediately.
-    Scheduled(ScheduledConsumerDelivery),
+    Scheduled(Box<ScheduledConsumerDelivery>),
     /// No data was available yet; the request remains queued.
     Waiting(PullRequest),
 }
 
-/// High-level policy-driven consumer engine layered on top of cursor leases.
+/// Typed reason for aborting a delivery attempt instead of committing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerNackReason {
+    /// Operator or caller explicitly rejected the delivery.
+    Explicit,
+    /// Delivery failed due to a processing error.
+    Error,
+    /// Delivery was cancelled before the consumer could complete it.
+    Cancel,
+}
+
+impl ConsumerNackReason {
+    const fn abort_reason(self) -> ObligationAbortReason {
+        match self {
+            Self::Explicit => ObligationAbortReason::Explicit,
+            Self::Error => ObligationAbortReason::Error,
+            Self::Cancel => ObligationAbortReason::Cancel,
+        }
+    }
+}
+
+/// Result of negatively acknowledging a delivery attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NackResolution {
+    /// The pending obligation was aborted and removed from consumer state.
+    Aborted {
+        /// Obligation closed by the nack path.
+        obligation_id: ObligationId,
+        /// Window released by the abort.
+        window: SequenceWindow,
+        /// Typed reason recorded against the ledger entry.
+        reason: ConsumerNackReason,
+    },
+    /// The attempt was already stale or previously resolved, so the nack is a no-op.
+    StaleNoOp {
+        /// Obligation associated with the stale negative acknowledgement.
+        obligation_id: ObligationId,
+        /// Current generation that fences out the stale attempt.
+        current_generation: u64,
+        /// Holder that currently owns the lease.
+        current_holder: CursorLeaseHolder,
+    },
+}
+
+/// Structured dead-letter transfer emitted when a delivery attempt is abandoned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetterTransfer {
+    /// Obligation that was removed from the pending set.
+    pub obligation_id: ObligationId,
+    /// Window that moved to the dead-letter path.
+    pub window: SequenceWindow,
+    /// Delivery attempt associated with the transfer.
+    pub delivery_attempt: u32,
+    /// Human-readable reason recorded for the DLQ transfer.
+    pub reason: String,
+}
+
+/// High-level policy-driven consumer engine layered on top of cursor leases.
+#[derive(Debug)]
 pub struct FabricConsumer {
     cursor: FabricConsumerCursor,
     config: FabricConsumerConfig,
+    owner: FabricConsumerOwner,
+    ledger: ObligationLedger,
     policy: FabricConsumerDeliveryPolicy,
     state: FabricConsumerState,
+    pending_ack_tokens: BTreeMap<ObligationId, ObligationToken>,
+    next_event_nanos: u64,
     waiting_pull_requests: Vec<QueuedPullRequest>,
 }
 
@@ -1026,12 +1115,25 @@ impl FabricConsumer {
         cell: &SubjectCell,
         config: FabricConsumerConfig,
     ) -> Result<Self, FabricConsumerError> {
+        Self::new_owned(cell, config, FabricConsumerOwner::default())
+    }
+
+    /// Construct a new consumer engine with explicit runtime ownership metadata.
+    pub fn new_owned(
+        cell: &SubjectCell,
+        config: FabricConsumerConfig,
+        owner: FabricConsumerOwner,
+    ) -> Result<Self, FabricConsumerError> {
         config.validate()?;
         Ok(Self {
             cursor: FabricConsumerCursor::new(cell)?,
             config,
+            owner,
+            ledger: ObligationLedger::new(),
             policy: FabricConsumerDeliveryPolicy::default(),
             state: FabricConsumerState::default(),
+            pending_ack_tokens: BTreeMap::new(),
+            next_event_nanos: 0,
             waiting_pull_requests: Vec::new(),
         })
     }
@@ -1052,6 +1154,18 @@ impl FabricConsumer {
     #[must_use]
     pub fn state(&self) -> &FabricConsumerState {
         &self.state
+    }
+
+    /// Return the runtime ownership metadata backing this consumer's obligations.
+    #[must_use]
+    pub const fn owner(&self) -> FabricConsumerOwner {
+        self.owner
+    }
+
+    /// Return ledger statistics for the consumer's delivery obligations.
+    #[must_use]
+    pub fn obligation_stats(&self) -> LedgerStats {
+        self.ledger.stats()
     }
 
     /// Return the number of queued pull requests still waiting for service.
@@ -1112,10 +1226,10 @@ impl FabricConsumer {
     }
 
     /// Dispatch a concrete push window under the active lease.
+    #[track_caller]
     pub fn dispatch_push(
         &mut self,
         window: SequenceWindow,
-        obligation_id: ObligationId,
         capsule: &RecoverableCapsule,
         ticket: Option<&ReadDelegationTicket>,
     ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
@@ -1127,17 +1241,17 @@ impl FabricConsumer {
             ScheduledConsumerRequest::Push(window),
             delivery_mode,
             window,
-            obligation_id,
             capsule,
             ticket,
+            None,
         )
     }
 
     /// Try to dispatch the next queued pull request.
+    #[track_caller]
     pub fn dispatch_next_pull(
         &mut self,
         available_tail: u64,
-        obligation_id: ObligationId,
         capsule: &RecoverableCapsule,
         ticket: Option<&ReadDelegationTicket>,
     ) -> Result<PullDispatchOutcome, FabricConsumerError> {
@@ -1165,11 +1279,11 @@ impl FabricConsumer {
             ScheduledConsumerRequest::Pull(request),
             CursorDeliveryMode::Pull(CursorRequest::Window(window)),
             window,
-            obligation_id,
             capsule,
             ticket,
+            None,
         )?;
-        Ok(PullDispatchOutcome::Scheduled(delivery))
+        Ok(PullDispatchOutcome::Scheduled(Box::new(delivery)))
     }
 
     /// Apply an acknowledgement attempt and update pending state on success.
@@ -1177,10 +1291,21 @@ impl FabricConsumer {
         &mut self,
         attempt: &AttemptCertificate,
     ) -> Result<AckResolution, FabricConsumerError> {
+        if !self.state.pending_acks.contains_key(&attempt.obligation_id) {
+            return Ok(self.stale_attempt_noop(attempt.obligation_id));
+        }
         let resolution = self.cursor.acknowledge(attempt)?;
         if matches!(resolution, AckResolution::Committed { .. })
             && let Some(pending) = self.state.pending_acks.remove(&attempt.obligation_id)
         {
+            let token = self
+                .pending_ack_tokens
+                .remove(&attempt.obligation_id)
+                .ok_or(FabricConsumerError::MissingPendingAckToken {
+                    obligation_id: attempt.obligation_id,
+                })?;
+            let resolved_at = self.next_event_time();
+            self.ledger.commit(token, resolved_at);
             self.state.pending_count = self
                 .state
                 .pending_count
@@ -1188,6 +1313,123 @@ impl FabricConsumer {
             self.state.ack_floor = self.state.ack_floor.max(pending.window.end());
         }
         Ok(resolution)
+    }
+
+    /// Abort a pending delivery attempt without committing it.
+    pub fn nack_delivery(
+        &mut self,
+        attempt: &AttemptCertificate,
+        reason: ConsumerNackReason,
+    ) -> Result<NackResolution, FabricConsumerError> {
+        let Some(pending) = self.state.pending_acks.remove(&attempt.obligation_id) else {
+            return Ok(self.stale_nack_noop(attempt.obligation_id));
+        };
+        let token = self
+            .pending_ack_tokens
+            .remove(&attempt.obligation_id)
+            .ok_or(FabricConsumerError::MissingPendingAckToken {
+                obligation_id: attempt.obligation_id,
+            })?;
+        let aborted_at = self.next_event_time();
+        self.ledger.abort(token, aborted_at, reason.abort_reason());
+        self.state.pending_count = self
+            .state
+            .pending_count
+            .saturating_sub(window_len(pending.window));
+        Ok(NackResolution::Aborted {
+            obligation_id: attempt.obligation_id,
+            window: pending.window,
+            reason,
+        })
+    }
+
+    /// Reissue a pending delivery attempt under a fresh obligation id.
+    #[track_caller]
+    pub fn redeliver_delivery(
+        &mut self,
+        attempt: &AttemptCertificate,
+        capsule: &RecoverableCapsule,
+        ticket: Option<&ReadDelegationTicket>,
+    ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
+        let Some(pending) = self.state.pending_acks.get(&attempt.obligation_id).cloned() else {
+            return Err(FabricConsumerError::PendingAckNotFound {
+                obligation_id: attempt.obligation_id,
+            });
+        };
+        let _ = self
+            .cursor
+            .plan_delivery(pending.delivery_mode, capsule, ticket)?;
+        if self.policy.paused {
+            return Err(FabricConsumerError::ConsumerPaused);
+        }
+
+        let removed = self
+            .state
+            .pending_acks
+            .remove(&attempt.obligation_id)
+            .expect("pending state must still exist after preflight");
+        let token = self
+            .pending_ack_tokens
+            .remove(&attempt.obligation_id)
+            .ok_or(FabricConsumerError::MissingPendingAckToken {
+                obligation_id: attempt.obligation_id,
+            })?;
+        let aborted_at = self.next_event_time();
+        self.ledger
+            .abort(token, aborted_at, ObligationAbortReason::Explicit);
+        self.state.pending_count = self
+            .state
+            .pending_count
+            .saturating_sub(window_len(removed.window));
+
+        self.schedule_delivery(
+            removed.request,
+            removed.delivery_mode,
+            removed.window,
+            capsule,
+            ticket,
+            Some(attempt.obligation_id),
+        )
+    }
+
+    /// Transfer a pending attempt into a dead-letter record with an explicit reason.
+    pub fn dead_letter_delivery(
+        &mut self,
+        attempt: &AttemptCertificate,
+        reason: impl Into<String>,
+    ) -> Result<DeadLetterTransfer, FabricConsumerError> {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(FabricConsumerError::EmptyDeadLetterReason);
+        }
+
+        let pending = self
+            .state
+            .pending_acks
+            .remove(&attempt.obligation_id)
+            .ok_or(FabricConsumerError::PendingAckNotFound {
+                obligation_id: attempt.obligation_id,
+            })?;
+        let token = self
+            .pending_ack_tokens
+            .remove(&attempt.obligation_id)
+            .ok_or(FabricConsumerError::MissingPendingAckToken {
+                obligation_id: attempt.obligation_id,
+            })?;
+        let dead_lettered_at = self.next_event_time();
+        self.ledger
+            .abort(token, dead_lettered_at, ObligationAbortReason::Error);
+        self.state.pending_count = self
+            .state
+            .pending_count
+            .saturating_sub(window_len(pending.window));
+
+        Ok(DeadLetterTransfer {
+            obligation_id: attempt.obligation_id,
+            window: pending.window,
+            delivery_attempt: pending.delivery_attempt,
+            reason,
+        })
     }
 
     fn pop_next_live_pull_request(&mut self) -> Option<QueuedPullRequest> {
@@ -1260,14 +1502,71 @@ impl FabricConsumer {
         }
     }
 
+    fn next_event_time(&mut self) -> Time {
+        let now = Time::from_nanos(self.next_event_nanos);
+        self.next_event_nanos = self.next_event_nanos.saturating_add(1);
+        now
+    }
+
+    fn stale_attempt_noop(&self, obligation_id: ObligationId) -> AckResolution {
+        AckResolution::StaleNoOp {
+            obligation_id,
+            current_generation: self.cursor.current_lease().lease_generation,
+            current_holder: self.cursor.current_lease().holder.clone(),
+        }
+    }
+
+    fn stale_nack_noop(&self, obligation_id: ObligationId) -> NackResolution {
+        NackResolution::StaleNoOp {
+            obligation_id,
+            current_generation: self.cursor.current_lease().lease_generation,
+            current_holder: self.cursor.current_lease().holder.clone(),
+        }
+    }
+
+    #[track_caller]
+    fn acquire_ack_token(
+        &mut self,
+        window: SequenceWindow,
+        delivery_attempt: u32,
+        supersedes_obligation_id: Option<ObligationId>,
+    ) -> ObligationToken {
+        let description = match supersedes_obligation_id {
+            Some(previous) => format!(
+                "consumer ack attempt {} for window {}-{} superseding {:?}",
+                delivery_attempt,
+                window.start(),
+                window.end(),
+                previous
+            ),
+            None => format!(
+                "consumer ack attempt {} for window {}-{}",
+                delivery_attempt,
+                window.start(),
+                window.end()
+            ),
+        };
+        let acquired_at = self.next_event_time();
+        self.ledger.acquire_with_context(
+            ObligationKind::Ack,
+            self.owner.holder,
+            self.owner.region,
+            acquired_at,
+            SourceLocation::from_panic_location(Location::caller()),
+            None,
+            Some(description),
+        )
+    }
+
+    #[track_caller]
     fn schedule_delivery(
         &mut self,
         request: ScheduledConsumerRequest,
         delivery_mode: CursorDeliveryMode,
         window: SequenceWindow,
-        obligation_id: ObligationId,
         capsule: &RecoverableCapsule,
         ticket: Option<&ReadDelegationTicket>,
+        supersedes_obligation_id: Option<ObligationId>,
     ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
         if self.policy.paused {
             return Err(FabricConsumerError::ConsumerPaused);
@@ -1283,22 +1582,28 @@ impl FabricConsumer {
             });
         }
 
-        let delivery_attempt = self.state.next_attempt();
-        let attempt = self
-            .cursor
-            .issue_attempt(delivery_mode, delivery_attempt, obligation_id)?;
         let plan = self.cursor.plan_delivery(delivery_mode, capsule, ticket)?;
+        let delivery_attempt = self.state.next_attempt();
+        let token = self.acquire_ack_token(window, delivery_attempt, supersedes_obligation_id);
+        let obligation_id = token.id();
+        let mut attempt =
+            self.cursor
+                .issue_attempt(delivery_mode, delivery_attempt, obligation_id)?;
+        attempt.supersedes_obligation_id = supersedes_obligation_id;
 
         self.state.delivered_count = self.state.delivered_count.saturating_add(window_messages);
         self.state.pending_count = self.state.pending_count.saturating_add(window_messages);
         self.state.pending_acks.insert(
             obligation_id,
             PendingAckState {
+                request: request.clone(),
                 window,
                 delivery_mode,
                 delivery_attempt,
+                supersedes_obligation_id,
             },
         );
+        self.pending_ack_tokens.insert(obligation_id, token);
 
         Ok(ScheduledConsumerDelivery {
             request,
@@ -1385,6 +1690,21 @@ pub enum FabricConsumerError {
         /// Tail sequence visible to the consumer at dispatch time.
         available_tail: u64,
     },
+    /// The attempt referred to an obligation that is no longer pending.
+    #[error("consumer obligation `{obligation_id}` is not pending")]
+    PendingAckNotFound {
+        /// Obligation the caller attempted to resolve or redeliver.
+        obligation_id: ObligationId,
+    },
+    /// Consumer state lost the linear token for a pending obligation.
+    #[error("consumer obligation `{obligation_id}` is pending but its ledger token is missing")]
+    MissingPendingAckToken {
+        /// Obligation whose token could not be recovered from the consumer state.
+        obligation_id: ObligationId,
+    },
+    /// Dead-letter transfers must capture a non-empty reason.
+    #[error("dead-letter reason must not be empty")]
+    EmptyDeadLetterReason,
     /// Low-level cursor machinery rejected the operation.
     #[error(transparent)]
     Cursor(#[from] ConsumerCursorError),
@@ -1975,10 +2295,10 @@ mod tests {
             .expect("queue catchup");
 
         let first_outcome = consumer
-            .dispatch_next_pull(12, obligation(30), &capsule, None)
+            .dispatch_next_pull(12, &capsule, None)
             .expect("dispatch catchup");
         let first = if let PullDispatchOutcome::Scheduled(delivery) = first_outcome {
-            delivery
+            *delivery
         } else {
             assert!(false, "catchup request should schedule");
             return;
@@ -1988,7 +2308,7 @@ mod tests {
         assert_eq!(
             consumer.acknowledge_delivery(&first.attempt),
             Ok(AckResolution::Committed {
-                obligation_id: obligation(30),
+                obligation_id: first.attempt.obligation_id,
                 against: CursorLeaseHolder::Steward(NodeId::new("node-a")),
             })
         );
@@ -1999,10 +2319,10 @@ mod tests {
             .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::Tail).expect("tail"))
             .expect("queue tail");
         let tail_outcome = consumer
-            .dispatch_next_pull(12, obligation(31), &capsule, None)
+            .dispatch_next_pull(12, &capsule, None)
             .expect("dispatch tail");
         let tail = if let PullDispatchOutcome::Scheduled(delivery) = tail_outcome {
-            delivery
+            *delivery
         } else {
             assert!(false, "tail request should schedule");
             return;
@@ -2026,13 +2346,13 @@ mod tests {
 
         consumer.pause().expect("pause");
         assert_eq!(
-            consumer.dispatch_push(window, obligation(32), &capsule, None),
+            consumer.dispatch_push(window, &capsule, None),
             Err(FabricConsumerError::ConsumerPaused)
         );
 
         consumer.resume();
         let delivery = consumer
-            .dispatch_push(window, obligation(32), &capsule, None)
+            .dispatch_push(window, &capsule, None)
             .expect("dispatch after resume");
         assert_eq!(delivery.window, window);
     }
@@ -2056,11 +2376,11 @@ mod tests {
         );
 
         let first = consumer
-            .dispatch_push(first_window, obligation(33), &capsule, None)
+            .dispatch_push(first_window, &capsule, None)
             .expect("first dispatch");
         assert_eq!(consumer.state().pending_count, 2);
         assert_eq!(
-            consumer.dispatch_push(second_window, obligation(34), &capsule, None),
+            consumer.dispatch_push(second_window, &capsule, None),
             Err(FabricConsumerError::MaxAckPendingExceeded {
                 limit: 2,
                 pending: 2,
@@ -2074,8 +2394,164 @@ mod tests {
         assert_eq!(consumer.state().pending_count, 0);
 
         let second = consumer
-            .dispatch_push(second_window, obligation(34), &capsule, None)
+            .dispatch_push(second_window, &capsule, None)
             .expect("second dispatch");
         assert_eq!(second.window, second_window);
+    }
+
+    #[test]
+    fn fabric_consumer_ack_commits_obligation_backed_state() {
+        let cell = test_cell();
+        let owner = FabricConsumerOwner {
+            holder: TaskId::new_for_test(41, 0),
+            region: RegionId::new_for_test(7, 0),
+        };
+        let mut consumer = FabricConsumer::new_owned(&cell, FabricConsumerConfig::default(), owner)
+            .expect("consumer");
+        let window = SequenceWindow::new(5, 6).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let delivery = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch");
+        let reserved = consumer
+            .ledger
+            .get(delivery.attempt.obligation_id)
+            .expect("reserved record");
+        assert_eq!(reserved.kind, ObligationKind::Ack);
+        assert_eq!(reserved.holder, owner.holder);
+        assert_eq!(reserved.region, owner.region);
+        assert_eq!(consumer.obligation_stats().pending, 1);
+        assert_eq!(consumer.obligation_stats().total_acquired, 1);
+
+        assert!(matches!(
+            consumer.acknowledge_delivery(&delivery.attempt),
+            Ok(AckResolution::Committed { .. })
+        ));
+
+        let committed = consumer
+            .ledger
+            .get(delivery.attempt.obligation_id)
+            .expect("committed record");
+        assert_eq!(committed.state, crate::record::ObligationState::Committed);
+        assert_eq!(consumer.obligation_stats().pending, 0);
+        assert_eq!(consumer.obligation_stats().total_committed, 1);
+    }
+
+    #[test]
+    fn fabric_consumer_nack_aborts_obligation_and_old_ack_is_stale() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let window = SequenceWindow::new(7, 7).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let delivery = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch");
+        assert_eq!(
+            consumer.nack_delivery(&delivery.attempt, ConsumerNackReason::Explicit),
+            Ok(NackResolution::Aborted {
+                obligation_id: delivery.attempt.obligation_id,
+                window,
+                reason: ConsumerNackReason::Explicit,
+            })
+        );
+
+        let record = consumer
+            .ledger
+            .get(delivery.attempt.obligation_id)
+            .expect("aborted record");
+        assert_eq!(record.state, crate::record::ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Explicit));
+        assert_eq!(consumer.obligation_stats().total_aborted, 1);
+        assert_eq!(
+            consumer.acknowledge_delivery(&delivery.attempt),
+            Ok(AckResolution::StaleNoOp {
+                obligation_id: delivery.attempt.obligation_id,
+                current_generation: consumer.current_lease().lease_generation,
+                current_holder: CursorLeaseHolder::Steward(NodeId::new("node-a")),
+            })
+        );
+    }
+
+    #[test]
+    fn fabric_consumer_redelivery_mints_new_obligation_and_supersedes_old_attempt() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let window = SequenceWindow::new(8, 9).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let first = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("first dispatch");
+        let redelivery = consumer
+            .redeliver_delivery(&first.attempt, &capsule, None)
+            .expect("redelivery");
+
+        assert_ne!(
+            first.attempt.obligation_id,
+            redelivery.attempt.obligation_id
+        );
+        assert_eq!(
+            redelivery.attempt.supersedes_obligation_id,
+            Some(first.attempt.obligation_id)
+        );
+        let first_record = consumer
+            .ledger
+            .get(first.attempt.obligation_id)
+            .expect("first record");
+        assert_eq!(first_record.state, crate::record::ObligationState::Aborted);
+        assert_eq!(
+            first_record.abort_reason,
+            Some(ObligationAbortReason::Explicit)
+        );
+        assert_eq!(
+            consumer.acknowledge_delivery(&first.attempt),
+            Ok(AckResolution::StaleNoOp {
+                obligation_id: first.attempt.obligation_id,
+                current_generation: consumer.current_lease().lease_generation,
+                current_holder: CursorLeaseHolder::Steward(NodeId::new("node-a")),
+            })
+        );
+        assert!(matches!(
+            consumer.acknowledge_delivery(&redelivery.attempt),
+            Ok(AckResolution::Committed { obligation_id, .. })
+                if obligation_id == redelivery.attempt.obligation_id
+        ));
+        let stats = consumer.obligation_stats();
+        assert_eq!(stats.total_acquired, 2);
+        assert_eq!(stats.total_aborted, 1);
+        assert_eq!(stats.total_committed, 1);
+        assert_eq!(stats.pending, 0);
+    }
+
+    #[test]
+    fn fabric_consumer_dead_letter_records_reason_and_aborts_obligation() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let window = SequenceWindow::new(10, 10).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let delivery = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch");
+        let transfer = consumer
+            .dead_letter_delivery(&delivery.attempt, "poison payload")
+            .expect("dead letter");
+
+        assert_eq!(transfer.obligation_id, delivery.attempt.obligation_id);
+        assert_eq!(transfer.window, window);
+        assert_eq!(transfer.reason, "poison payload");
+        let record = consumer
+            .ledger
+            .get(delivery.attempt.obligation_id)
+            .expect("dead-letter record");
+        assert_eq!(record.state, crate::record::ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Error));
+        assert_eq!(consumer.obligation_stats().pending, 0);
+        assert_eq!(consumer.obligation_stats().total_aborted, 1);
     }
 }
