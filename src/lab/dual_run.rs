@@ -2294,6 +2294,164 @@ pub fn normalize_live_observable(
 }
 
 // ============================================================================
+// Fuzz-to-Scenario Promotion
+// ============================================================================
+
+/// A promoted fuzz finding as a replayable dual-run scenario descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotedFuzzScenario {
+    /// Dual-run scenario identity with seed plan derived from the finding.
+    pub identity: DualRunScenarioIdentity,
+    /// Original fuzz seed that discovered the issue.
+    pub original_seed: u64,
+    /// Minimized seed (if available), used as the canonical replay seed.
+    pub replay_seed: u64,
+    /// Violation categories observed.
+    pub violation_categories: Vec<String>,
+    /// Trace fingerprint from the failing lab run.
+    pub trace_fingerprint: u64,
+    /// Certificate hash from the failing lab run.
+    pub certificate_hash: u64,
+    /// Human-readable description of what was found.
+    pub description: String,
+    /// Provenance: which fuzz campaign produced this.
+    pub campaign_base_seed: Option<u64>,
+    /// Provenance: iteration index in the campaign.
+    pub campaign_iteration: Option<usize>,
+}
+
+impl PromotedFuzzScenario {
+    /// Default repro command for this scenario.
+    #[must_use]
+    pub fn repro_command(&self) -> String {
+        format!(
+            "ASUPERSYNC_SEED=0x{:X} cargo test {} -- --nocapture",
+            self.replay_seed, self.identity.scenario_id
+        )
+    }
+}
+
+impl fmt::Display for PromotedFuzzScenario {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PromotedFuzz({}, seed=0x{:X}, violations=[{}])",
+            self.identity.scenario_id,
+            self.replay_seed,
+            self.violation_categories.join(", ")
+        )
+    }
+}
+
+/// Promote a `FuzzFinding` into a replayable `DualRunScenarioIdentity`.
+#[must_use]
+pub fn promote_fuzz_finding(
+    finding: &crate::lab::fuzz::FuzzFinding,
+    surface_id: &str,
+    contract_version: &str,
+) -> PromotedFuzzScenario {
+    let replay_seed = finding.minimized_seed.unwrap_or(finding.seed);
+    let violation_cats: Vec<String> = finding
+        .violations
+        .iter()
+        .map(|v| format!("{v:?}"))
+        .collect();
+
+    let scenario_id = format!("fuzz.{surface_id}.seed_{:x}", replay_seed & 0xFFFF_FFFF);
+    let description = format!(
+        "Fuzz-discovered adversarial case: {} violation(s) at seed 0x{:X}",
+        finding.violations.len(),
+        finding.seed
+    );
+
+    let identity = DualRunScenarioIdentity::phase1(
+        &scenario_id,
+        surface_id,
+        contract_version,
+        &description,
+        replay_seed,
+    )
+    .with_metadata("promoted_from", "fuzz_finding")
+    .with_metadata("original_seed", format!("0x{:X}", finding.seed))
+    .with_metadata(
+        "trace_fingerprint",
+        format!("0x{:X}", finding.trace_fingerprint),
+    );
+
+    PromotedFuzzScenario {
+        identity,
+        original_seed: finding.seed,
+        replay_seed,
+        violation_categories: violation_cats,
+        trace_fingerprint: finding.trace_fingerprint,
+        certificate_hash: finding.certificate_hash,
+        description,
+        campaign_base_seed: None,
+        campaign_iteration: None,
+    }
+}
+
+/// Promote a `FuzzRegressionCase` into a replayable scenario descriptor.
+#[must_use]
+pub fn promote_regression_case(
+    case: &crate::lab::fuzz::FuzzRegressionCase,
+    surface_id: &str,
+    contract_version: &str,
+) -> PromotedFuzzScenario {
+    let scenario_id = format!(
+        "regression.{surface_id}.seed_{:x}",
+        case.replay_seed & 0xFFFF_FFFF
+    );
+    let description = format!(
+        "Regression case: {} violation(s), replay seed 0x{:X}",
+        case.violation_categories.len(),
+        case.replay_seed
+    );
+
+    let identity = DualRunScenarioIdentity::phase1(
+        &scenario_id,
+        surface_id,
+        contract_version,
+        &description,
+        case.replay_seed,
+    )
+    .with_metadata("promoted_from", "regression_case")
+    .with_metadata("original_seed", format!("0x{:X}", case.seed));
+
+    PromotedFuzzScenario {
+        identity,
+        original_seed: case.seed,
+        replay_seed: case.replay_seed,
+        violation_categories: case.violation_categories.clone(),
+        trace_fingerprint: case.trace_fingerprint,
+        certificate_hash: case.certificate_hash,
+        description,
+        campaign_base_seed: None,
+        campaign_iteration: None,
+    }
+}
+
+/// Promote an entire `FuzzRegressionCorpus` into replayable scenarios.
+#[must_use]
+pub fn promote_regression_corpus(
+    corpus: &crate::lab::fuzz::FuzzRegressionCorpus,
+    surface_id: &str,
+    contract_version: &str,
+) -> Vec<PromotedFuzzScenario> {
+    corpus
+        .cases
+        .iter()
+        .enumerate()
+        .map(|(i, case)| {
+            let mut promoted = promote_regression_case(case, surface_id, contract_version);
+            promoted.campaign_base_seed = Some(corpus.base_seed);
+            promoted.campaign_iteration = Some(i);
+            promoted
+        })
+        .collect()
+}
+
+// ============================================================================
 // Dual-Run Harness Entrypoint
 // ============================================================================
 
@@ -4030,5 +4188,143 @@ mod tests {
         // Both should have ok outcomes and quiescent regions
         assert!(verdict.passed, "Verdict: {}", verdict.summary());
         crate::test_complete!("normalize_and_compare_lab_vs_live");
+    }
+
+    // --- Fuzz-to-Scenario Promotion ---
+
+    fn make_test_fuzz_finding(seed: u64) -> crate::lab::fuzz::FuzzFinding {
+        crate::lab::fuzz::FuzzFinding {
+            seed,
+            steps: 500,
+            violations: vec![],
+            certificate_hash: 0xABCD,
+            trace_fingerprint: 0x1234,
+            minimized_seed: Some(seed.wrapping_add(1)),
+        }
+    }
+
+    #[test]
+    fn promote_fuzz_finding_basic() {
+        init_test("promote_fuzz_finding_basic");
+        let finding = make_test_fuzz_finding(0xDEAD);
+        let promoted = promote_fuzz_finding(&finding, "cancellation", "v1");
+        assert!(promoted.identity.scenario_id.contains("fuzz"));
+        assert!(promoted.identity.scenario_id.contains("cancellation"));
+        assert_eq!(promoted.replay_seed, 0xDEAD + 1); // minimized
+        assert_eq!(promoted.original_seed, 0xDEAD);
+        assert_eq!(promoted.identity.seed_plan.canonical_seed, 0xDEAD + 1);
+        assert_eq!(promoted.identity.phase, Phase::Phase1);
+        assert!(promoted.identity.metadata.contains_key("promoted_from"));
+        crate::test_complete!("promote_fuzz_finding_basic");
+    }
+
+    #[test]
+    fn promote_fuzz_finding_no_minimized_seed() {
+        init_test("promote_fuzz_finding_no_minimized_seed");
+        let mut finding = make_test_fuzz_finding(0xBEEF);
+        finding.minimized_seed = None;
+        let promoted = promote_fuzz_finding(&finding, "obligation", "v1");
+        assert_eq!(promoted.replay_seed, 0xBEEF); // falls back to original
+        crate::test_complete!("promote_fuzz_finding_no_minimized_seed");
+    }
+
+    #[test]
+    fn promote_fuzz_finding_repro_command() {
+        init_test("promote_fuzz_finding_repro_command");
+        let finding = make_test_fuzz_finding(42);
+        let promoted = promote_fuzz_finding(&finding, "drain", "v1");
+        let cmd = promoted.repro_command();
+        assert!(cmd.contains("ASUPERSYNC_SEED"));
+        assert!(cmd.contains("cargo test"));
+        crate::test_complete!("promote_fuzz_finding_repro_command");
+    }
+
+    #[test]
+    fn promote_fuzz_finding_display() {
+        init_test("promote_fuzz_finding_display");
+        let finding = make_test_fuzz_finding(42);
+        let promoted = promote_fuzz_finding(&finding, "test", "v1");
+        let s = format!("{promoted}");
+        assert!(s.contains("PromotedFuzz"));
+        crate::test_complete!("promote_fuzz_finding_display");
+    }
+
+    #[test]
+    fn promote_fuzz_finding_serde_roundtrip() {
+        init_test("promote_fuzz_finding_serde_roundtrip");
+        let finding = make_test_fuzz_finding(0xCAFE);
+        let promoted = promote_fuzz_finding(&finding, "test", "v1");
+        let json = serde_json::to_string_pretty(&promoted).unwrap();
+        let parsed: PromotedFuzzScenario = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.replay_seed, promoted.replay_seed);
+        assert_eq!(parsed.original_seed, 0xCAFE);
+        crate::test_complete!("promote_fuzz_finding_serde_roundtrip");
+    }
+
+    #[test]
+    fn promote_regression_case_basic() {
+        init_test("promote_regression_case_basic");
+        let case = crate::lab::fuzz::FuzzRegressionCase {
+            seed: 0xDEAD,
+            replay_seed: 0xBEEF,
+            certificate_hash: 0x1111,
+            trace_fingerprint: 0x2222,
+            violation_categories: vec!["obligation_leak".to_string()],
+        };
+        let promoted = promote_regression_case(&case, "obligation", "v1");
+        assert!(promoted.identity.scenario_id.contains("regression"));
+        assert_eq!(promoted.replay_seed, 0xBEEF);
+        assert_eq!(promoted.violation_categories, vec!["obligation_leak"]);
+        crate::test_complete!("promote_regression_case_basic");
+    }
+
+    #[test]
+    fn promote_regression_corpus_preserves_order() {
+        init_test("promote_regression_corpus_preserves_order");
+        let corpus = crate::lab::fuzz::FuzzRegressionCorpus {
+            schema_version: 1,
+            base_seed: 42,
+            iterations: 1000,
+            cases: vec![
+                crate::lab::fuzz::FuzzRegressionCase {
+                    seed: 1,
+                    replay_seed: 10,
+                    certificate_hash: 0,
+                    trace_fingerprint: 0,
+                    violation_categories: vec!["a".to_string()],
+                },
+                crate::lab::fuzz::FuzzRegressionCase {
+                    seed: 2,
+                    replay_seed: 20,
+                    certificate_hash: 0,
+                    trace_fingerprint: 0,
+                    violation_categories: vec!["b".to_string()],
+                },
+            ],
+        };
+        let promoted = promote_regression_corpus(&corpus, "test", "v1");
+        assert_eq!(promoted.len(), 2);
+        assert_eq!(promoted[0].replay_seed, 10);
+        assert_eq!(promoted[1].replay_seed, 20);
+        assert_eq!(promoted[0].campaign_base_seed, Some(42));
+        assert_eq!(promoted[0].campaign_iteration, Some(0));
+        assert_eq!(promoted[1].campaign_iteration, Some(1));
+        crate::test_complete!("promote_regression_corpus_preserves_order");
+    }
+
+    #[test]
+    fn promoted_fuzz_scenario_runs_through_harness() {
+        init_test("promoted_fuzz_scenario_runs_through_harness");
+        let finding = make_test_fuzz_finding(42);
+        let promoted = promote_fuzz_finding(&finding, "test.surface", "v1");
+
+        // Use the promoted identity in a DualRunHarness
+        let result = DualRunHarness::from_identity(promoted.identity)
+            .lab(|_config| make_happy_semantics())
+            .live(|_seed, _entropy| make_happy_semantics())
+            .run();
+
+        assert!(result.passed());
+        crate::test_complete!("promoted_fuzz_scenario_runs_through_harness");
     }
 }
