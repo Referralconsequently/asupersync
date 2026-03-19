@@ -87,6 +87,29 @@ fn doc_locks_phase_policy() {
 }
 
 #[test]
+fn doc_gates_external_surface_timing_claims() {
+    let doc = load_doc();
+    for token in [
+        "Eligibility-Gate Timing Rules for Raw-Socket, HTTP, and Browser Surfaces",
+        "raw_socket",
+        "http_surface",
+        "browser_surface",
+        "service-worker lifetime timing",
+        "kernel wake ordering",
+        "host_role",
+        "lane_id",
+        "support_class",
+        "reason_code",
+        "unsupported_time_surface",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing external-surface timing token: {token}"
+        );
+    }
+}
+
+#[test]
 fn doc_defines_field_level_normalization_contract() {
     let doc = load_doc();
     for token in [

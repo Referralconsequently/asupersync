@@ -186,6 +186,48 @@ Minimum requirements:
 - declare whether `T5 stress_nightly` becomes mandatory,
 - retain contributor-facing repro commands and operator-facing artifact indexes.
 
+Eligibility-gate beads for external surfaces must do more than say "not yet" or
+"probably okay." They must publish the exact boundary, evidence, and failure
+contract a later promotion bead must satisfy.
+
+## Eligibility-Gate Matrix for External Surfaces
+
+For `asupersync-2a6k9.7.3`-style work, the gate itself may be contract-only
+today, but it must still define the executable floor before any meaningful
+parity claim is allowed.
+
+| Surface family | Gate-specific `T0` requirements | Promotion floor before `T2/T3` claims count | Mandatory `T4` rejection cases |
+|---|---|---|---|
+| `raw_socket` | boundary contract, virtualization boundary, connection-lifecycle field map, unsupported red lines | bounded loopback or virtual transport runner with shared normalized records and retained repro artifacts | unsupported-surface rejection, missing-capture rejection, and kernel-timing non-claim proof |
+| `http_surface` | request/response field map, peer-model contract, timeout/cancellation boundary, artifact schema | virtualized or loopback HTTP runner with shared normalized request/response records and shutdown coverage | malformed artifact rejection, under-observed peer rejection, and real-network non-claim proof |
+| `browser_surface` | host-role contract, lane-selection policy, downgrade semantics, explicit support boundaries | admitted browser runner lanes with shared normalized semantic subset and retained downgrade artifacts | unsupported-host rejection, downgrade-path proof, and ambient-host-timing non-claim proof |
+
+### Required Eligibility-Gate Log Fields
+
+When a bead publishes or evaluates an external-surface gate, the stable record
+must include:
+
+- `eligibility_verdict`
+- `surface_family`
+- `virtualization_boundary`
+- `observability_status`
+- `capture_manifest_path`
+- `normalized_record_path`
+- `artifact_bundle`
+- `repro_command`
+- `unsupported_reason`
+
+Browser-facing gate records must additionally include:
+
+- `host_role`
+- `support_class`
+- `reason_code`
+- `lane_id`
+
+These are not optional operator niceties. They are the minimum machine-readable
+fields required to keep "eligible later" and "unsupported today" from
+collapsing into vague prose.
+
 ## Minimum Coverage Matrix for Phase 1 Surfaces
 
 The first active rollout lane is still the `Phase 1` ladder from
@@ -322,7 +364,7 @@ This standard is upstream policy for the immediate follow-on beads:
 | `asupersync-2a6k9.5.4` | reusable runner scripts and report pipeline must emit the exact required identity, execution, and artifact fields |
 | `asupersync-2a6k9.5.5` | negative-control and self-calibration scenarios must use the `T4 negative_control` requirements here |
 | `asupersync-2a6k9.6.6` | the pilot coverage matrix and invariant log contract must refine, not replace, the minimum Phase 1 matrix here |
-| `asupersync-2a6k9.7.3` | eligibility gates for raw-socket, HTTP, and browser surfaces must respect the coverage ladder and logging obligations here |
+| `asupersync-2a6k9.7.3` | eligibility gates for raw-socket, HTTP, and browser surfaces must publish the external-surface gate matrix, required gate log fields, and rejection cases defined here |
 | `asupersync-2a6k9.8.*` | CI, nightly, summaries, and contributor playbooks must preserve these tier names and required artifact fields |
 
 If a later bead claims completion with weaker evidence than this document

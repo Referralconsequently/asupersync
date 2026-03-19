@@ -105,6 +105,31 @@ fn doc_locks_phase1_surface_coverage_matrix() {
 }
 
 #[test]
+fn doc_defines_external_surface_gate_requirements() {
+    let doc = load_doc();
+    for token in [
+        "Eligibility-Gate Matrix for External Surfaces",
+        "raw_socket",
+        "http_surface",
+        "browser_surface",
+        "eligibility_verdict",
+        "virtualization_boundary",
+        "observability_status",
+        "capture_manifest_path",
+        "unsupported_reason",
+        "host_role",
+        "support_class",
+        "reason_code",
+        "lane_id",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing external-surface gate token: {token}"
+        );
+    }
+}
+
+#[test]
 fn doc_requires_structured_logging_vocabulary() {
     let doc = load_doc();
     for token in [

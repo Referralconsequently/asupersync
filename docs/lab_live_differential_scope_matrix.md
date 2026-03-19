@@ -141,9 +141,81 @@ answer all of these questions concretely:
 If a proposal cannot answer all five, the surface remains `supported-later` or
 `unsupported`.
 
+## 7. Eligibility Gate for Raw-Socket, HTTP, and Browser Surfaces
+
+Bead `asupersync-2a6k9.7.3` does not promote raw sockets, HTTP, or browser
+surfaces by itself. It publishes the gate that a later promotion bead must
+satisfy before the differential program may make a meaningful parity claim.
+
+The mere existence of `src/net/*`, `src/http/*`, Browser Edition packages, or a
+working demo is not enough. The gate is about truthful semantic comparability,
+not feature presence.
+
+### Gate Verdicts
+
+Every expansion proposal for these surface families must end in one explicit
+verdict:
+
+- `eligible_for_pilot`
+- `blocked_missing_virtualization`
+- `blocked_missing_observability`
+- `blocked_missing_verification`
+- `blocked_scope_red_line`
+
+If a proposal cannot name one of those verdicts directly in its report bundle,
+the proposal is incomplete.
+
+### Surface Eligibility Matrix
+
+| Surface family | Minimum virtualization boundary | Minimum observability hooks | Minimum verification floor before promotion | Current red lines |
+|---|---|---|---|---|
+| `raw_socket` | loopback or virtual transport only; peer identity, injected faults, and connection lifecycle must stay inside a bounded scenario boundary | normalized connection lifecycle and terminal outcome, cancellation/cleanup evidence, `CaptureManifest`, explicit boundary contract ID, retained repro command | `T0 unit_contract` for the boundary and mapping rules, `T2 dual_run_smoke` through bounded loopback or virtual transport, `T4 negative_control` proving unsupported-surface rejection, and `T3 pilot_surface` only after the bounded runner stabilizes | no parity claim over epoll/kqueue/io_uring scheduling, kernel wake ordering, host-clock latency, DNS, TLS handshake timing, or remote peers |
+| `http_surface` | HTTP over loopback or virtualized transport with a captured peer model and explicit timeout boundary; no ambient internet dependency | normalized request/response termination, protocol version, request/connection identifiers, cancellation mapping, `CaptureManifest`, retained lab/live normalized records | `T0 unit_contract`, `T1 golden_fixture` for normalized request/response bundles, `T2 dual_run_smoke`, `T3 pilot_surface` for request/response and shutdown families, and `T4 negative_control` for malformed or under-observed traces | no real-internet claims, no uncontrolled TLS or packet-loss claims, no opaque upstream server behavior, and no wall-clock SLA or latency parity claims |
+| `browser_surface` | explicit host-role contract plus a captured execution boundary (`browser_main_thread`, `dedicated_worker`, or bridge-only lanes) with downgrade behavior instead of ambient host assumptions | normalized semantic subset, `CaptureManifest`, `host_role`, `support_class`, `reason_code`, `lane_id`, retained downgrade artifacts, explicit unsupported-surface reason | `T0 unit_contract` for host-role policy and lane diagnostics, `T1 golden_fixture` for host classification artifacts, `T2 dual_run_smoke` through a real browser-facing runner on admitted lanes, `T4 negative_control` for unsupported or downgrade cases, and `T5 stress_nightly` before noisy multi-host parity claims | no raw browser scheduler parity, no service-worker lifetime parity, no shared-worker direct-runtime claim before promotion, and no opaque host-clock or Web API timing claims |
+
+The browser row is additionally anchored to the truthful support boundary in
+`README.md` and `docs/WASM.md`: a browser feature may exist in the repository
+and still be ineligible for differential trust claims.
+
+### Required Gate Packet
+
+Any future proposal that wants one of these surface families promoted must
+publish a gate packet that includes, at minimum:
+
+- `eligibility_verdict`
+- `surface_family`
+- `virtualization_boundary`
+- `observability_status`
+- `artifact_bundle`
+- `repro_command`
+- `unsupported_reason` whenever the verdict is not `eligible_for_pilot`
+
+Browser-facing proposals must additionally publish:
+
+- `host_role`
+- `support_class`
+- `reason_code`
+- `lane_id`
+
+The proposal is not allowed to bury these facts in prose-only discussion. They
+must be present in machine-readable artifacts or stable contract output.
+
+### Promotion Law
+
+No raw-socket, HTTP, or browser surface may claim meaningful parity until:
+
+1. the virtualization boundary is explicit and bounded,
+2. the observability hooks are sufficient to emit shared normalized records,
+3. the verification floor above has been met,
+4. the retained artifacts are strong enough to reproduce or reject divergences,
+5. current red lines are preserved as explicit non-claims.
+
+If any of those conditions fail, the correct outcome is a blocked verdict, not
+an optimistic promotion.
+
 ---
 
-## 7. Downstream Binding
+## 8. Downstream Binding
 
 This scope matrix is upstream policy for the immediate follow-on beads:
 
@@ -163,7 +235,7 @@ bead is wrong until this matrix is updated deliberately.
 
 ---
 
-## 8. Validation Commands
+## 9. Validation Commands
 
 Heavy validation commands must run through `rch exec --`.
 

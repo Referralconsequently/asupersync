@@ -129,6 +129,32 @@ fn doc_requires_admission_rules_for_new_surfaces() {
 }
 
 #[test]
+fn doc_publishes_external_surface_eligibility_gate() {
+    let doc = load_doc();
+    for token in [
+        "Eligibility Gate for Raw-Socket, HTTP, and Browser Surfaces",
+        "eligible_for_pilot",
+        "blocked_missing_virtualization",
+        "blocked_missing_observability",
+        "blocked_missing_verification",
+        "blocked_scope_red_line",
+        "raw_socket",
+        "http_surface",
+        "browser_surface",
+        "host_role",
+        "support_class",
+        "reason_code",
+        "README.md",
+        "docs/WASM.md",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing eligibility-gate token: {token}"
+        );
+    }
+}
+
+#[test]
 fn doc_binds_to_downstream_beads() {
     let doc = load_doc();
     for token in [

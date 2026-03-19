@@ -155,6 +155,21 @@ For richer protocol, browser, or raw-host surfaces:
 - repeated real-world latency observations do not promote an unsupported surface
   into a supported one.
 
+## Eligibility-Gate Timing Rules for Raw-Socket, HTTP, and Browser Surfaces
+
+Bead `asupersync-2a6k9.7.3` depends on this section when deciding whether an
+external surface is timing-comparison-ready or still blocked.
+
+| Surface family | Timing claims rejected now | Timing claims admissible later |
+|---|---|---|
+| `raw_socket` | kernel wake ordering, epoll/kqueue/io_uring latency, DNS timing, TLS handshake timing, remote RTT, and wall-clock throughput/latency claims | only scenario-clocked timeout or cancellation facts over loopback or virtual transport with declared `scenario_clock_id`, `clock_source`, `logical_deadline_id`, and `normalization_window` |
+| `http_surface` | real-internet RTT, CDN or upstream service latency, uncontrolled peer processing time, and raw wall-clock request timing | only request/response timeout and termination semantics over captured or virtualized transport with the same scenario clock and deadline vocabulary |
+| `browser_surface` | browser event-loop jitter, rendering cadence, service-worker lifetime timing, shared-worker host timing, and opaque Web API latency | only admitted lane-selection or timeout semantics when `host_role`, `lane_id`, `support_class`, and `reason_code` are captured and the time fields satisfy this policy's scenario-clock requirements |
+
+If an external-surface proposal cannot satisfy the "admissible later" column,
+its timing claim must remain `unsupported_time_surface` or
+`insufficient_observability`.
+
 ## Field-Level Normalization Contract
 
 The following field classes are normative for later runners, comparators, and
@@ -287,6 +302,17 @@ Required interpretation rules:
 The governing rule is simple: reruns may help classify time/noise observations,
 but reruns do not authorize inventing a larger tolerance after the fact.
 
+For external-surface gates, that means:
+
+1. `host_role`, `lane_id`, `support_class`, and `reason_code` may explain a
+   browser decision, but they do not promote raw browser host timing into
+   `semantic_time`,
+2. loopback or virtual transport is necessary but not sufficient for
+   `raw_socket` or `http_surface` timing claims; the proposal still needs the
+   declared scenario clock and deadline boundary,
+3. wall-clock improvements or regressions remain `provenance_only_time` until a
+   later contract explicitly promotes a narrower timing surface.
+
 ## Operational Examples
 
 ### Example 1: `Phase 1` Race With Different Scheduler Order
@@ -344,7 +370,7 @@ This policy is normative for the following beads:
 | `asupersync-2a6k9.5.4` | runner scripts and reports must expose the report fields and explanation rules defined here |
 | `asupersync-2a6k9.6.6` | the pilot coverage matrix must keep `Phase 1` time qualification distinct from future timer semantics |
 | `asupersync-2a6k9.7.1` | timer parity suites may only promote time into semantic comparison through `scenario_clock_id`, `clock_source`, and `normalization_window` |
-| `asupersync-2a6k9.7.3` | eligibility gates for raw-socket, HTTP, and browser surfaces must reject timing claims that do not satisfy this policy |
+| `asupersync-2a6k9.7.3` | eligibility gates for raw-socket, HTTP, and browser surfaces must use the external-surface timing table here to reject raw host timing claims and to require scenario-clocked boundaries before promotion |
 | `asupersync-2a6k9.7.4` | virtualized-surface observability contracts must reuse the timing/noise vocabulary here |
 
 If a later bead wants to compare raw wall-clock latency, host scheduler quirks,
