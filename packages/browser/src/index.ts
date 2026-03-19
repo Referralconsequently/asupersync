@@ -5160,7 +5160,8 @@ function parseBrowserServiceWorkerBrokerDescriptor(
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerDescriptor>;
   if (
-    typeof candidate.artifactNamespace !== "string"
+    candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE
+    || typeof candidate.artifactNamespace !== "string"
     || typeof candidate.brokerWorkId !== "string"
     || typeof candidate.capabilityManifestVersion !== "string"
     || typeof candidate.idempotencyKey !== "string"
@@ -5218,7 +5219,8 @@ function parseBrowserServiceWorkerBrokerHandoffRecord(
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerHandoffRecord>;
   if (
-    typeof candidate.artifactNamespace !== "string"
+    candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE
+    || typeof candidate.artifactNamespace !== "string"
     || typeof candidate.brokerWorkId !== "string"
     || typeof candidate.capabilityManifestVersion !== "string"
     || typeof candidate.idempotencyKey !== "string"
