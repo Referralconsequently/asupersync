@@ -738,9 +738,13 @@ pub const NORMALIZED_OBSERVABLE_SCHEMA_VERSION: &str = "lab-live-normalized-obse
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeClass {
+    /// Successful completion.
     Ok,
+    /// Failed with an error.
     Err,
+    /// Cancelled via the cancellation protocol.
     Cancelled,
+    /// Panicked during execution.
     Panicked,
 }
 
@@ -770,8 +774,11 @@ pub enum CancelTerminalPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DrainStatus {
+    /// No drain was needed for this participant.
     NotApplicable,
+    /// All losers were fully drained.
     Complete,
+    /// Some losers were not fully drained.
     Incomplete,
 }
 
@@ -779,10 +786,15 @@ pub enum DrainStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegionState {
+    /// Region is accepting new work.
     Open,
+    /// Region close has been initiated.
     Closing,
+    /// Region is draining children.
     Draining,
+    /// Region finalizers are running.
     Finalizing,
+    /// Region has reached quiescence.
     Closed,
 }
 
@@ -790,9 +802,13 @@ pub enum RegionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CounterTolerance {
+    /// Counts must match exactly.
     Exact,
+    /// Observed count must be at least the expected value.
     AtLeast,
+    /// Observed count must be at most the expected value.
     AtMost,
+    /// Counter comparison is not supported for this surface.
     Unsupported,
 }
 
@@ -854,6 +870,7 @@ impl TerminalOutcome {
 
 /// Cancellation subrecord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CancellationRecord {
     pub requested: bool,
     pub acknowledged: bool,
@@ -1580,6 +1597,289 @@ pub fn assert_semantics(
         SeedLineageRecord::from_plan(&SeedPlan::inherit(0, "")),
     );
     verdict.mismatches
+}
+
+// ============================================================================
+// Live Runner Adapter
+// ============================================================================
+
+/// Execution profile for the live runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveExecutionProfile {
+    /// Phase 1: `RuntimeBuilder::current_thread()` — single-threaded,
+    /// no ambient globals, explicit `Cx`.
+    CurrentThread,
+}
+
+impl fmt::Display for LiveExecutionProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentThread => write!(f, "phase1.current_thread"),
+        }
+    }
+}
+
+/// Configuration for a live runner execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveRunnerConfig {
+    /// Effective seed for this live execution.
+    pub seed: u64,
+    /// Effective entropy seed.
+    pub entropy_seed: u64,
+    /// Execution profile.
+    pub profile: LiveExecutionProfile,
+    /// Scenario identity.
+    pub scenario_id: String,
+    /// Surface identity.
+    pub surface_id: String,
+    /// Seed lineage ID for audit.
+    pub seed_lineage_id: String,
+}
+
+impl LiveRunnerConfig {
+    /// Create a live runner config from a `DualRunScenarioIdentity`.
+    #[must_use]
+    pub fn from_identity(identity: &DualRunScenarioIdentity) -> Self {
+        let live_seed = identity.seed_plan.effective_live_seed();
+        let entropy = identity.seed_plan.effective_entropy_seed(live_seed);
+        Self {
+            seed: live_seed,
+            entropy_seed: entropy,
+            profile: LiveExecutionProfile::CurrentThread,
+            scenario_id: identity.scenario_id.clone(),
+            surface_id: identity.surface_id.clone(),
+            seed_lineage_id: identity.seed_plan.seed_lineage_id.clone(),
+        }
+    }
+
+    /// Create a live runner config from a `SeedPlan` with a scenario ID.
+    #[must_use]
+    pub fn from_plan(
+        plan: &SeedPlan,
+        scenario_id: impl Into<String>,
+        surface_id: impl Into<String>,
+    ) -> Self {
+        let live_seed = plan.effective_live_seed();
+        let entropy = plan.effective_entropy_seed(live_seed);
+        Self {
+            seed: live_seed,
+            entropy_seed: entropy,
+            profile: LiveExecutionProfile::CurrentThread,
+            scenario_id: scenario_id.into(),
+            surface_id: surface_id.into(),
+            seed_lineage_id: plan.seed_lineage_id.clone(),
+        }
+    }
+}
+
+impl fmt::Display for LiveRunnerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "LiveRunner(scenario={}, surface={}, seed=0x{:X}, profile={})",
+            self.scenario_id, self.surface_id, self.seed, self.profile
+        )
+    }
+}
+
+/// Witness collector for live-side semantic evidence.
+///
+/// The live adapter cannot rely on lab-only introspection (oracle reports,
+/// trace certificates). Instead, it collects evidence from explicit
+/// witnesses: joined handles, counters, lifecycle hooks, and stream
+/// termination signals.
+///
+/// A `LiveWitnessCollector` is passed into the live execution closure.
+/// The closure records evidence, and the collector normalizes it into
+/// `NormalizedSemantics` at the end.
+#[derive(Debug, Clone)]
+pub struct LiveWitnessCollector {
+    terminal_outcome: TerminalOutcome,
+    cancellation: CancellationRecord,
+    loser_drain: LoserDrainRecord,
+    region_close: RegionCloseRecord,
+    obligation_balance: ObligationBalanceRecord,
+    resource_surface: ResourceSurfaceRecord,
+    /// Nondeterminism qualifiers observed during execution.
+    nondeterminism_notes: Vec<String>,
+}
+
+impl LiveWitnessCollector {
+    /// Create a new collector with default (happy-path) assumptions.
+    ///
+    /// All fields start at "clean" values. The live execution closure
+    /// overrides them as evidence is observed.
+    #[must_use]
+    pub fn new(surface_scope: impl Into<String>) -> Self {
+        Self {
+            terminal_outcome: TerminalOutcome::ok(),
+            cancellation: CancellationRecord::none(),
+            loser_drain: LoserDrainRecord::not_applicable(),
+            region_close: RegionCloseRecord::quiescent(),
+            obligation_balance: ObligationBalanceRecord::zero(),
+            resource_surface: ResourceSurfaceRecord::empty(surface_scope),
+            nondeterminism_notes: Vec::new(),
+        }
+    }
+
+    /// Record the terminal outcome.
+    pub fn set_outcome(&mut self, outcome: TerminalOutcome) {
+        self.terminal_outcome = outcome;
+    }
+
+    /// Record cancellation evidence.
+    pub fn set_cancellation(&mut self, record: CancellationRecord) {
+        self.cancellation = record;
+    }
+
+    /// Record loser drain evidence.
+    pub fn set_loser_drain(&mut self, record: LoserDrainRecord) {
+        self.loser_drain = record;
+    }
+
+    /// Record region close evidence.
+    pub fn set_region_close(&mut self, record: RegionCloseRecord) {
+        self.region_close = record;
+    }
+
+    /// Record obligation balance evidence.
+    pub fn set_obligation_balance(&mut self, record: ObligationBalanceRecord) {
+        self.obligation_balance = record;
+    }
+
+    /// Set a resource counter.
+    pub fn record_counter(&mut self, name: impl Into<String>, value: i64) {
+        let n = name.into();
+        self.resource_surface.counters.insert(n.clone(), value);
+        self.resource_surface
+            .tolerances
+            .insert(n, CounterTolerance::Exact);
+    }
+
+    /// Set a resource counter with tolerance.
+    pub fn record_counter_with_tolerance(
+        &mut self,
+        name: impl Into<String>,
+        value: i64,
+        tolerance: CounterTolerance,
+    ) {
+        let n = name.into();
+        self.resource_surface.counters.insert(n.clone(), value);
+        self.resource_surface.tolerances.insert(n, tolerance);
+    }
+
+    /// Note a nondeterminism qualifier (e.g., "scheduler ordering may vary").
+    pub fn note_nondeterminism(&mut self, note: impl Into<String>) {
+        self.nondeterminism_notes.push(note.into());
+    }
+
+    /// Finalize into normalized semantics.
+    #[must_use]
+    pub fn finalize(self) -> NormalizedSemantics {
+        NormalizedSemantics {
+            terminal_outcome: self.terminal_outcome,
+            cancellation: self.cancellation,
+            loser_drain: self.loser_drain,
+            region_close: self.region_close,
+            obligation_balance: self.obligation_balance,
+            resource_surface: self.resource_surface,
+        }
+    }
+
+    /// Access nondeterminism notes.
+    #[must_use]
+    pub fn nondeterminism_notes(&self) -> &[String] {
+        &self.nondeterminism_notes
+    }
+}
+
+/// Structured metadata emitted by a live run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveRunMetadata {
+    /// Configuration used.
+    pub config: LiveRunnerConfig,
+    /// Nondeterminism qualifiers observed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nondeterminism_notes: Vec<String>,
+    /// Replay metadata for this execution.
+    pub replay: ReplayMetadata,
+}
+
+/// Result of a live runner execution.
+#[derive(Debug, Clone)]
+pub struct LiveRunResult {
+    /// Normalized semantics from the live run.
+    pub semantics: NormalizedSemantics,
+    /// Structured run metadata.
+    pub metadata: LiveRunMetadata,
+}
+
+/// Execute a differential scenario through the live runner adapter.
+///
+/// This is the live-side counterpart to lab execution. It:
+/// 1. Builds a `LiveRunnerConfig` from the identity
+/// 2. Logs structured start metadata
+/// 3. Invokes the user's execution closure with a `LiveWitnessCollector`
+/// 4. Logs structured completion metadata
+/// 5. Returns `LiveRunResult` with normalized semantics
+///
+/// # Example
+///
+/// ```ignore
+/// let identity = DualRunScenarioIdentity::phase1(
+///     "cancel.race", "cancellation.race", "v1", "desc", 42,
+/// );
+/// let result = run_live_adapter(&identity, |config, witness| {
+///     // Run on current-thread runtime
+///     let rt = RuntimeBuilder::current_thread().build().unwrap();
+///     let cx = Cx::for_testing();
+///     rt.block_on(async {
+///         // ... execute scenario, record witnesses ...
+///         witness.set_outcome(TerminalOutcome::ok());
+///     });
+/// });
+/// ```
+pub fn run_live_adapter(
+    identity: &DualRunScenarioIdentity,
+    f: impl FnOnce(&LiveRunnerConfig, &mut LiveWitnessCollector),
+) -> LiveRunResult {
+    let config = LiveRunnerConfig::from_identity(identity);
+    let mut witness = LiveWitnessCollector::new(&identity.surface_id);
+
+    tracing::info!(
+        scenario_id = %identity.scenario_id,
+        surface_id = %identity.surface_id,
+        seed = %format_args!("0x{:X}", config.seed),
+        entropy_seed = %format_args!("0x{:X}", config.entropy_seed),
+        profile = %config.profile,
+        seed_lineage = %config.seed_lineage_id,
+        "LIVE_RUN_START"
+    );
+
+    f(&config, &mut witness);
+
+    let nondeterminism_notes = witness.nondeterminism_notes().to_vec();
+    let semantics = witness.finalize();
+    let replay = ReplayMetadata::for_live(identity.family_id(), &identity.seed_plan);
+
+    tracing::info!(
+        scenario_id = %identity.scenario_id,
+        outcome = %semantics.terminal_outcome.class,
+        quiescent = semantics.region_close.quiescent,
+        obligation_balanced = semantics.obligation_balance.balanced,
+        nondeterminism_count = nondeterminism_notes.len(),
+        "LIVE_RUN_COMPLETE"
+    );
+
+    LiveRunResult {
+        semantics,
+        metadata: LiveRunMetadata {
+            config,
+            nondeterminism_notes,
+            replay,
+        },
+    }
 }
 
 // ============================================================================
@@ -2812,5 +3112,192 @@ mod tests {
             })
             .run();
         assert_dual_run_passes(&result);
+    }
+
+    // --- LiveRunnerAdapter ---
+
+    #[test]
+    fn live_runner_config_from_identity() {
+        init_test("live_runner_config_from_identity");
+        let ident = DualRunScenarioIdentity::phase1("test", "surface", "v1", "d", 0xBEEF);
+        let config = LiveRunnerConfig::from_identity(&ident);
+        assert_eq!(config.seed, 0xBEEF);
+        assert_eq!(config.profile, LiveExecutionProfile::CurrentThread);
+        assert_eq!(config.scenario_id, "test");
+        assert_eq!(config.surface_id, "surface");
+        crate::test_complete!("live_runner_config_from_identity");
+    }
+
+    #[test]
+    fn live_runner_config_from_plan() {
+        init_test("live_runner_config_from_plan");
+        let plan = SeedPlan::inherit(42, "lineage").with_live_override(0xCAFE);
+        let config = LiveRunnerConfig::from_plan(&plan, "scenario", "surface");
+        assert_eq!(config.seed, 0xCAFE);
+        assert_eq!(config.seed_lineage_id, "lineage");
+        crate::test_complete!("live_runner_config_from_plan");
+    }
+
+    #[test]
+    fn live_runner_config_display() {
+        init_test("live_runner_config_display");
+        let ident = DualRunScenarioIdentity::phase1("test", "s", "v1", "d", 42);
+        let config = LiveRunnerConfig::from_identity(&ident);
+        let s = format!("{config}");
+        assert!(s.contains("test"));
+        assert!(s.contains("current_thread"));
+        crate::test_complete!("live_runner_config_display");
+    }
+
+    #[test]
+    fn live_witness_collector_defaults() {
+        init_test("live_witness_collector_defaults");
+        let witness = LiveWitnessCollector::new("test.surface");
+        let sem = witness.finalize();
+        assert_eq!(sem.terminal_outcome.class, OutcomeClass::Ok);
+        assert!(sem.region_close.quiescent);
+        assert!(sem.obligation_balance.balanced);
+        assert_eq!(sem.loser_drain.status, DrainStatus::NotApplicable);
+        assert_eq!(sem.resource_surface.contract_scope, "test.surface");
+        crate::test_complete!("live_witness_collector_defaults");
+    }
+
+    #[test]
+    fn live_witness_collector_records_evidence() {
+        init_test("live_witness_collector_records_evidence");
+        let mut witness = LiveWitnessCollector::new("test");
+        witness.set_outcome(TerminalOutcome::cancelled("timeout"));
+        witness.set_cancellation(CancellationRecord::completed());
+        witness.set_loser_drain(LoserDrainRecord::complete(2));
+        witness.set_obligation_balance(ObligationBalanceRecord::balanced(5, 4, 1));
+        witness.record_counter("msgs_sent", 10);
+        witness.record_counter_with_tolerance("bytes", 1024, CounterTolerance::AtLeast);
+        witness.note_nondeterminism("scheduler ordering may vary");
+
+        assert_eq!(witness.nondeterminism_notes().len(), 1);
+
+        let sem = witness.finalize();
+        assert_eq!(sem.terminal_outcome.class, OutcomeClass::Cancelled);
+        assert!(sem.cancellation.requested);
+        assert_eq!(sem.loser_drain.drained_losers, 2);
+        assert_eq!(sem.obligation_balance.committed, 4);
+        assert_eq!(sem.resource_surface.counters["msgs_sent"], 10);
+        assert_eq!(
+            sem.resource_surface.tolerances["bytes"],
+            CounterTolerance::AtLeast
+        );
+        crate::test_complete!("live_witness_collector_records_evidence");
+    }
+
+    #[test]
+    fn run_live_adapter_happy_path() {
+        init_test("run_live_adapter_happy_path");
+        let ident = DualRunScenarioIdentity::phase1(
+            "test.happy",
+            "test.surface",
+            "v1",
+            "Happy path live adapter test",
+            42,
+        );
+        let result = run_live_adapter(&ident, |config, witness| {
+            assert_eq!(config.seed, 42);
+            assert_eq!(config.profile, LiveExecutionProfile::CurrentThread);
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.record_counter("items_processed", 5);
+        });
+        assert_eq!(result.semantics.terminal_outcome.class, OutcomeClass::Ok);
+        assert_eq!(
+            result.semantics.resource_surface.counters["items_processed"],
+            5
+        );
+        assert_eq!(result.metadata.config.scenario_id, "test.happy");
+        assert!(result.metadata.nondeterminism_notes.is_empty());
+        crate::test_complete!("run_live_adapter_happy_path");
+    }
+
+    #[test]
+    fn run_live_adapter_with_nondeterminism() {
+        init_test("run_live_adapter_with_nondeterminism");
+        let ident = DualRunScenarioIdentity::phase1("test", "s", "v1", "d", 42);
+        let result = run_live_adapter(&ident, |_config, witness| {
+            witness.note_nondeterminism("timer resolution varies");
+            witness.note_nondeterminism("thread scheduling");
+        });
+        assert_eq!(result.metadata.nondeterminism_notes.len(), 2);
+        crate::test_complete!("run_live_adapter_with_nondeterminism");
+    }
+
+    #[test]
+    fn run_live_adapter_cancellation_scenario() {
+        init_test("run_live_adapter_cancellation_scenario");
+        let ident = DualRunScenarioIdentity::phase1(
+            "cancel.race",
+            "cancellation.race",
+            "v1",
+            "Cancel and drain",
+            0xDEAD,
+        );
+        let result = run_live_adapter(&ident, |config, witness| {
+            assert_eq!(config.seed, 0xDEAD);
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_cancellation(CancellationRecord::completed());
+            witness.set_loser_drain(LoserDrainRecord::complete(1));
+        });
+        assert!(result.semantics.cancellation.requested);
+        assert!(result.semantics.cancellation.cleanup_completed);
+        assert_eq!(result.semantics.loser_drain.status, DrainStatus::Complete);
+        assert_eq!(
+            result.metadata.replay.instance.runtime_kind,
+            RuntimeKind::Live
+        );
+        crate::test_complete!("run_live_adapter_cancellation_scenario");
+    }
+
+    #[test]
+    fn run_live_adapter_metadata_serde() {
+        init_test("run_live_adapter_metadata_serde");
+        let ident = DualRunScenarioIdentity::phase1("test", "s", "v1", "d", 42);
+        let result = run_live_adapter(&ident, |_, _| {});
+        let json = serde_json::to_string_pretty(&result.metadata).unwrap();
+        let parsed: LiveRunMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.config.seed, 42);
+        assert_eq!(parsed.config.profile, LiveExecutionProfile::CurrentThread);
+        crate::test_complete!("run_live_adapter_metadata_serde");
+    }
+
+    #[test]
+    fn live_adapter_integrates_with_harness() {
+        init_test("live_adapter_integrates_with_harness");
+        // Demonstrates the full pattern: use run_live_adapter inside
+        // DualRunHarness.live() closure for structured live evidence.
+        let result = DualRunHarness::phase1(
+            "integration.test",
+            "test.surface",
+            "v1",
+            "Full integration of live adapter with harness",
+            0xBEEF,
+        )
+        .lab(|_config| make_happy_semantics())
+        .live(|seed, _entropy| {
+            let ident = DualRunScenarioIdentity::phase1(
+                "integration.test",
+                "test.surface",
+                "v1",
+                "d",
+                seed,
+            );
+            let live_result = run_live_adapter(&ident, |_config, witness| {
+                witness.set_outcome(TerminalOutcome::ok());
+                witness.record_counter("items", 3);
+            });
+            live_result.semantics
+        })
+        .run();
+
+        // Resource counter won't match lab (which has no counters),
+        // but that's expected — live has extra counters.
+        // The harness detects this properly.
+        assert!(!result.verdict.passed); // Different resource surfaces
+        crate::test_complete!("live_adapter_integrates_with_harness");
     }
 }
