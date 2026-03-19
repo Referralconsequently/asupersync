@@ -460,11 +460,15 @@ pub struct Sublist {
     queue_round_robin: Mutex<HashMap<String, u64>>,
 }
 
-/// Generation-tagged cache entry.
+/// Generation-tagged cache entry storing raw matched subscriber info
+/// (before queue group selection, which must run fresh each time).
 #[derive(Debug, Clone)]
 struct CacheEntry {
     generation: u64,
-    result: SublistResult,
+    /// Non-queue-group subscriber ids.
+    plain_ids: Vec<SubscriptionId>,
+    /// Queue-group subscriber ids grouped by group name.
+    queue_groups: Vec<(String, Vec<SubscriptionId>)>,
 }
 
 /// Literal-subject lookup cache.
@@ -536,17 +540,20 @@ impl Sublist {
     /// Look up all matching subscriptions for a concrete subject.
     ///
     /// For queue groups, exactly one subscriber per group is selected using
-    /// round-robin.
+    /// round-robin. Queue group selection always runs fresh (not cached) so
+    /// round-robin advances correctly on each call.
     #[must_use]
     pub fn lookup(&self, subject: &Subject) -> SublistResult {
         let current_gen = self.generation.load(Ordering::Acquire);
 
-        // Check cache first (read lock only).
+        // Check cache first (read lock only). Cache stores raw match sets;
+        // queue group selection runs fresh each time.
         {
             let cache = self.cache.read();
             if let Some(entry) = cache.entries.get(subject.as_str()) {
                 if entry.generation == current_gen {
-                    return entry.result.clone();
+                    return self
+                        .apply_queue_selection(entry.plain_ids.clone(), &entry.queue_groups);
                 }
             }
         }
@@ -556,7 +563,8 @@ impl Sublist {
         let mut raw_matches: Vec<&Subscriber> = Vec::new();
         collect_matches(&trie, subject.tokens(), &mut raw_matches);
 
-        let result = self.build_result(&raw_matches);
+        // Split into plain and queue-group buckets.
+        let (plain_ids, queue_groups) = Self::split_matches(&raw_matches);
 
         // Store in cache (generation-tagged).
         {
@@ -566,12 +574,13 @@ impl Sublist {
                 subject.as_str().to_owned(),
                 CacheEntry {
                     generation: gen_now,
-                    result: result.clone(),
+                    plain_ids: plain_ids.clone(),
+                    queue_groups: queue_groups.clone(),
                 },
             );
         }
 
-        result
+        self.apply_queue_selection(plain_ids, &queue_groups)
     }
 
     /// Return the count of all registered subscriptions.
@@ -581,22 +590,35 @@ impl Sublist {
         count_subscribers(&trie)
     }
 
-    fn build_result(&self, raw_matches: &[&Subscriber]) -> SublistResult {
-        let mut subscribers = Vec::new();
-        let mut queue_groups: BTreeMap<String, Vec<SubscriptionId>> = BTreeMap::new();
+    /// Split raw matches into plain subscriber ids and queue-group buckets.
+    fn split_matches(
+        raw_matches: &[&Subscriber],
+    ) -> (Vec<SubscriptionId>, Vec<(String, Vec<SubscriptionId>)>) {
+        let mut plain = Vec::new();
+        let mut groups: BTreeMap<String, Vec<SubscriptionId>> = BTreeMap::new();
 
         for sub in raw_matches {
             if let Some(group) = &sub.queue_group {
-                queue_groups.entry(group.clone()).or_default().push(sub.id);
+                groups.entry(group.clone()).or_default().push(sub.id);
             } else {
-                subscribers.push(sub.id);
+                plain.push(sub.id);
             }
         }
 
+        let queue_groups = groups.into_iter().collect();
+        (plain, queue_groups)
+    }
+
+    /// Apply round-robin queue group selection to produce the final result.
+    fn apply_queue_selection(
+        &self,
+        subscribers: Vec<SubscriptionId>,
+        queue_groups: &[(String, Vec<SubscriptionId>)],
+    ) -> SublistResult {
         let mut queue_group_picks = Vec::new();
         if !queue_groups.is_empty() {
             let mut rr = self.queue_round_robin.lock();
-            for (group, members) in &queue_groups {
+            for (group, members) in queue_groups {
                 if members.is_empty() {
                     continue;
                 }

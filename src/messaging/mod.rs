@@ -77,6 +77,8 @@ pub mod class;
 #[cfg(feature = "messaging-fabric")]
 pub mod consumer;
 #[cfg(feature = "messaging-fabric")]
+pub mod cut;
+#[cfg(feature = "messaging-fabric")]
 pub mod fabric;
 #[cfg(feature = "messaging-fabric")]
 pub mod ir;
@@ -95,6 +97,11 @@ pub mod subject;
 #[cfg(feature = "messaging-fabric")]
 pub use class::{
     AckKind, DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError, DeliveryCostVector,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use cut::{
+    CapsuleDigest, CertifiedMobility, ConsumerStateDigest, CutCertificate, CutMobilityError,
+    MobilityOperation,
 };
 pub use jetstream::{
     AckPolicy, Consumer, ConsumerConfig, DeliverPolicy, DiscardPolicy, JetStreamContext, JsError,
