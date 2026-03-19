@@ -73,6 +73,8 @@
 //! - what evidence or replay surface makes the behavior inspectable.
 
 #[cfg(feature = "messaging-fabric")]
+pub mod capability;
+#[cfg(feature = "messaging-fabric")]
 pub mod class;
 #[cfg(feature = "messaging-fabric")]
 pub mod consumer;
@@ -80,6 +82,8 @@ pub mod consumer;
 pub mod cut;
 #[cfg(feature = "messaging-fabric")]
 pub mod fabric;
+#[cfg(feature = "messaging-fabric")]
+pub mod federation;
 #[cfg(feature = "messaging-fabric")]
 pub mod ir;
 pub mod jetstream;
@@ -89,6 +93,10 @@ pub mod kafka_consumer;
 pub mod morphism;
 pub mod nats;
 pub mod redis;
+#[cfg(feature = "messaging-fabric")]
+pub mod service;
+#[cfg(feature = "messaging-fabric")]
+pub mod session;
 #[cfg(feature = "messaging-fabric")]
 pub mod stream;
 #[cfg(feature = "messaging-fabric")]
@@ -102,6 +110,13 @@ pub use class::{
 pub use cut::{
     CapsuleDigest, CertifiedMobility, ConsumerStateDigest, CutCertificate, CutMobilityError,
     MobilityOperation,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use federation::{
+    CatchUpPolicy, EdgeReplayConfig, EvidenceShippingPolicy, FederationBridge,
+    FederationBridgeState, FederationError, FederationRole, GatewayConfig,
+    InterestPropagationPolicy, LeafConfig, MorphismConstraints, OrderingGuarantee,
+    ReplicationConfig, TraceRetention,
 };
 pub use jetstream::{
     AckPolicy, Consumer, ConsumerConfig, DeliverPolicy, DiscardPolicy, JetStreamContext, JsError,
@@ -124,7 +139,19 @@ pub use morphism::{
 pub use nats::{Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription};
 pub use redis::{RedisClient, RedisConfig, RedisError};
 #[cfg(feature = "messaging-fabric")]
+pub use service::{
+    BudgetSemantics, CallerOptions, CancellationObligations, CaptureRules, CompensationSemantics,
+    EvidenceLevel, MobilityConstraint, OverloadPolicy, PayloadShape, ProviderTerms, ReplyShape,
+    ServiceContractError, ServiceContractSchema, ServiceRegistration, ValidatedServiceRequest,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use session::{
+    CompensationPath, CutoffPath, EvidenceCheckpoint, GlobalSessionType, Label, MessageType,
+    ProtocolContract, ProtocolContractValidationError, RoleName, SessionBranch, SessionPath,
+    SessionType, TimeoutLaw, TimeoutOverride,
+};
+#[cfg(feature = "messaging-fabric")]
 pub use subject::{
-    Subject, SubjectPattern, SubjectPatternError, SubjectToken, Sublist, SublistResult,
-    SubscriptionGuard, SubscriptionId,
+    RegistryEntry, RegistryFamily, Subject, SubjectPattern, SubjectPatternError, SubjectRegistry,
+    SubjectRegistryError, SubjectToken, Sublist, SublistResult, SubscriptionGuard, SubscriptionId,
 };

@@ -783,6 +783,182 @@ fn count_subscribers(node: &TrieNode) -> usize {
     count
 }
 
+// ---------------------------------------------------------------------------
+// SubjectRegistry: concurrent schema registry with family classification
+// ---------------------------------------------------------------------------
+
+/// Semantic family classification for registered subject entries.
+///
+/// This is a local mirror of the FABRIC IR `SubjectFamily` enum, kept here to
+/// avoid a circular dependency caused by ir.rs re-including subject.rs under
+/// `#[cfg(test)]` via `#[path = "subject.rs"] mod subject_defs;`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RegistryFamily {
+    /// Fire-and-forget command subjects.
+    Command,
+    /// Notification event subjects.
+    #[default]
+    Event,
+    /// Reply subjects for request/reply patterns.
+    Reply,
+    /// Control-plane subjects (typically `$SYS.*`).
+    Control,
+    /// Protocol-step subjects for multi-step sessions.
+    ProtocolStep,
+    /// Subjects used as capture selectors (must contain wildcards).
+    CaptureSelector,
+    /// Derived or computed view subjects.
+    DerivedView,
+}
+
+impl fmt::Display for RegistryFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command => write!(f, "command"),
+            Self::Event => write!(f, "event"),
+            Self::Reply => write!(f, "reply"),
+            Self::Control => write!(f, "control"),
+            Self::ProtocolStep => write!(f, "protocol-step"),
+            Self::CaptureSelector => write!(f, "capture-selector"),
+            Self::DerivedView => write!(f, "derived-view"),
+        }
+    }
+}
+
+/// A registered subject entry in the [`SubjectRegistry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryEntry {
+    /// Subject pattern for matching.
+    pub pattern: SubjectPattern,
+    /// Semantic family classification.
+    pub family: RegistryFamily,
+    /// Optional human-readable description.
+    pub description: String,
+}
+
+/// Errors from the subject registry.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SubjectRegistryError {
+    /// A schema with a conflicting (overlapping) pattern is already registered.
+    #[error("subject pattern `{pattern}` conflicts with existing registration `{existing}`")]
+    ConflictingPattern {
+        /// The pattern being registered.
+        pattern: String,
+        /// The existing pattern that conflicts.
+        existing: String,
+    },
+    /// The pattern was not found in the registry.
+    #[error("subject pattern `{pattern}` is not registered")]
+    NotFound {
+        /// The pattern that was not found.
+        pattern: String,
+    },
+}
+
+/// Thread-safe registry of subject entries indexed by pattern.
+///
+/// The registry detects overlapping pattern conflicts on registration and
+/// supports lookup of the most specific matching entry for a concrete
+/// subject. Thread-safety follows the same `RwLock` pattern as [`Sublist`].
+pub struct SubjectRegistry {
+    entries: RwLock<BTreeMap<String, RegistryEntry>>,
+}
+
+impl Default for SubjectRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SubjectRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Register a subject entry. Returns an error if the pattern overlaps
+    /// with an already-registered entry.
+    pub fn register(&self, entry: RegistryEntry) -> Result<(), SubjectRegistryError> {
+        let mut entries = self.entries.write();
+        let key = entry.pattern.as_str().to_owned();
+
+        for (existing_key, existing) in entries.iter() {
+            if entry.pattern.overlaps(&existing.pattern) {
+                return Err(SubjectRegistryError::ConflictingPattern {
+                    pattern: key,
+                    existing: existing_key.clone(),
+                });
+            }
+        }
+
+        entries.insert(key, entry);
+        Ok(())
+    }
+
+    /// Remove an entry by its exact pattern string.
+    pub fn deregister(&self, pattern: &str) -> Result<RegistryEntry, SubjectRegistryError> {
+        let mut entries = self.entries.write();
+        entries
+            .remove(pattern)
+            .ok_or_else(|| SubjectRegistryError::NotFound {
+                pattern: pattern.to_owned(),
+            })
+    }
+
+    /// Look up the most specific matching entry for a concrete subject.
+    ///
+    /// "Most specific" is the entry whose pattern has the most literal
+    /// segments. Ties are broken by pattern string for determinism.
+    #[must_use]
+    pub fn lookup(&self, subject: &Subject) -> Option<RegistryEntry> {
+        let entries = self.entries.read();
+        entries
+            .values()
+            .filter(|entry| entry.pattern.matches(subject))
+            .max_by_key(|entry| specificity_score(&entry.pattern))
+            .cloned()
+    }
+
+    /// List all entries belonging to a specific family.
+    #[must_use]
+    pub fn list_by_family(&self, family: RegistryFamily) -> Vec<RegistryEntry> {
+        let entries = self.entries.read();
+        entries
+            .values()
+            .filter(|entry| entry.family == family)
+            .cloned()
+            .collect()
+    }
+
+    /// Return the count of registered entries.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.entries.read().len()
+    }
+}
+
+impl fmt::Debug for SubjectRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SubjectRegistry")
+            .field("count", &self.count())
+            .finish()
+    }
+}
+
+/// Score a pattern by specificity: more literal segments = higher score.
+fn specificity_score(pattern: &SubjectPattern) -> (usize, usize) {
+    let literals = pattern
+        .segments()
+        .iter()
+        .filter(|s| matches!(s, SubjectToken::Literal(_)))
+        .count();
+    let total = pattern.segments().len();
+    (literals, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1384,5 +1560,192 @@ mod tests {
 
         drop(g2);
         assert_eq!(sl.count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // SubjectRegistry tests
+    // -----------------------------------------------------------------------
+
+    fn event_entry(pattern: &str) -> RegistryEntry {
+        RegistryEntry {
+            pattern: SubjectPattern::new(pattern),
+            family: RegistryFamily::Event,
+            description: String::new(),
+        }
+    }
+
+    fn command_entry(pattern: &str) -> RegistryEntry {
+        RegistryEntry {
+            pattern: SubjectPattern::new(pattern),
+            family: RegistryFamily::Command,
+            description: String::new(),
+        }
+    }
+
+    fn control_entry(pattern: &str) -> RegistryEntry {
+        RegistryEntry {
+            pattern: SubjectPattern::new(pattern),
+            family: RegistryFamily::Control,
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn registry_register_and_lookup() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("orders.created"))
+            .expect("register");
+
+        let result = reg.lookup(&Subject::new("orders.created"));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().family, RegistryFamily::Event);
+    }
+
+    #[test]
+    fn registry_lookup_returns_none_for_unmatched() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("orders.created"))
+            .expect("register");
+
+        assert!(reg.lookup(&Subject::new("payments.created")).is_none());
+    }
+
+    #[test]
+    fn registry_rejects_overlapping_patterns() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("orders.>"))
+            .expect("register wildcard");
+
+        let err = reg
+            .register(event_entry("orders.created"))
+            .expect_err("overlap should be rejected");
+
+        assert!(matches!(
+            err,
+            SubjectRegistryError::ConflictingPattern { .. }
+        ));
+    }
+
+    #[test]
+    fn registry_allows_non_overlapping_patterns() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("orders.created"))
+            .expect("register orders");
+        reg.register(event_entry("payments.created"))
+            .expect("register payments");
+
+        assert_eq!(reg.count(), 2);
+    }
+
+    #[test]
+    fn registry_deregister_removes_entry() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("orders.created"))
+            .expect("register");
+
+        let removed = reg.deregister("orders.created").expect("deregister");
+        assert_eq!(removed.family, RegistryFamily::Event);
+        assert_eq!(reg.count(), 0);
+        assert!(reg.lookup(&Subject::new("orders.created")).is_none());
+    }
+
+    #[test]
+    fn registry_deregister_not_found() {
+        let reg = SubjectRegistry::new();
+        let err = reg.deregister("nonexistent").expect_err("should not find");
+        assert!(matches!(err, SubjectRegistryError::NotFound { .. }));
+    }
+
+    #[test]
+    fn registry_list_by_family() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("events.user.created"))
+            .expect("event1");
+        reg.register(event_entry("events.user.deleted"))
+            .expect("event2");
+        reg.register(command_entry("commands.user.create"))
+            .expect("command1");
+        reg.register(control_entry("$SYS.health.ping"))
+            .expect("control1");
+
+        let events = reg.list_by_family(RegistryFamily::Event);
+        assert_eq!(events.len(), 2);
+
+        let commands = reg.list_by_family(RegistryFamily::Command);
+        assert_eq!(commands.len(), 1);
+
+        let controls = reg.list_by_family(RegistryFamily::Control);
+        assert_eq!(controls.len(), 1);
+
+        let replies = reg.list_by_family(RegistryFamily::Reply);
+        assert_eq!(replies.len(), 0);
+    }
+
+    #[test]
+    fn registry_lookup_returns_most_specific_match() {
+        let reg = SubjectRegistry::new();
+        // Register a broad wildcard and a specific literal (non-overlapping).
+        reg.register(event_entry("events.user.created"))
+            .expect("specific");
+        // Can't register overlapping "events.>", so register a sibling.
+        reg.register(event_entry("events.system.created"))
+            .expect("system");
+
+        let result = reg
+            .lookup(&Subject::new("events.user.created"))
+            .expect("found");
+        assert_eq!(result.pattern.as_str(), "events.user.created");
+    }
+
+    #[test]
+    fn registry_wildcard_lookup_matches() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("events.>")).expect("wildcard");
+
+        let result = reg
+            .lookup(&Subject::new("events.user.created"))
+            .expect("found");
+        assert_eq!(result.pattern.as_str(), "events.>");
+        assert_eq!(result.family, RegistryFamily::Event);
+    }
+
+    #[test]
+    fn registry_deregister_then_reregister() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("orders.created"))
+            .expect("register");
+        reg.deregister("orders.created").expect("deregister");
+
+        // After deregistration, can re-register the same pattern.
+        reg.register(command_entry("orders.created"))
+            .expect("re-register as command");
+
+        let result = reg.lookup(&Subject::new("orders.created")).expect("found");
+        assert_eq!(result.family, RegistryFamily::Command);
+    }
+
+    #[test]
+    fn registry_concurrent_read_access() {
+        use std::thread;
+
+        let reg = Arc::new(SubjectRegistry::new());
+        reg.register(event_entry("orders.created"))
+            .expect("register");
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let reg_clone = Arc::clone(&reg);
+                thread::spawn(move || {
+                    for _ in 0..100 {
+                        let result = reg_clone.lookup(&Subject::new("orders.created"));
+                        assert!(result.is_some());
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
     }
 }
