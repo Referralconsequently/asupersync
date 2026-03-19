@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn uniform_posterior_prefers_aggressive() {
+    fn uniform_posterior_prefers_conservative() {
         // With uniform prior: E[aggressive]=17.0, E[balanced]=9.0, E[conservative]=6.75
         // So uniform should prefer conservative.
         let c = SchedulerDecisionContract::new();
