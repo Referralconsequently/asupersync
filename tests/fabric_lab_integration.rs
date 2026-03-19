@@ -1,16 +1,31 @@
 //! LabRuntime integration coverage for the current FABRIC subject-cell foundation.
 #![cfg(feature = "messaging-fabric")]
 
+use asupersync::cx::{Cx, cap};
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::messaging::capability::{
+    FabricCapability as RuntimeFabricCapability, FabricCapabilityScope,
+};
+use asupersync::messaging::compiler::FabricCompiler;
 use asupersync::messaging::fabric::{
     CellEpoch, CellTemperature, DataCapsule, NodeRole, NormalizationPolicy, ObservedCellLoad,
     PlacementPolicy, RebalanceBudget, RebalancePlan, RepairPolicy, ReplySpaceCompactionPolicy,
     StewardCandidate, StorageClass, SubjectCell, SubjectPattern, SubjectPrefixMorphism,
 };
+use asupersync::messaging::ir::{
+    CostVector, EvidencePolicy, FabricIr, MobilityPermission, PrivacyPolicy, ReplySpaceRule,
+    SubjectFamily, SubjectSchema,
+};
+use asupersync::messaging::{
+    DeliveryClass, FabricCapability as MorphismCapability, Morphism, MorphismClass, ResponsePolicy,
+    ReversibilityRequirement, SharingPolicy, SubjectTransform,
+};
 use asupersync::remote::NodeId;
 use asupersync::runtime::yield_now;
-use asupersync::types::Budget;
+use asupersync::types::{Budget, RegionId, TaskId};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CellSnapshot {
@@ -28,6 +43,34 @@ struct RebalanceSnapshot {
     next_stewards: Vec<String>,
     added_stewards: Vec<String>,
     removed_stewards: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FabricLogEntry {
+    seq: u64,
+    lane: &'static str,
+    action: &'static str,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CapabilityScenarioSummary {
+    child_publish_visible_before_revoke: bool,
+    child_subscribe_visible_before_revoke: bool,
+    removed_by_scope: usize,
+    removed_by_subject: usize,
+    final_grants: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompilerScenarioSummary {
+    subject_patterns: Vec<String>,
+    aggregate_cost: CostVector,
+    export_fingerprint: String,
+    export_capabilities: Vec<MorphismCapability>,
+    export_reply_space: Option<ReplySpaceRule>,
+    import_fingerprint: String,
+    import_reply_space: Option<ReplySpaceRule>,
 }
 
 fn candidate(
@@ -127,6 +170,389 @@ fn snapshot_rebalance(plan: RebalancePlan, input_subject: &str) -> RebalanceSnap
             .map(|node| node.as_str().to_string())
             .collect(),
     }
+}
+
+fn test_fabric_cx(slot: u32) -> Cx {
+    Cx::new(
+        RegionId::new_for_test(slot, 0),
+        TaskId::new_for_test(slot, 0),
+        Budget::INFINITE,
+    )
+}
+
+fn push_log(
+    log: &Arc<Mutex<Vec<FabricLogEntry>>>,
+    seq: &Arc<AtomicU64>,
+    lane: &'static str,
+    action: &'static str,
+    detail: impl Into<String>,
+) {
+    log.lock().expect("log lock").push(FabricLogEntry {
+        seq: seq.fetch_add(1, Ordering::SeqCst),
+        lane,
+        action,
+        detail: detail.into(),
+    });
+}
+
+fn sample_fabric_ir() -> FabricIr {
+    FabricIr {
+        subjects: vec![
+            SubjectSchema {
+                pattern: SubjectPattern::new("tenant.orders.command"),
+                family: SubjectFamily::Command,
+                delivery_class: DeliveryClass::ObligationBacked,
+                evidence_policy: EvidencePolicy::default(),
+                privacy_policy: PrivacyPolicy::default(),
+                reply_space: Some(ReplySpaceRule::CallerInbox),
+                mobility: MobilityPermission::Federated,
+                quantitative_obligation: None,
+            },
+            SubjectSchema {
+                pattern: SubjectPattern::new("tenant.orders.event"),
+                family: SubjectFamily::Event,
+                delivery_class: DeliveryClass::DurableOrdered,
+                evidence_policy: EvidencePolicy::default(),
+                privacy_policy: PrivacyPolicy::default(),
+                reply_space: None,
+                mobility: MobilityPermission::Federated,
+                quantitative_obligation: None,
+            },
+        ],
+        ..FabricIr::default()
+    }
+}
+
+fn authoritative_morphism() -> Morphism {
+    Morphism {
+        source_language: SubjectPattern::new("tenant.orders"),
+        dest_language: SubjectPattern::new("authority.orders"),
+        class: MorphismClass::Authoritative,
+        transform: SubjectTransform::RenamePrefix {
+            from: SubjectPattern::new("tenant.orders"),
+            to: SubjectPattern::new("authority.orders"),
+        },
+        reversibility: ReversibilityRequirement::EvidenceBacked,
+        capability_requirements: vec![
+            MorphismCapability::CarryAuthority,
+            MorphismCapability::ReplyAuthority,
+        ],
+        sharing_policy: SharingPolicy::Federated,
+        privacy_policy: PrivacyPolicy {
+            allow_cross_tenant_flow: true,
+            ..PrivacyPolicy::default()
+        },
+        response_policy: ResponsePolicy::ReplyAuthoritative,
+        ..Morphism::default()
+    }
+}
+
+fn delegation_morphism() -> Morphism {
+    let mut morphism = Morphism {
+        source_language: SubjectPattern::new("tenant.rpc"),
+        dest_language: SubjectPattern::new("delegate.rpc"),
+        class: MorphismClass::Delegation,
+        capability_requirements: vec![MorphismCapability::DelegateNamespace],
+        sharing_policy: SharingPolicy::TenantScoped,
+        privacy_policy: PrivacyPolicy {
+            allow_cross_tenant_flow: true,
+            ..PrivacyPolicy::default()
+        },
+        response_policy: ResponsePolicy::ForwardOpaque,
+        ..Morphism::default()
+    };
+    morphism.quota_policy.max_handoff_duration = Some(Duration::from_secs(30));
+    morphism.quota_policy.revocation_required = true;
+    morphism
+}
+
+fn run_capability_scenario(seed: u64) -> (CapabilityScenarioSummary, Vec<FabricLogEntry>, u64) {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let parent = Arc::new(test_fabric_cx(100));
+    let child = Arc::new(parent.restrict::<cap::None>());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(CapabilityScenarioSummary::default()));
+
+    {
+        let parent = Arc::clone(&parent);
+        let child = Arc::clone(&child);
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                yield_now().await;
+                let publish = parent
+                    .grant_fabric_capability(RuntimeFabricCapability::Publish {
+                        subject: SubjectPattern::new("orders.>"),
+                    })
+                    .expect("publish grant");
+                push_log(
+                    &log,
+                    &seq,
+                    "capability",
+                    "grant_publish",
+                    format!(
+                        "grant_id={} active_grants={}",
+                        publish.id().raw(),
+                        parent.fabric_capabilities().len()
+                    ),
+                );
+
+                yield_now().await;
+                let subscribe = parent
+                    .grant_fabric_capability(RuntimeFabricCapability::Subscribe {
+                        subject: SubjectPattern::new("orders.created"),
+                    })
+                    .expect("subscribe grant");
+                push_log(
+                    &log,
+                    &seq,
+                    "capability",
+                    "grant_subscribe",
+                    format!(
+                        "grant_id={} active_grants={}",
+                        subscribe.id().raw(),
+                        parent.fabric_capabilities().len()
+                    ),
+                );
+
+                let publish_visible =
+                    child.check_fabric_capability(&RuntimeFabricCapability::Publish {
+                        subject: SubjectPattern::new("orders.created"),
+                    });
+                let subscribe_visible =
+                    child.check_fabric_capability(&RuntimeFabricCapability::Subscribe {
+                        subject: SubjectPattern::new("orders.created"),
+                    });
+                {
+                    let mut guard = summary.lock().expect("summary lock");
+                    guard.child_publish_visible_before_revoke = publish_visible;
+                    guard.child_subscribe_visible_before_revoke = subscribe_visible;
+                }
+                push_log(
+                    &log,
+                    &seq,
+                    "capability",
+                    "check_child_visibility",
+                    format!(
+                        "publish_visible={publish_visible} subscribe_visible={subscribe_visible}"
+                    ),
+                );
+
+                yield_now().await;
+                let removed =
+                    child.revoke_fabric_capability_scope(FabricCapabilityScope::Subscribe);
+                summary.lock().expect("summary lock").removed_by_scope = removed;
+                push_log(
+                    &log,
+                    &seq,
+                    "capability",
+                    "revoke_scope",
+                    format!(
+                        "removed={removed} remaining={}",
+                        child.fabric_capabilities().len()
+                    ),
+                );
+
+                yield_now().await;
+                let removed = parent
+                    .revoke_fabric_capability_by_subject(&SubjectPattern::new("orders.created"));
+                summary.lock().expect("summary lock").removed_by_subject = removed;
+                push_log(
+                    &log,
+                    &seq,
+                    "capability",
+                    "revoke_by_subject",
+                    format!(
+                        "removed={removed} remaining={}",
+                        parent.fabric_capabilities().len()
+                    ),
+                );
+            })
+            .expect("create capability scenario task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let violations = runtime.check_invariants();
+    let pending_obligations = runtime.state.pending_obligation_count();
+    assert!(
+        runtime.is_quiescent(),
+        "runtime should quiesce after capability scenario"
+    );
+    assert_eq!(
+        pending_obligations, 0,
+        "capability scenario should not leave pending obligations"
+    );
+    assert!(
+        violations.is_empty(),
+        "capability scenario should not violate lab invariants: {violations:?}"
+    );
+
+    let mut summary = summary.lock().expect("summary lock").clone();
+    summary.final_grants = parent.fabric_capabilities().len();
+
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    (summary, log_entries, runtime.steps())
+}
+
+fn run_compiler_scenario(seed: u64) -> (CompilerScenarioSummary, Vec<FabricLogEntry>, u64) {
+    #[derive(Debug, Clone, Default)]
+    struct CompilerState {
+        subject_patterns: Vec<String>,
+        aggregate_cost: Option<CostVector>,
+        export_fingerprint: Option<String>,
+        export_capabilities: Vec<MorphismCapability>,
+        export_reply_space: Option<ReplySpaceRule>,
+        import_fingerprint: Option<String>,
+        import_reply_space: Option<ReplySpaceRule>,
+    }
+
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let state = Arc::new(Mutex::new(CompilerState::default()));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let state = Arc::clone(&state);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                yield_now().await;
+                let report =
+                    FabricCompiler::compile(&sample_fabric_ir()).expect("sample IR should compile");
+                {
+                    let mut guard = state.lock().expect("state lock");
+                    guard.subject_patterns = report
+                        .subject_costs
+                        .iter()
+                        .map(|subject| subject.pattern.clone())
+                        .collect();
+                    guard.aggregate_cost = Some(report.aggregate_cost);
+                }
+                push_log(
+                    &log,
+                    &seq,
+                    "compiler",
+                    "compile_ir",
+                    format!(
+                        "subjects={} schema={}",
+                        report.subject_costs.len(),
+                        report.schema_version
+                    ),
+                );
+            })
+            .expect("create compiler task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let state = Arc::clone(&state);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                yield_now().await;
+                yield_now().await;
+                let plan = authoritative_morphism()
+                    .compile_export_plan(None)
+                    .expect("authoritative export plan should compile");
+                {
+                    let mut guard = state.lock().expect("state lock");
+                    guard.export_fingerprint = Some(plan.certificate.fingerprint.clone());
+                    guard.export_capabilities = plan.attached_capabilities.clone();
+                    guard.export_reply_space = plan.selected_reply_space.clone();
+                }
+                push_log(
+                    &log,
+                    &seq,
+                    "morphism",
+                    "compile_export_plan",
+                    format!(
+                        "fingerprint={} reply_space={:?}",
+                        plan.certificate.fingerprint, plan.selected_reply_space
+                    ),
+                );
+            })
+            .expect("create export plan task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let state = Arc::clone(&state);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                yield_now().await;
+                yield_now().await;
+                yield_now().await;
+                let plan = delegation_morphism()
+                    .compile_import_plan(None)
+                    .expect("delegation import plan should compile");
+                {
+                    let mut guard = state.lock().expect("state lock");
+                    guard.import_fingerprint = Some(plan.certificate.fingerprint.clone());
+                    guard.import_reply_space = plan.selected_reply_space.clone();
+                }
+                push_log(
+                    &log,
+                    &seq,
+                    "morphism",
+                    "compile_import_plan",
+                    format!(
+                        "fingerprint={} reply_space={:?}",
+                        plan.certificate.fingerprint, plan.selected_reply_space
+                    ),
+                );
+            })
+            .expect("create import plan task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let violations = runtime.check_invariants();
+    let pending_obligations = runtime.state.pending_obligation_count();
+    assert!(
+        runtime.is_quiescent(),
+        "runtime should quiesce after compiler scenario"
+    );
+    assert_eq!(
+        pending_obligations, 0,
+        "compiler scenario should not leave pending obligations"
+    );
+    assert!(
+        violations.is_empty(),
+        "compiler scenario should not violate lab invariants: {violations:?}"
+    );
+
+    let state = state.lock().expect("state lock").clone();
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+
+    (
+        CompilerScenarioSummary {
+            subject_patterns: state.subject_patterns,
+            aggregate_cost: state.aggregate_cost.expect("aggregate cost"),
+            export_fingerprint: state.export_fingerprint.expect("export fingerprint"),
+            export_capabilities: state.export_capabilities,
+            export_reply_space: state.export_reply_space,
+            import_fingerprint: state.import_fingerprint.expect("import fingerprint"),
+            import_reply_space: state.import_reply_space,
+        },
+        log_entries,
+        runtime.steps(),
+    )
 }
 
 fn run_subject_cell_scenario(seed: u64, inputs: &[&str]) -> (Vec<CellSnapshot>, u64) {
@@ -393,5 +819,119 @@ fn rebalance_aliases_choose_the_same_hot_steward_set() {
             .iter()
             .all(|snapshot| snapshot.added_stewards.len() <= 2),
         "rebalance budget should bound steward churn per planning step"
+    );
+}
+
+#[test]
+fn fabric_capability_mutations_are_deterministic_across_seeded_lab_runs() {
+    let (first_summary, first_log, first_steps) = run_capability_scenario(0xFACE_CAFE);
+    let (second_summary, second_log, second_steps) = run_capability_scenario(0xFACE_CAFE);
+
+    assert_eq!(
+        first_summary, second_summary,
+        "same seed should yield identical capability summaries"
+    );
+    assert_eq!(
+        first_log, second_log,
+        "same seed should yield identical capability logs"
+    );
+    assert_eq!(
+        first_steps, second_steps,
+        "same seed should yield identical capability scheduler steps"
+    );
+}
+
+#[test]
+fn fabric_capability_mutations_propagate_and_drain_cleanly() {
+    let (summary, log, _) = run_capability_scenario(0xC0DE_CAFE);
+
+    assert!(
+        summary.child_publish_visible_before_revoke,
+        "child view should observe inherited publish capability before revocation"
+    );
+    assert!(
+        summary.child_subscribe_visible_before_revoke,
+        "child view should observe inherited subscribe capability before revocation"
+    );
+    assert_eq!(
+        summary.removed_by_scope, 1,
+        "scope revoke should remove the subscribe grant"
+    );
+    assert_eq!(
+        summary.removed_by_subject, 1,
+        "subject revoke should remove the remaining publish grant"
+    );
+    assert_eq!(
+        summary.final_grants, 0,
+        "all shared grants should be drained by the end of the scenario"
+    );
+    assert_eq!(
+        log.len(),
+        5,
+        "expected one structured log entry per operation"
+    );
+    assert!(
+        log.windows(2).all(|window| window[0].seq < window[1].seq),
+        "structured capability logs should preserve a strict monotone sequence"
+    );
+}
+
+#[test]
+fn fabric_compiler_and_morphism_plans_are_deterministic_across_seeded_lab_runs() {
+    let (first_summary, first_log, first_steps) = run_compiler_scenario(0xC011_AB1E);
+    let (second_summary, second_log, second_steps) = run_compiler_scenario(0xC011_AB1E);
+
+    assert_eq!(
+        first_summary, second_summary,
+        "same seed should yield identical compiler and morphism summaries"
+    );
+    assert_eq!(
+        first_log, second_log,
+        "same seed should yield identical compiler and morphism logs"
+    );
+    assert_eq!(
+        first_steps, second_steps,
+        "same seed should yield identical compiler scheduler steps"
+    );
+}
+
+#[test]
+fn fabric_compiler_and_morphism_plans_match_expected_surfaces() {
+    let (summary, log, _) = run_compiler_scenario(0xA11C_0DE5);
+
+    assert_eq!(
+        summary.subject_patterns,
+        vec![
+            "tenant.orders.command".to_string(),
+            "tenant.orders.event".to_string()
+        ],
+        "compiler should preserve declaration order for deterministic reporting"
+    );
+    assert_eq!(
+        summary.export_capabilities,
+        vec![
+            MorphismCapability::CarryAuthority,
+            MorphismCapability::ReplyAuthority
+        ],
+        "authoritative export plans should carry the authority-bearing capability set"
+    );
+    assert_eq!(
+        summary.export_reply_space,
+        Some(ReplySpaceRule::DedicatedPrefix {
+            prefix: "authority.orders".to_string(),
+        }),
+        "authoritative export plans should default to a dedicated authority reply prefix"
+    );
+    assert_eq!(
+        summary.import_reply_space,
+        Some(ReplySpaceRule::CallerInbox),
+        "delegation import plans should preserve caller inbox replies by default"
+    );
+    assert!(!summary.export_fingerprint.is_empty());
+    assert!(!summary.import_fingerprint.is_empty());
+    assert_eq!(
+        log.len(),
+        3,
+        "expected one structured log entry per compile lane"
     );
 }

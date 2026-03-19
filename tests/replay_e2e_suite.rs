@@ -11,7 +11,7 @@
 #[macro_use]
 mod common;
 
-use asupersync::lab::{FuzzConfig, FuzzHarness, LabConfig, LabRuntime};
+use asupersync::lab::{DualRunHarness, FuzzConfig, FuzzHarness, LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
 use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
 use asupersync::trace::{
@@ -112,6 +112,17 @@ fn write_replay_artifact_text(name: &str, value: &str) {
         tracing::warn!(error = %err, path = %path.display(), "failed to write replay artifact text");
     } else {
         tracing::info!(path = %path.display(), "replay artifact text written");
+    }
+}
+
+fn dual_run_happy_semantics() -> asupersync::lab::NormalizedSemantics {
+    asupersync::lab::NormalizedSemantics {
+        terminal_outcome: asupersync::lab::TerminalOutcome::ok(),
+        cancellation: asupersync::lab::CancellationRecord::none(),
+        loser_drain: asupersync::lab::LoserDrainRecord::not_applicable(),
+        region_close: asupersync::lab::RegionCloseRecord::quiescent(),
+        obligation_balance: asupersync::lab::ObligationBalanceRecord::zero(),
+        resource_surface: asupersync::lab::ResourceSurfaceRecord::empty("test"),
     }
 }
 
@@ -1249,6 +1260,62 @@ fn schedule_permutation_fuzz_regression_corpus_artifact() {
         "schedule_permutation_fuzz_regression_corpus_artifact",
         cases = corpus.cases.len(),
         iterations = corpus.iterations
+    );
+}
+
+#[test]
+fn schedule_permutation_fuzz_regressions_promote_into_dual_run_scenarios() {
+    init_test("schedule_permutation_fuzz_regressions_promote_into_dual_run_scenarios");
+
+    let config = FuzzConfig::new(0x6C6F_7265_6D71_6505, 4)
+        .worker_count(2)
+        .max_steps(256)
+        .minimize(true);
+    let harness = FuzzHarness::new(config.clone());
+
+    let report = harness.run(|runtime| {
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        for i in 0..3_u8 {
+            let (task_id, _) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    for _ in 0..i {
+                        yield_now().await;
+                    }
+                })
+                .expect("create scheduled task");
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
+        let _unscheduled = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create unscheduled task");
+        runtime.run_until_quiescent();
+    });
+
+    assert!(report.has_findings(), "expected promoted fuzz findings");
+
+    let promoted = report
+        .to_regression_corpus(config.base_seed)
+        .to_promoted_scenarios("replay.schedule", "v1");
+    assert!(
+        !promoted.is_empty(),
+        "promoted scenarios should not be empty"
+    );
+    assert!(
+        promoted
+            .iter()
+            .all(|scenario| scenario.campaign_base_seed == Some(config.base_seed))
+    );
+
+    let result = DualRunHarness::from_identity(promoted[0].identity.clone())
+        .lab(|_config| dual_run_happy_semantics())
+        .live(|_seed, _entropy| dual_run_happy_semantics())
+        .run();
+
+    assert!(
+        result.passed(),
+        "promoted fuzz scenario should replay cleanly"
     );
 }
 

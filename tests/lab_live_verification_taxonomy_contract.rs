@@ -7,24 +7,30 @@
 
 use std::path::Path;
 
-fn load_doc() -> String {
+fn load_doc() -> std::io::Result<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/lab_live_verification_taxonomy.md");
-    std::fs::read_to_string(path).expect("lab-live verification taxonomy must exist")
+    std::fs::read_to_string(path)
+}
+
+fn load_divergence_doc() -> std::io::Result<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/lab_live_divergence_taxonomy.md");
+    std::fs::read_to_string(path)
 }
 
 #[test]
-fn doc_exists_and_is_substantial() {
-    let doc = load_doc();
+fn doc_exists_and_is_substantial() -> std::io::Result<()> {
+    let doc = load_doc()?;
     assert!(
         doc.len() > 8_000,
         "document should be substantial, got {} bytes",
         doc.len()
     );
+    Ok(())
 }
 
 #[test]
-fn doc_references_bead_parent_and_upstream_contracts() {
-    let doc = load_doc();
+fn doc_references_bead_parent_and_upstream_contracts() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "asupersync-2a6k9.1.4",
         "asupersync-2a6k9.1",
@@ -42,11 +48,12 @@ fn doc_references_bead_parent_and_upstream_contracts() {
             "document missing upstream contract token: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_defines_taxonomy_tiers() {
-    let doc = load_doc();
+fn doc_defines_taxonomy_tiers() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "T0",
         "unit_contract",
@@ -66,11 +73,12 @@ fn doc_defines_taxonomy_tiers() {
             "document missing taxonomy tier token: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_defines_minimum_bead_class_requirements() {
-    let doc = load_doc();
+fn doc_defines_minimum_bead_class_requirements() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "Policy or Contract Beads",
         "Shared Harness or Helper Beads",
@@ -83,11 +91,12 @@ fn doc_defines_minimum_bead_class_requirements() {
             "document missing bead-class section: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_locks_phase1_surface_coverage_matrix() {
-    let doc = load_doc();
+fn doc_locks_phase1_surface_coverage_matrix() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "cancellation -> combinators -> channels -> obligations -> region close/quiescence",
         "cancellation",
@@ -102,11 +111,12 @@ fn doc_locks_phase1_surface_coverage_matrix() {
             "document missing phase-1 coverage token: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_defines_external_surface_gate_requirements() {
-    let doc = load_doc();
+fn doc_defines_external_surface_gate_requirements() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "Eligibility-Gate Matrix for External Surfaces",
         "raw_socket",
@@ -127,11 +137,12 @@ fn doc_defines_external_surface_gate_requirements() {
             "document missing external-surface gate token: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_requires_structured_logging_vocabulary() {
-    let doc = load_doc();
+fn doc_requires_structured_logging_vocabulary() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "schema_version",
         "suite_id",
@@ -158,11 +169,12 @@ fn doc_requires_structured_logging_vocabulary() {
             "document missing structured logging token: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_requires_bundle_file_names() {
-    let doc = load_doc();
+fn doc_requires_bundle_file_names() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "differential_summary.json",
         "differential_event_log.jsonl",
@@ -177,11 +189,12 @@ fn doc_requires_bundle_file_names() {
             "document missing artifact bundle token: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_binds_downstream_beads() {
-    let doc = load_doc();
+fn doc_binds_downstream_beads() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "asupersync-2a6k9.2.2",
         "asupersync-2a6k9.2.5",
@@ -197,11 +210,12 @@ fn doc_binds_downstream_beads() {
             "document missing downstream binding token: {token}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn doc_requires_rch_validation_commands() {
-    let doc = load_doc();
+fn doc_requires_rch_validation_commands() -> std::io::Result<()> {
+    let doc = load_doc()?;
     for token in [
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo check --all-targets",
@@ -213,4 +227,33 @@ fn doc_requires_rch_validation_commands() {
             "document missing validation command: {token}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn divergence_doc_defines_registry_schema_and_lifecycle() -> std::io::Result<()> {
+    let doc = load_divergence_doc()?;
+    for token in [
+        "lab-live-divergence-corpus-v1",
+        "entry_id",
+        "first_seen.runner_profile",
+        "minimization_lineage",
+        "artifact_bundle",
+        "regression_promotion_state",
+        "investigating",
+        "minimized",
+        "promoted_regression",
+        "known_open",
+        "rejected",
+        "retention.bundle_level",
+        "retention.local_retention_days",
+        "retention.ci_retention_days",
+        "retention.redaction_mode",
+    ] {
+        assert!(
+            doc.contains(token),
+            "divergence taxonomy missing registry token: {token}"
+        );
+    }
+    Ok(())
 }

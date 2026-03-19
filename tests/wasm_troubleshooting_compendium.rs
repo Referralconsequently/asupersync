@@ -172,3 +172,58 @@ fn troubleshooting_doc_covers_browser_storage_and_artifact_failure_paths() {
         );
     }
 }
+
+#[test]
+fn troubleshooting_doc_defines_optional_lane_rollout_and_no_go_policy() {
+    let doc = load_doc();
+    for token in [
+        "### K. Optional-Lane Rollout, Demotion, and No-Go Policy",
+        "support_class",
+        "reason_code",
+        "fallback_lane_id",
+        "lane_health_status",
+        "lane_health_failure_count",
+        "lane_health_retry_budget_remaining",
+        "demoted_lane_id",
+        "repro_command",
+        "preview_only",
+        "guarded canary-only",
+        "nightly-only",
+        "SharedArrayBuffer",
+        "WebTransport",
+        "MessageChannel",
+        "MessagePort",
+        "BroadcastChannel",
+    ] {
+        assert!(
+            doc.contains(token),
+            "Troubleshooting compendium missing optional-lane policy token: {token}"
+        );
+    }
+}
+
+#[test]
+fn troubleshooting_doc_points_to_optional_lane_evidence_bundle() {
+    let doc = load_doc();
+    for token in [
+        "python3 scripts/check_wasm_worker_offload_policy.py",
+        ".github/wasm_worker_offload_policy.json",
+        "python3 scripts/check_wasm_benchmark_corpus.py",
+        ".github/wasm_benchmark_corpus.json",
+        "python3 scripts/check_perf_regression.py",
+        "artifacts/wasm_worker_offload_summary.json",
+        "artifacts/wasm_benchmark_corpus_summary.json",
+        "artifacts/wasm_perf_regression_report.json",
+        "artifacts/wasm_perf_gate_events.ndjson",
+        "rch exec -- ./scripts/run_perf_e2e.sh",
+        "rch exec -- bash ./scripts/run_nightly_stress_soak.sh",
+        "target/nightly-stress/<run_id>/trend_report.json",
+        "target/nightly-stress/<run_id>/run_manifest.json",
+        "docs/wasm_release_channel_strategy.md",
+    ] {
+        assert!(
+            doc.contains(token),
+            "Troubleshooting compendium missing optional-lane evidence token: {token}"
+        );
+    }
+}

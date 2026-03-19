@@ -5,6 +5,17 @@
 
 #![allow(missing_docs)]
 
+mod common;
+
+use asupersync::lab::{
+    ChaosSection, DualRunScenarioIdentity, LabSection, NetworkSection, Scenario, ScenarioRunner,
+    SeedPlan, SporkScenarioConfig, SporkScenarioRunner, SporkScenarioSpec,
+};
+use asupersync::runtime::yield_now;
+use asupersync::spork::prelude::AppSpec;
+use asupersync::test_logging::{LIVE_CURRENT_THREAD_ADAPTER, ReproManifest, TestContext};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 fn load_doc() -> String {
@@ -202,4 +213,219 @@ fn doc_binds_downstream_beads_and_validation_commands() {
             "document missing downstream or validation token: {token}"
         );
     }
+}
+
+fn minimal_contract_identity() -> DualRunScenarioIdentity {
+    let seed_plan = SeedPlan::inherit(42, "seed.phase1.cancel.race.one_loser.v1");
+    DualRunScenarioIdentity::phase1(
+        "phase1.cancel.race.one_loser",
+        "cancel.race",
+        "cancel.race.v1",
+        "Single loser is cancelled and drained",
+        seed_plan.canonical_seed,
+    )
+    .with_seed_plan(seed_plan)
+}
+
+fn minimal_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
+    let mut metadata = BTreeMap::new();
+    metadata.insert("surface_id".into(), identity.surface_id.clone());
+    metadata.insert(
+        "surface_contract_version".into(),
+        identity.surface_contract_version.clone(),
+    );
+    metadata.insert(
+        "seed_lineage_id".into(),
+        identity.seed_plan.seed_lineage_id.clone(),
+    );
+
+    Scenario {
+        schema_version: 1,
+        id: identity.scenario_id.clone(),
+        description: identity.description.clone(),
+        lab: LabSection {
+            seed: identity.seed_plan.canonical_seed,
+            ..LabSection::default()
+        },
+        chaos: ChaosSection::Off,
+        network: NetworkSection::default(),
+        faults: Vec::new(),
+        participants: Vec::new(),
+        oracles: vec!["all".to_string()],
+        cancellation: None,
+        include: Vec::new(),
+        metadata,
+    }
+}
+
+fn run_minimal_spork(identity: &DualRunScenarioIdentity) -> asupersync::lab::SporkScenarioResult {
+    let mut runner = SporkScenarioRunner::new();
+    runner
+        .register(
+            SporkScenarioSpec::new(&identity.scenario_id, |_config| {
+                AppSpec::new("dual_run_contract_app")
+            })
+            .with_description(identity.description.clone())
+            .with_expected_invariants(["no_task_leaks", "quiescence_on_close"])
+            .with_default_config(SporkScenarioConfig {
+                seed: identity.seed_plan.canonical_seed,
+                ..SporkScenarioConfig::default()
+            })
+            .with_surface_id(identity.surface_id.clone())
+            .with_surface_contract_version(identity.surface_contract_version.clone())
+            .with_seed_lineage_id(identity.seed_plan.seed_lineage_id.clone()),
+        )
+        .expect("register spork scenario");
+
+    runner
+        .run(&identity.scenario_id)
+        .expect("run spork scenario")
+}
+
+fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
+    if actual != expected {
+        let actual_pretty =
+            serde_json::to_string_pretty(actual).expect("serialize actual contract JSON");
+        let expected_pretty =
+            serde_json::to_string_pretty(expected).expect("serialize expected contract JSON");
+        panic!("{label} mismatch\nexpected:\n{expected_pretty}\nactual:\n{actual_pretty}");
+    }
+}
+
+#[test]
+fn shared_harness_smoke_executes_same_contract_across_lab_and_live_entrypoints() {
+    let identity = minimal_contract_identity();
+    let scenario = minimal_contract_scenario(&identity);
+    let lab_result = ScenarioRunner::run_with_identity(&scenario, &identity).unwrap();
+    let spork_result = run_minimal_spork(&identity);
+
+    let mut harness = common::e2e_harness::E2eLabHarness::from_dual_run_identity(&identity);
+    let root = harness.create_root();
+    harness.spawn(root, async {});
+    assert!(
+        harness.run_until_quiescent() > 0,
+        "lab harness should make scheduler progress for the shared smoke case"
+    );
+    assert!(
+        harness.is_quiescent(),
+        "lab harness should reach quiescence"
+    );
+    assert_eq!(
+        harness.check_invariants(),
+        0,
+        "lab harness should end without invariant violations"
+    );
+    harness.finish();
+
+    let live_identity = identity.clone();
+    common::run_test(move || async move {
+        yield_now().await;
+        let live_ctx = TestContext::from_live_dual_run(&live_identity);
+        let manifest = ReproManifest::from_context(&live_ctx, true).with_phases(vec![
+            "setup".into(),
+            "execute".into(),
+            "compare".into(),
+        ]);
+        assert_eq!(
+            manifest.adapter.as_deref(),
+            Some(LIVE_CURRENT_THREAD_ADAPTER),
+            "live smoke path should tag the current-thread adapter"
+        );
+        assert_eq!(
+            manifest.scenario_id, "phase1.cancel.race.one_loser",
+            "live smoke path should preserve the shared scenario id"
+        );
+    });
+
+    assert!(
+        lab_result.passed(),
+        "lab scenario runner smoke case must pass"
+    );
+    assert!(spork_result.passed(), "spork harness smoke case must pass");
+
+    let live_ctx = TestContext::from_live_dual_run(&identity);
+    let live_replay = live_ctx
+        .replay_metadata
+        .as_ref()
+        .expect("live context should retain replay metadata");
+
+    let actual = json!({
+        "scenario_id": identity.scenario_id.clone(),
+        "surface_id": identity.surface_id.clone(),
+        "surface_contract_version": identity.surface_contract_version.clone(),
+        "seed_lineage_id": identity.seed_plan.seed_lineage_id.clone(),
+        "adapters": {
+            "lab": lab_result.adapter.clone(),
+            "spork": spork_result.adapter.clone(),
+            "live": live_ctx.adapter.as_deref().expect("live adapter"),
+        },
+        "execution_instances": {
+            "lab": lab_result.replay_metadata.instance.key(),
+            "spork": spork_result.replay_metadata.instance.key(),
+            "live": live_replay.instance.key(),
+        },
+        "passed": {
+            "lab": lab_result.passed(),
+            "spork": spork_result.passed(),
+        }
+    });
+
+    let expected = json!({
+        "scenario_id": "phase1.cancel.race.one_loser",
+        "surface_id": "cancel.race",
+        "surface_contract_version": "cancel.race.v1",
+        "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+        "adapters": {
+            "lab": "lab.scenario_runner",
+            "spork": "lab.spork_harness",
+            "live": "live.current_thread",
+        },
+        "execution_instances": {
+            "lab": "phase1.cancel.race.one_loser:lab:0x2A:0",
+            "spork": "phase1.cancel.race.one_loser:lab:0x2A:0",
+            "live": "phase1.cancel.race.one_loser:live:0x2A:0",
+        },
+        "passed": {
+            "lab": true,
+            "spork": true,
+        }
+    });
+
+    assert_pretty_json_eq("shared dual-run smoke snapshot", &actual, &expected);
+}
+
+#[test]
+fn dual_run_failure_manifest_keeps_readable_provenance() {
+    let identity = minimal_contract_identity();
+    let manifest = ReproManifest::from_context(&TestContext::from_live_dual_run(&identity), false)
+        .with_failure_reason("contract smoke mismatch")
+        .with_phases(vec!["setup".into(), "execute".into(), "compare".into()]);
+
+    let actual = serde_json::to_value(&manifest).expect("serialize repro manifest");
+    let expected = json!({
+        "scenario_id": "phase1.cancel.race.one_loser",
+        "adapter": "live.current_thread",
+        "surface_id": "cancel.race",
+        "surface_contract_version": "cancel.race.v1",
+        "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+        "failure_reason": "contract smoke mismatch",
+        "phases_executed": ["setup", "execute", "compare"],
+    });
+    let normalized = json!({
+        "scenario_id": actual["scenario_id"],
+        "adapter": actual["adapter"],
+        "surface_id": actual["replay_metadata"]["family"]["surface_id"],
+        "surface_contract_version": actual["replay_metadata"]["family"]["surface_contract_version"],
+        "seed_lineage_id": actual["seed_lineage"]["seed_lineage_id"],
+        "failure_reason": actual["failure_reason"],
+        "phases_executed": actual["phases_executed"],
+    });
+
+    assert_pretty_json_eq("dual-run failure manifest", &normalized, &expected);
+    assert!(
+        actual["replay_command"]
+            .as_str()
+            .is_some_and(|cmd| cmd.contains("cargo test")),
+        "failure manifest should retain a replay command instead of opaque diagnostics"
+    );
 }

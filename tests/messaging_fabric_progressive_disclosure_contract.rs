@@ -6,12 +6,21 @@
 //! module docs and delivery-class taxonomy keep the cheap path explicit and
 //! keep stronger semantics opt-in.
 
+#![allow(clippy::duplicate_mod)]
+
 use std::path::PathBuf;
+
+/// Test utilities
+pub mod util {
+    pub use asupersync::util::DetHasher;
+}
 
 #[path = "../src/messaging/class.rs"]
 mod class;
 #[path = "../src/messaging/ir.rs"]
 mod ir;
+#[path = "../src/messaging/subject.rs"]
+mod subject;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

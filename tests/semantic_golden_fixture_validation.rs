@@ -8,6 +8,8 @@
 //! Bead: asupersync-3cddg.12.8
 //! Rule IDs exercised: #7, #8, #29, #30, #31, #39, #42, #46
 
+use asupersync::lab::{DualRunScenarioIdentity, SeedPlan};
+use asupersync::test_logging::TestContext;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -33,6 +35,106 @@ fn load_fixture(filename: &str) -> Value {
 
 fn load_manifest() -> Value {
     load_fixture("manifest.json")
+}
+
+fn assert_pretty_json_eq(label: &str, actual: &Value, expected: &Value) {
+    if actual != expected {
+        let actual_pretty =
+            serde_json::to_string_pretty(actual).expect("serialize actual golden JSON");
+        let expected_pretty =
+            serde_json::to_string_pretty(expected).expect("serialize expected golden JSON");
+        panic!("{label} mismatch\nexpected:\n{expected_pretty}\nactual:\n{actual_pretty}");
+    }
+}
+
+fn build_dual_run_harness_contract_fixture() -> Value {
+    let seed_plan = SeedPlan::inherit(42, "seed.phase1.cancel.race.one_loser.v1")
+        .with_live_override(99)
+        .with_entropy_seed(777);
+    let identity = DualRunScenarioIdentity::phase1(
+        "phase1.cancel.race.one_loser",
+        "cancel.race",
+        "cancel.race.v1",
+        "Single loser is cancelled and drained",
+        seed_plan.canonical_seed,
+    )
+    .with_seed_plan(seed_plan);
+    let lab_config = identity.to_lab_config();
+    let lab_replay = identity.lab_replay_metadata();
+    let live_ctx = TestContext::from_live_dual_run(&identity);
+    let live_replay = live_ctx
+        .replay_metadata
+        .as_ref()
+        .expect("dual-run live context should include replay metadata");
+    let seed_lineage = live_ctx
+        .seed_lineage
+        .as_ref()
+        .expect("dual-run live context should include seed lineage");
+
+    serde_json::json!({
+        "schema_version": "semantic-golden-fixture-v1",
+        "fixture_id": "golden-dual-run-harness-contract",
+        "rule_ids": [
+            "differential.shared_harness.contract",
+            "differential.seed_lineage.roundtrip"
+        ],
+        "description": "Expected shared dual-run identity and provenance records for the canonical harness contract case",
+        "identity": {
+            "schema_version": identity.schema_version.clone(),
+            "scenario_id": identity.scenario_id.clone(),
+            "surface_id": identity.surface_id.clone(),
+            "surface_contract_version": identity.surface_contract_version.clone(),
+            "description": identity.description.clone(),
+            "phase": identity.phase,
+            "seed_plan": {
+                "canonical_seed": identity.seed_plan.canonical_seed,
+                "seed_lineage_id": identity.seed_plan.seed_lineage_id.clone(),
+                "lab_seed_mode": identity.seed_plan.lab_seed_mode,
+                "live_seed_mode": identity.seed_plan.live_seed_mode,
+                "replay_policy": identity.seed_plan.replay_policy,
+                "lab_seed_override": identity.seed_plan.lab_seed_override,
+                "live_seed_override": identity.seed_plan.live_seed_override,
+                "entropy_seed_override": identity.seed_plan.entropy_seed_override
+            }
+        },
+        "lab_runtime": {
+            "seed": lab_config.seed,
+            "entropy_seed": lab_config.entropy_seed
+        },
+        "lab_replay": {
+            "execution_instance_id": lab_replay.instance.key(),
+            "effective_seed": lab_replay.effective_seed,
+            "effective_entropy_seed": lab_replay.effective_entropy_seed,
+            "surface_id": lab_replay.family.surface_id.clone(),
+            "surface_contract_version": lab_replay.family.surface_contract_version.clone()
+        },
+        "live_context": {
+            "adapter": live_ctx.adapter.as_deref().expect("live adapter"),
+            "seed": live_ctx.seed,
+            "execution_instance_id": live_replay.instance.key(),
+            "surface_id": live_replay.family.surface_id.clone(),
+            "surface_contract_version": live_replay.family.surface_contract_version.clone(),
+            "seed_lineage_id": seed_lineage.seed_lineage_id.clone()
+        },
+        "seed_lineage": {
+            "seed_lineage_id": seed_lineage.seed_lineage_id.clone(),
+            "canonical_seed": seed_lineage.canonical_seed,
+            "lab_effective_seed": seed_lineage.lab_effective_seed,
+            "live_effective_seed": seed_lineage.live_effective_seed,
+            "lab_seed_mode": seed_lineage.lab_seed_mode,
+            "live_seed_mode": seed_lineage.live_seed_mode,
+            "lab_entropy_seed": seed_lineage.lab_entropy_seed,
+            "live_entropy_seed": seed_lineage.live_entropy_seed,
+            "replay_policy": seed_lineage.replay_policy,
+            "seeds_match": seed_lineage.seeds_match
+        },
+        "invariants": [
+            "Scenario family identity is shared across lab and live adapters",
+            "Seed lineage records explicit live overrides instead of hiding them",
+            "Live current-thread provenance keeps the same surface contract as lab",
+            "Explicit entropy overrides are retained in both replay metadata and seed lineage"
+        ]
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +209,13 @@ fn golden_manifest_fixtures_all_loadable() {
             "fixture {id} must have schema_version"
         );
     }
+}
+
+#[test]
+fn golden_dual_run_harness_contract_matches_runtime_helpers() {
+    let expected = load_fixture("dual_run_harness_contract.json");
+    let actual = build_dual_run_harness_contract_fixture();
+    assert_pretty_json_eq("golden dual-run harness contract", &actual, &expected);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

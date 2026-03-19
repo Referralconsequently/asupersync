@@ -64,9 +64,29 @@
       "seed": 2915041283,
       "last_updated": "2026-03-02",
       "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-dual-run-harness-contract",
+      "rule_ids": [
+        "differential.shared_harness.contract",
+        "differential.seed_lineage.roundtrip"
+      ],
+      "rule_numbers": [201, 202],
+      "description": "Expected shared dual-run identity and provenance records for the canonical harness contract case",
+      "file": "dual_run_harness_contract.json",
+      "seed": 42,
+      "last_updated": "2026-03-19",
+      "update_reason": "Lock shared harness identity, live override, and seed-lineage golden output"
     }
   ],
   "change_log": [
+    {
+      "date": "2026-03-19",
+      "author": "PinkHeron",
+      "action": "add",
+      "fixtures_affected": ["golden-dual-run-harness-contract"],
+      "justification": "Add deterministic golden coverage for shared dual-run harness identity and seed-lineage provenance"
+    },
     {
       "date": "2026-03-02",
       "author": "SapphireHill",

@@ -301,3 +301,42 @@ fn release_docs_define_vnext_surface_promotion_and_packet_rows() {
         );
     }
 }
+
+#[test]
+fn release_strategy_doc_defines_optional_lane_operator_decision_law() {
+    let strategy = load_release_strategy_doc();
+
+    for token in [
+        "## Optional-Lane Operator Decision Law",
+        "support_class",
+        "reason_code",
+        "fallback_lane_id",
+        "lane_health_status",
+        "lane_health_failure_count",
+        "lane_health_retry_budget_remaining",
+        "lane_health_cooldown_until_ms",
+        "lane_health_last_trigger",
+        "demoted_lane_id",
+        "repro_command",
+        "policy_schema_version",
+        "python3 scripts/check_wasm_worker_offload_policy.py --policy .github/wasm_worker_offload_policy.json",
+        "artifacts/wasm_worker_offload_summary.json",
+        "python3 scripts/check_wasm_benchmark_corpus.py --policy .github/wasm_benchmark_corpus.json",
+        "artifacts/wasm_benchmark_corpus_summary.json",
+        "python3 scripts/check_perf_regression.py --budgets .github/wasm_perf_budgets.json --profile core-min",
+        "artifacts/wasm_perf_regression_report.json",
+        "artifacts/wasm_perf_gate_events.ndjson",
+        "rch exec -- ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark --seed 42 --metric p95_ns",
+        "rch exec -- bash ./scripts/run_nightly_stress_soak.sh --ci --suites cancellation_stress,scheduler_fairness --timeout 3600",
+        "target/nightly-stress/<run_id>/trend_report.json",
+        "preview_only",
+        "guarded canary-only",
+        "nightly-only",
+        "shared_array_buffer_requires_cross_origin_isolation",
+    ] {
+        assert!(
+            strategy.contains(token),
+            "release strategy doc missing optional-lane operator token: {token}"
+        );
+    }
+}
