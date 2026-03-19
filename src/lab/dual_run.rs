@@ -1549,14 +1549,37 @@ fn compare_resource_surface(
 
     // Compare counters using declared tolerances.
     for (name, &lab_val) in &lab.counters {
-        let live_val = live.counters.get(name).copied().unwrap_or(0);
-        let tolerance = lab
+        let Some(&live_val) = live.counters.get(name) else {
+            mismatches.push(SemanticMismatch {
+                field: format!("semantics.resource_surface.counters.{name}"),
+                description: format!("Counter '{name}' missing in live observable"),
+                lab_value: format!("{lab_val}"),
+                live_value: "absent".to_string(),
+            });
+            continue;
+        };
+
+        let lab_tolerance = lab
+            .tolerances
+            .get(name)
+            .copied()
+            .unwrap_or(CounterTolerance::Exact);
+        let live_tolerance = live
             .tolerances
             .get(name)
             .copied()
             .unwrap_or(CounterTolerance::Exact);
 
-        let mismatch = match tolerance {
+        if lab_tolerance != live_tolerance {
+            mismatches.push(SemanticMismatch {
+                field: format!("semantics.resource_surface.tolerances.{name}"),
+                description: format!("Counter '{name}' tolerance mismatch"),
+                lab_value: format!("{lab_tolerance:?}"),
+                live_value: format!("{live_tolerance:?}"),
+            });
+        }
+
+        let mismatch = match lab_tolerance {
             CounterTolerance::Exact => lab_val != live_val,
             CounterTolerance::AtLeast => live_val < lab_val,
             CounterTolerance::AtMost => live_val > lab_val,
@@ -1566,7 +1589,7 @@ fn compare_resource_surface(
         if mismatch {
             mismatches.push(SemanticMismatch {
                 field: format!("semantics.resource_surface.counters.{name}"),
-                description: format!("Counter '{name}' mismatch (tolerance: {tolerance:?})"),
+                description: format!("Counter '{name}' mismatch (tolerance: {lab_tolerance:?})"),
                 lab_value: format!("{lab_val}"),
                 live_value: format!("{live_val}"),
             });
@@ -3706,6 +3729,56 @@ mod tests {
                 .any(|m| m.field.contains("counters.msgs"))
         );
         crate::test_complete!("compare_resource_counter_exact_mismatch");
+    }
+
+    #[test]
+    fn compare_resource_counter_missing_in_live_fails() {
+        init_test("compare_resource_counter_missing_in_live_fails");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.resource_surface = ResourceSurfaceRecord::empty("test").with_counter("msgs", 0);
+        let mut live_sem = make_happy_semantics();
+        live_sem.resource_surface = ResourceSurfaceRecord::empty("test");
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.description.contains("missing in live observable"))
+        );
+        crate::test_complete!("compare_resource_counter_missing_in_live_fails");
+    }
+
+    #[test]
+    fn compare_resource_tolerance_mismatch_fails() {
+        init_test("compare_resource_tolerance_mismatch_fails");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.resource_surface = ResourceSurfaceRecord::empty("test").with_counter_tolerance(
+            "msgs",
+            5,
+            CounterTolerance::Exact,
+        );
+        let mut live_sem = make_happy_semantics();
+        live_sem.resource_surface = ResourceSurfaceRecord::empty("test").with_counter_tolerance(
+            "msgs",
+            5,
+            CounterTolerance::Unsupported,
+        );
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.resource_surface.tolerances.msgs")
+        );
+        crate::test_complete!("compare_resource_tolerance_mismatch_fails");
     }
 
     #[test]
