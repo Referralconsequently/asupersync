@@ -114,9 +114,9 @@ pub use class::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use control::{
-    AdvisoryDampingPolicy, ControlAdvisory, ControlAdvisoryType, ControlBudget, ControlHandler,
-    ControlHandlerId, ControlOutcome, ControlRegistry, ControlRegistryError,
-    ObligationTransferAction, SystemSubjectFamily,
+    AdvisoryDampingPolicy, ControlAdvisory, ControlAdvisoryFilter, ControlAdvisoryType,
+    ControlBudget, ControlHandler, ControlHandlerId, ControlOutcome, ControlRegistry,
+    ControlRegistryError, ObligationTransferAction, SystemSubjectFamily,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use cut::{

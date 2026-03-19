@@ -311,11 +311,36 @@ pub enum ControlAdvisoryType {
         /// Why this action was chosen (human-readable).
         justification: String,
     },
+    /// A structured evidence record was emitted for operator review.
+    EvidenceRecord {
+        /// Stable identifier for the emitted evidence record.
+        evidence_id: String,
+        /// Subsystem/component that produced the evidence.
+        component: String,
+        /// Action or decision summarized by the evidence.
+        action: String,
+        /// Human-readable summary of why the evidence matters.
+        summary: String,
+    },
     /// A break-glass recovery action was taken.
     BreakGlassActivation {
         /// Reason the break-glass path was triggered.
         reason: String,
     },
+}
+
+impl ControlAdvisoryType {
+    /// Stable advisory kind name used for filtering and serialized payloads.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::CapabilityGraphChange { .. } => "capability_graph_change",
+            Self::ObligationTransfer { .. } => "obligation_transfer",
+            Self::PolicyDecision { .. } => "policy_decision",
+            Self::EvidenceRecord { .. } => "evidence_record",
+            Self::BreakGlassActivation { .. } => "break_glass_activation",
+        }
+    }
 }
 
 /// Obligation lifecycle actions that produce advisories.
@@ -364,7 +389,28 @@ pub struct ControlAdvisory {
     pub decision_audit: Option<DecisionAuditEntry>,
 }
 
+/// Typed filter for advisory subscription and operator views.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControlAdvisoryFilter {
+    /// Limit matches to one control-plane family.
+    pub family: Option<SystemSubjectFamily>,
+    /// Limit matches to a single advisory kind.
+    pub advisory_kind: Option<&'static str>,
+    /// If true, only advisories carrying FrankenSuite decision provenance
+    /// should match.
+    pub require_decision_provenance: bool,
+}
+
 impl ControlAdvisory {
+    fn derived_evidence_id(family: SystemSubjectFamily, audit: &DecisionAuditEntry) -> String {
+        format!(
+            "control:{}:{}:{}",
+            family.name().to_ascii_lowercase(),
+            audit.decision_id,
+            audit.ts_unix_ms
+        )
+    }
+
     /// Create a new advisory from a decision outcome.
     ///
     /// This is the preferred constructor when a FrankenSuite decision
@@ -386,6 +432,31 @@ impl ControlAdvisory {
             ts_unix_ms: audit.ts_unix_ms,
             decision_audit: Some(audit.clone()),
         }
+    }
+
+    /// Create an explicit evidence-record advisory from a decision outcome.
+    ///
+    /// Use this when operators need an advisory that names the evidence bundle
+    /// directly rather than inferring it from a policy-decision payload.
+    #[must_use]
+    pub fn evidence_record(
+        family: SystemSubjectFamily,
+        subject: Subject,
+        outcome: &DecisionOutcome,
+        summary: impl Into<String>,
+    ) -> Self {
+        let audit = &outcome.audit_entry;
+        Self::from_decision(
+            ControlAdvisoryType::EvidenceRecord {
+                evidence_id: Self::derived_evidence_id(family, audit),
+                component: audit.contract_name.clone(),
+                action: audit.action_chosen.clone(),
+                summary: summary.into(),
+            },
+            family,
+            subject,
+            outcome,
+        )
     }
 
     /// Create a notification-only advisory (no decision contract).
@@ -418,10 +489,41 @@ impl ControlAdvisory {
             .map(DecisionAuditEntry::to_evidence_ledger)
     }
 
+    /// Stable evidence identifier for this advisory when provenance exists.
+    #[must_use]
+    pub fn evidence_id(&self) -> Option<String> {
+        match &self.advisory_type {
+            ControlAdvisoryType::EvidenceRecord { evidence_id, .. } => Some(evidence_id.clone()),
+            _ => self
+                .decision_audit
+                .as_ref()
+                .map(|audit| Self::derived_evidence_id(self.family, audit)),
+        }
+    }
+
     /// Whether this advisory carries decision provenance.
     #[must_use]
     pub fn has_decision_provenance(&self) -> bool {
         self.decision_audit.is_some()
+    }
+
+    /// Returns `true` when this advisory matches the given typed filter.
+    #[must_use]
+    pub fn matches_filter(&self, filter: &ControlAdvisoryFilter) -> bool {
+        if let Some(family) = filter.family
+            && self.family != family
+        {
+            return false;
+        }
+        if let Some(kind) = filter.advisory_kind
+            && self.advisory_type.kind() != kind
+        {
+            return false;
+        }
+        if filter.require_decision_provenance && !self.has_decision_provenance() {
+            return false;
+        }
+        true
     }
 
     /// Serialize the advisory payload to JSON bytes for publication.
@@ -438,14 +540,16 @@ impl ControlAdvisory {
             "has_decision_provenance",
             self.has_decision_provenance().to_string(),
         );
+        payload.insert("type", self.advisory_type.kind().to_owned());
+        if let Some(evidence_id) = self.evidence_id() {
+            payload.insert("evidence_id", evidence_id);
+        }
 
         match &self.advisory_type {
             ControlAdvisoryType::CapabilityGraphChange { description, .. } => {
-                payload.insert("type", "capability_graph_change".to_owned());
                 payload.insert("description", description.clone());
             }
             ControlAdvisoryType::ObligationTransfer { action, .. } => {
-                payload.insert("type", "obligation_transfer".to_owned());
                 payload.insert("action", action.to_string());
             }
             ControlAdvisoryType::PolicyDecision {
@@ -453,13 +557,21 @@ impl ControlAdvisory {
                 action_chosen,
                 justification,
             } => {
-                payload.insert("type", "policy_decision".to_owned());
                 payload.insert("policy_name", policy_name.clone());
                 payload.insert("action_chosen", action_chosen.clone());
                 payload.insert("justification", justification.clone());
             }
+            ControlAdvisoryType::EvidenceRecord {
+                component,
+                action,
+                summary,
+                ..
+            } => {
+                payload.insert("component", component.clone());
+                payload.insert("action", action.clone());
+                payload.insert("summary", summary.clone());
+            }
             ControlAdvisoryType::BreakGlassActivation { reason } => {
-                payload.insert("type", "break_glass_activation".to_owned());
                 payload.insert("reason", reason.clone());
             }
         }
@@ -1046,6 +1158,31 @@ mod tests {
     }
 
     #[test]
+    fn advisory_type_evidence_record_has_explicit_identity() {
+        let advisory = ControlAdvisoryType::EvidenceRecord {
+            evidence_id: "control:drain:42:1700000000000".to_owned(),
+            component: "drain_policy".to_owned(),
+            action: "failover".to_owned(),
+            summary: "latency SLO breach justified failover".to_owned(),
+        };
+        match &advisory {
+            ControlAdvisoryType::EvidenceRecord {
+                evidence_id,
+                component,
+                action,
+                summary,
+            } => {
+                assert_eq!(evidence_id, "control:drain:42:1700000000000");
+                assert_eq!(component, "drain_policy");
+                assert_eq!(action, "failover");
+                assert!(summary.contains("SLO breach"));
+                assert_eq!(advisory.kind(), "evidence_record");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn obligation_transfer_action_display() {
         assert_eq!(
             format!("{}", ObligationTransferAction::Transferred),
@@ -1141,6 +1278,30 @@ mod tests {
     }
 
     #[test]
+    fn evidence_record_advisory_uses_stable_evidence_id() {
+        let audit = make_test_audit_entry();
+        let outcome = DecisionOutcome {
+            action_index: 0,
+            action_name: "failover".to_owned(),
+            expected_loss: 0.3,
+            expected_losses: audit.expected_loss_by_action.clone(),
+            fallback_active: false,
+            audit_entry: audit,
+        };
+
+        let advisory = ControlAdvisory::evidence_record(
+            SystemSubjectFamily::Drain,
+            Subject::new("$SYS.FABRIC.DRAIN.evidence"),
+            &outcome,
+            "drain failover evidence bundle",
+        );
+
+        let evidence_id = advisory.evidence_id().expect("evidence id");
+        assert!(evidence_id.starts_with("control:drain:"));
+        assert!(advisory.has_decision_provenance());
+    }
+
+    #[test]
     fn notification_advisory_has_no_provenance() {
         let advisory = ControlAdvisory::notification(
             ControlAdvisoryType::BreakGlassActivation {
@@ -1177,10 +1338,7 @@ mod tests {
         assert_eq!(parsed.get("type").unwrap(), "obligation_transfer");
         assert_eq!(parsed.get("action").unwrap(), "aborted");
         assert_eq!(parsed.get("family").unwrap(), "CONSUMER");
-        assert_eq!(
-            parsed.get("has_decision_provenance").unwrap(),
-            "false"
-        );
+        assert_eq!(parsed.get("has_decision_provenance").unwrap(), "false");
     }
 
     #[test]
@@ -1212,9 +1370,43 @@ mod tests {
         assert_eq!(parsed.get("type").unwrap(), "policy_decision");
         assert_eq!(parsed.get("policy_name").unwrap(), "load_shed");
         assert_eq!(parsed.get("action_chosen").unwrap(), "reject_new");
+        assert_eq!(parsed.get("has_decision_provenance").unwrap(), "true");
+    }
+
+    #[test]
+    fn advisory_json_payload_evidence_record() {
+        let audit = make_test_audit_entry();
+        let outcome = DecisionOutcome {
+            action_index: 0,
+            action_name: "failover".to_owned(),
+            expected_loss: 0.3,
+            expected_losses: audit.expected_loss_by_action.clone(),
+            fallback_active: false,
+            audit_entry: audit,
+        };
+
+        let advisory = ControlAdvisory::evidence_record(
+            SystemSubjectFamily::Drain,
+            Subject::new("$SYS.FABRIC.DRAIN.evidence"),
+            &outcome,
+            "bounded drain failover evidence",
+        );
+
+        let payload = advisory.to_json_payload();
+        let parsed: BTreeMap<String, String> =
+            serde_json::from_slice(&payload).expect("valid JSON");
+        assert_eq!(parsed.get("type").unwrap(), "evidence_record");
+        assert!(
+            parsed
+                .get("evidence_id")
+                .unwrap()
+                .starts_with("control:drain:")
+        );
+        assert_eq!(parsed.get("component").unwrap(), "drain_policy");
+        assert_eq!(parsed.get("action").unwrap(), "failover");
         assert_eq!(
-            parsed.get("has_decision_provenance").unwrap(),
-            "true"
+            parsed.get("summary").unwrap(),
+            "bounded drain failover evidence"
         );
     }
 
@@ -1234,10 +1426,52 @@ mod tests {
         let parsed: BTreeMap<String, String> =
             serde_json::from_slice(&payload).expect("valid JSON");
         assert_eq!(parsed.get("type").unwrap(), "break_glass_activation");
-        assert_eq!(
-            parsed.get("reason").unwrap(),
-            "network partition detected"
+        assert_eq!(parsed.get("reason").unwrap(), "network partition detected");
+    }
+
+    #[test]
+    fn advisory_filter_matches_family_kind_and_provenance() {
+        let audit = make_test_audit_entry();
+        let outcome = DecisionOutcome {
+            action_index: 0,
+            action_name: "failover".to_owned(),
+            expected_loss: 0.3,
+            expected_losses: audit.expected_loss_by_action.clone(),
+            fallback_active: false,
+            audit_entry: audit,
+        };
+
+        let evidence_advisory = ControlAdvisory::evidence_record(
+            SystemSubjectFamily::Drain,
+            Subject::new("$SYS.FABRIC.DRAIN.evidence"),
+            &outcome,
+            "drain evidence",
         );
+        let notification = ControlAdvisory::notification(
+            ControlAdvisoryType::BreakGlassActivation {
+                reason: "fabric unreachable".to_owned(),
+            },
+            SystemSubjectFamily::Health,
+            Subject::new("$SYS.FABRIC.HEALTH.break_glass"),
+            TraceId::from_raw(9),
+            1_700_000_000_123,
+        );
+
+        let drain_evidence_only = ControlAdvisoryFilter {
+            family: Some(SystemSubjectFamily::Drain),
+            advisory_kind: Some("evidence_record"),
+            require_decision_provenance: true,
+        };
+        assert!(evidence_advisory.matches_filter(&drain_evidence_only));
+        assert!(!notification.matches_filter(&drain_evidence_only));
+
+        let health_break_glass = ControlAdvisoryFilter {
+            family: Some(SystemSubjectFamily::Health),
+            advisory_kind: Some("break_glass_activation"),
+            require_decision_provenance: false,
+        };
+        assert!(notification.matches_filter(&health_break_glass));
+        assert!(!evidence_advisory.matches_filter(&health_break_glass));
     }
 
     // ========================================================================
@@ -1455,6 +1689,12 @@ mod tests {
                 action_chosen: "accept".to_owned(),
                 justification: "test reason".to_owned(),
             },
+            ControlAdvisoryType::EvidenceRecord {
+                evidence_id: "control:health:1:1700000000000".to_owned(),
+                component: "health_policy".to_owned(),
+                action: "mark_degraded".to_owned(),
+                summary: "health evidence bundle".to_owned(),
+            },
             ControlAdvisoryType::BreakGlassActivation {
                 reason: "test reason".to_owned(),
             },
@@ -1469,8 +1709,7 @@ mod tests {
                 1_700_000_000_000,
             );
             let payload = advisory.to_json_payload();
-            let parsed: Result<BTreeMap<String, String>, _> =
-                serde_json::from_slice(&payload);
+            let parsed: Result<BTreeMap<String, String>, _> = serde_json::from_slice(&payload);
             assert!(parsed.is_ok(), "advisory payload must be valid JSON");
             let map = parsed.unwrap();
             assert!(map.contains_key("type"), "payload must contain 'type' key");
@@ -1583,8 +1822,7 @@ mod tests {
         // Tail wildcard ">" should match any depth.
         assert!(pattern.matches(&Subject::new("$SYS.FABRIC.AUTH.login")));
         assert!(pattern.matches(&Subject::new("$SYS.FABRIC.AUTH.login.failed")));
-        assert!(pattern
-            .matches(&Subject::new("$SYS.FABRIC.AUTH.login.failed.ip.127.0.0.1")));
+        assert!(pattern.matches(&Subject::new("$SYS.FABRIC.AUTH.login.failed.ip.127.0.0.1")));
     }
 
     #[test]
