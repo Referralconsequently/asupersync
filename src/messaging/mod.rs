@@ -77,9 +77,13 @@ pub mod capability;
 #[cfg(feature = "messaging-fabric")]
 pub mod class;
 #[cfg(feature = "messaging-fabric")]
+pub mod compiler;
+#[cfg(feature = "messaging-fabric")]
 pub mod consumer;
 #[cfg(feature = "messaging-fabric")]
 pub mod cut;
+#[cfg(feature = "messaging-fabric")]
+pub mod explain;
 #[cfg(feature = "messaging-fabric")]
 pub mod fabric;
 #[cfg(feature = "messaging-fabric")]
@@ -152,6 +156,7 @@ pub use session::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use subject::{
-    RegistryEntry, RegistryFamily, Subject, SubjectPattern, SubjectPatternError, SubjectRegistry,
-    SubjectRegistryError, SubjectToken, Sublist, SublistResult, SubscriptionGuard, SubscriptionId,
+    RegistryEntry, RegistryFamily, ShardedSublist, ShardedSubscriptionGuard, Subject,
+    SubjectPattern, SubjectPatternError, SubjectRegistry, SubjectRegistryError, SubjectToken,
+    Sublist, SublistResult, SubscriptionGuard, SubscriptionId,
 };

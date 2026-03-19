@@ -304,6 +304,21 @@ impl SubjectFamily {
         Self::CaptureSelector,
         Self::DerivedView,
     ];
+
+    /// Canonical snake-case name used in logs and explain plans.
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Event => "event",
+            Self::Reply => "reply",
+            Self::Control => "control",
+            Self::ProtocolStep => "protocol_step",
+            Self::CaptureSelector => "capture_selector",
+            Self::DerivedView => "derived_view",
+        }
+    }
 }
 
 /// Reply-space contract for request/reply or service subjects.
@@ -438,6 +453,501 @@ impl SubjectSchema {
             }
             SubjectFamily::ProtocolStep => {}
         }
+    }
+}
+
+/// Latency estimate with median and tail percentiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatencyEstimate {
+    /// Median steady-state latency.
+    pub median: Duration,
+    /// p99 latency.
+    pub p99: Duration,
+    /// p999 latency.
+    pub p999: Duration,
+}
+
+impl Default for LatencyEstimate {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl LatencyEstimate {
+    /// Zero-latency estimate.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self {
+            median: Duration::ZERO,
+            p99: Duration::ZERO,
+            p999: Duration::ZERO,
+        }
+    }
+
+    /// Construct a monotone latency estimate.
+    #[must_use]
+    pub const fn new(median: Duration, p99: Duration, p999: Duration) -> Self {
+        Self { median, p99, p999 }
+    }
+
+    #[allow(dead_code)]
+    fn max(self, other: Self) -> Self {
+        Self {
+            median: self.median.max(other.median),
+            p99: self.p99.max(other.p99),
+            p999: self.p999.max(other.p999),
+        }
+    }
+
+    fn cheaper_or_equal(self, other: Self) -> bool {
+        self.median <= other.median && self.p99 <= other.p99 && self.p999 <= other.p999
+    }
+}
+
+/// CPU-cost estimate per message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuEstimate {
+    /// Typical per-message CPU budget in microseconds.
+    pub typical_micros: u64,
+    /// p99 per-message CPU budget in microseconds.
+    pub p99_micros: u64,
+}
+
+impl CpuEstimate {
+    /// Construct a CPU estimate.
+    #[must_use]
+    pub const fn new(typical_micros: u64, p99_micros: u64) -> Self {
+        Self {
+            typical_micros,
+            p99_micros,
+        }
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        Self {
+            typical_micros: self.typical_micros.saturating_add(other.typical_micros),
+            p99_micros: self.p99_micros.saturating_add(other.p99_micros),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn max(self, other: Self) -> Self {
+        Self {
+            typical_micros: self.typical_micros.max(other.typical_micros),
+            p99_micros: self.p99_micros.max(other.p99_micros),
+        }
+    }
+
+    fn cheaper_or_equal(self, other: Self) -> bool {
+        self.typical_micros <= other.typical_micros && self.p99_micros <= other.p99_micros
+    }
+}
+
+impl Default for CpuEstimate {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
+}
+
+/// Byte-cost estimate with bounded range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteEstimate {
+    /// Minimum expected bytes.
+    pub min_bytes: u64,
+    /// Typical expected bytes.
+    pub typical_bytes: u64,
+    /// Maximum expected bytes.
+    pub max_bytes: u64,
+}
+
+impl ByteEstimate {
+    /// Construct a byte estimate.
+    #[must_use]
+    pub const fn new(min_bytes: u64, typical_bytes: u64, max_bytes: u64) -> Self {
+        Self {
+            min_bytes,
+            typical_bytes,
+            max_bytes,
+        }
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        Self {
+            min_bytes: self.min_bytes.saturating_add(other.min_bytes),
+            typical_bytes: self.typical_bytes.saturating_add(other.typical_bytes),
+            max_bytes: self.max_bytes.saturating_add(other.max_bytes),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn max(self, other: Self) -> Self {
+        Self {
+            min_bytes: self.min_bytes.max(other.min_bytes),
+            typical_bytes: self.typical_bytes.max(other.typical_bytes),
+            max_bytes: self.max_bytes.max(other.max_bytes),
+        }
+    }
+
+    fn cheaper_or_equal(self, other: Self) -> bool {
+        self.min_bytes <= other.min_bytes
+            && self.typical_bytes <= other.typical_bytes
+            && self.max_bytes <= other.max_bytes
+    }
+}
+
+impl Default for ByteEstimate {
+    fn default() -> Self {
+        Self::new(0, 0, 0)
+    }
+}
+
+/// Duration estimate for restore or handoff operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurationEstimate {
+    /// Minimum expected duration.
+    pub min: Duration,
+    /// Typical expected duration.
+    pub typical: Duration,
+    /// Maximum expected duration.
+    pub max: Duration,
+}
+
+impl DurationEstimate {
+    /// Construct a duration estimate.
+    #[must_use]
+    pub const fn new(min: Duration, typical: Duration, max: Duration) -> Self {
+        Self { min, typical, max }
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        Self {
+            min: self.min.saturating_add(other.min),
+            typical: self.typical.saturating_add(other.typical),
+            max: self.max.saturating_add(other.max),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn max(self, other: Self) -> Self {
+        Self {
+            min: self.min.max(other.min),
+            typical: self.typical.max(other.typical),
+            max: self.max.max(other.max),
+        }
+    }
+
+    fn cheaper_or_equal(self, other: Self) -> bool {
+        self.min <= other.min && self.typical <= other.typical && self.max <= other.max
+    }
+}
+
+impl Default for DurationEstimate {
+    fn default() -> Self {
+        Self::new(Duration::ZERO, Duration::ZERO, Duration::ZERO)
+    }
+}
+
+/// Multidimensional FABRIC feature cost envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CostVector {
+    /// Steady-state latency envelope.
+    pub steady_state_latency: LatencyEstimate,
+    /// Tail-latency envelope under stress.
+    pub tail_latency: LatencyEstimate,
+    /// Ratio of durable bytes versus raw payload bytes.
+    pub storage_amplification: f64,
+    /// Ratio of control-plane chatter versus data-plane messages.
+    pub control_plane_amplification: f64,
+    /// CPU and cryptographic overhead.
+    pub cpu_crypto_cost: CpuEstimate,
+    /// Evidence bytes emitted per decision or message.
+    pub evidence_bytes: ByteEstimate,
+    /// Restore or handoff latency envelope.
+    pub restore_handoff_time: DurationEstimate,
+}
+
+impl Default for CostVector {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl CostVector {
+    /// Zero-cost baseline.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self {
+            steady_state_latency: LatencyEstimate::zero(),
+            tail_latency: LatencyEstimate::zero(),
+            storage_amplification: 0.0,
+            control_plane_amplification: 0.0,
+            cpu_crypto_cost: CpuEstimate::new(0, 0),
+            evidence_bytes: ByteEstimate::new(0, 0, 0),
+            restore_handoff_time: DurationEstimate::new(
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+        }
+    }
+
+    /// Construct a baseline cost envelope for a delivery class.
+    #[must_use]
+    pub fn baseline_for_delivery_class(class: DeliveryClass) -> Self {
+        match class {
+            DeliveryClass::EphemeralInteractive => Self {
+                steady_state_latency: LatencyEstimate::new(
+                    Duration::from_micros(50),
+                    Duration::from_micros(200),
+                    Duration::from_micros(500),
+                ),
+                tail_latency: LatencyEstimate::new(
+                    Duration::from_micros(100),
+                    Duration::from_millis(1),
+                    Duration::from_millis(2),
+                ),
+                storage_amplification: 1.0,
+                control_plane_amplification: 0.0,
+                cpu_crypto_cost: CpuEstimate::new(4, 12),
+                evidence_bytes: ByteEstimate::new(0, 0, 0),
+                restore_handoff_time: DurationEstimate::default(),
+            },
+            DeliveryClass::DurableOrdered => Self {
+                steady_state_latency: LatencyEstimate::new(
+                    Duration::from_micros(150),
+                    Duration::from_millis(2),
+                    Duration::from_millis(4),
+                ),
+                tail_latency: LatencyEstimate::new(
+                    Duration::from_millis(1),
+                    Duration::from_millis(6),
+                    Duration::from_millis(12),
+                ),
+                storage_amplification: 1.25,
+                control_plane_amplification: 0.15,
+                cpu_crypto_cost: CpuEstimate::new(12, 30),
+                evidence_bytes: ByteEstimate::new(32, 96, 256),
+                restore_handoff_time: DurationEstimate::new(
+                    Duration::from_millis(10),
+                    Duration::from_millis(50),
+                    Duration::from_millis(250),
+                ),
+            },
+            DeliveryClass::ObligationBacked => Self {
+                steady_state_latency: LatencyEstimate::new(
+                    Duration::from_micros(250),
+                    Duration::from_millis(3),
+                    Duration::from_millis(6),
+                ),
+                tail_latency: LatencyEstimate::new(
+                    Duration::from_millis(2),
+                    Duration::from_millis(10),
+                    Duration::from_millis(20),
+                ),
+                storage_amplification: 1.4,
+                control_plane_amplification: 0.35,
+                cpu_crypto_cost: CpuEstimate::new(20, 48),
+                evidence_bytes: ByteEstimate::new(96, 256, 768),
+                restore_handoff_time: DurationEstimate::new(
+                    Duration::from_millis(25),
+                    Duration::from_millis(125),
+                    Duration::from_millis(500),
+                ),
+            },
+            DeliveryClass::MobilitySafe => Self {
+                steady_state_latency: LatencyEstimate::new(
+                    Duration::from_micros(350),
+                    Duration::from_millis(5),
+                    Duration::from_millis(10),
+                ),
+                tail_latency: LatencyEstimate::new(
+                    Duration::from_millis(3),
+                    Duration::from_millis(15),
+                    Duration::from_millis(30),
+                ),
+                storage_amplification: 1.6,
+                control_plane_amplification: 0.6,
+                cpu_crypto_cost: CpuEstimate::new(28, 70),
+                evidence_bytes: ByteEstimate::new(192, 640, 1536),
+                restore_handoff_time: DurationEstimate::new(
+                    Duration::from_millis(100),
+                    Duration::from_millis(750),
+                    Duration::from_secs(3),
+                ),
+            },
+            DeliveryClass::ForensicReplayable => Self {
+                steady_state_latency: LatencyEstimate::new(
+                    Duration::from_micros(500),
+                    Duration::from_millis(8),
+                    Duration::from_millis(16),
+                ),
+                tail_latency: LatencyEstimate::new(
+                    Duration::from_millis(5),
+                    Duration::from_millis(25),
+                    Duration::from_millis(50),
+                ),
+                storage_amplification: 2.4,
+                control_plane_amplification: 0.9,
+                cpu_crypto_cost: CpuEstimate::new(40, 96),
+                evidence_bytes: ByteEstimate::new(512, 2048, 8192),
+                restore_handoff_time: DurationEstimate::new(
+                    Duration::from_millis(250),
+                    Duration::from_secs(2),
+                    Duration::from_secs(8),
+                ),
+            },
+        }
+    }
+
+    /// Estimate the subject-level cost envelope from its declared features.
+    #[must_use]
+    pub fn estimate_subject(subject: &SubjectSchema) -> Self {
+        let mut cost = Self::baseline_for_delivery_class(subject.delivery_class);
+
+        let evidence_sampling = subject.evidence_policy.sampling_ratio.clamp(0.0, 1.0);
+        let evidence_base = if subject.evidence_policy.record_payload_hashes {
+            96
+        } else {
+            24
+        };
+        let sampled_bytes = (f64::from(evidence_base) * evidence_sampling).round() as u64;
+        cost.evidence_bytes = cost.evidence_bytes.saturating_add(ByteEstimate::new(
+            sampled_bytes / 2,
+            sampled_bytes,
+            sampled_bytes * 2,
+        ));
+
+        if subject.evidence_policy.record_control_transitions {
+            cost.control_plane_amplification += 0.08;
+            cost.evidence_bytes = cost
+                .evidence_bytes
+                .saturating_add(ByteEstimate::new(32, 96, 192));
+        }
+        if subject.evidence_policy.record_counterfactual_branches {
+            cost.storage_amplification += 0.2;
+            cost.control_plane_amplification += 0.12;
+            cost.evidence_bytes = cost
+                .evidence_bytes
+                .saturating_add(ByteEstimate::new(128, 256, 512));
+            cost.restore_handoff_time =
+                cost.restore_handoff_time
+                    .saturating_add(DurationEstimate::new(
+                        Duration::from_millis(10),
+                        Duration::from_millis(50),
+                        Duration::from_millis(200),
+                    ));
+        }
+
+        match subject.evidence_policy.retention {
+            RetentionPolicy::DropImmediately => {}
+            RetentionPolicy::RetainFor { duration } => {
+                cost.storage_amplification += duration.as_secs_f64().min(3600.0) / 3600.0 * 0.3;
+                cost.restore_handoff_time =
+                    cost.restore_handoff_time
+                        .saturating_add(DurationEstimate::new(
+                            Duration::from_millis(5),
+                            Duration::from_millis(25),
+                            Duration::from_millis(100),
+                        ));
+            }
+            RetentionPolicy::RetainForEvents { events } => {
+                let event_factor = events.min(10_000) as f64 / 10_000.0;
+                cost.storage_amplification += 0.4 * event_factor;
+            }
+            RetentionPolicy::Forever => {
+                cost.storage_amplification += 0.75;
+                cost.evidence_bytes = cost
+                    .evidence_bytes
+                    .saturating_add(ByteEstimate::new(64, 256, 1024));
+            }
+        }
+
+        if subject.reply_space.is_some() {
+            cost.control_plane_amplification += 0.1;
+            cost.cpu_crypto_cost = cost.cpu_crypto_cost.saturating_add(CpuEstimate::new(2, 8));
+        }
+
+        match subject.mobility {
+            MobilityPermission::LocalOnly => {}
+            MobilityPermission::Federated => {
+                cost.control_plane_amplification += 0.05;
+                cost.restore_handoff_time =
+                    cost.restore_handoff_time
+                        .saturating_add(DurationEstimate::new(
+                            Duration::from_millis(20),
+                            Duration::from_millis(80),
+                            Duration::from_millis(300),
+                        ));
+            }
+            MobilityPermission::StewardshipTransfer => {
+                cost.control_plane_amplification += 0.15;
+                cost.restore_handoff_time =
+                    cost.restore_handoff_time
+                        .saturating_add(DurationEstimate::new(
+                            Duration::from_millis(50),
+                            Duration::from_millis(250),
+                            Duration::from_secs(1),
+                        ));
+            }
+        }
+
+        if let Some(contract) = &subject.quantitative_obligation {
+            cost.tail_latency = cost.tail_latency.max(LatencyEstimate::new(
+                contract.target_latency,
+                contract.target_latency.saturating_mul(2),
+                contract.target_latency.saturating_mul(4),
+            ));
+            cost.control_plane_amplification += 0.05;
+        }
+
+        cost
+    }
+
+    /// Return true when every cost dimension is cheaper than or equal to the
+    /// corresponding dimension in `other`.
+    #[must_use]
+    pub fn cheaper_or_equal(&self, other: &Self) -> bool {
+        self.steady_state_latency
+            .cheaper_or_equal(other.steady_state_latency)
+            && self.tail_latency.cheaper_or_equal(other.tail_latency)
+            && self.storage_amplification <= other.storage_amplification
+            && self.control_plane_amplification <= other.control_plane_amplification
+            && self.cpu_crypto_cost.cheaper_or_equal(other.cpu_crypto_cost)
+            && self.evidence_bytes.cheaper_or_equal(other.evidence_bytes)
+            && self
+                .restore_handoff_time
+                .cheaper_or_equal(other.restore_handoff_time)
+    }
+
+    /// Return true when at least one dimension is more expensive than the
+    /// corresponding dimension in `other`.
+    #[must_use]
+    pub fn more_expensive_on_any_dimension(&self, other: &Self) -> bool {
+        !self.cheaper_or_equal(other)
+    }
+
+    fn max(self, other: Self) -> Self {
+        Self {
+            steady_state_latency: self.steady_state_latency.max(other.steady_state_latency),
+            tail_latency: self.tail_latency.max(other.tail_latency),
+            storage_amplification: self.storage_amplification.max(other.storage_amplification),
+            control_plane_amplification: self
+                .control_plane_amplification
+                .max(other.control_plane_amplification),
+            cpu_crypto_cost: self.cpu_crypto_cost.max(other.cpu_crypto_cost),
+            evidence_bytes: self.evidence_bytes.max(other.evidence_bytes),
+            restore_handoff_time: self.restore_handoff_time.max(other.restore_handoff_time),
+        }
+    }
+
+    /// Compute a conservative worst-case envelope across a set of cost vectors.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn max_dimensions<I>(costs: I) -> Self
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        costs.into_iter().fold(Self::zero(), Self::max)
     }
 }
 
@@ -2139,6 +2649,66 @@ mod tests {
             errors.is_empty(),
             "capture selector with wildcard should validate"
         );
+    }
+
+    #[test]
+    fn cost_vector_baselines_increase_with_stronger_delivery_classes() {
+        let ephemeral =
+            CostVector::baseline_for_delivery_class(DeliveryClass::EphemeralInteractive);
+        let durable = CostVector::baseline_for_delivery_class(DeliveryClass::DurableOrdered);
+        let obligation = CostVector::baseline_for_delivery_class(DeliveryClass::ObligationBacked);
+        let forensic = CostVector::baseline_for_delivery_class(DeliveryClass::ForensicReplayable);
+
+        assert!(ephemeral.cheaper_or_equal(&durable));
+        assert!(durable.cheaper_or_equal(&obligation));
+        assert!(obligation.cheaper_or_equal(&forensic));
+        assert!(forensic.more_expensive_on_any_dimension(&durable));
+        assert!(durable.storage_amplification >= 1.0);
+        assert!(forensic.evidence_bytes.typical_bytes > obligation.evidence_bytes.typical_bytes);
+    }
+
+    #[test]
+    fn subject_cost_estimation_accounts_for_evidence_and_mobility() {
+        let subject = SubjectSchema {
+            pattern: SubjectPattern::new("tenant.orders.command"),
+            family: SubjectFamily::Command,
+            delivery_class: DeliveryClass::ObligationBacked,
+            evidence_policy: EvidencePolicy {
+                sampling_ratio: 1.0,
+                retention: RetentionPolicy::Forever,
+                record_payload_hashes: true,
+                record_control_transitions: true,
+                record_counterfactual_branches: true,
+            },
+            privacy_policy: PrivacyPolicy::default(),
+            reply_space: Some(ReplySpaceRule::CallerInbox),
+            mobility: MobilityPermission::StewardshipTransfer,
+            quantitative_obligation: Some(QuantitativeObligationContract {
+                target_latency: Duration::from_millis(25),
+                ..QuantitativeObligationContract::default()
+            }),
+        };
+
+        let baseline = CostVector::baseline_for_delivery_class(subject.delivery_class);
+        let estimated = CostVector::estimate_subject(&subject);
+        assert!(baseline.cheaper_or_equal(&estimated));
+        assert!(estimated.storage_amplification > baseline.storage_amplification);
+        assert!(estimated.control_plane_amplification > baseline.control_plane_amplification);
+        assert!(estimated.evidence_bytes.typical_bytes > baseline.evidence_bytes.typical_bytes);
+        assert!(estimated.restore_handoff_time.typical > baseline.restore_handoff_time.typical);
+        assert!(estimated.tail_latency.p99 >= Duration::from_millis(25));
+    }
+
+    #[test]
+    fn cost_vector_round_trips_through_json() {
+        let original = CostVector::baseline_for_delivery_class(DeliveryClass::ForensicReplayable);
+
+        let json =
+            serde_json::to_string(&original).expect("cost vector should serialize for diagnostics");
+        let decoded: CostVector =
+            serde_json::from_str(&json).expect("cost vector should deserialize from diagnostics");
+
+        assert_eq!(decoded, original);
     }
 
     #[test]

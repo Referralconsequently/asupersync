@@ -1,7 +1,9 @@
 //! Shared subject-language primitives for FABRIC declarations and placement.
 
+use crate::util::DetHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use thiserror::Error;
 
 /// Canonical subject token used for routing and matching.
@@ -311,8 +313,7 @@ fn canonicalize_tokens(segments: &[SubjectToken]) -> String {
 
 fn matches_subject_tokens(pattern: &[SubjectToken], subject: &[String]) -> bool {
     match (pattern.split_first(), subject.split_first()) {
-        (None, None) => true,
-        (Some((SubjectToken::Tail, _)), Some(_)) => true,
+        (None, None) | (Some((SubjectToken::Tail, _)), Some(_)) => true,
         (Some((SubjectToken::One, pattern_tail)), Some((_, subject_tail))) => {
             matches_subject_tokens(pattern_tail, subject_tail)
         }
@@ -440,6 +441,11 @@ impl SublistResult {
     pub fn total(&self) -> usize {
         self.subscribers.len() + self.queue_group_picks.len()
     }
+
+    fn extend(&mut self, mut other: Self) {
+        self.subscribers.append(&mut other.subscribers);
+        self.queue_group_picks.append(&mut other.queue_group_picks);
+    }
 }
 
 /// Thread-safe trie-based subject routing engine with generation-invalidated
@@ -510,10 +516,7 @@ impl Sublist {
         queue_group: Option<String>,
     ) -> SubscriptionGuard {
         let id = SubscriptionId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let subscriber = Subscriber {
-            id,
-            queue_group: queue_group.clone(),
-        };
+        let subscriber = Subscriber { id, queue_group };
 
         {
             let mut trie = self.trie.write();
@@ -645,6 +648,204 @@ impl fmt::Debug for Sublist {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShardRoute {
+    Concrete(usize),
+    Fallback,
+}
+
+/// Sharded subject index that wraps multiple [`Sublist`] instances.
+///
+/// Concrete literal prefixes are deterministically assigned to a single shard.
+/// Broad wildcard prefixes that cannot be routed by the configured prefix
+/// depth fall back to a dedicated shard so wildcard lookups remain correct
+/// without replicating subscriptions across every shard.
+#[derive(Debug, Clone)]
+pub struct ShardedSublist {
+    prefix_depth: usize,
+    shards: Vec<Arc<Sublist>>,
+    fallback: Arc<Sublist>,
+}
+
+impl Default for ShardedSublist {
+    fn default() -> Self {
+        Self::new(default_subject_shard_count())
+    }
+}
+
+impl ShardedSublist {
+    /// Create a sharded subject index using the default prefix depth of `1`.
+    #[must_use]
+    pub fn new(shard_count: usize) -> Self {
+        Self::with_prefix_depth(shard_count, 1)
+    }
+
+    /// Create a sharded subject index with an explicit literal prefix depth.
+    ///
+    /// Patterns that do not expose at least `prefix_depth` literal segments
+    /// are routed into the fallback shard.
+    #[must_use]
+    pub fn with_prefix_depth(shard_count: usize, prefix_depth: usize) -> Self {
+        let shard_count = shard_count.max(1);
+        let prefix_depth = prefix_depth.max(1);
+        let shards = (0..shard_count)
+            .map(|_| Arc::new(Sublist::new()))
+            .collect::<Vec<_>>();
+        Self {
+            prefix_depth,
+            shards,
+            fallback: Arc::new(Sublist::new()),
+        }
+    }
+
+    /// Return the number of concrete shards.
+    #[must_use]
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// Return the configured shard prefix depth.
+    #[must_use]
+    pub fn prefix_depth(&self) -> usize {
+        self.prefix_depth
+    }
+
+    /// Return the concrete shard generation, if the shard exists.
+    #[must_use]
+    pub fn shard_generation(&self, index: usize) -> Option<u64> {
+        self.shards.get(index).map(|shard| shard.generation())
+    }
+
+    /// Return the fallback shard generation.
+    #[must_use]
+    pub fn fallback_generation(&self) -> u64 {
+        self.fallback.generation()
+    }
+
+    /// Return the assigned concrete shard for a subject pattern when the
+    /// pattern exposes enough literal prefix segments.
+    #[must_use]
+    pub fn shard_index_for_pattern(&self, pattern: &SubjectPattern) -> Option<usize> {
+        match self.route_for_pattern(pattern) {
+            ShardRoute::Concrete(index) => Some(index),
+            ShardRoute::Fallback => None,
+        }
+    }
+
+    /// Return the concrete shard index for a concrete subject lookup.
+    #[must_use]
+    pub fn shard_index_for_subject(&self, subject: &Subject) -> usize {
+        self.hash_subject_prefix(subject) % self.shards.len()
+    }
+
+    /// Subscribe to a pattern within the appropriate shard.
+    pub fn subscribe(
+        &self,
+        pattern: &SubjectPattern,
+        queue_group: Option<String>,
+    ) -> ShardedSubscriptionGuard {
+        let route = self.route_for_pattern(pattern);
+        let inner = match route {
+            ShardRoute::Concrete(index) => self.shards[index].subscribe(pattern, queue_group),
+            ShardRoute::Fallback => self.fallback.subscribe(pattern, queue_group),
+        };
+
+        ShardedSubscriptionGuard { route, inner }
+    }
+
+    /// Look up matching subscriptions for a concrete subject.
+    ///
+    /// The concrete shard handles the hot path, and the fallback shard is
+    /// consulted for broad wildcard prefixes that cannot be assigned to one
+    /// concrete shard.
+    #[must_use]
+    pub fn lookup(&self, subject: &Subject) -> SublistResult {
+        let concrete_index = self.shard_index_for_subject(subject);
+        let mut result = self.shards[concrete_index].lookup(subject);
+        result.extend(self.fallback.lookup(subject));
+        result
+    }
+
+    /// Return the total number of registered subscriptions across all shards.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.fallback.count() + self.shards.iter().map(|shard| shard.count()).sum::<usize>()
+    }
+
+    fn route_for_pattern(&self, pattern: &SubjectPattern) -> ShardRoute {
+        match self.hash_pattern_prefix(pattern) {
+            Some(hash) => ShardRoute::Concrete(hash % self.shards.len()),
+            None => ShardRoute::Fallback,
+        }
+    }
+
+    fn hash_pattern_prefix(&self, pattern: &SubjectPattern) -> Option<usize> {
+        let mut hasher = DetHasher::default();
+        let mut literal_count = 0;
+
+        for segment in pattern.segments() {
+            if literal_count == self.prefix_depth {
+                break;
+            }
+
+            match segment {
+                SubjectToken::Literal(value) => {
+                    value.hash(&mut hasher);
+                    literal_count += 1;
+                }
+                SubjectToken::One | SubjectToken::Tail => return None,
+            }
+        }
+
+        if literal_count == self.prefix_depth {
+            Some(hasher.finish() as usize)
+        } else {
+            None
+        }
+    }
+
+    fn hash_subject_prefix(&self, subject: &Subject) -> usize {
+        let mut hasher = DetHasher::default();
+
+        for token in subject.tokens().iter().take(self.prefix_depth) {
+            token.hash(&mut hasher);
+        }
+
+        hasher.finish() as usize
+    }
+}
+
+/// Subscription guard returned by [`ShardedSublist::subscribe`].
+#[derive(Debug)]
+pub struct ShardedSubscriptionGuard {
+    route: ShardRoute,
+    inner: SubscriptionGuard,
+}
+
+impl ShardedSubscriptionGuard {
+    /// Return the subscription identifier.
+    #[must_use]
+    pub fn id(&self) -> SubscriptionId {
+        self.inner.id()
+    }
+
+    /// Return the subscribed pattern.
+    #[must_use]
+    pub fn pattern(&self) -> &SubjectPattern {
+        self.inner.pattern()
+    }
+
+    /// Return the concrete shard index when the subscription lives in a
+    /// concrete shard, or `None` when it lives in the fallback shard.
+    #[must_use]
+    pub fn shard_index(&self) -> Option<usize> {
+        match self.route {
+            ShardRoute::Concrete(index) => Some(index),
+            ShardRoute::Fallback => None,
+        }
+    }
+}
+
 /// RAII guard that removes the subscription from the [`Sublist`] on drop.
 ///
 /// This ensures cancel-correctness: when a subscriber's scope/task is
@@ -683,6 +884,12 @@ impl fmt::Debug for SubscriptionGuard {
             .field("pattern", &self.pattern)
             .finish()
     }
+}
+
+fn default_subject_shard_count() -> usize {
+    std::thread::available_parallelism()
+        .map_or(16, usize::from)
+        .next_power_of_two()
 }
 
 // --- Trie operations ---
@@ -836,9 +1043,53 @@ pub struct RegistryEntry {
     pub description: String,
 }
 
+impl RegistryEntry {
+    fn validate(&self) -> Result<(), SubjectRegistryError> {
+        match self.family {
+            RegistryFamily::Control => {
+                if !self.pattern.as_str().starts_with("$SYS.")
+                    && !self.pattern.as_str().starts_with("sys.")
+                {
+                    return Err(SubjectRegistryError::InvalidEntry {
+                        pattern: self.pattern.as_str().to_owned(),
+                        family: self.family,
+                        message: "control subjects must live under `$SYS.` or `sys.`".to_owned(),
+                    });
+                }
+            }
+            RegistryFamily::CaptureSelector => {
+                if !self.pattern.has_wildcards() {
+                    return Err(SubjectRegistryError::InvalidEntry {
+                        pattern: self.pattern.as_str().to_owned(),
+                        family: self.family,
+                        message: "capture-selector subjects must include `*` or `>`".to_owned(),
+                    });
+                }
+            }
+            RegistryFamily::Command
+            | RegistryFamily::Event
+            | RegistryFamily::Reply
+            | RegistryFamily::ProtocolStep
+            | RegistryFamily::DerivedView => {}
+        }
+
+        Ok(())
+    }
+}
+
 /// Errors from the subject registry.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SubjectRegistryError {
+    /// The entry violates family-specific subject rules.
+    #[error("subject pattern `{pattern}` is invalid for family `{family}`: {message}")]
+    InvalidEntry {
+        /// The rejected subject pattern.
+        pattern: String,
+        /// The subject family that rejected the pattern.
+        family: RegistryFamily,
+        /// Human-readable validation failure.
+        message: String,
+    },
     /// A schema with a conflicting (overlapping) pattern is already registered.
     #[error("subject pattern `{pattern}` conflicts with existing registration `{existing}`")]
     ConflictingPattern {
@@ -857,9 +1108,10 @@ pub enum SubjectRegistryError {
 
 /// Thread-safe registry of subject entries indexed by pattern.
 ///
-/// The registry detects overlapping pattern conflicts on registration and
-/// supports lookup of the most specific matching entry for a concrete
-/// subject. Thread-safety follows the same `RwLock` pattern as [`Sublist`].
+/// The registry validates family-specific pattern rules and rejects only
+/// ambiguous overlaps on registration. Broader wildcard entries may coexist
+/// with more-specific entries, and lookup resolves those by specificity.
+/// Thread-safety follows the same `RwLock` pattern as [`Sublist`].
 pub struct SubjectRegistry {
     entries: RwLock<BTreeMap<String, RegistryEntry>>,
 }
@@ -880,13 +1132,14 @@ impl SubjectRegistry {
     }
 
     /// Register a subject entry. Returns an error if the pattern overlaps
-    /// with an already-registered entry.
+    /// ambiguously with an already-registered entry or violates family rules.
     pub fn register(&self, entry: RegistryEntry) -> Result<(), SubjectRegistryError> {
         let mut entries = self.entries.write();
         let key = entry.pattern.as_str().to_owned();
+        entry.validate()?;
 
         for (existing_key, existing) in entries.iter() {
-            if entry.pattern.overlaps(&existing.pattern) {
+            if registry_patterns_conflict(&entry, existing) {
                 return Err(SubjectRegistryError::ConflictingPattern {
                     pattern: key,
                     existing: existing_key.clone(),
@@ -911,14 +1164,19 @@ impl SubjectRegistry {
     /// Look up the most specific matching entry for a concrete subject.
     ///
     /// "Most specific" is the entry whose pattern has the most literal
-    /// segments. Ties are broken by pattern string for determinism.
+    /// segments. When specificity ties, the pattern string breaks the tie so
+    /// lookup stays deterministic even if registration rules are widened later.
     #[must_use]
     pub fn lookup(&self, subject: &Subject) -> Option<RegistryEntry> {
         let entries = self.entries.read();
         entries
             .values()
             .filter(|entry| entry.pattern.matches(subject))
-            .max_by_key(|entry| specificity_score(&entry.pattern))
+            .max_by(|left, right| {
+                specificity_score(&left.pattern)
+                    .cmp(&specificity_score(&right.pattern))
+                    .then_with(|| right.pattern.as_str().cmp(left.pattern.as_str()))
+            })
             .cloned()
     }
 
@@ -957,6 +1215,11 @@ fn specificity_score(pattern: &SubjectPattern) -> (usize, usize) {
         .count();
     let total = pattern.segments().len();
     (literals, total)
+}
+
+fn registry_patterns_conflict(left: &RegistryEntry, right: &RegistryEntry) -> bool {
+    left.pattern.overlaps(&right.pattern)
+        && specificity_score(&left.pattern) == specificity_score(&right.pattern)
 }
 
 #[cfg(test)]
@@ -1562,6 +1825,134 @@ mod tests {
         assert_eq!(sl.count(), 0);
     }
 
+    fn sharded_sublist() -> ShardedSublist {
+        ShardedSublist::with_prefix_depth(8, 1)
+    }
+
+    fn distinct_sharded_subjects(index: &ShardedSublist) -> (Subject, Subject) {
+        let first = Subject::new("alpha.events");
+        let first_shard = index.shard_index_for_subject(&first);
+
+        for candidate in [
+            "beta.events",
+            "gamma.events",
+            "delta.events",
+            "epsilon.events",
+            "zeta.events",
+            "eta.events",
+        ] {
+            let subject = Subject::new(candidate);
+            if index.shard_index_for_subject(&subject) != first_shard {
+                return (first, subject);
+            }
+        }
+
+        panic!("expected at least two subjects to map to distinct shards");
+    }
+
+    #[test]
+    fn sharded_sublist_assigns_literal_prefixes_deterministically() {
+        let index = sharded_sublist();
+        let pattern = SubjectPattern::new("tenant.orders.created");
+
+        let shard1 = index
+            .shard_index_for_pattern(&pattern)
+            .expect("literal prefix should map to a concrete shard");
+        let shard2 = index
+            .shard_index_for_pattern(&pattern)
+            .expect("literal prefix should map deterministically");
+
+        assert_eq!(shard1, shard2);
+        assert_eq!(
+            index.shard_index_for_subject(&Subject::new("tenant.orders.created")),
+            shard1
+        );
+        assert!(
+            index
+                .shard_index_for_pattern(&SubjectPattern::new("*.orders"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn sharded_sublist_uses_fallback_for_wildcard_prefixes() {
+        let index = sharded_sublist();
+        let pattern = SubjectPattern::new("*.orders");
+
+        let generation_before = index.fallback_generation();
+        let guard = index.subscribe(&pattern, None);
+        let generation_after = index.fallback_generation();
+
+        assert!(guard.shard_index().is_none());
+        assert!(generation_after > generation_before);
+        assert_eq!(index.lookup(&Subject::new("tenant.orders")).total(), 1);
+    }
+
+    #[test]
+    fn sharded_sublist_mutation_bumps_only_target_shard() {
+        let index = sharded_sublist();
+        let (subject_a, subject_b) = distinct_sharded_subjects(&index);
+        let pattern_a = SubjectPattern::from(&subject_a);
+        let pattern_b = SubjectPattern::from(&subject_b);
+        let shard_a = index
+            .shard_index_for_pattern(&pattern_a)
+            .expect("literal pattern should map to a shard");
+        let shard_b = index
+            .shard_index_for_pattern(&pattern_b)
+            .expect("literal pattern should map to a shard");
+        assert_ne!(shard_a, shard_b);
+
+        let before_a = index.shard_generation(shard_a).expect("shard exists");
+        let before_b = index.shard_generation(shard_b).expect("shard exists");
+        let _guard_a = index.subscribe(&pattern_a, None);
+        let after_a = index.shard_generation(shard_a).expect("shard exists");
+        let after_b = index.shard_generation(shard_b).expect("shard exists");
+
+        assert!(after_a > before_a);
+        assert_eq!(after_b, before_b);
+    }
+
+    #[test]
+    fn sharded_sublist_cross_shard_cache_isolation_preserves_hot_shard() {
+        let index = sharded_sublist();
+        let (subject_a, subject_b) = distinct_sharded_subjects(&index);
+        let pattern_a = SubjectPattern::from(&subject_a);
+        let pattern_b = SubjectPattern::from(&subject_b);
+        let shard_a = index.shard_index_for_subject(&subject_a);
+        let shard_b = index.shard_index_for_subject(&subject_b);
+        assert_ne!(shard_a, shard_b);
+
+        let _guard_a = index.subscribe(&pattern_a, None);
+        let initial = index.lookup(&subject_a);
+        assert_eq!(initial.total(), 1);
+
+        let generation_a_before = index.shard_generation(shard_a).expect("shard exists");
+        let _guard_b = index.subscribe(&pattern_b, None);
+        let generation_a_after = index.shard_generation(shard_a).expect("shard exists");
+
+        assert_eq!(generation_a_after, generation_a_before);
+        assert_eq!(index.lookup(&subject_a).total(), 1);
+    }
+
+    #[test]
+    fn sharded_sublist_distribution_stays_within_reasonable_skew() {
+        let index = sharded_sublist();
+        let mut counts = vec![0usize; index.shard_count()];
+
+        for tenant in 0..256 {
+            let subject = Subject::new(format!("tenant{tenant}.events").as_str());
+            let shard = index.shard_index_for_subject(&subject);
+            counts[shard] += 1;
+        }
+
+        let average = 256 / index.shard_count();
+        let worst = counts.into_iter().max().expect("shards exist");
+        assert!(
+            worst <= average * 2,
+            "expected bounded shard skew, saw {worst}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // SubjectRegistry tests
     // -----------------------------------------------------------------------
@@ -1590,6 +1981,14 @@ mod tests {
         }
     }
 
+    fn capture_entry(pattern: &str) -> RegistryEntry {
+        RegistryEntry {
+            pattern: SubjectPattern::new(pattern),
+            family: RegistryFamily::CaptureSelector,
+            description: String::new(),
+        }
+    }
+
     #[test]
     fn registry_register_and_lookup() {
         let reg = SubjectRegistry::new();
@@ -1611,14 +2010,14 @@ mod tests {
     }
 
     #[test]
-    fn registry_rejects_overlapping_patterns() {
+    fn registry_rejects_ambiguous_overlapping_patterns() {
         let reg = SubjectRegistry::new();
-        reg.register(event_entry("orders.>"))
-            .expect("register wildcard");
+        reg.register(event_entry("events.*.created"))
+            .expect("register first pattern");
 
         let err = reg
-            .register(event_entry("orders.created"))
-            .expect_err("overlap should be rejected");
+            .register(event_entry("events.user.*"))
+            .expect_err("ambiguous overlap should be rejected");
 
         assert!(matches!(
             err,
@@ -1684,17 +2083,47 @@ mod tests {
     #[test]
     fn registry_lookup_returns_most_specific_match() {
         let reg = SubjectRegistry::new();
-        // Register a broad wildcard and a specific literal (non-overlapping).
+        reg.register(event_entry("events.>"))
+            .expect("broad wildcard should register");
         reg.register(event_entry("events.user.created"))
             .expect("specific");
-        // Can't register overlapping "events.>", so register a sibling.
-        reg.register(event_entry("events.system.created"))
-            .expect("system");
 
         let result = reg
             .lookup(&Subject::new("events.user.created"))
             .expect("found");
         assert_eq!(result.pattern.as_str(), "events.user.created");
+    }
+
+    #[test]
+    fn registry_rejects_control_entries_outside_system_namespace() {
+        let reg = SubjectRegistry::new();
+        let err = reg
+            .register(control_entry("events.user.created"))
+            .expect_err("control entry outside sys namespace should fail");
+
+        assert!(matches!(err, SubjectRegistryError::InvalidEntry { .. }));
+    }
+
+    #[test]
+    fn registry_rejects_capture_selectors_without_wildcards() {
+        let reg = SubjectRegistry::new();
+        let err = reg
+            .register(capture_entry("events.user.created"))
+            .expect_err("capture selector must include a wildcard");
+
+        assert!(matches!(err, SubjectRegistryError::InvalidEntry { .. }));
+    }
+
+    #[test]
+    fn registry_accepts_capture_selectors_with_wildcards() {
+        let reg = SubjectRegistry::new();
+        reg.register(capture_entry("events.user.*"))
+            .expect("capture selector with wildcard should register");
+
+        let result = reg
+            .lookup(&Subject::new("events.user.created"))
+            .expect("capture selector should match");
+        assert_eq!(result.family, RegistryFamily::CaptureSelector);
     }
 
     #[test]
