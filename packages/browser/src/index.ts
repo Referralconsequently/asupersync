@@ -563,6 +563,222 @@ export interface BrowserArtifactOperationDiagnostics {
   capabilities: BrowserCapabilitySnapshot;
 }
 
+export const BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID =
+  "wasm-service-worker-broker-contract-v1";
+export const BROWSER_SERVICE_WORKER_BROKER_LANE =
+  "lane.browser.service_worker.broker";
+export const BROWSER_BRIDGE_ONLY_FALLBACK_TARGET = "bridge_fallback";
+export const BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED_CODE =
+  "ASUPERSYNC_BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED";
+export const BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE =
+  "ASUPERSYNC_BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED";
+
+export type BrowserServiceWorkerBrokerRequestedLane =
+  typeof BROWSER_SERVICE_WORKER_BROKER_LANE;
+
+export type BrowserServiceWorkerBrokerFallbackTarget =
+  | typeof BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
+  | typeof BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE
+  | typeof BROWSER_BRIDGE_ONLY_FALLBACK_TARGET;
+
+export type BrowserServiceWorkerBrokerLifecycleState =
+  | "cold_start"
+  | "validating_scope"
+  | "reconciling_durable_state"
+  | "brokering"
+  | "draining"
+  | "quiescent"
+  | "terminated";
+
+export type BrowserServiceWorkerBrokerSupportReason =
+  | "supported"
+  | "service_worker_api_missing"
+  | "service_worker_registration_scope_mismatch"
+  | "service_worker_controller_missing_when_required"
+  | "app_namespace_mismatch"
+  | "app_version_major_mismatch"
+  | "broker_protocol_version_mismatch"
+  | "durable_store_unavailable_for_restartable_profile"
+  | "capability_manifest_mismatch_on_restart"
+  | "background_event_kind_outside_broker_contract"
+  | "broker_bootstrap_failure"
+  | "broker_restart_reconciliation_failed"
+  | "worker_reclaimed_by_browser"
+  | "lane_health_demoted";
+
+export type BrowserServiceWorkerBrokerOperation =
+  | "read_registration"
+  | "write_registration"
+  | "clear_registration"
+  | "set_lifecycle"
+  | "list_work"
+  | "persist_work"
+  | "delete_work"
+  | "list_handoffs"
+  | "persist_handoff"
+  | "clear_state";
+
+export type BrowserServiceWorkerBrokerFailureReason =
+  | BrowserServiceWorkerBrokerSupportReason
+  | "storage_failed"
+  | "serialization_failed";
+
+export interface BrowserServiceWorkerBrokerAdmissionTuple {
+  origin: string;
+  registrationScope: string;
+  appNamespace: string;
+  appVersionMajor: number;
+  brokerProtocolVersion: number;
+  runProfile: string;
+}
+
+export interface BrowserServiceWorkerBrokerSupportOptions {
+  allowBrowserMainThreadFallback?: boolean;
+  allowDedicatedWorkerFallback?: boolean;
+  appNamespace?: string | null;
+  appVersionMajor?: number | null;
+  backend?: BrowserStorageBackend;
+  brokerProtocolVersion?: number | null;
+  controllerPresent?: boolean;
+  expectedAppNamespace?: string | null;
+  expectedAppVersionMajor?: number | null;
+  expectedBrokerProtocolVersion?: number | null;
+  expectedRegistrationScope?: string | null;
+  globalObject?: Record<string, unknown>;
+  origin?: string | null;
+  registrationScope?: string | null;
+  requireController?: boolean;
+  runProfile?: string | null;
+}
+
+export interface BrowserServiceWorkerBrokerSupportDiagnostics {
+  supported: boolean;
+  contractId: typeof BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID;
+  requestedLane: BrowserServiceWorkerBrokerRequestedLane;
+  fallbackTarget: BrowserServiceWorkerBrokerFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+  downgradeOrder: BrowserServiceWorkerBrokerFallbackTarget[];
+  backend: BrowserStorageBackend;
+  hostRole: BrowserExecutionHostRole;
+  runtimeContext: BrowserRuntimeContext;
+  reason: BrowserServiceWorkerBrokerSupportReason;
+  message: string;
+  guidance: string[];
+  origin: string | null;
+  registrationScope: string | null;
+  controllerPresent: boolean;
+  appNamespace: string | null;
+  appVersionMajor: number | null;
+  brokerProtocolVersion: number | null;
+  runProfile: string;
+  directRuntimeReason: BrowserRuntimeSupportReason;
+  directExecutionReasonCode: BrowserExecutionReasonCode;
+  runtimeSupport: BrowserRuntimeSupportDiagnostics;
+  capabilities: BrowserCapabilitySnapshot;
+}
+
+export interface BrowserServiceWorkerBrokerStoreOptions
+  extends BrowserStorageOptions {
+  allowBrowserMainThreadFallback?: boolean;
+  allowDedicatedWorkerFallback?: boolean;
+  now?: () => number;
+  namespace?: string;
+}
+
+export interface BrowserServiceWorkerBrokerRegistrationRequest {
+  admission: BrowserServiceWorkerBrokerAdmissionTuple;
+  capabilityManifestVersion: string;
+  controllerPresent?: boolean;
+  lifecycleState?: BrowserServiceWorkerBrokerLifecycleState;
+}
+
+export interface BrowserServiceWorkerBrokerRegistration {
+  contractId: typeof BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID;
+  requestedLane: BrowserServiceWorkerBrokerRequestedLane;
+  fallbackTarget: BrowserServiceWorkerBrokerFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+  downgradeOrder: BrowserServiceWorkerBrokerFallbackTarget[];
+  backend: BrowserStorageBackend;
+  admission: BrowserServiceWorkerBrokerAdmissionTuple;
+  capabilityManifestVersion: string;
+  lifecycleState: BrowserServiceWorkerBrokerLifecycleState;
+  controllerPresent: boolean;
+  directExecutionReasonCode: BrowserExecutionReasonCode;
+  registeredAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface BrowserServiceWorkerBrokerDescriptorRequest {
+  artifactNamespace: string;
+  brokerWorkId: string;
+  capabilityManifestVersion: string;
+  fallbackTarget?: BrowserServiceWorkerBrokerFallbackTarget | null;
+  idempotencyKey: string;
+  leaseEpoch: number;
+  metadata?: Record<string, unknown> | null;
+  sourceEventKind: string;
+}
+
+export interface BrowserServiceWorkerBrokerDescriptor {
+  artifactNamespace: string;
+  brokerWorkId: string;
+  capabilityManifestVersion: string;
+  createdAtMs: number;
+  fallbackTarget: BrowserServiceWorkerBrokerFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+  idempotencyKey: string;
+  leaseEpoch: number;
+  metadata: Record<string, unknown> | null;
+  requestedLane: BrowserServiceWorkerBrokerRequestedLane;
+  sourceEventKind: string;
+  updatedAtMs: number;
+}
+
+export interface BrowserServiceWorkerBrokerHandoffRequest {
+  artifactNamespace: string;
+  brokerWorkId: string;
+  capabilityManifestVersion: string;
+  fallbackTarget?: BrowserServiceWorkerBrokerFallbackTarget | null;
+  idempotencyKey: string;
+  leaseEpoch: number;
+  metadata?: Record<string, unknown> | null;
+  reason?: BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode;
+  sourceEventKind: string;
+  targetLane?: BrowserServiceWorkerBrokerFallbackTarget | null;
+}
+
+export interface BrowserServiceWorkerBrokerHandoffRecord {
+  artifactNamespace: string;
+  brokerWorkId: string;
+  capabilityManifestVersion: string;
+  fallbackTarget: BrowserServiceWorkerBrokerFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+  idempotencyKey: string;
+  leaseEpoch: number;
+  metadata: Record<string, unknown> | null;
+  reason: BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode;
+  recordedAtMs: number;
+  requestedLane: BrowserServiceWorkerBrokerRequestedLane;
+  sourceEventKind: string;
+  targetLane: BrowserServiceWorkerBrokerFallbackTarget;
+  targetLaneId: BrowserExecutionLane | null;
+}
+
+export interface BrowserServiceWorkerBrokerOperationDiagnostics {
+  backend: BrowserStorageBackend;
+  namespace: string;
+  operation: BrowserServiceWorkerBrokerOperation;
+  brokerWorkId?: string;
+  reason: BrowserServiceWorkerBrokerFailureReason;
+  message: string;
+  guidance: string[];
+  fallbackTarget: BrowserServiceWorkerBrokerFallbackTarget;
+  fallbackLaneId: BrowserExecutionLane | null;
+  directExecutionReasonCode: BrowserExecutionReasonCode;
+  runtimeContext: BrowserRuntimeContext;
+  capabilities: BrowserCapabilitySnapshot;
+}
+
 const DEDICATED_WORKER_GLOBAL_SCOPE_TAG = "[object DedicatedWorkerGlobalScope]";
 const INDEXEDDB_STORAGE_KEY_PREFIX = "asupersync:indexeddb:v1:";
 const LOCAL_STORAGE_KEY_PREFIX = "asupersync:storage:v1:";
@@ -572,6 +788,12 @@ const DEFAULT_INDEXEDDB_VERSION = 1;
 const BROWSER_ARTIFACT_INDEX_KEY = "__artifact_index__";
 const BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION = 1;
 const DEFAULT_BROWSER_ARTIFACT_NAMESPACE = "runtime_artifacts_v1";
+const BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY =
+  "__service_worker_broker_registration__";
+const BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX = "broker_work:";
+const BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX = "broker_handoff:";
+const DEFAULT_BROWSER_SERVICE_WORKER_BROKER_NAMESPACE =
+  "service_worker_broker_v1";
 const DEFAULT_BROWSER_LANE_HEALTH_SCOPE_KEY = "@asupersync/browser::default";
 const DEFAULT_BROWSER_LANE_HEALTH_POLICY: BrowserLaneHealthPolicy = {
   maxConsecutiveFailures: 2,
@@ -1988,6 +2210,359 @@ export function assertBrowserStorageSupport(
     throw createBrowserStorageUnsupportedError(diagnostics);
   }
   return diagnostics;
+}
+
+function browserServiceWorkerBrokerFallbackTargets(
+  allowDedicatedWorkerFallback: boolean | undefined,
+  allowBrowserMainThreadFallback: boolean | undefined,
+): BrowserServiceWorkerBrokerFallbackTarget[] {
+  const targets: BrowserServiceWorkerBrokerFallbackTarget[] = [];
+  if (allowDedicatedWorkerFallback !== false) {
+    targets.push(BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE);
+  }
+  if (allowBrowserMainThreadFallback !== false) {
+    targets.push(BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE);
+  }
+  targets.push(BROWSER_BRIDGE_ONLY_FALLBACK_TARGET);
+  return Array.from(new Set(targets));
+}
+
+function browserServiceWorkerBrokerFallbackLaneId(
+  target: BrowserServiceWorkerBrokerFallbackTarget,
+): BrowserExecutionLane | null {
+  return target === BROWSER_BRIDGE_ONLY_FALLBACK_TARGET ? null : target;
+}
+
+function normalizeBrowserServiceWorkerBrokerString(
+  value: string,
+  label: string,
+): string {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new TypeError(`${label} must not be empty`);
+  }
+  return normalized;
+}
+
+function normalizeOptionalBrowserServiceWorkerBrokerString(
+  value: string | null | undefined,
+): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length === 0 ? null : normalized;
+}
+
+function normalizeOptionalBrowserServiceWorkerBrokerVersion(
+  value: number | null | undefined,
+): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(value)) {
+    throw new TypeError("service-worker broker version fields must be finite numbers");
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function browserServiceWorkerBrokerOrigin(
+  globalObject: Record<string, unknown> | undefined,
+): string | null {
+  const candidate = (
+    globalObject as { location?: { origin?: unknown } } | undefined
+  )?.location?.origin;
+  return typeof candidate === "string" ? candidate : null;
+}
+
+function browserServiceWorkerBrokerRegistrationScope(
+  globalObject: Record<string, unknown> | undefined,
+): string | null {
+  const candidate = (
+    globalObject as {
+      registration?: { scope?: unknown };
+    } | undefined
+  )?.registration?.scope;
+  return typeof candidate === "string" ? candidate : null;
+}
+
+function browserServiceWorkerBrokerControllerPresent(
+  globalObject: Record<string, unknown> | undefined,
+): boolean {
+  const navigatorController = (
+    globalObject as {
+      navigator?: {
+        serviceWorker?: { controller?: unknown };
+      };
+    } | undefined
+  )?.navigator?.serviceWorker?.controller;
+  return navigatorController !== null && navigatorController !== undefined;
+}
+
+function browserServiceWorkerBrokerGuidance(
+  reason: BrowserServiceWorkerBrokerSupportReason,
+): string[] {
+  switch (reason) {
+    case "service_worker_api_missing":
+      return [
+        "Call the bounded broker API only from a service-worker-like host.",
+        "Keep direct BrowserRuntime creation on dedicated-worker or browser main-thread lanes.",
+      ];
+    case "service_worker_registration_scope_mismatch":
+      return [
+        "Persist a broker registration manifest whose registration_scope exactly matches the active service-worker registration.",
+        "Fail closed and downgrade instead of replaying durable broker state against a drifted scope.",
+      ];
+    case "service_worker_controller_missing_when_required":
+      return [
+        "Require a controlling service worker only for flows that explicitly depend on controlled clients.",
+        "Downgrade to a dedicated worker, browser main thread, or bridge-only handoff when no controller is present.",
+      ];
+    case "app_namespace_mismatch":
+      return [
+        "Keep the durable broker manifest scoped to one app_namespace and fail closed on drift.",
+        "Write a fresh registration manifest before resuming restartable broker work after an app namespace change.",
+      ];
+    case "app_version_major_mismatch":
+      return [
+        "Treat app_version_major drift as a restart boundary and re-register the broker explicitly.",
+        "Do not guess forward across major-version changes when reconciling durable broker work.",
+      ];
+    case "broker_protocol_version_mismatch":
+      return [
+        "Re-register the broker when the protocol contract changes instead of replaying older durable state.",
+        "Keep the admission tuple's broker_protocol_version exact so downgrade decisions stay mechanical.",
+      ];
+    case "durable_store_unavailable_for_restartable_profile":
+      return [
+        "Use IndexedDB-backed durable storage before claiming restartable broker progress.",
+        "If no durable store is available, downgrade immediately rather than pretending restartability.",
+      ];
+    case "capability_manifest_mismatch_on_restart":
+      return [
+        "Compare durable broker descriptors against the new capability manifest and fail closed on mismatch.",
+        "Persist a new registration and handoff record instead of reviving stale authority.",
+      ];
+    case "background_event_kind_outside_broker_contract":
+      return [
+        "Restrict broker work to fetch, push, sync, or notification-style ingress that the contract admits explicitly.",
+        "Route unsupported event kinds through an application-owned bridge instead of widening the broker surface.",
+      ];
+    case "broker_bootstrap_failure":
+      return [
+        "Register the broker before claiming restartable work or durable handoff.",
+        "Persist the admission tuple and capability manifest before writing work descriptors.",
+      ];
+    case "broker_restart_reconciliation_failed":
+      return [
+        "Treat unreadable or schema-drifted durable broker state as an explicit restart reconciliation failure.",
+        "Clear or re-register the broker state instead of guessing through corrupted durable records.",
+      ];
+    case "worker_reclaimed_by_browser":
+      return [
+        "Persist handoff metadata before browser reclaim becomes observable.",
+        "Resume only through explicit downgrade or re-registration after worker reclaim.",
+      ];
+    case "lane_health_demoted":
+      return [
+        "Honor lane-health demotion by handing off to the next truthful fallback target.",
+        "Do not keep brokering work in a host that the current health policy already demoted.",
+      ];
+    default:
+      return [
+        "Call registerBroker() before persistBrokerWork() so durable restart state is explicit.",
+        "Keep BrowserRuntime creation fail-closed in service workers and hand execution off through the fallback target.",
+      ];
+  }
+}
+
+export function detectBrowserServiceWorkerBrokerSupport(
+  options: BrowserServiceWorkerBrokerSupportOptions = {},
+): BrowserServiceWorkerBrokerSupportDiagnostics {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
+  const fallbackTargets = browserServiceWorkerBrokerFallbackTargets(
+    options.allowDedicatedWorkerFallback,
+    options.allowBrowserMainThreadFallback,
+  );
+  const fallbackTarget = fallbackTargets[0];
+  const fallbackLaneId = browserServiceWorkerBrokerFallbackLaneId(
+    fallbackTarget,
+  );
+  const hostRole = browserExecutionHostRole(
+    globalObject,
+    runtimeSupport.capabilities,
+  );
+  const origin = normalizeOptionalBrowserServiceWorkerBrokerString(
+    options.origin ?? browserServiceWorkerBrokerOrigin(globalObject),
+  );
+  const registrationScope = normalizeOptionalBrowserServiceWorkerBrokerString(
+    options.registrationScope
+      ?? browserServiceWorkerBrokerRegistrationScope(globalObject),
+  );
+  const appNamespace = normalizeOptionalBrowserServiceWorkerBrokerString(
+    options.appNamespace,
+  );
+  const appVersionMajor = normalizeOptionalBrowserServiceWorkerBrokerVersion(
+    options.appVersionMajor,
+  );
+  const brokerProtocolVersion =
+    normalizeOptionalBrowserServiceWorkerBrokerVersion(
+      options.brokerProtocolVersion,
+    );
+  const expectedRegistrationScope =
+    normalizeOptionalBrowserServiceWorkerBrokerString(
+      options.expectedRegistrationScope,
+    );
+  const expectedAppNamespace = normalizeOptionalBrowserServiceWorkerBrokerString(
+    options.expectedAppNamespace,
+  );
+  const expectedAppVersionMajor =
+    normalizeOptionalBrowserServiceWorkerBrokerVersion(
+      options.expectedAppVersionMajor,
+    );
+  const expectedBrokerProtocolVersion =
+    normalizeOptionalBrowserServiceWorkerBrokerVersion(
+      options.expectedBrokerProtocolVersion,
+    );
+  const controllerPresent =
+    options.controllerPresent
+    ?? browserServiceWorkerBrokerControllerPresent(globalObject);
+  const runProfile =
+    normalizeOptionalBrowserServiceWorkerBrokerString(options.runProfile)
+    ?? "restartable";
+  const backend = options.backend ?? "indexeddb";
+
+  let reason: BrowserServiceWorkerBrokerSupportReason = "supported";
+  if (!isServiceWorkerLikeGlobal(globalObject)) {
+    reason = "service_worker_api_missing";
+  } else if (
+    expectedRegistrationScope !== null
+    && registrationScope !== expectedRegistrationScope
+  ) {
+    reason = "service_worker_registration_scope_mismatch";
+  } else if (options.requireController && !controllerPresent) {
+    reason = "service_worker_controller_missing_when_required";
+  } else if (
+    expectedAppNamespace !== null
+    && appNamespace !== expectedAppNamespace
+  ) {
+    reason = "app_namespace_mismatch";
+  } else if (
+    expectedAppVersionMajor !== null
+    && appVersionMajor !== expectedAppVersionMajor
+  ) {
+    reason = "app_version_major_mismatch";
+  } else if (
+    expectedBrokerProtocolVersion !== null
+    && brokerProtocolVersion !== expectedBrokerProtocolVersion
+  ) {
+    reason = "broker_protocol_version_mismatch";
+  } else if (
+    runProfile !== "ephemeral"
+    && (
+      (backend === "indexeddb" && browserIndexedDbFactory(globalObject) === null)
+      || (backend === "localstorage" && browserLocalStorage(globalObject) === null)
+    )
+  ) {
+    reason = "durable_store_unavailable_for_restartable_profile";
+  }
+
+  const directExecutionReasonCode = browserExecutionReasonCodeFromRuntimeSupport(
+    runtimeSupport.reason,
+  );
+  const guidance = browserServiceWorkerBrokerGuidance(reason);
+  const message =
+    reason === "supported"
+      ? "@asupersync/browser service-worker broker prerequisites are available; direct BrowserRuntime creation remains fail-closed and all work must hand off explicitly."
+      : `@asupersync/browser service-worker broker prerequisites are not satisfied: ${reason}.`;
+
+  return {
+    supported: reason === "supported",
+    contractId: BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
+    requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+    fallbackTarget,
+    fallbackLaneId,
+    downgradeOrder: fallbackTargets,
+    backend,
+    hostRole,
+    runtimeContext: runtimeSupport.runtimeContext,
+    reason,
+    message,
+    guidance,
+    origin,
+    registrationScope,
+    controllerPresent,
+    appNamespace,
+    appVersionMajor,
+    brokerProtocolVersion,
+    runProfile,
+    directRuntimeReason: runtimeSupport.reason,
+    directExecutionReasonCode,
+    runtimeSupport,
+    capabilities: runtimeSupport.capabilities,
+  };
+}
+
+export function createBrowserServiceWorkerBrokerUnsupportedError(
+  diagnostics: BrowserServiceWorkerBrokerSupportDiagnostics,
+): Error & {
+  code: typeof BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED_CODE;
+  diagnostics: BrowserServiceWorkerBrokerSupportDiagnostics;
+} {
+  const error = new Error(
+    `${BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED_CODE}: ${diagnostics.message} ${diagnostics.guidance.join(" ")}`.trim(),
+  ) as Error & {
+    code: typeof BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED_CODE;
+    diagnostics: BrowserServiceWorkerBrokerSupportDiagnostics;
+  };
+  error.code = BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED_CODE;
+  error.diagnostics = diagnostics;
+  return error;
+}
+
+export function assertBrowserServiceWorkerBrokerSupport(
+  diagnostics: BrowserServiceWorkerBrokerSupportDiagnostics = detectBrowserServiceWorkerBrokerSupport(),
+): BrowserServiceWorkerBrokerSupportDiagnostics {
+  if (!diagnostics.supported) {
+    throw createBrowserServiceWorkerBrokerUnsupportedError(diagnostics);
+  }
+  return diagnostics;
+}
+
+function browserServiceWorkerBrokerOperationGuidance(
+  reason: BrowserServiceWorkerBrokerFailureReason,
+): string[] {
+  if (reason === "storage_failed") {
+    return [
+      "Inspect the underlying IndexedDB or localStorage error and retry only after the durable substrate is healthy.",
+      "Do not claim restartable broker progress until the durable handoff write succeeds.",
+    ];
+  }
+  if (reason === "serialization_failed") {
+    return [
+      "Persist only JSON-serializable broker metadata and explicit string identifiers.",
+      "Keep durable broker descriptors small, mechanical, and replay-friendly.",
+    ];
+  }
+  return browserServiceWorkerBrokerGuidance(reason);
+}
+
+export function createBrowserServiceWorkerBrokerOperationError(
+  diagnostics: BrowserServiceWorkerBrokerOperationDiagnostics,
+): Error & {
+  code: typeof BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE;
+  diagnostics: BrowserServiceWorkerBrokerOperationDiagnostics;
+} {
+  const error = new Error(
+    `${BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE}: ${diagnostics.message} ${diagnostics.guidance.join(" ")}`.trim(),
+  ) as Error & {
+    code: typeof BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE;
+    diagnostics: BrowserServiceWorkerBrokerOperationDiagnostics;
+  };
+  error.code = BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE;
+  error.diagnostics = diagnostics;
+  return error;
 }
 
 function browserStorageFailureReason(
@@ -4410,6 +4985,1046 @@ export class BrowserArtifactStore {
   }
 }
 
+function isBrowserServiceWorkerBrokerLifecycleState(
+  value: unknown,
+): value is BrowserServiceWorkerBrokerLifecycleState {
+  return (
+    value === "cold_start"
+    || value === "validating_scope"
+    || value === "reconciling_durable_state"
+    || value === "brokering"
+    || value === "draining"
+    || value === "quiescent"
+    || value === "terminated"
+  );
+}
+
+function normalizeBrowserServiceWorkerBrokerLifecycleState(
+  value: BrowserServiceWorkerBrokerLifecycleState | undefined,
+): BrowserServiceWorkerBrokerLifecycleState {
+  return value ?? "cold_start";
+}
+
+function normalizeBrowserServiceWorkerBrokerFallbackTarget(
+  value: BrowserServiceWorkerBrokerFallbackTarget | null | undefined,
+  fallbackTarget: BrowserServiceWorkerBrokerFallbackTarget,
+): BrowserServiceWorkerBrokerFallbackTarget {
+  const candidate = value ?? fallbackTarget;
+  if (
+    candidate === BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
+    || candidate === BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE
+    || candidate === BROWSER_BRIDGE_ONLY_FALLBACK_TARGET
+  ) {
+    return candidate;
+  }
+  throw new TypeError("service-worker broker fallback target is invalid");
+}
+
+function normalizeBrowserServiceWorkerBrokerMetadata(
+  value: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  if (!value) {
+    return null;
+  }
+  return { ...value };
+}
+
+function normalizeBrowserServiceWorkerBrokerLeaseEpoch(
+  value: number,
+): number {
+  if (!Number.isFinite(value)) {
+    throw new TypeError("service-worker broker lease_epoch must be a finite number");
+  }
+  return Math.max(0, Math.trunc(value));
+}
+
+function normalizeBrowserServiceWorkerBrokerAdmissionTuple(
+  admission: BrowserServiceWorkerBrokerAdmissionTuple,
+): BrowserServiceWorkerBrokerAdmissionTuple {
+  return {
+    origin: normalizeBrowserServiceWorkerBrokerString(
+      admission.origin,
+      "service-worker broker origin",
+    ),
+    registrationScope: normalizeBrowserServiceWorkerBrokerString(
+      admission.registrationScope,
+      "service-worker broker registration_scope",
+    ),
+    appNamespace: normalizeBrowserServiceWorkerBrokerString(
+      admission.appNamespace,
+      "service-worker broker app_namespace",
+    ),
+    appVersionMajor: Math.max(
+      0,
+      Math.trunc(
+        normalizeOptionalBrowserServiceWorkerBrokerVersion(
+          admission.appVersionMajor,
+        ) ?? 0,
+      ),
+    ),
+    brokerProtocolVersion: Math.max(
+      0,
+      Math.trunc(
+        normalizeOptionalBrowserServiceWorkerBrokerVersion(
+          admission.brokerProtocolVersion,
+        ) ?? 0,
+      ),
+    ),
+    runProfile: normalizeBrowserServiceWorkerBrokerString(
+      admission.runProfile,
+      "service-worker broker run_profile",
+    ),
+  };
+}
+
+function parseBrowserServiceWorkerBrokerAdmissionTuple(
+  value: unknown,
+): BrowserServiceWorkerBrokerAdmissionTuple {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("service-worker broker admission tuple must be an object");
+  }
+  const candidate = value as Partial<BrowserServiceWorkerBrokerAdmissionTuple>;
+  if (
+    typeof candidate.origin !== "string"
+    || typeof candidate.registrationScope !== "string"
+    || typeof candidate.appNamespace !== "string"
+    || typeof candidate.appVersionMajor !== "number"
+    || typeof candidate.brokerProtocolVersion !== "number"
+    || typeof candidate.runProfile !== "string"
+  ) {
+    throw new Error("service-worker broker admission tuple is missing required fields");
+  }
+  return normalizeBrowserServiceWorkerBrokerAdmissionTuple(
+    candidate as BrowserServiceWorkerBrokerAdmissionTuple,
+  );
+}
+
+function parseBrowserServiceWorkerBrokerRegistration(
+  value: unknown,
+): BrowserServiceWorkerBrokerRegistration {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("service-worker broker registration must be an object");
+  }
+  const candidate = value as Partial<BrowserServiceWorkerBrokerRegistration>;
+  if (
+    candidate.contractId !== BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID
+    || candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE
+    || typeof candidate.backend !== "string"
+    || !Array.isArray(candidate.downgradeOrder)
+    || typeof candidate.capabilityManifestVersion !== "string"
+    || typeof candidate.controllerPresent !== "boolean"
+    || typeof candidate.directExecutionReasonCode !== "string"
+    || typeof candidate.registeredAtMs !== "number"
+    || typeof candidate.updatedAtMs !== "number"
+  ) {
+    throw new Error("service-worker broker registration is missing required fields");
+  }
+  if (!isBrowserServiceWorkerBrokerLifecycleState(candidate.lifecycleState)) {
+    throw new Error("service-worker broker registration lifecycle_state is invalid");
+  }
+  const fallbackTarget = normalizeBrowserServiceWorkerBrokerFallbackTarget(
+    candidate.fallbackTarget,
+    BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
+  );
+  return {
+    contractId: BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
+    requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+    fallbackTarget,
+    fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+    downgradeOrder: candidate.downgradeOrder.map((target) =>
+      normalizeBrowserServiceWorkerBrokerFallbackTarget(
+        target,
+        BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
+      )
+    ),
+    backend:
+      candidate.backend === "indexeddb" ? "indexeddb" : "localstorage",
+    admission: parseBrowserServiceWorkerBrokerAdmissionTuple(candidate.admission),
+    capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
+      candidate.capabilityManifestVersion,
+      "service-worker broker capability_manifest_version",
+    ),
+    lifecycleState: candidate.lifecycleState,
+    controllerPresent: candidate.controllerPresent,
+    directExecutionReasonCode: candidate.directExecutionReasonCode as BrowserExecutionReasonCode,
+    registeredAtMs: Math.max(0, Math.trunc(candidate.registeredAtMs)),
+    updatedAtMs: Math.max(0, Math.trunc(candidate.updatedAtMs)),
+  };
+}
+
+function parseBrowserServiceWorkerBrokerDescriptor(
+  value: unknown,
+): BrowserServiceWorkerBrokerDescriptor {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("service-worker broker descriptor must be an object");
+  }
+  const candidate = value as Partial<BrowserServiceWorkerBrokerDescriptor>;
+  if (
+    typeof candidate.artifactNamespace !== "string"
+    || typeof candidate.brokerWorkId !== "string"
+    || typeof candidate.capabilityManifestVersion !== "string"
+    || typeof candidate.idempotencyKey !== "string"
+    || typeof candidate.leaseEpoch !== "number"
+    || typeof candidate.sourceEventKind !== "string"
+    || typeof candidate.createdAtMs !== "number"
+    || typeof candidate.updatedAtMs !== "number"
+  ) {
+    throw new Error("service-worker broker descriptor is missing required fields");
+  }
+  const fallbackTarget = normalizeBrowserServiceWorkerBrokerFallbackTarget(
+    candidate.fallbackTarget,
+    BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
+  );
+  return {
+    artifactNamespace: normalizeBrowserServiceWorkerBrokerString(
+      candidate.artifactNamespace,
+      "service-worker broker artifact_namespace",
+    ),
+    brokerWorkId: normalizeBrowserServiceWorkerBrokerString(
+      candidate.brokerWorkId,
+      "service-worker broker broker_work_id",
+    ),
+    capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
+      candidate.capabilityManifestVersion,
+      "service-worker broker capability_manifest_version",
+    ),
+    createdAtMs: Math.max(0, Math.trunc(candidate.createdAtMs)),
+    fallbackTarget,
+    fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+    idempotencyKey: normalizeBrowserServiceWorkerBrokerString(
+      candidate.idempotencyKey,
+      "service-worker broker idempotency_key",
+    ),
+    leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
+      candidate.leaseEpoch,
+    ),
+    metadata: normalizeBrowserServiceWorkerBrokerMetadata(
+      (candidate.metadata as Record<string, unknown> | null | undefined),
+    ),
+    requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+    sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
+      candidate.sourceEventKind,
+      "service-worker broker source_event_kind",
+    ),
+    updatedAtMs: Math.max(0, Math.trunc(candidate.updatedAtMs)),
+  };
+}
+
+function parseBrowserServiceWorkerBrokerHandoffRecord(
+  value: unknown,
+): BrowserServiceWorkerBrokerHandoffRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("service-worker broker handoff record must be an object");
+  }
+  const candidate = value as Partial<BrowserServiceWorkerBrokerHandoffRecord>;
+  if (
+    typeof candidate.artifactNamespace !== "string"
+    || typeof candidate.brokerWorkId !== "string"
+    || typeof candidate.capabilityManifestVersion !== "string"
+    || typeof candidate.idempotencyKey !== "string"
+    || typeof candidate.leaseEpoch !== "number"
+    || typeof candidate.sourceEventKind !== "string"
+    || typeof candidate.reason !== "string"
+    || typeof candidate.recordedAtMs !== "number"
+  ) {
+    throw new Error("service-worker broker handoff record is missing required fields");
+  }
+  const fallbackTarget = normalizeBrowserServiceWorkerBrokerFallbackTarget(
+    candidate.fallbackTarget,
+    BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
+  );
+  const targetLane = normalizeBrowserServiceWorkerBrokerFallbackTarget(
+    candidate.targetLane,
+    fallbackTarget,
+  );
+  return {
+    artifactNamespace: normalizeBrowserServiceWorkerBrokerString(
+      candidate.artifactNamespace,
+      "service-worker broker artifact_namespace",
+    ),
+    brokerWorkId: normalizeBrowserServiceWorkerBrokerString(
+      candidate.brokerWorkId,
+      "service-worker broker broker_work_id",
+    ),
+    capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
+      candidate.capabilityManifestVersion,
+      "service-worker broker capability_manifest_version",
+    ),
+    fallbackTarget,
+    fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+    idempotencyKey: normalizeBrowserServiceWorkerBrokerString(
+      candidate.idempotencyKey,
+      "service-worker broker idempotency_key",
+    ),
+    leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
+      candidate.leaseEpoch,
+    ),
+    metadata: normalizeBrowserServiceWorkerBrokerMetadata(
+      (candidate.metadata as Record<string, unknown> | null | undefined),
+    ),
+    reason:
+      normalizeBrowserServiceWorkerBrokerString(
+        candidate.reason,
+        "service-worker broker reason",
+      ) as BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode,
+    recordedAtMs: Math.max(0, Math.trunc(candidate.recordedAtMs)),
+    requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+    sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
+      candidate.sourceEventKind,
+      "service-worker broker source_event_kind",
+    ),
+    targetLane,
+    targetLaneId: browserServiceWorkerBrokerFallbackLaneId(targetLane),
+  };
+}
+
+export class BrowserServiceWorkerBrokerStore {
+  readonly allowBrowserMainThreadFallback: boolean;
+  readonly allowDedicatedWorkerFallback: boolean;
+  readonly backend: BrowserStorageBackend;
+  readonly dbName: string;
+  readonly globalObject: Record<string, unknown> | undefined;
+  readonly namespace: string;
+  readonly now: () => number;
+  readonly storeName: string;
+  readonly version: number;
+
+  constructor(options: BrowserServiceWorkerBrokerStoreOptions = {}) {
+    this.allowBrowserMainThreadFallback =
+      options.allowBrowserMainThreadFallback !== false;
+    this.allowDedicatedWorkerFallback =
+      options.allowDedicatedWorkerFallback !== false;
+    this.backend = options.backend ?? "indexeddb";
+    this.dbName = options.dbName ?? DEFAULT_INDEXEDDB_NAME;
+    this.globalObject = options.globalObject ?? defaultGlobalObject();
+    this.namespace = normalizeBrowserStorageNamespace(
+      options.namespace ?? DEFAULT_BROWSER_SERVICE_WORKER_BROKER_NAMESPACE,
+    );
+    this.now = options.now ?? (() => Date.now());
+    this.storeName = options.storeName ?? DEFAULT_INDEXEDDB_STORE;
+    this.version = options.version ?? DEFAULT_INDEXEDDB_VERSION;
+  }
+
+  diagnostics(
+    overrides: Omit<
+      BrowserServiceWorkerBrokerSupportOptions,
+      | "allowBrowserMainThreadFallback"
+      | "allowDedicatedWorkerFallback"
+      | "backend"
+      | "globalObject"
+    > = {},
+  ): BrowserServiceWorkerBrokerSupportDiagnostics {
+    return detectBrowserServiceWorkerBrokerSupport({
+      ...overrides,
+      allowBrowserMainThreadFallback: this.allowBrowserMainThreadFallback,
+      allowDedicatedWorkerFallback: this.allowDedicatedWorkerFallback,
+      backend: this.backend,
+      globalObject: this.globalObject,
+    });
+  }
+
+  private assertSupported(
+    overrides: Parameters<BrowserServiceWorkerBrokerStore["diagnostics"]>[0] = {},
+  ): BrowserServiceWorkerBrokerSupportDiagnostics {
+    return assertBrowserServiceWorkerBrokerSupport(this.diagnostics(overrides));
+  }
+
+  private operationDiagnostics(
+    operation: BrowserServiceWorkerBrokerOperation,
+    reason: BrowserServiceWorkerBrokerFailureReason,
+    message: string,
+    brokerWorkId?: string,
+  ): BrowserServiceWorkerBrokerOperationDiagnostics {
+    const support = this.diagnostics();
+    return {
+      backend: this.backend,
+      namespace: this.namespace,
+      operation,
+      brokerWorkId,
+      reason,
+      message,
+      guidance: browserServiceWorkerBrokerOperationGuidance(reason),
+      fallbackTarget: support.fallbackTarget,
+      fallbackLaneId: support.fallbackLaneId,
+      directExecutionReasonCode: support.directExecutionReasonCode,
+      runtimeContext: support.runtimeContext,
+      capabilities: support.capabilities,
+    };
+  }
+
+  private operationError(
+    operation: BrowserServiceWorkerBrokerOperation,
+    reason: BrowserServiceWorkerBrokerFailureReason,
+    message: string,
+    brokerWorkId?: string,
+  ): Error & {
+    code: typeof BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE;
+    diagnostics: BrowserServiceWorkerBrokerOperationDiagnostics;
+  } {
+    return createBrowserServiceWorkerBrokerOperationError(
+      this.operationDiagnostics(operation, reason, message, brokerWorkId),
+    );
+  }
+
+  private isBrokerOperationError(error: unknown): boolean {
+    return (
+      typeof error === "object"
+      && error !== null
+      && "code" in error
+      && (error as { code?: string }).code
+        === BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE
+    );
+  }
+
+  private async getRaw(
+    key: string,
+    operation: BrowserServiceWorkerBrokerOperation,
+    brokerWorkId?: string,
+  ): Promise<Uint8Array | null> {
+    this.assertSupported();
+
+    try {
+      if (this.backend === "indexeddb") {
+        const database = await openIndexedDbDatabase(
+          this.globalObject,
+          this.dbName,
+          this.storeName,
+          this.version,
+        );
+        try {
+          const { store } = openIndexedDbStore(
+            database,
+            this.storeName,
+            "readonly",
+          );
+          const request = store.get(
+            encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
+          );
+          const result = await awaitIndexedDbRequest(request);
+          if (result === undefined || result === null) {
+            return null;
+          }
+          return result instanceof Uint8Array
+            ? result
+            : new Uint8Array(result as ArrayBufferLike);
+        } finally {
+          database.close();
+        }
+      }
+
+      const storage = browserLocalStorage(this.globalObject);
+      if (!storage) {
+        throw new Error("localStorage is unavailable in this browser/runtime");
+      }
+      const result = storage.getItem(
+        encodeLocalStorageKey(this.namespace, key, this.globalObject),
+      );
+      if (result === null) {
+        return null;
+      }
+      const decoded = decodeBrowserStorageBytes(result, this.globalObject);
+      if (decoded === null) {
+        throw new Error("service-worker broker durable state could not be decoded from storage");
+      }
+      return decoded;
+    } catch (error) {
+      throw this.operationError(
+        operation,
+        "storage_failed",
+        errorMessage(error),
+        brokerWorkId,
+      );
+    }
+  }
+
+  private async setRaw(
+    key: string,
+    value: Uint8Array,
+    operation: BrowserServiceWorkerBrokerOperation,
+    brokerWorkId?: string,
+  ): Promise<void> {
+    this.assertSupported();
+
+    try {
+      if (this.backend === "indexeddb") {
+        const database = await openIndexedDbDatabase(
+          this.globalObject,
+          this.dbName,
+          this.storeName,
+          this.version,
+        );
+        try {
+          const { transaction, store } = openIndexedDbStore(
+            database,
+            this.storeName,
+            "readwrite",
+          );
+          store.put(
+            value,
+            encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
+          );
+          await awaitIndexedDbTransaction(transaction);
+          return;
+        } finally {
+          database.close();
+        }
+      }
+
+      const storage = browserLocalStorage(this.globalObject);
+      if (!storage) {
+        throw new Error("localStorage is unavailable in this browser/runtime");
+      }
+      storage.setItem(
+        encodeLocalStorageKey(this.namespace, key, this.globalObject),
+        encodeBrowserStorageBytes(value, this.globalObject),
+      );
+    } catch (error) {
+      throw this.operationError(
+        operation,
+        "storage_failed",
+        errorMessage(error),
+        brokerWorkId,
+      );
+    }
+  }
+
+  private async deleteRaw(
+    key: string,
+    operation: BrowserServiceWorkerBrokerOperation,
+    brokerWorkId?: string,
+  ): Promise<boolean> {
+    this.assertSupported();
+
+    try {
+      if (this.backend === "indexeddb") {
+        const database = await openIndexedDbDatabase(
+          this.globalObject,
+          this.dbName,
+          this.storeName,
+          this.version,
+        );
+        try {
+          const { transaction, store } = openIndexedDbStore(
+            database,
+            this.storeName,
+            "readwrite",
+          );
+          const storageKey = encodeIndexedDbStorageKey(
+            this.namespace,
+            key,
+            this.globalObject,
+          );
+          const existing = await awaitIndexedDbRequest(store.get(storageKey));
+          store.delete(storageKey);
+          await awaitIndexedDbTransaction(transaction);
+          return existing !== undefined && existing !== null;
+        } finally {
+          database.close();
+        }
+      }
+
+      const storage = browserLocalStorage(this.globalObject);
+      if (!storage) {
+        throw new Error("localStorage is unavailable in this browser/runtime");
+      }
+      const storageKey = encodeLocalStorageKey(
+        this.namespace,
+        key,
+        this.globalObject,
+      );
+      const existed = storage.getItem(storageKey) !== null;
+      storage.removeItem(storageKey);
+      return existed;
+    } catch (error) {
+      throw this.operationError(
+        operation,
+        "storage_failed",
+        errorMessage(error),
+        brokerWorkId,
+      );
+    }
+  }
+
+  private async listNamespaceKeys(
+    operation: BrowserServiceWorkerBrokerOperation,
+  ): Promise<string[]> {
+    this.assertSupported();
+
+    try {
+      if (this.backend === "indexeddb") {
+        const database = await openIndexedDbDatabase(
+          this.globalObject,
+          this.dbName,
+          this.storeName,
+          this.version,
+        );
+        try {
+          const { store } = openIndexedDbStore(
+            database,
+            this.storeName,
+            "readonly",
+          );
+          const rawKeys = await awaitIndexedDbRequest(store.getAllKeys());
+          const keys = Array.from(rawKeys as ArrayLike<unknown>)
+            .map((value) =>
+              typeof value === "string"
+                ? decodeIndexedDbStorageKey(
+                    value,
+                    this.namespace,
+                    this.globalObject,
+                  )
+                : null,
+            )
+            .filter((value): value is string => value !== null);
+          keys.sort();
+          return Array.from(new Set(keys));
+        } finally {
+          database.close();
+        }
+      }
+
+      const storage = browserLocalStorage(this.globalObject);
+      if (!storage) {
+        throw new Error("localStorage is unavailable in this browser/runtime");
+      }
+      const prefix = localStorageNamespacePrefix(
+        this.namespace,
+        this.globalObject,
+      );
+      const keys: string[] = [];
+      for (let index = 0; index < storage.length; index += 1) {
+        const maybeKey = storage.key(index);
+        if (!maybeKey || !maybeKey.startsWith(prefix)) {
+          continue;
+        }
+        const decoded = decodeLocalStorageKey(
+          maybeKey,
+          this.namespace,
+          this.globalObject,
+        );
+        if (decoded !== null) {
+          keys.push(decoded);
+        }
+      }
+      keys.sort();
+      return Array.from(new Set(keys));
+    } catch (error) {
+      throw this.operationError(
+        operation,
+        "storage_failed",
+        errorMessage(error),
+      );
+    }
+  }
+
+  private async clearNamespace(
+    operation: BrowserServiceWorkerBrokerOperation,
+  ): Promise<number> {
+    const keys = await this.listNamespaceKeys(operation);
+    if (keys.length === 0) {
+      return 0;
+    }
+
+    if (this.backend === "indexeddb") {
+      try {
+        const database = await openIndexedDbDatabase(
+          this.globalObject,
+          this.dbName,
+          this.storeName,
+          this.version,
+        );
+        try {
+          const { transaction, store } = openIndexedDbStore(
+            database,
+            this.storeName,
+            "readwrite",
+          );
+          for (const key of keys) {
+            store.delete(
+              encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
+            );
+          }
+          await awaitIndexedDbTransaction(transaction);
+          return keys.length;
+        } finally {
+          database.close();
+        }
+      } catch (error) {
+        throw this.operationError(
+          operation,
+          "storage_failed",
+          errorMessage(error),
+        );
+      }
+    }
+
+    try {
+      const storage = browserLocalStorage(this.globalObject);
+      if (!storage) {
+        throw new Error("localStorage is unavailable in this browser/runtime");
+      }
+      for (const key of keys) {
+        storage.removeItem(
+          encodeLocalStorageKey(this.namespace, key, this.globalObject),
+        );
+      }
+      return keys.length;
+    } catch (error) {
+      throw this.operationError(
+        operation,
+        "storage_failed",
+        errorMessage(error),
+      );
+    }
+  }
+
+  private decodeJsonRecord<T>(
+    raw: Uint8Array,
+    operation: BrowserServiceWorkerBrokerOperation,
+    parser: (value: unknown) => T,
+    brokerWorkId?: string,
+  ): T {
+    try {
+      const candidate = JSON.parse(
+        browserTextDecoder(this.globalObject).decode(raw),
+      );
+      return parser(candidate);
+    } catch (error) {
+      throw this.operationError(
+        operation,
+        "broker_restart_reconciliation_failed",
+        errorMessage(error),
+        brokerWorkId,
+      );
+    }
+  }
+
+  private async readJsonRecord<T>(
+    key: string,
+    operation: BrowserServiceWorkerBrokerOperation,
+    parser: (value: unknown) => T,
+    brokerWorkId?: string,
+  ): Promise<T | null> {
+    const raw = await this.getRaw(key, operation, brokerWorkId);
+    if (raw === null) {
+      return null;
+    }
+    return this.decodeJsonRecord(raw, operation, parser, brokerWorkId);
+  }
+
+  private async writeJsonRecord(
+    key: string,
+    value: unknown,
+    operation: BrowserServiceWorkerBrokerOperation,
+    brokerWorkId?: string,
+  ): Promise<void> {
+    try {
+      const serialized = JSON.stringify(value);
+      if (serialized === undefined) {
+        throw new TypeError("service-worker broker durable state must be JSON-serializable");
+      }
+      await this.setRaw(
+        key,
+        browserTextEncoder(this.globalObject).encode(serialized),
+        operation,
+        brokerWorkId,
+      );
+    } catch (error) {
+      if (this.isBrokerOperationError(error)) {
+        throw error;
+      }
+      throw this.operationError(
+        operation,
+        "serialization_failed",
+        errorMessage(error),
+        brokerWorkId,
+      );
+    }
+  }
+
+  async readRegistration(): Promise<BrowserServiceWorkerBrokerRegistration | null> {
+    return this.readJsonRecord(
+      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
+      "read_registration",
+      parseBrowserServiceWorkerBrokerRegistration,
+    );
+  }
+
+  async registerBroker(
+    request: BrowserServiceWorkerBrokerRegistrationRequest,
+  ): Promise<BrowserServiceWorkerBrokerRegistration> {
+    const admission = normalizeBrowserServiceWorkerBrokerAdmissionTuple(
+      request.admission,
+    );
+    const support = this.assertSupported({
+      appNamespace: admission.appNamespace,
+      appVersionMajor: admission.appVersionMajor,
+      brokerProtocolVersion: admission.brokerProtocolVersion,
+      controllerPresent: request.controllerPresent,
+      expectedRegistrationScope: admission.registrationScope,
+      runProfile: admission.runProfile,
+    });
+    const existing = await this.readRegistration();
+    const now = Math.max(0, Math.trunc(this.now()));
+    const fallbackTarget = support.fallbackTarget;
+    const registration: BrowserServiceWorkerBrokerRegistration = {
+      contractId: BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
+      requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+      fallbackTarget,
+      fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+      downgradeOrder: [...support.downgradeOrder],
+      backend: this.backend,
+      admission,
+      capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
+        request.capabilityManifestVersion,
+        "service-worker broker capability_manifest_version",
+      ),
+      lifecycleState: normalizeBrowserServiceWorkerBrokerLifecycleState(
+        request.lifecycleState ?? "validating_scope",
+      ),
+      controllerPresent:
+        request.controllerPresent ?? support.controllerPresent,
+      directExecutionReasonCode: support.directExecutionReasonCode,
+      registeredAtMs: existing?.registeredAtMs ?? now,
+      updatedAtMs: now,
+    };
+    await this.writeJsonRecord(
+      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
+      registration,
+      "write_registration",
+    );
+    return registration;
+  }
+
+  async setLifecycleState(
+    lifecycleState: BrowserServiceWorkerBrokerLifecycleState,
+  ): Promise<BrowserServiceWorkerBrokerRegistration | null> {
+    const registration = await this.readRegistration();
+    if (!registration) {
+      return null;
+    }
+    const updated: BrowserServiceWorkerBrokerRegistration = {
+      ...registration,
+      lifecycleState: normalizeBrowserServiceWorkerBrokerLifecycleState(
+        lifecycleState,
+      ),
+      updatedAtMs: Math.max(0, Math.trunc(this.now())),
+    };
+    await this.writeJsonRecord(
+      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
+      updated,
+      "set_lifecycle",
+    );
+    return updated;
+  }
+
+  async clearRegistration(): Promise<boolean> {
+    return this.deleteRaw(
+      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
+      "clear_registration",
+    );
+  }
+
+  async listPendingWork(): Promise<BrowserServiceWorkerBrokerDescriptor[]> {
+    const keys = await this.listNamespaceKeys("list_work");
+    const workKeys = keys.filter((key) =>
+      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX)
+    );
+    const descriptors = await Promise.all(
+      workKeys.map(async (key) => {
+        const brokerWorkId = key.slice(
+          BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX.length,
+        );
+        return this.readJsonRecord(
+          key,
+          "list_work",
+          parseBrowserServiceWorkerBrokerDescriptor,
+          brokerWorkId,
+        );
+      }),
+    );
+    return descriptors
+      .filter(
+        (descriptor): descriptor is BrowserServiceWorkerBrokerDescriptor =>
+          descriptor !== null,
+      )
+      .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  }
+
+  async persistBrokerWork(
+    request: BrowserServiceWorkerBrokerDescriptorRequest,
+  ): Promise<BrowserServiceWorkerBrokerDescriptor> {
+    const registration = await this.readRegistration();
+    if (!registration) {
+      throw this.operationError(
+        "persist_work",
+        "broker_bootstrap_failure",
+        "registerBroker() must succeed before persistBrokerWork() claims durable restartable work.",
+        request.brokerWorkId,
+      );
+    }
+    const brokerWorkId = normalizeBrowserServiceWorkerBrokerString(
+      request.brokerWorkId,
+      "service-worker broker broker_work_id",
+    );
+    const fallbackTarget = normalizeBrowserServiceWorkerBrokerFallbackTarget(
+      request.fallbackTarget,
+      registration.fallbackTarget,
+    );
+    const now = Math.max(0, Math.trunc(this.now()));
+    const existing = await this.readJsonRecord(
+      `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
+      "persist_work",
+      parseBrowserServiceWorkerBrokerDescriptor,
+      brokerWorkId,
+    );
+    const descriptor: BrowserServiceWorkerBrokerDescriptor = {
+      artifactNamespace: normalizeBrowserServiceWorkerBrokerString(
+        request.artifactNamespace,
+        "service-worker broker artifact_namespace",
+      ),
+      brokerWorkId,
+      capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
+        request.capabilityManifestVersion,
+        "service-worker broker capability_manifest_version",
+      ),
+      createdAtMs: existing?.createdAtMs ?? now,
+      fallbackTarget,
+      fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+      idempotencyKey: normalizeBrowserServiceWorkerBrokerString(
+        request.idempotencyKey,
+        "service-worker broker idempotency_key",
+      ),
+      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
+        request.leaseEpoch,
+      ),
+      metadata: normalizeBrowserServiceWorkerBrokerMetadata(request.metadata),
+      requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+      sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
+        request.sourceEventKind,
+        "service-worker broker source_event_kind",
+      ),
+      updatedAtMs: now,
+    };
+    await this.writeJsonRecord(
+      `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${brokerWorkId}`,
+      descriptor,
+      "persist_work",
+      brokerWorkId,
+    );
+    return descriptor;
+  }
+
+  async deleteBrokerWork(brokerWorkId: string): Promise<boolean> {
+    const normalized = normalizeBrowserServiceWorkerBrokerString(
+      brokerWorkId,
+      "service-worker broker broker_work_id",
+    );
+    return this.deleteRaw(
+      `${BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX}${normalized}`,
+      "delete_work",
+      normalized,
+    );
+  }
+
+  async listDurableHandoffs(): Promise<BrowserServiceWorkerBrokerHandoffRecord[]> {
+    const keys = await this.listNamespaceKeys("list_handoffs");
+    const handoffKeys = keys.filter((key) =>
+      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX)
+    );
+    const records = await Promise.all(
+      handoffKeys.map(async (key) => {
+        const brokerWorkId = key.slice(
+          BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX.length,
+        );
+        return this.readJsonRecord(
+          key,
+          "list_handoffs",
+          parseBrowserServiceWorkerBrokerHandoffRecord,
+          brokerWorkId,
+        );
+      }),
+    );
+    return records
+      .filter(
+        (record): record is BrowserServiceWorkerBrokerHandoffRecord =>
+          record !== null,
+      )
+      .sort((left, right) => right.recordedAtMs - left.recordedAtMs);
+  }
+
+  async persistDurableHandoff(
+    request: BrowserServiceWorkerBrokerHandoffRequest,
+  ): Promise<BrowserServiceWorkerBrokerHandoffRecord> {
+    const registration = await this.readRegistration();
+    if (!registration) {
+      throw this.operationError(
+        "persist_handoff",
+        "broker_bootstrap_failure",
+        "registerBroker() must succeed before persistDurableHandoff() records fallback metadata.",
+        request.brokerWorkId,
+      );
+    }
+    const brokerWorkId = normalizeBrowserServiceWorkerBrokerString(
+      request.brokerWorkId,
+      "service-worker broker broker_work_id",
+    );
+    const fallbackTarget = normalizeBrowserServiceWorkerBrokerFallbackTarget(
+      request.fallbackTarget,
+      registration.fallbackTarget,
+    );
+    const targetLane = normalizeBrowserServiceWorkerBrokerFallbackTarget(
+      request.targetLane,
+      fallbackTarget,
+    );
+    const record: BrowserServiceWorkerBrokerHandoffRecord = {
+      artifactNamespace: normalizeBrowserServiceWorkerBrokerString(
+        request.artifactNamespace,
+        "service-worker broker artifact_namespace",
+      ),
+      brokerWorkId,
+      capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
+        request.capabilityManifestVersion,
+        "service-worker broker capability_manifest_version",
+      ),
+      fallbackTarget,
+      fallbackLaneId: browserServiceWorkerBrokerFallbackLaneId(fallbackTarget),
+      idempotencyKey: normalizeBrowserServiceWorkerBrokerString(
+        request.idempotencyKey,
+        "service-worker broker idempotency_key",
+      ),
+      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
+        request.leaseEpoch,
+      ),
+      metadata: normalizeBrowserServiceWorkerBrokerMetadata(request.metadata),
+      reason:
+        (
+          request.reason
+          ?? registration.directExecutionReasonCode
+        ) as BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode,
+      recordedAtMs: Math.max(0, Math.trunc(this.now())),
+      requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+      sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
+        request.sourceEventKind,
+        "service-worker broker source_event_kind",
+      ),
+      targetLane,
+      targetLaneId: browserServiceWorkerBrokerFallbackLaneId(targetLane),
+    };
+    await this.writeJsonRecord(
+      `${BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX}${brokerWorkId}`,
+      record,
+      "persist_handoff",
+      brokerWorkId,
+    );
+    return record;
+  }
+
+  async clearBrokerState(): Promise<number> {
+    return this.clearNamespace("clear_state");
+  }
+}
+
 export class CancellationToken {
   readonly kind: string;
   readonly message?: string;
@@ -4497,6 +6112,14 @@ export function createBrowserArtifactStore(
 ): BrowserArtifactStore {
   const store = new BrowserArtifactStore(options);
   assertBrowserStorageSupport(store.diagnostics());
+  return store;
+}
+
+export function createBrowserServiceWorkerBrokerStore(
+  options: BrowserServiceWorkerBrokerStoreOptions = {},
+): BrowserServiceWorkerBrokerStore {
+  const store = new BrowserServiceWorkerBrokerStore(options);
+  assertBrowserServiceWorkerBrokerSupport(store.diagnostics());
   return store;
 }
 

@@ -36,6 +36,21 @@ The live tree still fail-closes service-worker direct runtime today:
   runtime. This document is a future implementation contract for bounded
   brokering, not a present support claim.
 
+At the same time, the Browser Edition package now exposes a bounded broker API
+that keeps this direct-runtime denial intact:
+
+- `detectBrowserServiceWorkerBrokerSupport()` reports whether the service-worker
+  broker prerequisites are available without claiming that direct runtime is
+  supported in `ServiceWorkerGlobalScope`.
+- `BrowserServiceWorkerBrokerStore` and
+  `createBrowserServiceWorkerBrokerStore()` persist explicit broker
+  registration manifests, pending work descriptors, and durable handoff
+  records.
+- `registerBroker()`, `persistBrokerWork()`, and `persistDurableHandoff()`
+  keep `requested_lane = "lane.browser.service_worker.broker"` and force the
+  fallback target to stay on a dedicated worker, browser main thread, or
+  explicit bridge-only path.
+
 The downgrade promise is non-negotiable: browser reclaim, missing storage,
 scope drift, or capability mismatch may change the selected lane, but must not
 quietly widen the support claim.

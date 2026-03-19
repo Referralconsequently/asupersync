@@ -95,6 +95,44 @@ fn doc_pins_restart_reconciliation_and_capability_reestablishment() {
 }
 
 #[test]
+fn doc_and_browser_package_pin_bounded_broker_exports() {
+    let doc = read_file(DOC_PATH);
+    for marker in [
+        "detectBrowserServiceWorkerBrokerSupport()",
+        "BrowserServiceWorkerBrokerStore",
+        "createBrowserServiceWorkerBrokerStore()",
+        "registerBroker()",
+        "persistBrokerWork()",
+        "persistDurableHandoff()",
+        "lane.browser.service_worker.broker",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "doc missing broker API marker: {marker}"
+        );
+    }
+
+    let browser = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID",
+        "BROWSER_SERVICE_WORKER_BROKER_LANE",
+        "export interface BrowserServiceWorkerBrokerAdmissionTuple",
+        "export interface BrowserServiceWorkerBrokerSupportDiagnostics",
+        "export function detectBrowserServiceWorkerBrokerSupport(",
+        "export class BrowserServiceWorkerBrokerStore",
+        "registerBroker(",
+        "persistBrokerWork(",
+        "persistDurableHandoff(",
+        "createBrowserServiceWorkerBrokerStore(",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser package missing bounded broker marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_package_and_runtime_builder_preserve_service_worker_fail_closed_markers() {
     let browser = read_file("packages/browser/src/index.ts");
     for marker in [
@@ -143,6 +181,14 @@ fn canonical_browser_docs_reference_the_contract_and_current_reason_codes() {
         "WASM guide must preserve the ladder-level service-worker denial reason"
     );
     assert!(
+        wasm.contains("detectBrowserServiceWorkerBrokerSupport()"),
+        "WASM guide must reference the bounded broker support helper"
+    );
+    assert!(
+        wasm.contains("BrowserServiceWorkerBrokerStore"),
+        "WASM guide must reference the bounded broker store"
+    );
+    assert!(
         integration.contains("docs/wasm_service_worker_broker_contract.md"),
         "integration guide must reference the service-worker contract"
     );
@@ -153,6 +199,14 @@ fn canonical_browser_docs_reference_the_contract_and_current_reason_codes() {
     assert!(
         integration.contains("service_worker_not_yet_shipped"),
         "integration guide must use the current browser package reason code"
+    );
+    assert!(
+        integration.contains("registerBroker()"),
+        "integration guide must reference broker registration"
+    );
+    assert!(
+        integration.contains("persistDurableHandoff()"),
+        "integration guide must reference durable handoff"
     );
     assert!(
         troubleshooting.contains("service_worker_not_yet_shipped"),
