@@ -208,7 +208,7 @@ mod tests {
     use std::task::{Poll, Wake, Waker};
 
     thread_local! {
-        static TEST_NOW_NANOS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+        static TEST_NOW_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     struct NoopWaker;
@@ -243,7 +243,7 @@ mod tests {
     }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW_NANOS.with(|t| t.get()))
+        Time::from_nanos(TEST_NOW_NANOS.with(std::cell::Cell::get))
     }
 
     #[test]

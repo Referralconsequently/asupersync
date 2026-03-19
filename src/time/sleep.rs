@@ -317,7 +317,7 @@ impl Sleep {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.completed
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.ready.store(false, Ordering::Release);
+        self.ready = Arc::new(AtomicBool::new(false));
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
@@ -355,7 +355,7 @@ impl Sleep {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.completed
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.ready.store(false, Ordering::Release);
+        self.ready = Arc::new(AtomicBool::new(false));
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
@@ -570,7 +570,8 @@ impl Future for Sleep {
                         // IMPORTANT: We intentionally drop the JoinHandle (detaching the thread)
                         // rather than joining it, so we don't block the executor. OS threads
                         // naturally clean themselves up upon exit.
-                        let duration = self.remaining(now);
+                        let deadline = self.deadline;
+                        let getter = self.time_getter.unwrap_or(wall_now);
                         let state_clone = Arc::clone(&self.state);
 
                         let stop = Arc::new(AtomicBool::new(false));
@@ -581,20 +582,15 @@ impl Future for Sleep {
                         // ubs:ignore - intentional detach by dropping JoinHandle in Drop to avoid blocking executor
                         let handle = std::thread::spawn(move || {
                             // Allow prompt cancellation via `unpark()`.
-                            let start = Instant::now();
-                            let mut remaining = duration;
                             while !stop_for_thread.load(Ordering::Acquire) {
-                                if remaining > Duration::ZERO {
-                                    std::thread::park_timeout(remaining);
-                                }
-                                if stop_for_thread.load(Ordering::Acquire) {
-                                    return;
-                                }
-                                let elapsed = start.elapsed();
-                                if elapsed >= duration {
+                                let current = getter();
+                                if current >= deadline {
                                     break;
                                 }
-                                remaining = duration.saturating_sub(elapsed);
+                                let remaining =
+                                    deadline.as_nanos().saturating_sub(current.as_nanos());
+                                let park_dur = Duration::from_nanos(remaining);
+                                std::thread::park_timeout(park_dur);
                             }
 
                             if stop_for_thread.load(Ordering::Acquire) {

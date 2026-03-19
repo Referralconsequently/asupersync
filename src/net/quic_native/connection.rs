@@ -594,6 +594,11 @@ impl NativeQuicConnection {
     }
 
     fn ensure_data_state(&self) -> Result<(), NativeQuicConnectionError> {
+        if self.transport.state() == QuicConnectionState::Closed {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "connection is closed",
+            ));
+        }
         if !self.can_send_1rtt() {
             return Err(NativeQuicConnectionError::InvalidState(
                 "1-RTT traffic not yet enabled",
@@ -1229,7 +1234,7 @@ mod tests {
             .expect_err("must fail after close");
         assert_eq!(
             err,
-            NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+            NativeQuicConnectionError::InvalidState("connection is closed")
         );
     }
 
@@ -1241,7 +1246,7 @@ mod tests {
         let err = conn.open_local_bidi(&cx).expect_err("must fail");
         assert_eq!(
             err,
-            NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+            NativeQuicConnectionError::InvalidState("connection is closed")
         );
     }
 
@@ -1256,7 +1261,7 @@ mod tests {
             .expect_err("must fail after close");
         assert_eq!(
             err,
-            NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+            NativeQuicConnectionError::InvalidState("connection is closed")
         );
     }
 

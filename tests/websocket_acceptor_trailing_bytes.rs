@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use asupersync::cx::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::websocket::{Message, WebSocketAcceptor};

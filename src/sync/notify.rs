@@ -1215,4 +1215,23 @@ mod tests {
         );
         crate::test_complete!("notify_waiters_does_not_store_token_when_no_waiters");
     }
+
+    #[test]
+    fn test_spurious_wakeup_bug() {
+        let notify = Notify::new();
+        let mut fut1 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+
+        notify.notify_waiters();
+
+        let mut fut2 = notify.notified();
+        assert!(poll_once(&mut fut2).is_pending());
+
+        drop(fut1);
+
+        // If fut2 is now ready, it means the drop of a broadcast-woken waiter
+        // spuriously woke fut2!
+        let is_ready = poll_once(&mut fut2).is_ready();
+        assert!(!is_ready, "Spurious wakeup detected!");
+    }
 }

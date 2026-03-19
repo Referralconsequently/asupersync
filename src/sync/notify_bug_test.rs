@@ -32,5 +32,5 @@ fn main() {
     // If fut2 is now ready, it means the drop of a broadcast-woken waiter
     // spuriously woke fut2!
     let is_ready = poll_once(&mut fut2).is_ready();
-    println!("Spurious wakeup? {}", is_ready);
+    assert!(!is_ready, "Spurious wakeup detected!");
 }

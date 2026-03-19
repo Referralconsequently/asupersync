@@ -690,6 +690,7 @@ impl HttpRequest {
     /// # Errors
     ///
     /// Returns `HandshakeError::InvalidRequest` if parsing fails.
+    #[allow(clippy::option_if_let_else)]
     pub fn parse_with_trailing(data: &[u8]) -> Result<(Self, &[u8]), HandshakeError> {
         let (header_bytes, trailing) =
             if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
