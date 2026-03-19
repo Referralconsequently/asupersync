@@ -143,8 +143,8 @@ fn brokerless_fabric_foundation_stays_narrow_until_higher_layers_land() {
 
     for expected in [
         "The goal of this module is deliberately narrow",
-        "does not attempt to implement the full control log, cursor leasing, or",
-        "stream semantics yet.",
+        "does not attempt to implement the",
+        "full distributed data plane, federation, or consumer semantics yet.",
     ] {
         assert!(
             content.contains(expected),
