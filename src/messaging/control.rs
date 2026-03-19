@@ -664,6 +664,14 @@ pub enum ControlRegistryError {
         /// The offending subject pattern.
         pattern: String,
     },
+    /// The subject pattern is not scoped to the declared family.
+    #[error("control subject `{pattern}` does not belong to family `{family}`")]
+    FamilyMismatch {
+        /// The declared family for the handler.
+        family: SystemSubjectFamily,
+        /// The offending subject pattern.
+        pattern: String,
+    },
     /// A handler with the same ID is already registered.
     #[error("duplicate handler id: {id}")]
     DuplicateId {
@@ -711,8 +719,9 @@ impl ControlRegistry {
 
     /// Register a control handler.
     ///
-    /// The pattern must start with `$SYS.FABRIC.`; otherwise
-    /// [`ControlRegistryError::InvalidPrefix`] is returned.
+    /// The pattern must start with `$SYS.FABRIC.` and remain scoped to the
+    /// declared family; otherwise [`ControlRegistryError::InvalidPrefix`] or
+    /// [`ControlRegistryError::FamilyMismatch`] is returned.
     pub fn register(
         &mut self,
         family: SystemSubjectFamily,
@@ -724,6 +733,17 @@ impl ControlRegistry {
         let pat_str = pattern.as_str();
         if !pat_str.starts_with("$SYS.FABRIC.") {
             return Err(ControlRegistryError::InvalidPrefix {
+                pattern: pat_str.to_owned(),
+            });
+        }
+        let family_prefix = family.prefix();
+        if pat_str != family_prefix
+            && !pat_str
+                .strip_prefix(&family_prefix)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        {
+            return Err(ControlRegistryError::FamilyMismatch {
+                family,
                 pattern: pat_str.to_owned(),
             });
         }
@@ -983,6 +1003,44 @@ mod tests {
     }
 
     #[test]
+    fn register_rejects_family_mismatch() {
+        let mut registry = ControlRegistry::new();
+        let result = registry.register(
+            SystemSubjectFamily::Health,
+            SubjectPattern::new("$SYS.FABRIC.AUTH.>"),
+            ControlBudget::default(),
+            AdvisoryDampingPolicy::default(),
+            false,
+        );
+        match result.expect_err("family mismatch must fail") {
+            ControlRegistryError::FamilyMismatch { family, pattern } => {
+                assert_eq!(family, SystemSubjectFamily::Health);
+                assert_eq!(pattern, "$SYS.FABRIC.AUTH.>");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn register_rejects_similar_prefix_outside_family_boundary() {
+        let mut registry = ControlRegistry::new();
+        let result = registry.register(
+            SystemSubjectFamily::Health,
+            SubjectPattern::new("$SYS.FABRIC.HEALTHY.>"),
+            ControlBudget::default(),
+            AdvisoryDampingPolicy::default(),
+            false,
+        );
+        match result.expect_err("family boundary mismatch must fail") {
+            ControlRegistryError::FamilyMismatch { family, pattern } => {
+                assert_eq!(family, SystemSubjectFamily::Health);
+                assert_eq!(pattern, "$SYS.FABRIC.HEALTHY.>");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
     fn break_glass_registration() {
         let mut registry = ControlRegistry::new();
         let bg_id = registry
@@ -1068,6 +1126,24 @@ mod tests {
         assert_eq!(registry.break_glass_handlers().len(), 1);
         registry.unregister(bg_id);
         assert!(registry.break_glass_handlers().is_empty());
+    }
+
+    #[test]
+    fn unregister_one_break_glass_preserves_remaining_handlers() {
+        let mut registry = ControlRegistry::new();
+        let health = registry
+            .register_break_glass(SystemSubjectFamily::Health)
+            .expect("health break-glass");
+        let drain = registry
+            .register_break_glass(SystemSubjectFamily::Drain)
+            .expect("drain break-glass");
+
+        assert!(registry.unregister(health));
+
+        let remaining = registry.break_glass_handlers();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, drain);
+        assert_eq!(remaining[0].family, SystemSubjectFamily::Drain);
     }
 
     #[test]
@@ -1638,6 +1714,32 @@ mod tests {
         let ids: Vec<_> = matches.iter().map(|h| h.id).collect();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    #[test]
+    fn family_scoped_pattern_routes_only_within_declared_prefix() {
+        let mut registry = ControlRegistry::new();
+        let narrow = registry
+            .register(
+                SystemSubjectFamily::Health,
+                SubjectPattern::new("$SYS.FABRIC.HEALTH.break_glass.>"),
+                ControlBudget::default(),
+                AdvisoryDampingPolicy::default(),
+                false,
+            )
+            .expect("narrow register");
+        let wildcard = registry
+            .register_default(SystemSubjectFamily::Health)
+            .expect("wildcard register");
+
+        let narrow_matches =
+            registry.matching_handlers(&Subject::new("$SYS.FABRIC.HEALTH.break_glass.activate"));
+        let narrow_ids: Vec<_> = narrow_matches.iter().map(|handler| handler.id).collect();
+        assert_eq!(narrow_ids, vec![narrow, wildcard]);
+
+        let general_matches = registry.matching_handlers(&Subject::new("$SYS.FABRIC.HEALTH.probe"));
+        let general_ids: Vec<_> = general_matches.iter().map(|handler| handler.id).collect();
+        assert_eq!(general_ids, vec![wildcard]);
     }
 
     #[test]
