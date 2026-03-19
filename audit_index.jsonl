@@ -1095,3 +1095,4 @@
 {"file":"src/messaging/capability/mod.rs","lines":445,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/compiler.rs","lines":147,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/explain.rs","lines":89,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/session/contract.rs","lines":1182,"batch":376,"date":"2026-03-19","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
