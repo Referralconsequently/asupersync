@@ -275,6 +275,81 @@ This policy inherits retention and redaction defaults from `docs/replay-debuggin
 
 This document does not define a second retention regime.
 
+## Divergence Corpus Registry
+
+Retained mismatches must also be recorded in a machine-readable registry so
+future contributors can shrink, replay, and promote the case without manual
+archaeology. The canonical schema id is:
+
+- `lab-live-divergence-corpus-v1`
+
+Each registry entry must record at least:
+
+- `entry_id`
+- `scenario_id`
+- `surface_id`
+- `surface_contract_version`
+- `divergence_class`
+- `policy_class`
+- `first_seen.runner_profile`
+- `first_seen.attempt_index`
+- `first_seen.rerun_count`
+- `seed_lineage`
+- `minimization_lineage`
+- `artifact_bundle`
+- `regression_promotion_state`
+- `retention.bundle_level`
+- `retention.local_retention_days`
+- `retention.ci_retention_days`
+- `retention.redaction_mode`
+
+### Stable Artifact Bundle Layout
+
+When an entry points at a retained bundle, the bundle root must expand into the
+same stable file set used by the broader differential program:
+
+- `differential_summary.json`
+- `differential_event_log.jsonl`
+- `differential_failures.json`
+- `differential_deviations.json`
+- `differential_repro_manifest.json`
+- `lab_normalized.json`
+- `live_normalized.json`
+
+### Lifecycle and Promotion Rules
+
+`regression_promotion_state` must follow an explicit lifecycle instead of ad-hoc
+operator notes:
+
+- `investigating`: first-seen divergence retained with its original lineage
+- `minimized`: a shrinker produced a smaller reproducer that preserved the same
+  divergence/policy class
+- `promoted_regression`: the minimized or original case was admitted into the
+  durable regression corpus
+- `known_open`: retained for forensics, but intentionally not promoted yet
+- `rejected`: explicitly excluded because shrink/promotion did not preserve the
+  semantic claim
+
+`minimization_lineage` must preserve semantic meaning, not merely shrink event
+count or bytes. At minimum it must record:
+
+- `original_seed`
+- `minimized_seed` when available
+- `shrinker`
+- `shrink_status`
+- whether the minimized case preserved the same divergence class
+- whether the minimized case preserved the same policy class
+
+### Bundle Strength Mapping
+
+The registry must mirror the retention strength already implied by the policy
+class:
+
+- `runtime_semantic_bug`, `lab_model_or_mapping_bug`, `artifact_schema_violation`,
+  and `irreproducible_divergence` require `retention.bundle_level = full`
+- `insufficient_observability`, `unsupported_surface`, and
+  `scheduler_noise_suspected` require `retention.bundle_level = reduced`
+
 ## Diagnostic Evidence Mapping
 
 `trace::divergence::DivergenceCategory` is diagnostic evidence, not the final policy label.

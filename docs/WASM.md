@@ -276,6 +276,50 @@ Every persisted `repro_command` must include the tokens `--lane`,
 `--host-role`, and `--reason` exactly so logs and fixtures can be compared
 mechanically.
 
+### Optional-lane operator decision inputs
+
+Treat every advanced browser lane as an explicit operator decision, not as an
+ambient runtime upgrade. The minimum decision tuple is:
+
+1. `support_class`
+2. `reason_code`
+3. `fallback_lane_id`
+4. `lane_health_status`
+5. `lane_health_failure_count`
+6. `lane_health_retry_budget_remaining`
+7. `lane_health_cooldown_until_ms`
+8. `lane_health_last_trigger`
+9. `demoted_lane_id`
+10. `repro_command`
+11. the surface ceiling from `docs/wasm_release_channel_strategy.md`
+
+Interpret the tuple with this law:
+
+- `direct_runtime_supported` + `supported` only means the current host may
+  attempt the lane. It does not authorize a `stable` claim unless the
+  surface-specific ceiling and evidence bundle are green.
+- `candidate_prerequisite_missing` is a current-window no-go. Keep the lane at
+  `preview_only`, `guarded canary-only`, or `nightly-only` until the missing
+  prerequisite is explicit in logs and operator evidence.
+- `candidate_lane_unhealthy` or `demote_due_to_lane_health` means the lane has
+  already tripped health policy. Publish the fallback lane as the truth and do
+  not widen exposure until a fresh green evidence window exists.
+- Any `downgrade_*` reason means operators must communicate the fallback as the
+  supported path, not as a soft warning or temporary caveat.
+- Any `policy_denial` or `unsupported` reason keeps the lane disabled or
+  fail-closed regardless of package pressure or channel ambitions.
+
+Use this shorthand when reading Browser Edition diagnostics:
+
+| Surface | Highest truthful public label today | Healthy tuple required before widening exposure | Immediate operator action when tuple is not healthy |
+|---|---|---|---|
+| Dedicated worker direct-runtime lane | may be `stable` when the worker evidence bundle stays green | `support_class=direct_runtime_supported`, `reason_code=supported`, `lane_health_status=healthy`, no demotion marker | keep browser main-thread direct runtime as the stable fallback and treat worker-specific regressions as lane-local until worker evidence recovers |
+| `WebTransport` datagrams | `guarded canary-only` | direct-runtime support plus explicit `WebTransport` prerequisite satisfaction and healthy lane state | fall back to `WebSocket` or `fetch` when the tuple carries `candidate_prerequisite_missing`, `downgrade_to_websocket_or_fetch`, or any lane-health demotion |
+| Rust-authored browser path | `preview_only` | maintained fixture evidence plus a public Rust-callable builder path, not just substrate feasibility | keep public docs on the JS/TS Browser Edition or bridge path; do not imply public Rust browser bootstrap support |
+| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `preview_only` | a future public SDK export plus explicit API contract tests | keep these surfaces at the application boundary or reactor substrate; do not market them as shipped Browser Edition APIs |
+| `SharedArrayBuffer` / worker offload / parallel executor lanes | `nightly-only` | explicit cross-origin isolation, worker-offload policy green, replay/perf evidence green, and no lane-health demotion | disable the lane immediately on missing isolation, replay drift, chaos regression, or performance instability; preserve the single-threaded browser runtime as the supported default |
+| Service-worker or shared-worker direct runtime | `unsupported` today | not applicable until their dedicated bounded contracts are implemented and promoted | fail closed and route operators to the broker / tenancy contracts instead of pretending direct runtime is already shipped |
+
 Explicit non-goals of the current ladder contract:
 
 - `service_worker_general_runtime_without_bounded_broker_contract`

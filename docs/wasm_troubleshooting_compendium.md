@@ -385,6 +385,96 @@ Expected operator action:
    to `WebSocket` or `fetch` unless and until the deployment/runtime satisfies
    the guarded prerequisites.
 
+### K. Optional-Lane Rollout, Demotion, and No-Go Policy
+
+Use when the question is not "which command failed?" but "is this advanced lane
+allowed to widen exposure at all?"
+
+Read the latest ladder decision tuple first:
+
+1. `support_class`
+2. `reason_code`
+3. `fallback_lane_id`
+4. `lane_health_status`
+5. `lane_health_failure_count`
+6. `lane_health_retry_budget_remaining`
+7. `lane_health_cooldown_until_ms`
+8. `lane_health_last_trigger`
+9. `demoted_lane_id`
+10. `repro_command`
+11. `policy_schema_version`
+
+Then compare the surface against its ceiling in
+`docs/wasm_release_channel_strategy.md`.
+
+Deterministic command bundle:
+
+```bash
+python3 scripts/check_wasm_worker_offload_policy.py \
+  --policy .github/wasm_worker_offload_policy.json
+
+python3 scripts/check_wasm_benchmark_corpus.py \
+  --policy .github/wasm_benchmark_corpus.json
+
+python3 scripts/check_perf_regression.py \
+  --budgets .github/wasm_perf_budgets.json \
+  --profile core-min
+
+rch exec -- ./scripts/run_perf_e2e.sh \
+  --bench phase0_baseline \
+  --bench scheduler_benchmark \
+  --seed 42 \
+  --metric p95_ns
+
+rch exec -- bash ./scripts/run_nightly_stress_soak.sh \
+  --ci \
+  --suites cancellation_stress,scheduler_fairness \
+  --timeout 3600
+
+rch exec -- cargo test --test wasm_browser_feasibility_matrix -- --nocapture
+rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+```
+
+Required evidence to capture:
+
+- `artifacts/wasm_worker_offload_summary.json`
+- `artifacts/wasm_benchmark_corpus_summary.json`
+- `artifacts/wasm_perf_regression_report.json`
+- `artifacts/wasm_perf_gate_events.ndjson`
+- `target/nightly-stress/<run_id>/trend_report.json`
+- `target/nightly-stress/<run_id>/run_manifest.json`
+- the latest lane log or diagnostic blob containing `support_class`,
+  `reason_code`, `fallback_lane_id`, `lane_health_status`,
+  `lane_health_failure_count`, `lane_health_retry_budget_remaining`,
+  `lane_health_last_trigger`, `demoted_lane_id`, and `repro_command`
+
+Decision table:
+
+| Surface family | Truthful ceiling today | Green-light conditions | Mandatory no-go / demotion trigger |
+|---|---|---|---|
+| Dedicated-worker direct runtime | may reach `stable` | `support_class=direct_runtime_supported`, `reason_code=supported`, lane health is healthy, and worker artifacts are green in the same window | any worker-only lane-health demotion, missing worker onboarding/consumer evidence, or a regression that forces fallback to the browser main thread |
+| `WebTransport` datagrams | `guarded canary-only` | HTTPS/HTTP3 prerequisites hold, diagnostics remain healthy, and docs/tests still point to `WebSocket` / `fetch` as the fallback | `candidate_prerequisite_missing`, `downgrade_to_websocket_or_fetch`, handshake/datagram rejection, or missing fallback guidance |
+| Rust-authored browser path | `preview_only` | maintained fixture evidence is green and the public Rust-callable builder lane actually exists | any attempt to present the lane as public/stable while it remains repository-maintained only |
+| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `preview_only` | public SDK exports and explicit API contract tests exist | any claim that the shipped Browser Edition SDK already exports these surfaces as stable runtime lanes |
+| `SharedArrayBuffer` / worker offload / parallel executor lanes | `nightly-only` | cross-origin isolation is proven, worker-offload policy is green, replay and perf artifacts are green, and nightly stress/soak trends are clean | `shared_array_buffer_requires_cross_origin_isolation`, any replay drift, any perf regression, any stress/soak regression, or any lane-health demotion |
+
+Interpretation order:
+
+1. If the surface asks for a label above its ceiling (`preview_only`,
+   `guarded canary-only`, or `nightly-only`), stop: that is already `NO_GO`.
+2. If `support_class` is `bridge_only` or `unsupported`, publish the fallback
+   or fail-closed path as the supported behavior. Do not widen exposure.
+3. If `reason_code` is `candidate_prerequisite_missing`,
+   `candidate_lane_unhealthy`, or `demote_due_to_lane_health`, keep the lane
+   in its lowered state until a fresh green evidence bundle exists.
+4. If the lane is performance- or chaos-sensitive, require both
+   `artifacts/wasm_perf_regression_report.json` and
+   `target/nightly-stress/<run_id>/trend_report.json` before retrying.
+5. If the lane reaches users only through a downgrade
+   (`downgrade_to_websocket_or_fetch`,
+   `downgrade_to_export_bytes_for_download`, bridge-only targets), describe the
+   downgraded path as the actual supported product behavior.
+
 ## Escalation Rules
 
 Escalate immediately if any condition holds:

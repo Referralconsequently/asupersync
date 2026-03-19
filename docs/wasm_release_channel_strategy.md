@@ -143,6 +143,68 @@ that matches the live support bucket in `docs/WASM.md`.
 | Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `Direct-runtime feasible but not yet shipped as public Browser Edition APIs` | `preview_only`; no `stable` promotion while the public SDK intentionally does not export them | `docs/wasm_api_surface_census.md`, `docs/WASM.md`, public API contract tests once the SDK exports land | revert to application-boundary-only guidance and remove any public Browser Edition support claim |
 | `SharedArrayBuffer` / worker offload / parallel executor lanes | `Guarded optional, not shipped` | `nightly-only` or explicitly marked preview experiments; never default `stable` | closure of `asupersync-2jhnk.2`, `asupersync-2jhnk.3`, `asupersync-2jhnk.4`, and `asupersync-2jhnk.5`, plus cross-origin-isolation, replay, chaos, and performance evidence | disable the lane immediately and demote `canary -> nightly`; preserve the single-threaded browser runtime as the only supported default |
 
+## Optional-Lane Operator Decision Law
+
+The table above defines ceilings. This section defines the operator law for
+whether a lane is actually eligible to widen exposure inside that ceiling.
+
+Every optional-lane decision record must capture these fields from the latest
+diagnostic or ladder log:
+
+- `support_class`
+- `reason_code`
+- `fallback_lane_id`
+- `lane_health_status`
+- `lane_health_failure_count`
+- `lane_health_retry_budget_remaining`
+- `lane_health_cooldown_until_ms`
+- `lane_health_last_trigger`
+- `demoted_lane_id`
+- `repro_command`
+- `policy_schema_version`
+
+Interpret the latest tuple with this state machine:
+
+| Observed tuple | Allowed external label | Required operator action |
+|---|---|---|
+| `support_class=direct_runtime_supported`, `reason_code=supported`, `lane_health_status=healthy` | may follow the surface ceiling from the vNext table | verify the surface-specific artifacts are green in the same decision window before widening exposure |
+| `support_class=direct_runtime_supported`, `reason_code=candidate_prerequisite_missing` | hold at `preview_only`, `guarded canary-only`, or `nightly-only` | publish the missing prerequisite, keep fallback guidance explicit, and block promotion until the next green evidence window |
+| any `candidate_lane_unhealthy` or `demote_due_to_lane_health` result | demote one level below the requested channel; never claim `stable` during the unhealthy window | treat the lane as failed over, preserve the fallback path, and require fresh replay/perf/support evidence before retrying |
+| `support_class=bridge_only` with `downgrade_to_server_bridge`, `downgrade_to_edge_bridge`, `downgrade_to_websocket_or_fetch`, or `downgrade_to_export_bytes_for_download` | `bridge_only` or the named fallback only | release notes and diagnostics must describe the downgrade as the supported path, not as degraded direct-runtime parity |
+| any `policy_denial` or `unsupported` reason (`service_worker_direct_runtime_not_shipped`, `shared_worker_direct_runtime_not_shipped`, `shared_array_buffer_requires_cross_origin_isolation`, `unsupported_runtime_context`) | keep the lane disabled, `preview_only`, or `nightly-only` per the vNext table | treat the request as `NO_GO` for wider rollout and keep the fail-closed or downgraded path in place |
+
+Mandatory evidence bundle before promoting or re-enabling an optional lane:
+
+1. the latest ladder log with `support_class`, `reason_code`,
+   `fallback_lane_id`, `lane_health_status`, `lane_health_failure_count`,
+   `lane_health_retry_budget_remaining`, `lane_health_last_trigger`,
+   `demoted_lane_id`, and `repro_command`,
+2. `python3 scripts/check_wasm_worker_offload_policy.py --policy .github/wasm_worker_offload_policy.json`
+   producing `artifacts/wasm_worker_offload_summary.json`,
+3. `python3 scripts/check_wasm_benchmark_corpus.py --policy .github/wasm_benchmark_corpus.json`
+   producing `artifacts/wasm_benchmark_corpus_summary.json`,
+4. `python3 scripts/check_perf_regression.py --budgets .github/wasm_perf_budgets.json --profile core-min`
+   producing `artifacts/wasm_perf_regression_report.json` and
+   `artifacts/wasm_perf_gate_events.ndjson`,
+5. `rch exec -- ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark --seed 42 --metric p95_ns`
+   or the surface-specific benchmark corpus repro command for the candidate,
+6. `rch exec -- bash ./scripts/run_nightly_stress_soak.sh --ci --suites cancellation_stress,scheduler_fairness --timeout 3600`
+   with `target/nightly-stress/<run_id>/trend_report.json`,
+7. the surface-specific artifacts from the vNext table plus
+   `docs/WASM.md` and `docs/wasm_troubleshooting_compendium.md`.
+
+Automatic `NO_GO` triggers for optional lanes:
+
+1. a surface asks for a label above its ceiling (`preview_only`,
+   `guarded canary-only`, or `nightly-only`),
+2. `lane_health_status` is not healthy or retry budget is exhausted,
+3. cross-origin isolation is missing for any `SharedArrayBuffer` or worker
+   offload lane,
+4. fallback guidance is missing for `WebTransport`, worker artifact export, or
+   any bridge-only downgrade,
+5. any replay, performance, benchmark-corpus, or nightly stress artifact is
+   missing, stale, or not attributable to the reviewed candidate.
+
 ## Promotion Rules
 
 `nightly -> canary` promotion requires:
@@ -219,7 +281,11 @@ Demotion actions:
    `bash scripts/validate_npm_pack_smoke.sh`.
 7. Confirm onboarding summaries plus QA smoke bundle/summary artifacts for the
    same candidate are present and non-empty.
-8. Publish promotion decision with command + artifact pointers.
+8. For any optional lane, attach the latest decision tuple
+   (`support_class`, `reason_code`, `fallback_lane_id`, lane-health fields,
+   and `repro_command`) plus the optional-lane evidence bundle before
+   widening exposure.
+9. Publish promotion decision with command + artifact pointers.
 
 ## Traceability and Audit Fields
 
