@@ -83,6 +83,8 @@ pub mod kafka;
 pub mod kafka_consumer;
 pub mod nats;
 pub mod redis;
+#[cfg(feature = "messaging-fabric")]
+pub mod subject;
 
 #[cfg(feature = "messaging-fabric")]
 pub use class::{
