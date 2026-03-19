@@ -285,10 +285,11 @@ Explicit non-goals of the current ladder contract:
 - `raw_socket_filesystem_process_parity`
 
 This is stricter than the broad feasibility matrix on purpose. Service-worker
-direct runtime still remains fail-closed until its bounded broker contract
-exists. Shared-worker direct runtime now has a dedicated tenancy/lifecycle
-contract in `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`, but the
-shipped execution ladder must still fail closed there until that contract is
+direct runtime still remains fail-closed until its bounded broker contract in
+`docs/wasm_service_worker_broker_contract.md` is implemented and promoted.
+Shared-worker direct runtime now has a dedicated tenancy/lifecycle contract in
+`docs/wasm_shared_worker_tenancy_lifecycle_contract.md`, but the shipped
+execution ladder must still fail closed there until that contract is
 implemented and promoted.
 
 ### Runtime contexts
@@ -297,7 +298,7 @@ implemented and promoted.
 |---|---|---|---|
 | Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported | `packages/browser/src/index.ts`, `tests/wasm_js_exports_coverage_contract.rs` | Primary shipped JS/TS Browser Edition lane |
 | Dedicated Web Worker (`DedicatedWorkerGlobalScope`) | Direct-runtime supported | `packages/browser/src/index.ts`, `asupersync-browser-core/src/lib.rs`, `tests/wasm_js_exports_coverage_contract.rs` | Shipped: SDK detects `DedicatedWorkerGlobalScope`, fetch routes through `WorkerGlobalScope.fetch()`; examples and QA are catching up |
-| Service worker direct runtime | Direct-runtime feasible but not yet shipped | `packages/browser/src/index.ts` currently accepts only main-thread DOM or dedicated worker globals | Deferred until a bounded broker and persistence contract is promoted explicitly |
+| Service worker direct runtime | Direct-runtime feasible but not yet shipped | `packages/browser/src/index.ts` detects service-worker-like hosts and returns `service_worker_not_yet_shipped`; `src/runtime/builder.rs` maps `ServiceWorkerGlobalScope` to `service_worker_direct_runtime_not_shipped` | Governed by `docs/wasm_service_worker_broker_contract.md`; the future lane is bounded broker/orchestration only, not direct-runtime parity, and must remain fail-closed until that contract is implemented and promoted |
 | Shared worker direct runtime | Direct-runtime feasible but not yet shipped | `src/runtime/builder.rs` explicitly detects `SharedWorkerGlobalScope` and returns `shared_worker_direct_runtime_not_shipped`; `packages/browser/src/index.ts` still rejects it as an unsupported direct-runtime host | Governed by `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`; must remain fail-closed until the tenancy/lifecycle/downgrade contract is implemented and promoted |
 | Node / SSR / edge direct runtime via `@asupersync/browser` | Impossible for direct browser runtime; bridge-only or unsupported | `packages/browser/src/index.ts`, `packages/next/src/index.ts` | Browser package fails closed; Next diagnostics classify server/edge as bridge-only targets |
 | Rust-authored `wasm32-unknown-unknown` consumer path | Direct-runtime feasible but not yet shipped | semantic core is target-agnostic; `asupersync` supports canonical browser profiles and the repository ships `asupersync-browser-core` / `asupersync-wasm`, but `src/runtime/builder.rs` still exposes no public Rust-callable browser runtime builder path | Planned lane, not current public support |
@@ -568,8 +569,9 @@ The current browser runtime model (Phase 1) is:
 - **No multi-threading by default**: the Phase 1 browser runtime is
   single-threaded. Supported direct-runtime lanes are the browser main thread
   and a single dedicated Web Worker; service-worker/shared-worker lanes remain
-  deferred. True parallelism requires additional workers plus the Phase 2
-  model below.
+  deferred behind `docs/wasm_service_worker_broker_contract.md` and
+  `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`. True parallelism
+  requires additional workers plus the Phase 2 model below.
 
 ### Cross-origin isolation for SharedArrayBuffer
 

@@ -128,8 +128,9 @@ Evidence to capture:
   - `ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME`
   - `ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME`
   - `ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME`
-- `diagnostics.reason` (`missing_global_this`, `missing_browser_dom`,
-  `missing_webassembly`, or `supported`)
+- `diagnostics.reason` (`missing_global_this`,
+  `service_worker_not_yet_shipped`, `shared_worker_not_yet_shipped`,
+  `unsupported_runtime_context`, `missing_webassembly`, or `supported`)
 - capability snapshot (`hasWindow`, `hasDocument`, `hasWebAssembly`,
   `hasAbortController`, `hasFetch`, `hasWebSocket`)
 - Next target (`client`, `server`, `edge`) if the failure came through

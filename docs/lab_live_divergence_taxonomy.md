@@ -356,6 +356,7 @@ This document is normative for:
 |---|---|
 | `asupersync-2a6k9.2.*` | scenario runners must emit enough evidence to support these classes |
 | `asupersync-2a6k9.4.*` | live evidence capture must retain the fields this policy needs |
+| `asupersync-2a6k9.4.4` | timing and scheduler-noise qualification must refine how `scheduler_noise_suspected`, `TimeDivergence`, and `TimerMismatch` are interpreted |
 | `asupersync-2a6k9.5.*` | comparator outputs must produce one of these final policy classes |
 | `asupersync-2a6k9.6.*` | pilot suites must treat scope and escalation rules here as binding |
 | `asupersync-2a6k9.7.*` | CI and stress lanes must wire gate behavior to these classes rather than inventing new verdict labels |

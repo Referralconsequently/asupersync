@@ -246,7 +246,7 @@ Recommended fields:
 | `repro_manifest` | replay manifest or bundle manifest path | workload bundle or repro manifest path |
 | `config_hash` | lab config summary hash when available | live config hash when available |
 
-Fields such as `now_nanos`, `steps_delta`, and oracle check timestamps may be preserved in local artifacts, but they are provenance-only and must not create semantic mismatches on their own.
+Fields such as `now_nanos`, `steps_delta`, and oracle check timestamps may be preserved in local artifacts, but they are provenance-only and must not create semantic mismatches on their own. Promotion of any time-related provenance field is governed by `docs/lab_live_time_normalization_policy.md`, not by ad hoc suite logic.
 
 ## Mapping Rules
 
@@ -298,6 +298,7 @@ Normative live mapping requirements:
 4. `region_close` must only report `quiescent = true` when the owning scope or scenario boundary has no live child work remaining.
 5. `obligation_balance` must come from a real ledger, counter set, or witness stream that can distinguish `committed`, `aborted`, `leaked`, and `unresolved`.
 6. If a live surface cannot produce a required semantic field, that surface is not yet comparison-ready and must fail contract validation rather than silently dropping the field.
+7. Time and scheduler-local fields remain provenance-only unless `docs/lab_live_time_normalization_policy.md` explicitly promotes them through a scenario clock and normalization rule.
 
 ## Explicit Non-Goals
 
@@ -414,6 +415,7 @@ Any future contract tests for this schema must at minimum verify:
 - `docs/tokio_differential_behavior_suites.md`
 - `docs/runtime_workload_corpus_contract.md`
 - `docs/semantic_verification_log_schema.md`
+- `docs/lab_live_time_normalization_policy.md`
 - `src/lab/runtime.rs`
 - `src/lab/scenario_runner.rs`
 - `src/lab/oracle/mod.rs`
