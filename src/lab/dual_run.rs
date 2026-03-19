@@ -1218,6 +1218,22 @@ pub fn compare_observables(
             live_value: live.scenario_id.clone(),
         });
     }
+    if lab.surface_id != live.surface_id {
+        mismatches.push(SemanticMismatch {
+            field: "surface_id".to_string(),
+            description: "Surface ID mismatch".to_string(),
+            lab_value: lab.surface_id.clone(),
+            live_value: live.surface_id.clone(),
+        });
+    }
+    if lab.surface_contract_version != live.surface_contract_version {
+        mismatches.push(SemanticMismatch {
+            field: "surface_contract_version".to_string(),
+            description: "Surface contract version mismatch".to_string(),
+            lab_value: lab.surface_contract_version.clone(),
+            live_value: live.surface_contract_version.clone(),
+        });
+    }
 
     // Terminal outcome
     compare_terminal_outcome(
@@ -1305,6 +1321,22 @@ fn compare_terminal_outcome(
             description: "Error class mismatch".to_string(),
             lab_value: format!("{:?}", lab.error_class),
             live_value: format!("{:?}", live.error_class),
+        });
+    }
+    if lab.cancel_reason_class != live.cancel_reason_class {
+        mismatches.push(SemanticMismatch {
+            field: "semantics.terminal_outcome.cancel_reason_class".to_string(),
+            description: "Cancel reason class mismatch".to_string(),
+            lab_value: format!("{:?}", lab.cancel_reason_class),
+            live_value: format!("{:?}", live.cancel_reason_class),
+        });
+    }
+    if lab.panic_class != live.panic_class {
+        mismatches.push(SemanticMismatch {
+            field: "semantics.terminal_outcome.panic_class".to_string(),
+            description: "Panic class mismatch".to_string(),
+            lab_value: format!("{:?}", lab.panic_class),
+            live_value: format!("{:?}", live.panic_class),
         });
     }
 }
@@ -1427,6 +1459,22 @@ fn compare_region_close(
             live_value: format!("{}", live.close_completed),
         });
     }
+    if lab.live_children != live.live_children {
+        mismatches.push(SemanticMismatch {
+            field: "semantics.region_close.live_children".to_string(),
+            description: "Region live child count mismatch".to_string(),
+            lab_value: format!("{}", lab.live_children),
+            live_value: format!("{}", live.live_children),
+        });
+    }
+    if lab.finalizers_pending != live.finalizers_pending {
+        mismatches.push(SemanticMismatch {
+            field: "semantics.region_close.finalizers_pending".to_string(),
+            description: "Region finalizers pending mismatch".to_string(),
+            lab_value: format!("{}", lab.finalizers_pending),
+            live_value: format!("{}", live.finalizers_pending),
+        });
+    }
 }
 
 fn compare_obligation_balance(
@@ -1456,6 +1504,30 @@ fn compare_obligation_balance(
             description: "Unresolved obligation count mismatch".to_string(),
             lab_value: format!("{}", lab.unresolved),
             live_value: format!("{}", live.unresolved),
+        });
+    }
+    if lab.reserved != live.reserved {
+        mismatches.push(SemanticMismatch {
+            field: "semantics.obligation_balance.reserved".to_string(),
+            description: "Reserved obligation count mismatch".to_string(),
+            lab_value: format!("{}", lab.reserved),
+            live_value: format!("{}", live.reserved),
+        });
+    }
+    if lab.committed != live.committed {
+        mismatches.push(SemanticMismatch {
+            field: "semantics.obligation_balance.committed".to_string(),
+            description: "Committed obligation count mismatch".to_string(),
+            lab_value: format!("{}", lab.committed),
+            live_value: format!("{}", live.committed),
+        });
+    }
+    if lab.aborted != live.aborted {
+        mismatches.push(SemanticMismatch {
+            field: "semantics.obligation_balance.aborted".to_string(),
+            description: "Aborted obligation count mismatch".to_string(),
+            lab_value: format!("{}", lab.aborted),
+            live_value: format!("{}", live.aborted),
         });
     }
 }
@@ -3489,6 +3561,79 @@ mod tests {
     }
 
     #[test]
+    fn compare_surface_identity_mismatch_fails() {
+        init_test("compare_surface_identity_mismatch_fails");
+        let lab = make_observable(RuntimeKind::Lab, make_happy_semantics());
+        let mut live = make_observable(RuntimeKind::Live, make_happy_semantics());
+        live.surface_id = "different.surface".to_string();
+        live.surface_contract_version = "v2".to_string();
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+        assert!(!verdict.passed);
+        assert!(verdict.mismatches.iter().any(|m| m.field == "surface_id"));
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "surface_contract_version")
+        );
+        crate::test_complete!("compare_surface_identity_mismatch_fails");
+    }
+
+    #[test]
+    fn compare_terminal_reason_and_panic_class_mismatch_fails() {
+        init_test("compare_terminal_reason_and_panic_class_mismatch_fails");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.terminal_outcome = TerminalOutcome::cancelled("timeout");
+
+        let mut live_sem = make_happy_semantics();
+        live_sem.terminal_outcome = TerminalOutcome::cancelled("shutdown");
+
+        let lab = make_observable(RuntimeKind::Lab, lab_sem.clone());
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| { m.field == "semantics.terminal_outcome.cancel_reason_class" })
+        );
+
+        let mut panic_sem = lab_sem;
+        panic_sem.terminal_outcome = TerminalOutcome {
+            class: OutcomeClass::Panicked,
+            severity: OutcomeClass::Panicked,
+            surface_result: None,
+            error_class: None,
+            cancel_reason_class: None,
+            panic_class: Some("panic_a".to_string()),
+        };
+        let mut other_panic_sem = make_happy_semantics();
+        other_panic_sem.terminal_outcome = TerminalOutcome {
+            class: OutcomeClass::Panicked,
+            severity: OutcomeClass::Panicked,
+            surface_result: None,
+            error_class: None,
+            cancel_reason_class: None,
+            panic_class: Some("panic_b".to_string()),
+        };
+        let panic_lab = make_observable(RuntimeKind::Lab, panic_sem);
+        let panic_live = make_observable(RuntimeKind::Live, other_panic_sem);
+        let panic_verdict =
+            compare_observables(&panic_lab, &panic_live, SeedLineageRecord::from_plan(&plan));
+        assert!(!panic_verdict.passed);
+        assert!(
+            panic_verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.terminal_outcome.panic_class")
+        );
+        crate::test_complete!("compare_terminal_reason_and_panic_class_mismatch_fails");
+    }
+
+    #[test]
     fn compare_obligation_leak_mismatch() {
         init_test("compare_obligation_leak_mismatch");
         let lab_sem = make_happy_semantics();
@@ -3513,6 +3658,33 @@ mod tests {
                 .any(|m| m.field.contains("leaked"))
         );
         crate::test_complete!("compare_obligation_leak_mismatch");
+    }
+
+    #[test]
+    fn compare_obligation_component_mismatch_fails_even_when_balanced() {
+        init_test("compare_obligation_component_mismatch_fails_even_when_balanced");
+        let mut lab_sem = make_happy_semantics();
+        lab_sem.obligation_balance = ObligationBalanceRecord::balanced(3, 3, 0);
+        let mut live_sem = make_happy_semantics();
+        live_sem.obligation_balance = ObligationBalanceRecord::balanced(3, 2, 1);
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.obligation_balance.committed")
+        );
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.obligation_balance.aborted")
+        );
+        crate::test_complete!("compare_obligation_component_mismatch_fails_even_when_balanced");
     }
 
     #[test]
@@ -3557,6 +3729,33 @@ mod tests {
         let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
         assert!(verdict.passed);
         crate::test_complete!("compare_resource_counter_at_least_passes");
+    }
+
+    #[test]
+    fn compare_region_close_counts_mismatch_fails() {
+        init_test("compare_region_close_counts_mismatch_fails");
+        let lab_sem = make_happy_semantics();
+        let mut live_sem = make_happy_semantics();
+        live_sem.region_close.live_children = 1;
+        live_sem.region_close.finalizers_pending = 2;
+        let lab = make_observable(RuntimeKind::Lab, lab_sem);
+        let live = make_observable(RuntimeKind::Live, live_sem);
+        let plan = SeedPlan::inherit(42, "test");
+        let verdict = compare_observables(&lab, &live, SeedLineageRecord::from_plan(&plan));
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.region_close.live_children")
+        );
+        assert!(
+            verdict
+                .mismatches
+                .iter()
+                .any(|m| m.field == "semantics.region_close.finalizers_pending")
+        );
+        crate::test_complete!("compare_region_close_counts_mismatch_fails");
     }
 
     #[test]
