@@ -724,7 +724,11 @@ impl WebSocket<TcpStream> {
         } else {
             format!("{}:{}", parsed.host, parsed.port)
         };
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = if let Some(timeout) = config.connect_timeout {
+            TcpStream::connect_timeout(addr, timeout).await?
+        } else {
+            TcpStream::connect(addr).await?
+        };
 
         if config.nodelay {
             let _ = tcp.set_nodelay(true);

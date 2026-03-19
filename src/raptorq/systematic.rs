@@ -27,7 +27,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::rfc6330::repair_indices_for_esi;
 #[cfg(test)]
 use crate::util::DetRng;
@@ -949,8 +949,16 @@ impl SystematicEncoder {
     /// Source symbols are emitted unchanged from the input, in index order.
     /// Each has degree=1 since it maps directly to one intermediate symbol.
     ///
-    /// Updates `systematic_bytes_emitted` in stats and sets the emission flag.
+    /// This method is idempotent after the first source pass: repeated calls
+    /// return an empty batch and leave stats unchanged.
+    ///
+    /// Updates `systematic_bytes_emitted` in stats and sets the emission flag
+    /// only when the source batch is emitted for the first time.
     pub fn emit_systematic(&mut self) -> Vec<EmittedSymbol> {
+        if self.systematic_emitted {
+            return Vec::new();
+        }
+
         let symbols: Vec<EmittedSymbol> = self
             .source_symbols
             .iter()
@@ -1039,8 +1047,8 @@ impl SystematicEncoder {
 
     /// Emit all symbols (systematic + repair) in deterministic order.
     ///
-    /// First emits K source symbols (ESI 0..K-1), then `repair_count` repair
-    /// symbols (ESI K..K+repair_count-1).
+    /// First emits K source symbols (ESI 0..K-1) if they have not already been
+    /// emitted, then `repair_count` repair symbols (ESI K..K+repair_count-1).
     pub fn emit_all(&mut self, repair_count: usize) -> Vec<EmittedSymbol> {
         let mut result: Vec<EmittedSymbol> = self.emit_systematic();
         result.extend(self.emit_repair(repair_count));
@@ -1804,6 +1812,32 @@ mod tests {
     }
 
     #[test]
+    fn repeated_emit_systematic_is_idempotent() {
+        let symbol_size = 32;
+        let mut enc = make_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        let first = enc.emit_systematic();
+        assert_eq!(first.len(), k, "first call should emit all source symbols");
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            k * symbol_size,
+            "first source pass should count emitted bytes"
+        );
+
+        let second = enc.emit_systematic();
+        assert!(
+            second.is_empty(),
+            "second source pass should not re-emit systematic symbols"
+        );
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            k * symbol_size,
+            "repeated source pass must not double-count emitted bytes"
+        );
+    }
+
+    #[test]
     fn stats_encoding_efficiency() {
         let symbol_size = 64;
         let mut enc = make_encoder(16, symbol_size, 42);
@@ -1924,6 +1958,42 @@ mod tests {
                 "all source ESIs must precede repair ESIs"
             );
         }
+    }
+
+    #[test]
+    fn emit_all_after_systematic_only_emits_repairs() {
+        let symbol_size = 24;
+        let repair_count = 5;
+        let mut enc = make_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        let systematic = enc.emit_systematic();
+        assert_eq!(
+            systematic.len(),
+            k,
+            "initial source pass should emit every source symbol"
+        );
+
+        let combined = enc.emit_all(repair_count);
+        assert_eq!(
+            combined.len(),
+            repair_count,
+            "emit_all after a source pass should only emit repairs"
+        );
+        assert!(
+            combined.iter().all(|symbol| !symbol.is_source),
+            "combined batch should contain only repair symbols after systematic emission"
+        );
+        assert_eq!(
+            combined.first().map(|symbol| symbol.esi),
+            Some(k as u32),
+            "repair emission should resume at the first repair ESI"
+        );
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            k * symbol_size,
+            "emit_all must not double-count systematic bytes after a source pass"
+        );
     }
 
     #[test]

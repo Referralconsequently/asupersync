@@ -587,8 +587,7 @@ impl Future for Sleep {
                                 if current >= deadline {
                                     break;
                                 }
-                                let remaining =
-                                    deadline.as_nanos().saturating_sub(current.as_nanos());
+                                let remaining = deadline.as_nanos().saturating_sub(current.as_nanos());
                                 let park_dur = Duration::from_nanos(remaining);
                                 std::thread::park_timeout(park_dur);
                             }
