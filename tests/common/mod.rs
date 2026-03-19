@@ -18,12 +18,16 @@ pub use coverage::{
     assert_coverage_threshold,
 };
 
+pub use asupersync::lab::{
+    DualRunScenarioIdentity, ExecutionInstanceId, Phase, ReplayMetadata, ReplayPolicy, RuntimeKind,
+    ScenarioFamilyId, SeedLineageRecord, SeedMode, SeedPlan,
+};
 pub use asupersync::test_logging::{
     ARTIFACT_SCHEMA_VERSION, AggregatedReport, AllocatedPort, DockerFixtureService,
-    EnvironmentMetadata, FixtureService, InProcessService, NoOpFixtureService, PortAllocator,
-    ReproManifest, TempDirFixture, TestContext, TestEnvironment, TestHarness, TestReportAggregator,
-    TestSummary, derive_component_seed, derive_entropy_seed, derive_scenario_seed,
-    wait_until_healthy,
+    EnvironmentMetadata, FixtureService, InProcessService, LIVE_CURRENT_THREAD_ADAPTER,
+    NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture, TestContext, TestEnvironment,
+    TestHarness, TestReportAggregator, TestSummary, derive_component_seed, derive_entropy_seed,
+    derive_scenario_seed, wait_until_healthy,
 };
 
 pub use asupersync::raptorq::test_log_schema::{
@@ -188,6 +192,12 @@ pub fn test_lab_from_context(ctx: &TestContext) -> LabRuntime {
     LabRuntime::new(LabConfig::new(ctx.seed))
 }
 
+/// Create a deterministic lab runtime from a shared dual-run identity.
+#[must_use]
+pub fn test_lab_from_dual_run_identity(identity: &DualRunScenarioIdentity) -> LabRuntime {
+    LabRuntime::new(identity.to_lab_config())
+}
+
 /// Create a [`TestContext`] for an integration test with the default seed.
 #[must_use]
 pub fn test_context(test_id: &str) -> TestContext {
@@ -198,6 +208,12 @@ pub fn test_context(test_id: &str) -> TestContext {
 #[must_use]
 pub fn test_context_with_seed(test_id: &str, seed: u64) -> TestContext {
     TestContext::new(test_id, seed)
+}
+
+/// Create a current-thread live test context from a shared dual-run identity.
+#[must_use]
+pub fn test_context_from_dual_run_identity(identity: &DualRunScenarioIdentity) -> TestContext {
+    TestContext::from_live_dual_run(identity)
 }
 
 /// Run async test code using a lightweight current-thread runtime.

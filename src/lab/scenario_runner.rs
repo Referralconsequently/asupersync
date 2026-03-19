@@ -22,6 +22,7 @@
 //! ```
 
 use super::config::LabConfig;
+use super::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
 use super::meta::mutation::ALL_ORACLE_INVARIANTS;
 use super::oracle::OracleReport;
 use super::runtime::{LabRunReport, LabRuntime};
@@ -29,6 +30,8 @@ use super::scenario::{FaultAction, Scenario, ValidationError};
 use crate::trace::replay::ReplayTrace;
 use crate::types::Time;
 use std::collections::BTreeMap;
+
+const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -123,6 +126,12 @@ pub struct ScenarioRunResult {
     pub replay_trace: Option<ReplayTrace>,
     /// Trace certificate snapshot for replay validation.
     pub certificate: TraceCertificateSnapshot,
+    /// Adapter identity that produced this lab result.
+    pub adapter: String,
+    /// Shared dual-run replay metadata for this execution.
+    pub replay_metadata: ReplayMetadata,
+    /// Stable seed-lineage audit record for this execution.
+    pub seed_lineage: SeedLineageRecord,
 }
 
 impl ScenarioRunResult {
@@ -140,7 +149,12 @@ impl ScenarioRunResult {
         use serde_json::json;
         json!({
             "scenario_id": self.scenario_id,
+            "surface_id": self.replay_metadata.family.surface_id,
+            "surface_contract_version": self.replay_metadata.family.surface_contract_version,
             "seed": self.seed,
+            "seed_lineage_id": self.seed_lineage.seed_lineage_id,
+            "adapter": self.adapter,
+            "execution_instance_id": self.replay_metadata.instance.key(),
             "passed": self.passed(),
             "steps": self.lab_report.steps_total,
             "faults_injected": self.faults_injected,
@@ -151,6 +165,8 @@ impl ScenarioRunResult {
             },
             "oracle_report": self.oracle_report.to_json(),
             "invariant_violations": self.lab_report.invariant_violations,
+            "replay_metadata": &self.replay_metadata,
+            "seed_lineage": &self.seed_lineage,
         })
     }
 }
@@ -314,6 +330,80 @@ impl ExplorationRunSummary {
 pub struct ScenarioRunner;
 
 impl ScenarioRunner {
+    fn scenario_surface_id(scenario: &Scenario) -> String {
+        scenario
+            .metadata
+            .get("surface_id")
+            .cloned()
+            .unwrap_or_else(|| scenario.id.clone())
+    }
+
+    fn scenario_surface_contract_version(scenario: &Scenario) -> String {
+        scenario
+            .metadata
+            .get("surface_contract_version")
+            .cloned()
+            .unwrap_or_else(|| format!("{}.v1", scenario.id))
+    }
+
+    fn scenario_seed_lineage_id(scenario: &Scenario) -> String {
+        scenario
+            .metadata
+            .get("seed_lineage_id")
+            .cloned()
+            .unwrap_or_else(|| format!("seed.{}.v1", scenario.id))
+    }
+
+    fn scenario_identity(
+        scenario: &Scenario,
+        seed_override: Option<u64>,
+    ) -> DualRunScenarioIdentity {
+        let description = if scenario.description.trim().is_empty() {
+            format!("Scenario {}", scenario.id)
+        } else {
+            scenario.description.clone()
+        };
+        let mut identity = DualRunScenarioIdentity::phase1(
+            &scenario.id,
+            Self::scenario_surface_id(scenario),
+            Self::scenario_surface_contract_version(scenario),
+            description,
+            scenario.lab.seed,
+        );
+        let mut seed_plan = identity.seed_plan.clone();
+        seed_plan.seed_lineage_id = Self::scenario_seed_lineage_id(scenario);
+        if let Some(seed) = seed_override {
+            seed_plan = seed_plan.with_lab_override(seed);
+        }
+        if let Some(entropy_seed) = scenario.lab.entropy_seed {
+            seed_plan = seed_plan.with_entropy_seed(entropy_seed);
+        }
+        identity = identity.with_seed_plan(seed_plan);
+        for (key, value) in &scenario.metadata {
+            identity = identity.with_metadata(key.clone(), value.clone());
+        }
+        identity
+    }
+
+    fn replay_metadata_for_run(
+        identity: &DualRunScenarioIdentity,
+        lab_report: &LabRunReport,
+    ) -> ReplayMetadata {
+        identity
+            .lab_replay_metadata()
+            .with_lab_report(
+                lab_report.trace_fingerprint,
+                lab_report.trace_certificate.event_hash,
+                lab_report.trace_certificate.event_count,
+                lab_report.trace_certificate.schedule_hash,
+                lab_report.steps_total,
+            )
+            .with_repro_command(format!(
+                "ASUPERSYNC_SEED=0x{:X} rch exec -- cargo test {} -- --nocapture",
+                lab_report.seed, identity.scenario_id
+            ))
+    }
+
     /// Validate oracle names in a scenario against the known oracle registry.
     fn validate_oracle_names(scenario: &Scenario) -> Result<(), ScenarioRunnerError> {
         for name in &scenario.oracles {
@@ -338,6 +428,18 @@ impl ScenarioRunner {
             },
         );
         // Always enable replay recording so we get trace certificates
+        config.with_default_replay_recording()
+    }
+
+    /// Create a `LabConfig` from a scenario plus an explicit dual-run identity.
+    fn lab_config_for_identity(
+        scenario: &Scenario,
+        identity: &DualRunScenarioIdentity,
+    ) -> LabConfig {
+        let mut config = scenario.to_lab_config();
+        let effective_seed = identity.seed_plan.effective_lab_seed();
+        config.seed = effective_seed;
+        config.entropy_seed = identity.seed_plan.effective_entropy_seed(effective_seed);
         config.with_default_replay_recording()
     }
 
@@ -419,6 +521,53 @@ impl ScenarioRunner {
         Self::run_with_seed(scenario, None)
     }
 
+    /// Run a scenario using an explicit dual-run identity and seed plan.
+    ///
+    /// This keeps scenario-family metadata stable while allowing the concrete
+    /// lab execution seed to vary via the identity's seed plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the scenario fails validation or contains unknown oracle names.
+    pub fn run_with_identity(
+        scenario: &Scenario,
+        identity: &DualRunScenarioIdentity,
+    ) -> Result<ScenarioRunResult, ScenarioRunnerError> {
+        let errors = scenario.validate();
+        if !errors.is_empty() {
+            return Err(ScenarioRunnerError::Validation(errors));
+        }
+        Self::validate_oracle_names(scenario)?;
+
+        let effective_seed = identity.seed_plan.effective_lab_seed();
+        let config = Self::lab_config_for_identity(scenario, identity);
+        let mut runtime = LabRuntime::new(config);
+
+        let faults_injected = Self::inject_faults(&mut runtime, scenario);
+        runtime.run_until_quiescent();
+
+        let lab_report = runtime.report();
+        let certificate = Self::certificate_snapshot(&lab_report);
+        let replay_metadata = Self::replay_metadata_for_run(identity, &lab_report);
+        let seed_lineage = identity.seed_lineage();
+        let oracle_report =
+            FilteredOracleReport::from_full(lab_report.oracle_report.clone(), &scenario.oracles);
+        let replay_trace = runtime.finish_replay_trace();
+
+        Ok(ScenarioRunResult {
+            scenario_id: scenario.id.clone(),
+            seed: effective_seed,
+            lab_report,
+            oracle_report,
+            faults_injected,
+            replay_trace,
+            certificate,
+            adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),
+            replay_metadata,
+            seed_lineage,
+        })
+    }
+
     /// Run a scenario, optionally overriding the seed.
     ///
     /// # Errors
@@ -449,6 +598,9 @@ impl ScenarioRunner {
         // 5. Collect report
         let lab_report = runtime.report();
         let certificate = Self::certificate_snapshot(&lab_report);
+        let identity = Self::scenario_identity(scenario, seed_override);
+        let replay_metadata = Self::replay_metadata_for_run(&identity, &lab_report);
+        let seed_lineage = identity.seed_lineage();
 
         // 6. Filter oracle results
         let oracle_report =
@@ -465,6 +617,9 @@ impl ScenarioRunner {
             faults_injected,
             replay_trace,
             certificate,
+            adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),
+            replay_metadata,
+            seed_lineage,
         })
     }
 
@@ -615,7 +770,29 @@ mod tests {
         assert_eq!(result.scenario_id, "test-minimal");
         assert_eq!(result.seed, 42);
         assert_eq!(result.faults_injected, 0);
+        assert_eq!(result.adapter, LAB_SCENARIO_RUNNER_ADAPTER);
+        assert_eq!(result.replay_metadata.family.surface_id, "test-minimal");
+        assert_eq!(
+            result.replay_metadata.family.surface_contract_version,
+            "test-minimal.v1"
+        );
+        assert_eq!(result.seed_lineage.seed_lineage_id, "seed.test-minimal.v1");
         crate::test_complete!("run_minimal_scenario");
+    }
+
+    #[test]
+    fn run_with_seed_preserves_family_and_tracks_execution_seed() {
+        init_test("run_with_seed_preserves_family_and_tracks_execution_seed");
+        let scenario = minimal_scenario();
+        let result = ScenarioRunner::run_with_seed(&scenario, Some(7)).unwrap();
+
+        assert_eq!(result.seed, 7);
+        assert_eq!(result.replay_metadata.family.id, "test-minimal");
+        assert_eq!(result.replay_metadata.effective_seed, 7);
+        assert_eq!(result.seed_lineage.canonical_seed, 42);
+        assert_eq!(result.seed_lineage.lab_effective_seed, 7);
+
+        crate::test_complete!("run_with_seed_preserves_family_and_tracks_execution_seed");
     }
 
     #[test]

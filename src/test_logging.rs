@@ -24,6 +24,7 @@
 //! println!("{}", logger.report());
 //! ```
 
+use crate::lab::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
 use parking_lot::Mutex;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -94,6 +95,9 @@ impl std::str::FromStr for TestLogLevel {
         }
     }
 }
+
+/// Stable adapter token for the Phase 1 live current-thread runner.
+pub const LIVE_CURRENT_THREAD_ADAPTER: &str = "live.current_thread";
 
 // ============================================================================
 // Interest flags (for reactor events)
@@ -1112,6 +1116,15 @@ pub struct TestContext {
     pub subsystem: Option<String>,
     /// Core invariant being verified (e.g., "no_obligation_leaks", "quiescence").
     pub invariant: Option<String>,
+    /// Adapter identity for dual-run provenance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// Rich replay/provenance metadata for the execution, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_metadata: Option<ReplayMetadata>,
+    /// Stable seed lineage record for audit/mismatch artifacts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_lineage: Option<SeedLineageRecord>,
 }
 
 impl TestContext {
@@ -1123,6 +1136,9 @@ impl TestContext {
             seed,
             subsystem: None,
             invariant: None,
+            adapter: None,
+            replay_metadata: None,
+            seed_lineage: None,
         }
     }
 
@@ -1140,6 +1156,68 @@ impl TestContext {
         self
     }
 
+    /// Attach replay provenance captured from a dual-run execution surface.
+    #[must_use]
+    pub fn with_replay_provenance(
+        mut self,
+        adapter: impl Into<String>,
+        replay_metadata: ReplayMetadata,
+        seed_lineage: SeedLineageRecord,
+    ) -> Self {
+        self.test_id.clone_from(&replay_metadata.family.id);
+        self.seed = replay_metadata.effective_seed;
+        self.adapter = Some(adapter.into());
+        self.replay_metadata = Some(replay_metadata);
+        self.seed_lineage = Some(seed_lineage);
+        self
+    }
+
+    /// Build a current-thread live test context from a dual-run identity.
+    #[must_use]
+    pub fn from_live_dual_run(identity: &DualRunScenarioIdentity) -> Self {
+        Self::new(
+            &identity.scenario_id,
+            identity.seed_plan.effective_live_seed(),
+        )
+        .with_replay_provenance(
+            LIVE_CURRENT_THREAD_ADAPTER,
+            identity.live_replay_metadata(),
+            identity.seed_lineage(),
+        )
+    }
+
+    /// Surface identifier, when dual-run provenance is attached.
+    #[must_use]
+    pub fn surface_id(&self) -> Option<&str> {
+        self.replay_metadata
+            .as_ref()
+            .map(|metadata| metadata.family.surface_id.as_str())
+    }
+
+    /// Surface contract version, when dual-run provenance is attached.
+    #[must_use]
+    pub fn surface_contract_version(&self) -> Option<&str> {
+        self.replay_metadata
+            .as_ref()
+            .map(|metadata| metadata.family.surface_contract_version.as_str())
+    }
+
+    /// Stable seed lineage identifier, when dual-run provenance is attached.
+    #[must_use]
+    pub fn seed_lineage_id(&self) -> Option<&str> {
+        self.seed_lineage
+            .as_ref()
+            .map(|lineage| lineage.seed_lineage_id.as_str())
+    }
+
+    /// Concrete execution-instance identifier, when dual-run provenance is attached.
+    #[must_use]
+    pub fn execution_instance_id(&self) -> Option<String> {
+        self.replay_metadata
+            .as_ref()
+            .map(|metadata| metadata.instance.key())
+    }
+
     /// Emit a tracing info event with all context fields.
     pub fn log_start(&self) {
         tracing::info!(
@@ -1147,6 +1225,11 @@ impl TestContext {
             seed = %format_args!("0x{:X}", self.seed),
             subsystem = self.subsystem.as_deref().unwrap_or("-"),
             invariant = self.invariant.as_deref().unwrap_or("-"),
+            surface_id = self.surface_id().unwrap_or("-"),
+            surface_contract_version = self.surface_contract_version().unwrap_or("-"),
+            adapter = self.adapter.as_deref().unwrap_or("-"),
+            seed_lineage_id = self.seed_lineage_id().unwrap_or("-"),
+            execution_instance_id = self.execution_instance_id().as_deref().unwrap_or("-"),
             "TEST START"
         );
     }
@@ -1158,6 +1241,11 @@ impl TestContext {
             seed = %format_args!("0x{:X}", self.seed),
             subsystem = self.subsystem.as_deref().unwrap_or("-"),
             invariant = self.invariant.as_deref().unwrap_or("-"),
+            surface_id = self.surface_id().unwrap_or("-"),
+            surface_contract_version = self.surface_contract_version().unwrap_or("-"),
+            adapter = self.adapter.as_deref().unwrap_or("-"),
+            seed_lineage_id = self.seed_lineage_id().unwrap_or("-"),
+            execution_instance_id = self.execution_instance_id().as_deref().unwrap_or("-"),
             passed = passed,
             "TEST END"
         );
@@ -1188,6 +1276,11 @@ impl TestContext {
             seed = %format_args!("0x{:X}", self.seed),
             subsystem = self.subsystem.as_deref().unwrap_or("-"),
             invariant = self.invariant.as_deref().unwrap_or("-"),
+            surface_id = self.surface_id().unwrap_or("-"),
+            surface_contract_version = self.surface_contract_version().unwrap_or("-"),
+            adapter = self.adapter.as_deref().unwrap_or("-"),
+            seed_lineage_id = self.seed_lineage_id().unwrap_or("-"),
+            execution_instance_id = self.execution_instance_id().as_deref().unwrap_or("-"),
             reason = %reason,
             "TEST FAILURE — reproduce with seed 0x{:X}",
             self.seed
@@ -1199,11 +1292,14 @@ impl std::fmt::Display for TestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "test_id={} seed=0x{:X} subsystem={} invariant={}",
+            "test_id={} seed=0x{:X} subsystem={} invariant={} surface={} contract={} adapter={}",
             self.test_id,
             self.seed,
             self.subsystem.as_deref().unwrap_or("-"),
             self.invariant.as_deref().unwrap_or("-"),
+            self.surface_id().unwrap_or("-"),
+            self.surface_contract_version().unwrap_or("-"),
+            self.adapter.as_deref().unwrap_or("-"),
         )
     }
 }
@@ -1290,7 +1386,7 @@ fn default_trace_fingerprint(seed: u64, scenario_id: &str) -> String {
 }
 
 fn default_replay_command(seed: u64, scenario_id: &str) -> String {
-    format!("ASUPERSYNC_SEED=0x{seed:X} cargo test {scenario_id} -- --nocapture")
+    format!("ASUPERSYNC_SEED=0x{seed:X} rch exec -- cargo test {scenario_id} -- --nocapture")
 }
 
 fn normalize_string_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -1367,6 +1463,15 @@ pub struct ReproManifest {
     /// Failure reason or assertion message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+    /// Adapter identity for the execution surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// Rich replay/provenance metadata for the execution surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_metadata: Option<ReplayMetadata>,
+    /// Stable seed lineage record for reruns and mismatch bundles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_lineage: Option<SeedLineageRecord>,
 }
 
 impl ReproManifest {
@@ -1398,12 +1503,20 @@ impl ReproManifest {
             env_snapshot: Vec::new(),
             phases_executed: Vec::new(),
             failure_reason: None,
+            adapter: None,
+            replay_metadata: None,
+            seed_lineage: None,
         }
     }
 
     /// Create a manifest from a [`TestContext`] and pass/fail status.
     #[must_use]
     pub fn from_context(ctx: &TestContext, passed: bool) -> Self {
+        let replay_command = ctx
+            .replay_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.repro_command.clone())
+            .unwrap_or_else(|| default_replay_command(ctx.seed, &ctx.test_id));
         Self {
             schema_version: ARTIFACT_SCHEMA_VERSION,
             seed: ctx.seed,
@@ -1415,7 +1528,7 @@ impl ReproManifest {
             entropy_seed: None,
             config_hash: None,
             trace_fingerprint: default_trace_fingerprint(ctx.seed, &ctx.test_id),
-            replay_command: default_replay_command(ctx.seed, &ctx.test_id),
+            replay_command,
             failure_class: if passed {
                 FAILURE_CLASS_PASSED.to_string()
             } else {
@@ -1432,6 +1545,9 @@ impl ReproManifest {
             env_snapshot: Vec::new(),
             phases_executed: Vec::new(),
             failure_reason: None,
+            adapter: ctx.adapter.clone(),
+            replay_metadata: ctx.replay_metadata.clone(),
+            seed_lineage: ctx.seed_lineage.clone(),
         }
     }
 
@@ -1463,6 +1579,9 @@ impl ReproManifest {
     #[must_use]
     pub fn with_entropy_seed(mut self, entropy_seed: u64) -> Self {
         self.entropy_seed = Some(entropy_seed);
+        if let Some(ref mut replay_metadata) = self.replay_metadata {
+            replay_metadata.effective_entropy_seed = entropy_seed;
+        }
         self
     }
 
@@ -1470,6 +1589,9 @@ impl ReproManifest {
     #[must_use]
     pub fn with_config_hash(mut self, config_hash: &str) -> Self {
         self.config_hash = Some(config_hash.to_string());
+        if let Some(ref mut replay_metadata) = self.replay_metadata {
+            replay_metadata.config_hash = Some(config_hash.to_string());
+        }
         self
     }
 
@@ -1484,6 +1606,9 @@ impl ReproManifest {
     #[must_use]
     pub fn with_replay_command(mut self, replay_command: &str) -> Self {
         self.replay_command = replay_command.to_string();
+        if let Some(ref mut replay_metadata) = self.replay_metadata {
+            replay_metadata.repro_command = Some(replay_command.to_string());
+        }
         self
     }
 
@@ -1601,6 +1726,27 @@ impl ReproManifest {
         {
             return Err("artifact_paths cannot contain empty values".to_string());
         }
+        if let Some(ref adapter) = self.adapter {
+            if adapter.trim().is_empty() {
+                return Err("adapter cannot be empty when present".to_string());
+            }
+        }
+        if let Some(ref replay_metadata) = self.replay_metadata {
+            if replay_metadata.family.id != self.scenario_id {
+                return Err("replay_metadata.family.id must match scenario_id".to_string());
+            }
+            if replay_metadata.effective_seed != self.seed {
+                return Err("replay_metadata.effective_seed must match seed".to_string());
+            }
+            if let Some(ref seed_lineage) = self.seed_lineage {
+                if seed_lineage.seed_lineage_id != replay_metadata.seed_plan.seed_lineage_id {
+                    return Err(
+                        "seed_lineage.seed_lineage_id must match replay_metadata.seed_plan.seed_lineage_id"
+                            .to_string(),
+                    );
+                }
+            }
+        }
 
         let normalized_invariants = normalize_string_ids(self.invariant_ids.clone());
         if normalized_invariants != self.invariant_ids {
@@ -1674,6 +1820,22 @@ pub fn replay_context_from_manifest(manifest: &ReproManifest) -> TestContext {
         ctx = ctx.with_invariant(invariant);
     } else if let Some(first_invariant_id) = manifest.invariant_ids.first() {
         ctx = ctx.with_invariant(first_invariant_id);
+    }
+    if let Some(replay_metadata) = manifest.replay_metadata.clone() {
+        let seed_lineage = manifest
+            .seed_lineage
+            .clone()
+            .unwrap_or_else(|| SeedLineageRecord::from_plan(&replay_metadata.seed_plan));
+        ctx = ctx.with_replay_provenance(
+            manifest
+                .adapter
+                .clone()
+                .unwrap_or_else(|| LIVE_CURRENT_THREAD_ADAPTER.to_string()),
+            replay_metadata,
+            seed_lineage,
+        );
+    } else if let Some(ref adapter) = manifest.adapter {
+        ctx.adapter = Some(adapter.clone());
     }
     ctx
 }
@@ -3847,6 +4009,29 @@ mod tests {
         crate::test_complete!("test_context_seed_methods");
     }
 
+    #[test]
+    fn test_context_from_live_dual_run_preserves_identity() {
+        init_test("test_context_from_live_dual_run_preserves_identity");
+        let identity = DualRunScenarioIdentity::phase1(
+            "phase1.cancel.race.one_loser",
+            "cancel.race",
+            "cancel.race.v1",
+            "winner completes, loser drains",
+            0xCAFE,
+        );
+        let ctx = TestContext::from_live_dual_run(&identity);
+
+        assert_eq!(ctx.test_id, "phase1.cancel.race.one_loser");
+        assert_eq!(ctx.seed, 0xCAFE);
+        assert_eq!(ctx.adapter.as_deref(), Some(LIVE_CURRENT_THREAD_ADAPTER));
+        assert_eq!(ctx.surface_id(), Some("cancel.race"));
+        assert_eq!(ctx.surface_contract_version(), Some("cancel.race.v1"));
+        assert_eq!(ctx.seed_lineage_id(), Some("phase1.cancel.race.one_loser"));
+        assert!(ctx.execution_instance_id().is_some());
+
+        crate::test_complete!("test_context_from_live_dual_run_preserves_identity");
+    }
+
     // ----------------------------------------------------------------
     // ReproManifest tests
     // ----------------------------------------------------------------
@@ -3869,7 +4054,7 @@ mod tests {
         assert!(
             manifest
                 .replay_command
-                .contains("cargo test obligation_leak -- --nocapture"),
+                .contains("rch exec -- cargo test obligation_leak -- --nocapture"),
             "default replay command should be deterministic"
         );
         assert!(!manifest.trace_fingerprint.is_empty());
@@ -3889,7 +4074,9 @@ mod tests {
             .with_subsystem("scheduler")
             .with_invariant("no_leaks")
             .with_invariant_ids(["quiescence", "no_leaks", "quiescence"])
-            .with_replay_command("ASUPERSYNC_SEED=0xBEEF cargo test helper_test -- --nocapture")
+            .with_replay_command(
+                "ASUPERSYNC_SEED=0xBEEF rch exec -- cargo test helper_test -- --nocapture",
+            )
             .with_failure_class("assertion_failure")
             .with_artifact_paths(["b.json", "a.json", "b.json"])
             .with_trace_file("traces/run.jsonl")
@@ -3910,7 +4097,7 @@ mod tests {
         assert!(
             manifest
                 .replay_command
-                .contains("cargo test helper_test -- --nocapture")
+                .contains("rch exec -- cargo test helper_test -- --nocapture")
         );
         assert_eq!(
             manifest.artifact_paths,
@@ -3963,6 +4150,38 @@ mod tests {
         assert_eq!(ctx.seed, 0xDEAD);
         assert_eq!(ctx.subsystem.as_deref(), Some("scheduler"));
         crate::test_complete!("test_replay_context_from_manifest");
+    }
+
+    #[test]
+    fn test_replay_context_from_manifest_restores_dual_run_metadata() {
+        init_test("test_replay_context_from_manifest_restores_dual_run_metadata");
+        let identity = DualRunScenarioIdentity::phase1(
+            "phase1.cancel.race.one_loser",
+            "cancel.race",
+            "cancel.race.v1",
+            "winner completes, loser drains",
+            0xDEAD,
+        );
+        let ctx = TestContext::from_live_dual_run(&identity);
+        let manifest = ReproManifest::from_context(&ctx, false);
+        let replay_ctx = replay_context_from_manifest(&manifest);
+
+        assert_eq!(
+            replay_ctx.adapter.as_deref(),
+            Some(LIVE_CURRENT_THREAD_ADAPTER)
+        );
+        assert_eq!(replay_ctx.surface_id(), Some("cancel.race"));
+        assert_eq!(
+            replay_ctx.surface_contract_version(),
+            Some("cancel.race.v1")
+        );
+        assert_eq!(
+            replay_ctx.seed_lineage_id(),
+            Some("phase1.cancel.race.one_loser")
+        );
+        assert!(replay_ctx.execution_instance_id().is_some());
+
+        crate::test_complete!("test_replay_context_from_manifest_restores_dual_run_metadata");
     }
 
     // ----------------------------------------------------------------
@@ -4042,7 +4261,9 @@ mod tests {
         let manifest = ReproManifest::new(0x1234, "contract_ok", false)
             .with_trace_fingerprint("fp_1234")
             .with_invariant_ids(["cancel_protocol", "no_obligation_leaks"])
-            .with_replay_command("ASUPERSYNC_SEED=0x1234 cargo test contract_ok -- --nocapture")
+            .with_replay_command(
+                "ASUPERSYNC_SEED=0x1234 rch exec -- cargo test contract_ok -- --nocapture",
+            )
             .with_failure_class(FAILURE_CLASS_ASSERTION_FAILURE)
             .with_artifact_paths([
                 "target/test-artifacts/contract_ok/event_log.txt",
@@ -4063,7 +4284,9 @@ mod tests {
         init_test("test_repro_manifest_contract_validation_rejects_unsorted_ids");
         let mut manifest = ReproManifest::new(0x9999, "contract_bad", false)
             .with_trace_fingerprint("fp_9999")
-            .with_replay_command("ASUPERSYNC_SEED=0x9999 cargo test contract_bad -- --nocapture")
+            .with_replay_command(
+                "ASUPERSYNC_SEED=0x9999 rch exec -- cargo test contract_bad -- --nocapture",
+            )
             .with_failure_class(FAILURE_CLASS_ASSERTION_FAILURE)
             .with_artifact_paths([
                 "target/test-artifacts/contract_bad/repro_manifest.json",
@@ -4159,12 +4382,12 @@ mod tests {
         crate::assert_with_log!(
             manifest
                 .replay_command
-                .contains("cargo test harness_failure_test -- --nocapture"),
+                .contains("rch exec -- cargo test harness_failure_test -- --nocapture"),
             "replay command populated",
             true,
             manifest
                 .replay_command
-                .contains("cargo test harness_failure_test -- --nocapture")
+                .contains("rch exec -- cargo test harness_failure_test -- --nocapture")
         );
         crate::test_complete!("test_harness_repro_manifest_on_failure");
     }

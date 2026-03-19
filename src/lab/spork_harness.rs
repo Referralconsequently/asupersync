@@ -24,9 +24,12 @@
 use crate::app::{AppHandle, AppSpec, AppStartError, AppStopError};
 use crate::cx::Cx;
 use crate::lab::config::LabConfig;
+use crate::lab::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
 use crate::lab::runtime::{HarnessAttachmentRef, LabRuntime, SporkHarnessReport};
 use crate::types::Budget;
 use std::collections::BTreeMap;
+
+const LAB_SPORK_HARNESS_ADAPTER: &str = "lab.spork_harness";
 
 /// Error returned when the harness cannot start the application.
 #[derive(Debug)]
@@ -293,6 +296,9 @@ pub struct SporkScenarioSpec {
     description: Option<String>,
     expected_invariants: Vec<String>,
     default_config: SporkScenarioConfig,
+    surface_id: Option<String>,
+    surface_contract_version: Option<String>,
+    seed_lineage_id: Option<String>,
     app_factory: ScenarioFactory,
 }
 
@@ -303,6 +309,9 @@ impl std::fmt::Debug for SporkScenarioSpec {
             .field("description", &self.description)
             .field("expected_invariants", &self.expected_invariants)
             .field("default_config", &self.default_config)
+            .field("surface_id", &self.surface_id)
+            .field("surface_contract_version", &self.surface_contract_version)
+            .field("seed_lineage_id", &self.seed_lineage_id)
             .finish_non_exhaustive()
     }
 }
@@ -318,6 +327,9 @@ impl SporkScenarioSpec {
             description: None,
             expected_invariants: Vec::new(),
             default_config: SporkScenarioConfig::default(),
+            surface_id: None,
+            surface_contract_version: None,
+            seed_lineage_id: None,
             app_factory: std::sync::Arc::new(app_factory),
         }
     }
@@ -346,6 +358,24 @@ impl SporkScenarioSpec {
         &self.default_config
     }
 
+    /// Semantic surface identifier for dual-run comparison, when set.
+    #[must_use]
+    pub fn surface_id(&self) -> Option<&str> {
+        self.surface_id.as_deref()
+    }
+
+    /// Versioned comparator contract token for the semantic surface, when set.
+    #[must_use]
+    pub fn surface_contract_version(&self) -> Option<&str> {
+        self.surface_contract_version.as_deref()
+    }
+
+    /// Stable seed-lineage identifier for the scenario, when set.
+    #[must_use]
+    pub fn seed_lineage_id(&self) -> Option<&str> {
+        self.seed_lineage_id.as_deref()
+    }
+
     /// Set a human-readable scenario description.
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
@@ -369,6 +399,46 @@ impl SporkScenarioSpec {
     pub fn with_default_config(mut self, config: SporkScenarioConfig) -> Self {
         self.default_config = config;
         self
+    }
+
+    /// Set the semantic surface identifier for dual-run comparison.
+    #[must_use]
+    pub fn with_surface_id(mut self, surface_id: impl Into<String>) -> Self {
+        self.surface_id = Some(surface_id.into());
+        self
+    }
+
+    /// Set the surface contract version for dual-run comparison.
+    #[must_use]
+    pub fn with_surface_contract_version(mut self, version: impl Into<String>) -> Self {
+        self.surface_contract_version = Some(version.into());
+        self
+    }
+
+    /// Set the seed-lineage identifier to preserve in downstream artifacts.
+    #[must_use]
+    pub fn with_seed_lineage_id(mut self, seed_lineage_id: impl Into<String>) -> Self {
+        self.seed_lineage_id = Some(seed_lineage_id.into());
+        self
+    }
+
+    fn dual_run_identity(&self, config: &SporkScenarioConfig) -> DualRunScenarioIdentity {
+        let description = self.description.clone().unwrap_or_else(|| self.id.clone());
+        let mut identity = DualRunScenarioIdentity::phase1(
+            &self.id,
+            self.surface_id.clone().unwrap_or_else(|| self.id.clone()),
+            self.surface_contract_version
+                .clone()
+                .unwrap_or_else(|| format!("{}.v1", self.id)),
+            description,
+            config.seed,
+        );
+        if let Some(ref seed_lineage_id) = self.seed_lineage_id {
+            let mut seed_plan = identity.seed_plan.clone();
+            seed_plan.seed_lineage_id.clone_from(seed_lineage_id);
+            identity = identity.with_seed_plan(seed_plan);
+        }
+        identity
     }
 }
 
@@ -428,6 +498,12 @@ pub struct SporkScenarioResult {
     pub config: SporkScenarioConfig,
     /// Underlying harness report.
     pub report: SporkHarnessReport,
+    /// Adapter identity that produced this result.
+    pub adapter: String,
+    /// Shared dual-run replay metadata for this execution.
+    pub replay_metadata: ReplayMetadata,
+    /// Stable seed-lineage audit record for this execution.
+    pub seed_lineage: SeedLineageRecord,
 }
 
 impl SporkScenarioResult {
@@ -440,6 +516,23 @@ impl SporkScenarioResult {
         config: SporkScenarioConfig,
         report: SporkHarnessReport,
     ) -> Self {
+        let identity = scenario.dual_run_identity(&config);
+        let mut replay_metadata = identity
+            .lab_replay_metadata()
+            .with_lab_report(
+                report.trace_fingerprint(),
+                report.run.trace_certificate.event_hash,
+                report.run.trace_certificate.event_count,
+                report.run.trace_certificate.schedule_hash,
+                report.run.steps_total,
+            )
+            .with_repro_command(format!(
+                "ASUPERSYNC_SEED=0x{:X} rch exec -- cargo test {} -- --nocapture",
+                config.seed, scenario.id
+            ));
+        if let Some(crashpack_path) = report.crashpack_path() {
+            replay_metadata = replay_metadata.with_artifact_path(crashpack_path.to_string());
+        }
         Self {
             schema_version: Self::SCHEMA_VERSION,
             scenario_id: scenario.id.clone(),
@@ -447,6 +540,9 @@ impl SporkScenarioResult {
             expected_invariants: scenario.expected_invariants.clone(),
             config,
             report,
+            adapter: LAB_SPORK_HARNESS_ADAPTER.to_string(),
+            replay_metadata,
+            seed_lineage: identity.seed_lineage(),
         }
     }
 
@@ -464,10 +560,17 @@ impl SporkScenarioResult {
         json!({
             "schema_version": self.schema_version,
             "scenario_id": self.scenario_id,
+            "surface_id": self.replay_metadata.family.surface_id,
+            "surface_contract_version": self.replay_metadata.family.surface_contract_version,
             "description": self.description,
             "expected_invariants": self.expected_invariants,
             "config": self.config.to_json(),
             "report": self.report.to_json(),
+            "seed_lineage_id": self.seed_lineage.seed_lineage_id,
+            "adapter": self.adapter,
+            "execution_instance_id": self.replay_metadata.instance.key(),
+            "replay_metadata": &self.replay_metadata,
+            "seed_lineage": &self.seed_lineage,
         })
     }
 }
@@ -651,6 +754,12 @@ mod tests {
         assert_eq!(result.scenario_id, "empty.lifecycle");
         assert_eq!(result.config.seed, 777);
         assert_eq!(result.report.app, "empty_app");
+        assert_eq!(result.adapter, LAB_SPORK_HARNESS_ADAPTER);
+        assert_eq!(result.replay_metadata.family.surface_id, "empty.lifecycle");
+        assert_eq!(
+            result.replay_metadata.family.surface_contract_version,
+            "empty.lifecycle.v1"
+        );
         assert!(
             result
                 .expected_invariants
@@ -688,6 +797,32 @@ mod tests {
         assert_eq!(a.to_json(), b.to_json());
 
         crate::test_complete!("scenario_runner_deterministic_for_same_seed");
+    }
+
+    #[test]
+    fn scenario_runner_preserves_configured_dual_run_surface_metadata() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("scenario_runner_preserves_configured_dual_run_surface_metadata");
+
+        let mut runner = SporkScenarioRunner::new();
+        runner
+            .register(
+                SporkScenarioSpec::new("cancel.race", |_| AppSpec::new("surface_app"))
+                    .with_surface_id("cancel.race")
+                    .with_surface_contract_version("cancel.race.v1")
+                    .with_seed_lineage_id("seed.cancel.race.v1"),
+            )
+            .unwrap();
+
+        let result = runner.run("cancel.race").unwrap();
+        assert_eq!(result.replay_metadata.family.surface_id, "cancel.race");
+        assert_eq!(
+            result.replay_metadata.family.surface_contract_version,
+            "cancel.race.v1"
+        );
+        assert_eq!(result.seed_lineage.seed_lineage_id, "seed.cancel.race.v1");
+
+        crate::test_complete!("scenario_runner_preserves_configured_dual_run_surface_metadata");
     }
 
     #[test]

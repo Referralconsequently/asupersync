@@ -3,6 +3,7 @@
 //! Every E2E test instantiates via `E2eLabHarness::new(name, seed)` or
 //! `E2eLabHarness::with_chaos(name, seed, chaos)`.
 
+use asupersync::lab::DualRunScenarioIdentity;
 use asupersync::lab::chaos::{ChaosConfig, ChaosStats};
 use asupersync::lab::oracle::OracleReport;
 use asupersync::lab::{LabConfig, LabRuntime};
@@ -68,6 +69,14 @@ impl E2eLabHarness {
     /// Create a harness with heavy chaos preset.
     pub fn with_heavy_chaos(name: &str, seed: u64) -> Self {
         Self::with_chaos(name, seed, ChaosConfig::heavy())
+    }
+
+    /// Create a harness from a shared dual-run identity.
+    pub fn from_dual_run_identity(identity: &DualRunScenarioIdentity) -> Self {
+        Self::new(
+            &identity.scenario_id,
+            identity.seed_plan.effective_lab_seed(),
+        )
     }
 
     /// Create root region with infinite budget.
@@ -224,7 +233,7 @@ impl E2eLabHarness {
         tracing::info!(
             test = %self.name,
             seed = self.seed,
-            "REPRO: cargo test -- {} --exact --test-threads=1  (seed={:#x})",
+            "REPRO: rch exec -- cargo test -- {} --exact --test-threads=1  (seed={:#x})",
             self.name,
             self.seed
         );
