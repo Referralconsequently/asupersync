@@ -279,15 +279,17 @@ mechanically.
 Explicit non-goals of the current ladder contract:
 
 - `service_worker_general_runtime_without_bounded_broker_contract`
-- `shared_worker_general_runtime_without_tenancy_and_lifecycle_contract`
+- `shared_worker_direct_runtime_without_promoted_tenancy_lifecycle_enforcement`
 - `ambient_message_channel_promotion`
 - `shared_array_buffer_multi_worker_default_lane`
 - `raw_socket_filesystem_process_parity`
 
 This is stricter than the broad feasibility matrix on purpose. Service-worker
-and shared-worker direct runtime remain architecturally plausible in the
-abstract, but the shipped execution ladder must still fail closed there until
-their dedicated contracts exist.
+direct runtime still remains fail-closed until its bounded broker contract
+exists. Shared-worker direct runtime now has a dedicated tenancy/lifecycle
+contract in `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`, but the
+shipped execution ladder must still fail closed there until that contract is
+implemented and promoted.
 
 ### Runtime contexts
 
@@ -295,7 +297,8 @@ their dedicated contracts exist.
 |---|---|---|---|
 | Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported | `packages/browser/src/index.ts`, `tests/wasm_js_exports_coverage_contract.rs` | Primary shipped JS/TS Browser Edition lane |
 | Dedicated Web Worker (`DedicatedWorkerGlobalScope`) | Direct-runtime supported | `packages/browser/src/index.ts`, `asupersync-browser-core/src/lib.rs`, `tests/wasm_js_exports_coverage_contract.rs` | Shipped: SDK detects `DedicatedWorkerGlobalScope`, fetch routes through `WorkerGlobalScope.fetch()`; examples and QA are catching up |
-| Service worker / shared worker direct runtime | Direct-runtime feasible but not yet shipped | `packages/browser/src/index.ts` currently accepts only main-thread DOM or dedicated worker globals | Deferred until lifecycle/host constraints are productized explicitly |
+| Service worker direct runtime | Direct-runtime feasible but not yet shipped | `packages/browser/src/index.ts` currently accepts only main-thread DOM or dedicated worker globals | Deferred until a bounded broker and persistence contract is promoted explicitly |
+| Shared worker direct runtime | Direct-runtime feasible but not yet shipped | `src/runtime/builder.rs` explicitly detects `SharedWorkerGlobalScope` and returns `shared_worker_direct_runtime_not_shipped`; `packages/browser/src/index.ts` still rejects it as an unsupported direct-runtime host | Governed by `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`; must remain fail-closed until the tenancy/lifecycle/downgrade contract is implemented and promoted |
 | Node / SSR / edge direct runtime via `@asupersync/browser` | Impossible for direct browser runtime; bridge-only or unsupported | `packages/browser/src/index.ts`, `packages/next/src/index.ts` | Browser package fails closed; Next diagnostics classify server/edge as bridge-only targets |
 | Rust-authored `wasm32-unknown-unknown` consumer path | Direct-runtime feasible but not yet shipped | semantic core is target-agnostic; `asupersync` supports canonical browser profiles and the repository ships `asupersync-browser-core` / `asupersync-wasm`, but `src/runtime/builder.rs` still exposes no public Rust-callable browser runtime builder path | Planned lane, not current public support |
 | Multi-worker / `SharedArrayBuffer` parallel execution | Guarded optional, not shipped | browser model is single-threaded today; true parallelism requires cross-origin isolation | Explicitly non-default even if pursued later |

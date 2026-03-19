@@ -151,7 +151,7 @@ This scope matrix is upstream policy for the immediate follow-on beads:
 |---|---|
 | `asupersync-2a6k9.1.2` | comparator schema only for surfaces admitted here |
 | `asupersync-2a6k9.1.3` | divergence taxonomy should classify failures relative to these buckets |
-| `asupersync-2a6k9.1.4` | verification/logging requirements must match the rollout ladder here |
+| `asupersync-2a6k9.1.4` | verification/logging requirements must match the rollout ladder here and should be published in `docs/lab_live_verification_taxonomy.md` |
 | `asupersync-2a6k9.2.*` | scenario model should prioritize `Phase 1` surfaces first |
 | `asupersync-2a6k9.4.*` | live evidence capture should only target admitted surfaces |
 | `asupersync-2a6k9.6.*` | pilot suites must follow the exact `Phase 1` ordering defined above |

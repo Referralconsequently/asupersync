@@ -662,6 +662,7 @@ This contract is upstream policy for the next harness beads:
 
 | Downstream bead | What it must consume from this contract |
 |---|---|
+| `asupersync-2a6k9.1.4` | verification taxonomy should treat this contract as the minimum shared scenario/artifact shape for later executable beads |
 | `asupersync-2a6k9.2.2` | shared witness/assertion helpers must read `expectations` and mismatch policy from here |
 | `asupersync-2a6k9.2.3` | harness result schema must preserve `scenario_id`, `surface_id`, `seed_lineage_id`, and adapter identity |
 | `asupersync-2a6k9.2.4` | smoke dual-run e2e path must prove `lab_binding` and `live_binding` can execute the same contract |
