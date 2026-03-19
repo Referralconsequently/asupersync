@@ -5,7 +5,7 @@
 //! carries, whether the rewrite is reversible, what privacy and sharing rules
 //! apply, and what quota envelope bounds the handoff.
 
-use super::ir::{EvidencePolicy, PrivacyPolicy};
+use super::ir::{EvidencePolicy, MetadataDisclosure, PrivacyPolicy, ReplySpaceRule};
 use super::subject::SubjectPattern;
 use crate::util::DetHasher;
 use serde::{Deserialize, Serialize};
@@ -648,6 +648,52 @@ impl Morphism {
             facets: self.facet_set(),
         })
     }
+
+    /// Compile the morphism into a verified export-side boundary plan.
+    pub fn compile_export_plan(
+        &self,
+        requested_reply_space: Option<ReplySpaceRule>,
+    ) -> Result<ExportPlan, MorphismCompileError> {
+        let parts =
+            compile_boundary_plan(self, MorphismPlanDirection::Export, requested_reply_space)?;
+        Ok(ExportPlan {
+            direction: parts.direction,
+            certificate: parts.certificate,
+            attached_capabilities: parts.attached_capabilities,
+            selected_reply_space: parts.selected_reply_space,
+            permitted_reply_spaces: parts.permitted_reply_spaces,
+            metadata_boundary: parts.metadata_boundary,
+            steps: parts.steps,
+            reasoning: parts.reasoning,
+        })
+    }
+
+    /// Compile the morphism into a verified import-side boundary plan.
+    pub fn compile_import_plan(
+        &self,
+        requested_reply_space: Option<ReplySpaceRule>,
+    ) -> Result<ImportPlan, MorphismCompileError> {
+        let parts =
+            compile_boundary_plan(self, MorphismPlanDirection::Import, requested_reply_space)?;
+        Ok(ImportPlan {
+            direction: parts.direction,
+            certificate: parts.certificate,
+            attached_capabilities: parts.attached_capabilities,
+            selected_reply_space: parts.selected_reply_space,
+            permitted_reply_spaces: parts.permitted_reply_spaces,
+            metadata_boundary: parts.metadata_boundary,
+            steps: parts.steps,
+            reasoning: parts.reasoning,
+        })
+    }
+
+    fn crosses_boundary(&self) -> bool {
+        self.sharing_policy != SharingPolicy::Private
+            || matches!(
+                self.class,
+                MorphismClass::Egress | MorphismClass::Delegation
+            )
+    }
 }
 
 /// Independently checkable authority facet.
@@ -723,6 +769,184 @@ pub struct MorphismCertificate {
     pub transform: SubjectTransform,
     /// Faceted summary used by downstream validators.
     pub facets: MorphismFacetSet,
+}
+
+/// Direction for a compiled morphism boundary plan.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MorphismPlanDirection {
+    /// Compile an inbound/import-side boundary plan.
+    Import,
+    /// Compile an outbound/export-side boundary plan.
+    #[default]
+    Export,
+}
+
+impl MorphismPlanDirection {
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Export => "export",
+        }
+    }
+}
+
+/// Deterministic execution steps in a compiled boundary plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MorphismPlanStep {
+    /// Match the incoming namespace against the source language.
+    MatchSourceLanguage,
+    /// Enforce the attached capability envelope.
+    EnforceCapabilityEnvelope,
+    /// Apply the transform certificate deterministically.
+    ApplyTransformCertificate,
+    /// Enforce reply-space policy for cross-boundary requests.
+    EnforceReplySpace,
+    /// Enforce metadata disclosure policy at the boundary.
+    EnforceMetadataBoundary,
+    /// Emit auditable reasoning for the plan installation.
+    EmitAuditReasoning,
+}
+
+/// Semantic class for a risky morphism cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticCycleClass {
+    /// The loop could preserve or re-amplify authority.
+    Authority,
+    /// The loop hides a lossy or irreversible rewrite.
+    Reversibility,
+    /// The loop composes boundary-crossing capabilities into a cycle.
+    Capability,
+}
+
+/// Auditable summary of what metadata crosses a morphism boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetadataBoundarySummary {
+    /// Whether the plan crosses an authority or stewardship boundary.
+    pub crosses_boundary: bool,
+    /// Metadata disclosure level across the boundary.
+    pub metadata_disclosure: MetadataDisclosure,
+    /// Whether literal subject segments are redacted before crossing.
+    pub subject_literals_redacted: bool,
+    /// Whether cross-tenant metadata movement is explicitly allowed.
+    pub cross_tenant_flow_allowed: bool,
+    /// Whether payload hashes remain observable after the boundary.
+    pub payload_hashes_recorded: bool,
+}
+
+/// Auditable reasoning note attached to a compiled plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MorphismAuditNote {
+    /// Stable category for the note.
+    pub code: String,
+    /// Human-readable explanation for auditors.
+    pub detail: String,
+}
+
+/// Compiled export-side routing plan for a morphism boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportPlan {
+    /// Direction for the compiled plan.
+    pub direction: MorphismPlanDirection,
+    /// Transform certificate emitted by the compiler.
+    pub certificate: MorphismCertificate,
+    /// Canonical attached capability envelope.
+    pub attached_capabilities: Vec<FabricCapability>,
+    /// Reply space selected for the boundary.
+    pub selected_reply_space: Option<ReplySpaceRule>,
+    /// Reply spaces permitted by the compiled policy.
+    pub permitted_reply_spaces: Vec<ReplySpaceRule>,
+    /// Metadata disclosure summary for the boundary.
+    pub metadata_boundary: MetadataBoundarySummary,
+    /// Deterministic execution steps for the plan.
+    pub steps: Vec<MorphismPlanStep>,
+    /// Auditable reasoning notes emitted by compilation.
+    pub reasoning: Vec<MorphismAuditNote>,
+}
+
+/// Compiled import-side routing plan for a morphism boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportPlan {
+    /// Direction for the compiled plan.
+    pub direction: MorphismPlanDirection,
+    /// Transform certificate emitted by the compiler.
+    pub certificate: MorphismCertificate,
+    /// Canonical attached capability envelope.
+    pub attached_capabilities: Vec<FabricCapability>,
+    /// Reply space selected for the boundary.
+    pub selected_reply_space: Option<ReplySpaceRule>,
+    /// Reply spaces permitted by the compiled policy.
+    pub permitted_reply_spaces: Vec<ReplySpaceRule>,
+    /// Metadata disclosure summary for the boundary.
+    pub metadata_boundary: MetadataBoundarySummary,
+    /// Deterministic execution steps for the plan.
+    pub steps: Vec<MorphismPlanStep>,
+    /// Auditable reasoning notes emitted by compilation.
+    pub reasoning: Vec<MorphismAuditNote>,
+}
+
+/// Compilation failures while building import/export plans.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MorphismCompileError {
+    /// The morphism declaration itself failed validation.
+    #[error(transparent)]
+    InvalidMorphism(#[from] MorphismValidationError),
+    /// Cross-boundary traffic selected a forbidden reply space.
+    #[error(
+        "cross-boundary reply space `{requested:?}` is not permitted for response policy `{policy:?}`; permitted reply spaces: {permitted:?}"
+    )]
+    ReplySpaceNotPermitted {
+        /// Response policy being enforced.
+        policy: ResponsePolicy,
+        /// Requested reply space for the boundary.
+        requested: ReplySpaceRule,
+        /// Reply spaces admitted by the compiler.
+        permitted: Vec<ReplySpaceRule>,
+    },
+    /// Cross-boundary traffic attempted to keep replies when the policy strips them.
+    #[error("cross-boundary replies are forbidden for response policy `{policy:?}`")]
+    ReplySpaceForbidden {
+        /// Response policy being enforced.
+        policy: ResponsePolicy,
+    },
+    /// A morphism chain creates a risky semantic loop.
+    #[error("semantic {class:?} cycle detected across morphism chain {path:?}")]
+    SemanticCycleDetected {
+        /// Semantic class of the detected loop.
+        class: SemanticCycleClass,
+        /// Human-readable path for the cycle.
+        path: Vec<String>,
+    },
+    /// The privacy boundary permits more metadata than the policy authorizes.
+    #[error(
+        "sharing policy `{sharing_policy:?}` with metadata disclosure `{metadata_disclosure:?}` requires explicit cross-tenant permission"
+    )]
+    MetadataBoundaryViolation {
+        /// Boundary sharing level that triggered the violation.
+        sharing_policy: SharingPolicy,
+        /// Metadata disclosure mode that exceeded policy.
+        metadata_disclosure: MetadataDisclosure,
+    },
+}
+
+/// Detect risky semantic cycles across a chain of morphisms.
+pub fn detect_semantic_cycles(morphisms: &[Morphism]) -> Result<(), MorphismCompileError> {
+    for morphism in morphisms {
+        morphism.validate()?;
+    }
+
+    for start in 0..morphisms.len() {
+        let mut path = vec![start];
+        let mut visited = BTreeSet::from([start]);
+        detect_semantic_cycle_from(morphisms, start, start, &mut path, &mut visited)?;
+    }
+
+    Ok(())
 }
 
 /// Validation failures for typed namespace morphisms.
@@ -938,6 +1162,273 @@ fn take_right(token: &str, len: usize) -> String {
     token.chars().skip(start).collect()
 }
 
+#[derive(Debug)]
+struct CompiledPlanParts {
+    direction: MorphismPlanDirection,
+    certificate: MorphismCertificate,
+    attached_capabilities: Vec<FabricCapability>,
+    selected_reply_space: Option<ReplySpaceRule>,
+    permitted_reply_spaces: Vec<ReplySpaceRule>,
+    metadata_boundary: MetadataBoundarySummary,
+    steps: Vec<MorphismPlanStep>,
+    reasoning: Vec<MorphismAuditNote>,
+}
+
+fn compile_boundary_plan(
+    morphism: &Morphism,
+    direction: MorphismPlanDirection,
+    requested_reply_space: Option<ReplySpaceRule>,
+) -> Result<CompiledPlanParts, MorphismCompileError> {
+    let certificate = morphism.compile()?;
+    let attached_capabilities = canonical_capabilities(&morphism.capability_requirements);
+    let permitted_reply_spaces = permitted_reply_spaces(morphism);
+    let selected_reply_space =
+        select_reply_space(morphism, requested_reply_space, &permitted_reply_spaces)?;
+    let metadata_boundary = compile_metadata_boundary(morphism)?;
+    let reasoning = vec![
+        audit_note(
+            "direction",
+            format!(
+                "{} plan rewrites `{}` into `{}`",
+                direction.as_str(),
+                morphism.source_language,
+                morphism.dest_language
+            ),
+        ),
+        audit_note(
+            "capabilities",
+            format!("attached capabilities: {attached_capabilities:?}"),
+        ),
+        audit_note(
+            "reply_space",
+            format!(
+                "response policy {:?} selected {:?} from permitted spaces {:?}",
+                morphism.response_policy, selected_reply_space, permitted_reply_spaces
+            ),
+        ),
+        audit_note(
+            "metadata_boundary",
+            format!(
+                "boundary crosses={}, disclosure={:?}, subject_literals_redacted={}, cross_tenant_flow_allowed={}, payload_hashes_recorded={}",
+                metadata_boundary.crosses_boundary,
+                metadata_boundary.metadata_disclosure,
+                metadata_boundary.subject_literals_redacted,
+                metadata_boundary.cross_tenant_flow_allowed,
+                metadata_boundary.payload_hashes_recorded,
+            ),
+        ),
+    ];
+
+    Ok(CompiledPlanParts {
+        direction,
+        certificate,
+        attached_capabilities,
+        selected_reply_space,
+        permitted_reply_spaces,
+        metadata_boundary,
+        steps: vec![
+            MorphismPlanStep::MatchSourceLanguage,
+            MorphismPlanStep::EnforceCapabilityEnvelope,
+            MorphismPlanStep::ApplyTransformCertificate,
+            MorphismPlanStep::EnforceReplySpace,
+            MorphismPlanStep::EnforceMetadataBoundary,
+            MorphismPlanStep::EmitAuditReasoning,
+        ],
+        reasoning,
+    })
+}
+
+fn permitted_reply_spaces(morphism: &Morphism) -> Vec<ReplySpaceRule> {
+    match morphism.response_policy {
+        ResponsePolicy::StripReplies => Vec::new(),
+        ResponsePolicy::PreserveCallerReplies | ResponsePolicy::ForwardOpaque => {
+            vec![ReplySpaceRule::CallerInbox]
+        }
+        ResponsePolicy::ReplyAuthoritative => {
+            let prefix = morphism.dest_language.as_str().to_owned();
+            vec![
+                ReplySpaceRule::DedicatedPrefix {
+                    prefix: prefix.clone(),
+                },
+                ReplySpaceRule::SharedPrefix { prefix },
+            ]
+        }
+    }
+}
+
+fn select_reply_space(
+    morphism: &Morphism,
+    requested_reply_space: Option<ReplySpaceRule>,
+    permitted_reply_spaces: &[ReplySpaceRule],
+) -> Result<Option<ReplySpaceRule>, MorphismCompileError> {
+    let selected_reply_space = match requested_reply_space {
+        Some(reply_space) => Some(reply_space),
+        None => default_reply_space(morphism, permitted_reply_spaces),
+    };
+
+    if !morphism.crosses_boundary() {
+        return Ok(selected_reply_space);
+    }
+
+    match selected_reply_space {
+        Some(reply_space) => {
+            if permitted_reply_spaces.contains(&reply_space) {
+                Ok(Some(reply_space))
+            } else if permitted_reply_spaces.is_empty() {
+                Err(MorphismCompileError::ReplySpaceForbidden {
+                    policy: morphism.response_policy,
+                })
+            } else {
+                Err(MorphismCompileError::ReplySpaceNotPermitted {
+                    policy: morphism.response_policy,
+                    requested: reply_space,
+                    permitted: permitted_reply_spaces.to_vec(),
+                })
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+fn default_reply_space(
+    morphism: &Morphism,
+    permitted_reply_spaces: &[ReplySpaceRule],
+) -> Option<ReplySpaceRule> {
+    match morphism.response_policy {
+        ResponsePolicy::StripReplies => None,
+        ResponsePolicy::PreserveCallerReplies | ResponsePolicy::ForwardOpaque => {
+            Some(ReplySpaceRule::CallerInbox)
+        }
+        ResponsePolicy::ReplyAuthoritative => permitted_reply_spaces.first().cloned(),
+    }
+}
+
+fn compile_metadata_boundary(
+    morphism: &Morphism,
+) -> Result<MetadataBoundarySummary, MorphismCompileError> {
+    let summary = MetadataBoundarySummary {
+        crosses_boundary: morphism.crosses_boundary(),
+        metadata_disclosure: morphism.privacy_policy.metadata_disclosure,
+        subject_literals_redacted: morphism.privacy_policy.redact_subject_literals
+            || matches!(morphism.transform, SubjectTransform::RedactLiterals),
+        cross_tenant_flow_allowed: morphism.privacy_policy.allow_cross_tenant_flow,
+        payload_hashes_recorded: morphism.evidence_policy.record_payload_hashes,
+    };
+
+    if summary.crosses_boundary
+        && matches!(
+            morphism.sharing_policy,
+            SharingPolicy::Federated | SharingPolicy::PublicRead
+        )
+        && summary.metadata_disclosure == MetadataDisclosure::Full
+        && !summary.cross_tenant_flow_allowed
+    {
+        return Err(MorphismCompileError::MetadataBoundaryViolation {
+            sharing_policy: morphism.sharing_policy,
+            metadata_disclosure: summary.metadata_disclosure,
+        });
+    }
+
+    Ok(summary)
+}
+
+fn detect_semantic_cycle_from(
+    morphisms: &[Morphism],
+    start: usize,
+    current: usize,
+    path: &mut Vec<usize>,
+    visited: &mut BTreeSet<usize>,
+) -> Result<(), MorphismCompileError> {
+    if morphisms[current]
+        .dest_language
+        .overlaps(&morphisms[start].source_language)
+    {
+        let cycle = path
+            .iter()
+            .map(|index| &morphisms[*index])
+            .collect::<Vec<_>>();
+        if let Some(class) = classify_semantic_cycle(&cycle) {
+            return Err(MorphismCompileError::SemanticCycleDetected {
+                class,
+                path: path
+                    .iter()
+                    .map(|index| describe_morphism(&morphisms[*index]))
+                    .collect(),
+            });
+        }
+    }
+
+    for next in 0..morphisms.len() {
+        if !morphisms[current]
+            .dest_language
+            .overlaps(&morphisms[next].source_language)
+        {
+            continue;
+        }
+        if visited.contains(&next) {
+            continue;
+        }
+
+        visited.insert(next);
+        path.push(next);
+        let result = detect_semantic_cycle_from(morphisms, start, next, path, visited);
+        path.pop();
+        visited.remove(&next);
+        result?;
+    }
+
+    Ok(())
+}
+
+fn classify_semantic_cycle(morphisms: &[&Morphism]) -> Option<SemanticCycleClass> {
+    if morphisms.iter().any(|morphism| {
+        morphism.class == MorphismClass::Authoritative
+            || morphism.response_policy == ResponsePolicy::ReplyAuthoritative
+            || morphism
+                .capability_requirements
+                .iter()
+                .copied()
+                .any(FabricCapability::is_authority_bearing)
+    }) {
+        return Some(SemanticCycleClass::Authority);
+    }
+
+    if morphisms.iter().any(|morphism| {
+        morphism.reversibility == ReversibilityRequirement::Irreversible
+            || morphism.transform.is_lossy()
+    }) {
+        return Some(SemanticCycleClass::Reversibility);
+    }
+
+    if morphisms.iter().any(|morphism| {
+        morphism.sharing_policy != SharingPolicy::Private
+            || morphism.capability_requirements.iter().any(|capability| {
+                matches!(
+                    capability,
+                    FabricCapability::ObserveEvidence | FabricCapability::CrossBoundaryEgress
+                )
+            })
+    }) {
+        return Some(SemanticCycleClass::Capability);
+    }
+
+    None
+}
+
+fn describe_morphism(morphism: &Morphism) -> String {
+    format!(
+        "{:?}:{}->{}",
+        morphism.class, morphism.source_language, morphism.dest_language
+    )
+}
+
+fn audit_note(code: &str, detail: String) -> MorphismAuditNote {
+    MorphismAuditNote {
+        code: code.to_owned(),
+        detail,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,6 +1472,7 @@ mod tests {
     #[test]
     fn authoritative_morphisms_reject_lossy_or_wildcard_rewrites() {
         let mut lossy = authoritative_morphism();
+        lossy.reversibility = ReversibilityRequirement::EvidenceBacked;
         lossy.transform = SubjectTransform::RedactLiterals;
         assert_eq!(
             lossy.validate(),
@@ -1135,6 +1627,75 @@ mod tests {
     }
 
     #[test]
+    fn rename_prefix_and_remaining_lossy_variants_cover_expected_behavior() {
+        let tokens = vec![
+            String::from("tenant"),
+            String::from("orders"),
+            String::from("priority"),
+        ];
+        let rename = SubjectTransform::RenamePrefix {
+            from: SubjectPattern::new("tenant.orders"),
+            to: SubjectPattern::new("authority.orders"),
+        };
+        let rewritten = rename
+            .apply_tokens(&tokens)
+            .expect("rename-prefix should rewrite matching literal prefixes");
+        assert_eq!(
+            rewritten,
+            vec![
+                String::from("authority"),
+                String::from("orders"),
+                String::from("priority"),
+            ]
+        );
+        assert_eq!(
+            rename
+                .inverse()
+                .expect("literal rename should be invertible")
+                .apply_tokens(&rewritten)
+                .expect("inverse rename should roundtrip"),
+            tokens
+        );
+
+        let redacted = SubjectTransform::RedactLiterals;
+        assert_eq!(
+            redacted
+                .apply_tokens(&rewritten)
+                .expect("redaction should preserve token count"),
+            vec![String::from("_"), String::from("_"), String::from("_"),]
+        );
+        assert!(redacted.is_lossy());
+
+        let summarized = SubjectTransform::SummarizeTail {
+            preserve_segments: 2,
+        };
+        assert_eq!(
+            summarized
+                .apply_tokens(&rewritten)
+                .expect("tail summary should preserve requested prefix"),
+            vec![
+                String::from("authority"),
+                String::from("orders"),
+                String::from("..."),
+            ]
+        );
+        assert!(summarized.is_lossy());
+
+        let partition = SubjectTransform::HashPartition { buckets: 8 };
+        let first = partition
+            .apply_tokens(&rewritten)
+            .expect("hash partition should evaluate deterministically");
+        let second = partition
+            .apply_tokens(&rewritten)
+            .expect("hash partition should remain stable");
+        assert_eq!(first, second);
+        let bucket = first[0]
+            .parse::<u16>()
+            .expect("hash partition must emit a bucket number");
+        assert!(bucket < 8);
+    }
+
+    #[test]
     fn deterministic_hash_is_stable_for_selected_tokens() {
         let tokens = vec![
             String::from("tenant"),
@@ -1153,6 +1714,25 @@ mod tests {
             .apply_tokens(&tokens)
             .expect("hash should evaluate deterministically twice");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn transform_validation_rejects_invalid_core_parameters() {
+        assert_eq!(
+            SubjectTransform::SummarizeTail {
+                preserve_segments: 0,
+            }
+            .validate(),
+            Err(MorphismValidationError::SummarizeTailMustPreserveSegments)
+        );
+        assert_eq!(
+            SubjectTransform::HashPartition { buckets: 0 }.validate(),
+            Err(MorphismValidationError::HashPartitionRequiresBuckets)
+        );
+        assert_eq!(
+            SubjectTransform::Compose { steps: Vec::new() }.validate(),
+            Err(MorphismValidationError::ComposeRequiresSteps)
+        );
     }
 
     #[test]
@@ -1210,5 +1790,320 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn export_plan_compilation_attaches_certificate_capabilities_and_reply_space() {
+        let mut morphism = authoritative_morphism();
+        morphism.sharing_policy = SharingPolicy::Federated;
+        morphism.privacy_policy.allow_cross_tenant_flow = true;
+
+        let plan = morphism
+            .compile_export_plan(None)
+            .expect("export plan should compile");
+
+        assert_eq!(plan.direction, MorphismPlanDirection::Export);
+        assert_eq!(
+            plan.attached_capabilities,
+            vec![
+                FabricCapability::CarryAuthority,
+                FabricCapability::ReplyAuthority,
+            ]
+        );
+        assert_eq!(
+            plan.selected_reply_space,
+            Some(ReplySpaceRule::DedicatedPrefix {
+                prefix: String::from("authority.orders"),
+            })
+        );
+        assert!(
+            plan.permitted_reply_spaces
+                .contains(&ReplySpaceRule::SharedPrefix {
+                    prefix: String::from("authority.orders"),
+                })
+        );
+        assert!(plan.reasoning.iter().any(|note| note.code == "reply_space"));
+    }
+
+    #[test]
+    fn import_plan_compilation_defaults_forward_opaque_to_caller_inbox() {
+        let mut delegation = Morphism {
+            source_language: SubjectPattern::new("tenant.rpc"),
+            dest_language: SubjectPattern::new("delegate.rpc"),
+            class: MorphismClass::Delegation,
+            capability_requirements: vec![FabricCapability::DelegateNamespace],
+            response_policy: ResponsePolicy::ForwardOpaque,
+            sharing_policy: SharingPolicy::TenantScoped,
+            ..Morphism::default()
+        };
+        delegation.quota_policy.max_handoff_duration = Some(Duration::from_secs(30));
+        delegation.quota_policy.revocation_required = true;
+        delegation.privacy_policy.allow_cross_tenant_flow = true;
+
+        let plan = delegation
+            .compile_import_plan(None)
+            .expect("import plan should compile");
+
+        assert_eq!(plan.direction, MorphismPlanDirection::Import);
+        assert_eq!(plan.selected_reply_space, Some(ReplySpaceRule::CallerInbox));
+        assert_eq!(
+            plan.permitted_reply_spaces,
+            vec![ReplySpaceRule::CallerInbox]
+        );
+    }
+
+    #[test]
+    fn cross_boundary_reply_space_enforcement_rejects_unpermitted_reply_prefixes() {
+        let mut morphism = Morphism {
+            source_language: SubjectPattern::new("tenant.requests"),
+            dest_language: SubjectPattern::new("federated.requests"),
+            sharing_policy: SharingPolicy::Federated,
+            ..Morphism::default()
+        };
+        morphism.privacy_policy.allow_cross_tenant_flow = true;
+
+        let err = morphism
+            .compile_export_plan(Some(ReplySpaceRule::DedicatedPrefix {
+                prefix: String::from("reply.bad"),
+            }))
+            .expect_err("non-caller reply prefix should be rejected");
+
+        assert_eq!(
+            err,
+            MorphismCompileError::ReplySpaceNotPermitted {
+                policy: ResponsePolicy::PreserveCallerReplies,
+                requested: ReplySpaceRule::DedicatedPrefix {
+                    prefix: String::from("reply.bad"),
+                },
+                permitted: vec![ReplySpaceRule::CallerInbox],
+            }
+        );
+    }
+
+    #[test]
+    fn cross_boundary_strip_replies_forbids_any_selected_reply_space() {
+        let mut egress = Morphism {
+            source_language: SubjectPattern::new("tenant.audit"),
+            dest_language: SubjectPattern::new("federated.audit"),
+            class: MorphismClass::Egress,
+            transform: SubjectTransform::RedactLiterals,
+            reversibility: ReversibilityRequirement::Irreversible,
+            sharing_policy: SharingPolicy::Federated,
+            response_policy: ResponsePolicy::StripReplies,
+            ..Morphism::default()
+        };
+        egress.privacy_policy.allow_cross_tenant_flow = true;
+
+        let err = egress
+            .compile_export_plan(Some(ReplySpaceRule::CallerInbox))
+            .expect_err("strip-replies egress should reject every reply space");
+
+        assert_eq!(
+            err,
+            MorphismCompileError::ReplySpaceForbidden {
+                policy: ResponsePolicy::StripReplies,
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_boundary_checks_fail_closed_for_public_full_disclosure() {
+        let mut morphism = Morphism {
+            source_language: SubjectPattern::new("tenant.audit"),
+            dest_language: SubjectPattern::new("public.audit"),
+            sharing_policy: SharingPolicy::PublicRead,
+            ..Morphism::default()
+        };
+        morphism.privacy_policy.metadata_disclosure = MetadataDisclosure::Full;
+
+        let err = morphism
+            .compile_export_plan(None)
+            .expect_err("public full disclosure should require explicit cross-tenant permission");
+
+        assert_eq!(
+            err,
+            MorphismCompileError::MetadataBoundaryViolation {
+                sharing_policy: SharingPolicy::PublicRead,
+                metadata_disclosure: MetadataDisclosure::Full,
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_boundary_summary_records_redaction_and_payload_hash_evidence() {
+        let mut morphism = Morphism {
+            source_language: SubjectPattern::new("tenant.audit"),
+            dest_language: SubjectPattern::new("federated.audit"),
+            transform: SubjectTransform::RedactLiterals,
+            sharing_policy: SharingPolicy::Federated,
+            ..Morphism::default()
+        };
+        morphism.privacy_policy.allow_cross_tenant_flow = true;
+        morphism.evidence_policy.record_payload_hashes = true;
+
+        let plan = morphism
+            .compile_export_plan(None)
+            .expect("cross-boundary plan should compile");
+
+        assert_eq!(
+            plan.metadata_boundary,
+            MetadataBoundarySummary {
+                crosses_boundary: true,
+                metadata_disclosure: MetadataDisclosure::Hashed,
+                subject_literals_redacted: true,
+                cross_tenant_flow_allowed: true,
+                payload_hashes_recorded: true,
+            }
+        );
+        assert!(plan.reasoning.iter().any(|note| {
+            note.code == "metadata_boundary"
+                && note.detail.contains("subject_literals_redacted=true")
+                && note.detail.contains("payload_hashes_recorded=true")
+        }));
+    }
+
+    #[test]
+    fn semantic_cycle_detection_flags_authority_cycles() {
+        let forward = authoritative_morphism();
+        let reverse = Morphism {
+            source_language: SubjectPattern::new("authority.orders"),
+            dest_language: SubjectPattern::new("tenant.orders"),
+            class: MorphismClass::Authoritative,
+            transform: SubjectTransform::RenamePrefix {
+                from: SubjectPattern::new("authority.orders"),
+                to: SubjectPattern::new("tenant.orders"),
+            },
+            reversibility: ReversibilityRequirement::Bijective,
+            capability_requirements: vec![
+                FabricCapability::CarryAuthority,
+                FabricCapability::ReplyAuthority,
+            ],
+            response_policy: ResponsePolicy::ReplyAuthoritative,
+            ..Morphism::default()
+        };
+
+        let err = detect_semantic_cycles(&[forward, reverse])
+            .expect_err("authority-bearing cycle should be rejected");
+
+        assert!(matches!(
+            err,
+            MorphismCompileError::SemanticCycleDetected {
+                class: SemanticCycleClass::Authority,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn semantic_cycle_detection_flags_irreversible_cycles() {
+        let irreversible = Morphism {
+            source_language: SubjectPattern::new("tenant.audit"),
+            dest_language: SubjectPattern::new("egress.audit"),
+            class: MorphismClass::Egress,
+            transform: SubjectTransform::RedactLiterals,
+            reversibility: ReversibilityRequirement::Irreversible,
+            sharing_policy: SharingPolicy::Federated,
+            response_policy: ResponsePolicy::StripReplies,
+            ..Morphism::default()
+        };
+        let reverse = Morphism {
+            source_language: SubjectPattern::new("egress.audit"),
+            dest_language: SubjectPattern::new("tenant.audit"),
+            ..Morphism::default()
+        };
+
+        let err = detect_semantic_cycles(&[irreversible, reverse])
+            .expect_err("irreversible cycle should be rejected");
+
+        assert!(matches!(
+            err,
+            MorphismCompileError::SemanticCycleDetected {
+                class: SemanticCycleClass::Reversibility,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn semantic_cycle_detection_flags_capability_cycles() {
+        let mut boundary = Morphism {
+            source_language: SubjectPattern::new("tenant.stream"),
+            dest_language: SubjectPattern::new("federated.stream"),
+            capability_requirements: vec![
+                FabricCapability::RewriteNamespace,
+                FabricCapability::CrossBoundaryEgress,
+            ],
+            sharing_policy: SharingPolicy::Federated,
+            ..Morphism::default()
+        };
+        boundary.privacy_policy.allow_cross_tenant_flow = true;
+        let reverse = Morphism {
+            source_language: SubjectPattern::new("federated.stream"),
+            dest_language: SubjectPattern::new("tenant.stream"),
+            ..Morphism::default()
+        };
+
+        let err = detect_semantic_cycles(&[boundary, reverse])
+            .expect_err("boundary capability cycle should be rejected");
+
+        assert!(matches!(
+            err,
+            MorphismCompileError::SemanticCycleDetected {
+                class: SemanticCycleClass::Capability,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn semantic_cycle_detection_flags_multi_hop_boundary_cycles() {
+        let mut first = Morphism {
+            source_language: SubjectPattern::new("tenant.stream"),
+            dest_language: SubjectPattern::new("federated.stream"),
+            capability_requirements: vec![
+                FabricCapability::RewriteNamespace,
+                FabricCapability::CrossBoundaryEgress,
+            ],
+            sharing_policy: SharingPolicy::Federated,
+            ..Morphism::default()
+        };
+        first.privacy_policy.allow_cross_tenant_flow = true;
+
+        let mut second = Morphism {
+            source_language: SubjectPattern::new("federated.stream"),
+            dest_language: SubjectPattern::new("shared.stream"),
+            capability_requirements: vec![FabricCapability::ObserveEvidence],
+            sharing_policy: SharingPolicy::Federated,
+            ..Morphism::default()
+        };
+        second.privacy_policy.allow_cross_tenant_flow = true;
+
+        let third = Morphism {
+            source_language: SubjectPattern::new("shared.stream"),
+            dest_language: SubjectPattern::new("tenant.stream"),
+            ..Morphism::default()
+        };
+
+        let err = detect_semantic_cycles(&[first, second, third])
+            .expect_err("multi-hop boundary cycle should be rejected");
+
+        assert!(matches!(
+            err,
+            MorphismCompileError::SemanticCycleDetected {
+                class: SemanticCycleClass::Capability,
+                ref path,
+            } if path.len() == 3
+        ));
+    }
+
+    #[test]
+    fn semantic_cycle_detection_ignores_safe_private_identity_overlap() {
+        let morphism = Morphism {
+            source_language: SubjectPattern::new("tenant.local"),
+            dest_language: SubjectPattern::new("tenant.local"),
+            ..Morphism::default()
+        };
+
+        detect_semantic_cycles(&[morphism]).expect("safe private overlap should be accepted");
     }
 }

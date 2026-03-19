@@ -10,11 +10,13 @@
 //! - stale acknowledgements collapse to an explicit no-op instead of
 //!   reanimating stale authority.
 
-use super::fabric::{CellEpoch, CellId, SubjectCell};
+use super::fabric::{CellEpoch, CellId, SubjectCell, SubjectPattern};
+use super::jetstream::{AckPolicy, DeliverPolicy};
 use crate::remote::NodeId;
 use crate::types::ObligationId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Inclusive sequence window requested or served by a consumer.
@@ -751,6 +753,643 @@ impl FabricConsumerCursor {
     }
 }
 
+/// Replay pacing applied to pull-based consumer delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ConsumerReplayPolicy {
+    /// Replay as quickly as policy gates allow.
+    #[default]
+    Instant,
+    /// Preserve source pacing semantics when replaying historical windows.
+    Original,
+}
+
+/// High-level dispatch mode for a FABRIC consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ConsumerDispatchMode {
+    /// Windows are pushed according to the active delivery policy.
+    #[default]
+    Push,
+    /// Windows are served only in response to queued pull requests.
+    Pull,
+}
+
+/// Static consumer configuration for the FABRIC delivery engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricConsumerConfig {
+    /// Stable durable consumer name, when the consumer survives process restarts.
+    pub durable_name: Option<String>,
+    /// Optional subject filter narrowing which stream slice the consumer may see.
+    pub filter_subject: Option<SubjectPattern>,
+    /// Acknowledgement semantics for delivered messages.
+    pub ack_policy: AckPolicy,
+    /// Maximum number of delivery attempts before policy escalation.
+    pub max_deliver: u16,
+    /// Maximum number of messages that may remain pending acknowledgement.
+    pub max_ack_pending: usize,
+    /// Maximum queued pull requests waiting for service.
+    pub max_waiting: usize,
+    /// Ack deadline carried into obligation-backed pending state.
+    pub ack_wait: Duration,
+    /// Replay pacing for historical or recovery delivery.
+    pub replay_policy: ConsumerReplayPolicy,
+    /// Starting delivery anchor for replay-oriented pull requests.
+    pub deliver_policy: DeliverPolicy,
+    /// Whether explicit flow-control pause/resume is enabled.
+    pub flow_control: bool,
+    /// Heartbeat cadence while actively delivering.
+    pub heartbeat: Option<Duration>,
+    /// Heartbeat cadence while idle.
+    pub idle_heartbeat: Option<Duration>,
+}
+
+impl Default for FabricConsumerConfig {
+    fn default() -> Self {
+        Self {
+            durable_name: None,
+            filter_subject: None,
+            ack_policy: AckPolicy::Explicit,
+            max_deliver: 1,
+            max_ack_pending: 256,
+            max_waiting: 64,
+            ack_wait: Duration::from_secs(30),
+            replay_policy: ConsumerReplayPolicy::Instant,
+            deliver_policy: DeliverPolicy::All,
+            flow_control: false,
+            heartbeat: None,
+            idle_heartbeat: None,
+        }
+    }
+}
+
+impl FabricConsumerConfig {
+    /// Validate the consumer configuration before construction.
+    pub fn validate(&self) -> Result<(), FabricConsumerError> {
+        if self.max_deliver == 0 {
+            return Err(FabricConsumerError::InvalidMaxDeliver);
+        }
+        if self.max_ack_pending == 0 {
+            return Err(FabricConsumerError::InvalidMaxAckPending);
+        }
+        if self.max_waiting == 0 {
+            return Err(FabricConsumerError::InvalidMaxWaiting);
+        }
+        if self.ack_wait.is_zero() {
+            return Err(FabricConsumerError::InvalidAckWait);
+        }
+        if self.heartbeat.is_some_and(|duration| duration.is_zero()) {
+            return Err(FabricConsumerError::InvalidHeartbeat { field: "heartbeat" });
+        }
+        if self
+            .idle_heartbeat
+            .is_some_and(|duration| duration.is_zero())
+        {
+            return Err(FabricConsumerError::InvalidHeartbeat {
+                field: "idle_heartbeat",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Dynamic consumer-delivery policy toggles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FabricConsumerDeliveryPolicy {
+    /// Whether the consumer currently runs in push or pull mode.
+    pub mode: ConsumerDispatchMode,
+    /// Whether the engine is paused by explicit flow control.
+    pub paused: bool,
+}
+
+impl Default for FabricConsumerDeliveryPolicy {
+    fn default() -> Self {
+        Self {
+            mode: ConsumerDispatchMode::Push,
+            paused: false,
+        }
+    }
+}
+
+/// Pull request admitted into the consumer wait queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    /// Maximum number of messages requested.
+    pub batch_size: u32,
+    /// Named demand class used to interpret the request.
+    pub demand_class: ConsumerDemandClass,
+    /// Optional byte bound used to tighten the batch size conservatively.
+    pub max_bytes: Option<u32>,
+    /// Optional expiry in logical cursor ticks relative to enqueue time.
+    pub expires: Option<u64>,
+    /// Whether the request should fail fast when no data is currently available.
+    pub no_wait: bool,
+}
+
+impl PullRequest {
+    /// Create a new pull request with the required batch size and demand class.
+    pub fn new(
+        batch_size: u32,
+        demand_class: ConsumerDemandClass,
+    ) -> Result<Self, FabricConsumerError> {
+        if batch_size == 0 {
+            return Err(FabricConsumerError::InvalidPullBatchSize);
+        }
+        Ok(Self {
+            batch_size,
+            demand_class,
+            max_bytes: None,
+            expires: None,
+            no_wait: false,
+        })
+    }
+
+    /// Cap the request by a byte budget.
+    #[must_use]
+    pub fn with_max_bytes(mut self, max_bytes: u32) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Expire the request after `ticks` logical cursor ticks.
+    #[must_use]
+    pub fn with_expires(mut self, ticks: u64) -> Self {
+        self.expires = Some(ticks);
+        self
+    }
+
+    /// Mark the request as no-wait.
+    #[must_use]
+    pub fn with_no_wait(mut self) -> Self {
+        self.no_wait = true;
+        self
+    }
+
+    fn effective_batch_size(&self) -> Result<u64, FabricConsumerError> {
+        if self.max_bytes == Some(0) {
+            return Err(FabricConsumerError::InvalidPullMaxBytes);
+        }
+        if self.expires == Some(0) {
+            return Err(FabricConsumerError::InvalidPullExpiry);
+        }
+        let batch_size = u64::from(self.batch_size);
+        let byte_bound = self.max_bytes.map_or(batch_size, u64::from);
+        Ok(batch_size.min(byte_bound).max(1))
+    }
+
+    fn is_expired(&self, enqueued_at_tick: u64, current_tick: u64) -> bool {
+        self.expires
+            .is_some_and(|ttl| current_tick > enqueued_at_tick.saturating_add(ttl))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedPullRequest {
+    request: PullRequest,
+    enqueued_at_tick: u64,
+}
+
+/// Pending acknowledgement tracked against an obligation id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAckState {
+    /// Inclusive sequence window still awaiting acknowledgement.
+    pub window: SequenceWindow,
+    /// Cursor delivery mode used when the attempt was issued.
+    pub delivery_mode: CursorDeliveryMode,
+    /// Monotonic attempt number for the logical delivery.
+    pub delivery_attempt: u32,
+}
+
+/// Dynamic consumer state surfaced to policy and tests.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FabricConsumerState {
+    /// Total messages dispatched by this consumer engine.
+    pub delivered_count: u64,
+    /// Messages currently pending acknowledgement.
+    pub pending_count: u64,
+    /// Highest sequence durably acknowledged by the engine.
+    pub ack_floor: u64,
+    /// Pending acknowledgements keyed by their obligation id.
+    pub pending_acks: BTreeMap<ObligationId, PendingAckState>,
+    next_delivery_attempt: u32,
+}
+
+impl FabricConsumerState {
+    fn next_attempt(&mut self) -> u32 {
+        self.next_delivery_attempt = self.next_delivery_attempt.saturating_add(1).max(1);
+        self.next_delivery_attempt
+    }
+}
+
+/// Public request shape returned with a scheduled delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduledConsumerRequest {
+    /// A push delivery pinned to a concrete window.
+    Push(SequenceWindow),
+    /// A pull request resolved into a concrete delivery.
+    Pull(PullRequest),
+}
+
+/// Concrete delivery scheduled by the consumer engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledConsumerDelivery {
+    /// High-level request shape that led to this delivery.
+    pub request: ScheduledConsumerRequest,
+    /// Window selected for the concrete delivery attempt.
+    pub window: SequenceWindow,
+    /// Cursor attempt certificate minted for the delivery.
+    pub attempt: AttemptCertificate,
+    /// Delivery plan chosen from the current cursor lease plus capsule coverage.
+    pub plan: DeliveryPlan,
+}
+
+/// Result of polling the next queued pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PullDispatchOutcome {
+    /// A concrete delivery was scheduled immediately.
+    Scheduled(ScheduledConsumerDelivery),
+    /// No data was available yet; the request remains queued.
+    Waiting(PullRequest),
+}
+
+/// High-level policy-driven consumer engine layered on top of cursor leases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricConsumer {
+    cursor: FabricConsumerCursor,
+    config: FabricConsumerConfig,
+    policy: FabricConsumerDeliveryPolicy,
+    state: FabricConsumerState,
+    waiting_pull_requests: Vec<QueuedPullRequest>,
+}
+
+impl FabricConsumer {
+    /// Construct a new consumer engine from the current subject cell.
+    pub fn new(
+        cell: &SubjectCell,
+        config: FabricConsumerConfig,
+    ) -> Result<Self, FabricConsumerError> {
+        config.validate()?;
+        Ok(Self {
+            cursor: FabricConsumerCursor::new(cell)?,
+            config,
+            policy: FabricConsumerDeliveryPolicy::default(),
+            state: FabricConsumerState::default(),
+            waiting_pull_requests: Vec::new(),
+        })
+    }
+
+    /// Return the static consumer configuration.
+    #[must_use]
+    pub fn config(&self) -> &FabricConsumerConfig {
+        &self.config
+    }
+
+    /// Return the current dynamic delivery policy.
+    #[must_use]
+    pub fn policy(&self) -> &FabricConsumerDeliveryPolicy {
+        &self.policy
+    }
+
+    /// Return the dynamic consumer state.
+    #[must_use]
+    pub fn state(&self) -> &FabricConsumerState {
+        &self.state
+    }
+
+    /// Return the number of queued pull requests still waiting for service.
+    #[must_use]
+    pub fn waiting_pull_request_count(&self) -> usize {
+        self.waiting_pull_requests.len()
+    }
+
+    /// Return the current cursor lease.
+    #[must_use]
+    pub fn current_lease(&self) -> &CursorAuthorityLease {
+        self.cursor.current_lease()
+    }
+
+    /// Advance logical time for ticket and pull-request expiry testing.
+    pub fn advance_clock(&mut self, ticks: u64) -> u64 {
+        self.cursor.advance_ticket_clock(ticks)
+    }
+
+    /// Switch between push and pull delivery.
+    pub fn switch_mode(&mut self, mode: ConsumerDispatchMode) {
+        self.policy.mode = mode;
+        if mode == ConsumerDispatchMode::Push {
+            self.waiting_pull_requests.clear();
+        }
+    }
+
+    /// Pause the consumer with explicit flow control.
+    pub fn pause(&mut self) -> Result<(), FabricConsumerError> {
+        if !self.config.flow_control {
+            return Err(FabricConsumerError::FlowControlDisabled);
+        }
+        self.policy.paused = true;
+        Ok(())
+    }
+
+    /// Resume the consumer after an explicit pause.
+    pub fn resume(&mut self) {
+        self.policy.paused = false;
+    }
+
+    /// Queue a pull request for later dispatch.
+    pub fn queue_pull_request(&mut self, request: PullRequest) -> Result<(), FabricConsumerError> {
+        if self.policy.mode != ConsumerDispatchMode::Pull {
+            return Err(FabricConsumerError::PullModeRequired);
+        }
+        let _ = request.effective_batch_size()?;
+        if self.waiting_pull_requests.len() >= self.config.max_waiting {
+            return Err(FabricConsumerError::MaxWaitingExceeded {
+                limit: self.config.max_waiting,
+            });
+        }
+        self.waiting_pull_requests.push(QueuedPullRequest {
+            request,
+            enqueued_at_tick: self.cursor.ticket_clock(),
+        });
+        Ok(())
+    }
+
+    /// Dispatch a concrete push window under the active lease.
+    pub fn dispatch_push(
+        &mut self,
+        window: SequenceWindow,
+        obligation_id: ObligationId,
+        capsule: &RecoverableCapsule,
+        ticket: Option<&ReadDelegationTicket>,
+    ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
+        if self.policy.mode != ConsumerDispatchMode::Push {
+            return Err(FabricConsumerError::PushModeRequired);
+        }
+        let delivery_mode = CursorDeliveryMode::Push { window };
+        self.schedule_delivery(
+            ScheduledConsumerRequest::Push(window),
+            delivery_mode,
+            window,
+            obligation_id,
+            capsule,
+            ticket,
+        )
+    }
+
+    /// Try to dispatch the next queued pull request.
+    pub fn dispatch_next_pull(
+        &mut self,
+        available_tail: u64,
+        obligation_id: ObligationId,
+        capsule: &RecoverableCapsule,
+        ticket: Option<&ReadDelegationTicket>,
+    ) -> Result<PullDispatchOutcome, FabricConsumerError> {
+        if self.policy.mode != ConsumerDispatchMode::Pull {
+            return Err(FabricConsumerError::PullModeRequired);
+        }
+
+        let Some(mut queued) = self.pop_next_live_pull_request() else {
+            return Err(FabricConsumerError::NoQueuedPullRequests);
+        };
+        let request = queued.request.clone();
+        let Some(window) = self.resolve_pull_window(&request, available_tail)? else {
+            if request.no_wait {
+                return Err(FabricConsumerError::NoDataAvailable {
+                    demand_class: request.demand_class,
+                    available_tail,
+                });
+            }
+            queued.enqueued_at_tick = self.cursor.ticket_clock();
+            self.waiting_pull_requests.insert(0, queued);
+            return Ok(PullDispatchOutcome::Waiting(request));
+        };
+
+        let delivery = self.schedule_delivery(
+            ScheduledConsumerRequest::Pull(request),
+            CursorDeliveryMode::Pull(CursorRequest::Window(window)),
+            window,
+            obligation_id,
+            capsule,
+            ticket,
+        )?;
+        Ok(PullDispatchOutcome::Scheduled(delivery))
+    }
+
+    /// Apply an acknowledgement attempt and update pending state on success.
+    pub fn acknowledge_delivery(
+        &mut self,
+        attempt: &AttemptCertificate,
+    ) -> Result<AckResolution, FabricConsumerError> {
+        let resolution = self.cursor.acknowledge(attempt)?;
+        if matches!(resolution, AckResolution::Committed { .. })
+            && let Some(pending) = self.state.pending_acks.remove(&attempt.obligation_id)
+        {
+            self.state.pending_count = self
+                .state
+                .pending_count
+                .saturating_sub(window_len(pending.window));
+            self.state.ack_floor = self.state.ack_floor.max(pending.window.end());
+        }
+        Ok(resolution)
+    }
+
+    fn pop_next_live_pull_request(&mut self) -> Option<QueuedPullRequest> {
+        let current_tick = self.cursor.ticket_clock();
+        while !self.waiting_pull_requests.is_empty() {
+            let queued = self.waiting_pull_requests.remove(0);
+            if !queued
+                .request
+                .is_expired(queued.enqueued_at_tick, current_tick)
+            {
+                return Some(queued);
+            }
+        }
+        None
+    }
+
+    fn resolve_pull_window(
+        &self,
+        request: &PullRequest,
+        available_tail: u64,
+    ) -> Result<Option<SequenceWindow>, FabricConsumerError> {
+        let batch = request.effective_batch_size()?;
+        if available_tail == 0 {
+            return Ok(None);
+        }
+
+        let next_unacked = self.state.ack_floor.saturating_add(1).max(1);
+        let resolve = match request.demand_class {
+            ConsumerDemandClass::Tail => {
+                let start = available_tail
+                    .saturating_sub(batch.saturating_sub(1))
+                    .max(1);
+                Some((start, available_tail))
+            }
+            ConsumerDemandClass::CatchUp => {
+                if next_unacked > available_tail {
+                    None
+                } else {
+                    Some((
+                        next_unacked,
+                        available_tail.min(next_unacked.saturating_add(batch).saturating_sub(1)),
+                    ))
+                }
+            }
+            ConsumerDemandClass::Replay => {
+                let start = self.replay_start_sequence(available_tail);
+                if start > available_tail {
+                    None
+                } else {
+                    Some((
+                        start,
+                        available_tail.min(start.saturating_add(batch).saturating_sub(1)),
+                    ))
+                }
+            }
+        };
+
+        match resolve {
+            Some((start, end)) => Ok(Some(SequenceWindow::new(start, end)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn replay_start_sequence(&self, available_tail: u64) -> u64 {
+        match self.config.deliver_policy {
+            DeliverPolicy::All => 1,
+            DeliverPolicy::New => available_tail.saturating_add(1),
+            DeliverPolicy::ByStartSequence(sequence) => sequence.max(1),
+            DeliverPolicy::Last | DeliverPolicy::LastPerSubject => available_tail.max(1),
+        }
+    }
+
+    fn schedule_delivery(
+        &mut self,
+        request: ScheduledConsumerRequest,
+        delivery_mode: CursorDeliveryMode,
+        window: SequenceWindow,
+        obligation_id: ObligationId,
+        capsule: &RecoverableCapsule,
+        ticket: Option<&ReadDelegationTicket>,
+    ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
+        if self.policy.paused {
+            return Err(FabricConsumerError::ConsumerPaused);
+        }
+
+        let window_messages = window_len(window);
+        if self.state.pending_count.saturating_add(window_messages)
+            > self.config.max_ack_pending as u64
+        {
+            return Err(FabricConsumerError::MaxAckPendingExceeded {
+                limit: self.config.max_ack_pending,
+                pending: self.state.pending_count,
+            });
+        }
+
+        let delivery_attempt = self.state.next_attempt();
+        let attempt = self
+            .cursor
+            .issue_attempt(delivery_mode, delivery_attempt, obligation_id)?;
+        let plan = self.cursor.plan_delivery(delivery_mode, capsule, ticket)?;
+
+        self.state.delivered_count = self.state.delivered_count.saturating_add(window_messages);
+        self.state.pending_count = self.state.pending_count.saturating_add(window_messages);
+        self.state.pending_acks.insert(
+            obligation_id,
+            PendingAckState {
+                window,
+                delivery_mode,
+                delivery_attempt,
+            },
+        );
+
+        Ok(ScheduledConsumerDelivery {
+            request,
+            window,
+            attempt,
+            plan,
+        })
+    }
+}
+
+fn window_len(window: SequenceWindow) -> u64 {
+    window
+        .end()
+        .saturating_sub(window.start())
+        .saturating_add(1)
+}
+
+/// High-level consumer-engine failures layered on top of cursor errors.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum FabricConsumerError {
+    /// Consumer delivery attempts require a positive retry budget.
+    #[error("consumer max_deliver must be greater than zero")]
+    InvalidMaxDeliver,
+    /// Pending-ack flow control must reserve at least one message slot.
+    #[error("consumer max_ack_pending must be greater than zero")]
+    InvalidMaxAckPending,
+    /// Pull-mode wait queues must reserve at least one slot.
+    #[error("consumer max_waiting must be greater than zero")]
+    InvalidMaxWaiting,
+    /// Ack deadlines must be explicit and positive.
+    #[error("consumer ack_wait must be greater than zero")]
+    InvalidAckWait,
+    /// Heartbeat fields must never be zero-duration sentinels.
+    #[error("consumer {field} must be greater than zero when configured")]
+    InvalidHeartbeat {
+        /// Name of the invalid heartbeat field.
+        field: &'static str,
+    },
+    /// Pull requests must ask for at least one message.
+    #[error("pull request batch_size must be greater than zero")]
+    InvalidPullBatchSize,
+    /// Pull requests may not pretend that zero bytes are useful demand.
+    #[error("pull request max_bytes must be greater than zero when configured")]
+    InvalidPullMaxBytes,
+    /// Pull-request expiries use logical ticks and must be positive.
+    #[error("pull request expires must be greater than zero when configured")]
+    InvalidPullExpiry,
+    /// Push-only operations were attempted while the consumer is in pull mode.
+    #[error("consumer is not in push mode")]
+    PushModeRequired,
+    /// Pull-only operations were attempted while the consumer is not in pull mode.
+    #[error("consumer is not in pull mode")]
+    PullModeRequired,
+    /// Flow-control pause/resume is disabled in the static config.
+    #[error("consumer flow control is disabled")]
+    FlowControlDisabled,
+    /// Dispatch is paused until the operator resumes the consumer.
+    #[error("consumer dispatch is paused")]
+    ConsumerPaused,
+    /// Flow-control backpressure blocked another dispatch.
+    #[error("consumer pending messages `{pending}` exceed or meet max_ack_pending `{limit}`")]
+    MaxAckPendingExceeded {
+        /// Configured pending-message limit.
+        limit: usize,
+        /// Current pending message count.
+        pending: u64,
+    },
+    /// Pull queue admission exceeded the configured waiting bound.
+    #[error("consumer already has max_waiting `{limit}` queued pull requests")]
+    MaxWaitingExceeded {
+        /// Configured max waiting pull requests.
+        limit: usize,
+    },
+    /// No queued pull request was available when dispatch was attempted.
+    #[error("consumer has no queued pull requests")]
+    NoQueuedPullRequests,
+    /// A no-wait pull request found no data.
+    #[error(
+        "no data available for pull request class `{demand_class:?}` at tail `{available_tail}`"
+    )]
+    NoDataAvailable {
+        /// Demand class of the request that could not be served.
+        demand_class: ConsumerDemandClass,
+        /// Tail sequence visible to the consumer at dispatch time.
+        available_tail: u64,
+    },
+    /// Low-level cursor machinery rejected the operation.
+    #[error(transparent)]
+    Cursor(#[from] ConsumerCursorError),
+}
+
 /// Deterministic cursor-lease failures.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConsumerCursorError {
@@ -1244,5 +1883,199 @@ mod tests {
             cursor.current_lease().lease_generation,
             current_generation + 1
         );
+    }
+
+    #[test]
+    fn fabric_consumer_creation_preserves_config_and_starts_clean() {
+        let cell = test_cell();
+        let config = FabricConsumerConfig {
+            durable_name: Some("orders-durable".to_owned()),
+            filter_subject: Some(SubjectPattern::parse("orders.*").expect("pattern")),
+            flow_control: true,
+            heartbeat: Some(std::time::Duration::from_secs(5)),
+            idle_heartbeat: Some(std::time::Duration::from_secs(15)),
+            ..FabricConsumerConfig::default()
+        };
+
+        let consumer = FabricConsumer::new(&cell, config.clone()).expect("consumer");
+        assert_eq!(consumer.config(), &config);
+        assert_eq!(consumer.policy().mode, ConsumerDispatchMode::Push);
+        assert!(!consumer.policy().paused);
+        assert_eq!(consumer.state().delivered_count, 0);
+        assert_eq!(consumer.state().pending_count, 0);
+        assert_eq!(consumer.state().ack_floor, 0);
+        assert_eq!(consumer.waiting_pull_request_count(), 0);
+        assert_eq!(
+            consumer.current_lease().holder,
+            CursorLeaseHolder::Steward(NodeId::new("node-a"))
+        );
+    }
+
+    #[test]
+    fn fabric_consumer_mode_switching_clears_waiting_pull_requests() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(
+                PullRequest::new(2, ConsumerDemandClass::CatchUp).expect("pull request"),
+            )
+            .expect("queue pull request");
+        assert_eq!(consumer.waiting_pull_request_count(), 1);
+
+        consumer.switch_mode(ConsumerDispatchMode::Push);
+        assert_eq!(consumer.policy().mode, ConsumerDispatchMode::Push);
+        assert_eq!(consumer.waiting_pull_request_count(), 0);
+    }
+
+    #[test]
+    fn fabric_consumer_pull_queue_respects_max_waiting() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                max_waiting: 1,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(
+                PullRequest::new(1, ConsumerDemandClass::CatchUp).expect("first request"),
+            )
+            .expect("queue first");
+
+        assert_eq!(
+            consumer.queue_pull_request(
+                PullRequest::new(1, ConsumerDemandClass::Tail).expect("second request")
+            ),
+            Err(FabricConsumerError::MaxWaitingExceeded { limit: 1 })
+        );
+    }
+
+    #[test]
+    fn fabric_consumer_pull_dispatches_catchup_then_tail_windows() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 12).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(
+                PullRequest::new(3, ConsumerDemandClass::CatchUp).expect("catchup request"),
+            )
+            .expect("queue catchup");
+
+        let first_outcome = consumer
+            .dispatch_next_pull(12, obligation(30), &capsule, None)
+            .expect("dispatch catchup");
+        let first = if let PullDispatchOutcome::Scheduled(delivery) = first_outcome {
+            delivery
+        } else {
+            assert!(false, "catchup request should schedule");
+            return;
+        };
+        assert_eq!(first.window, SequenceWindow::new(1, 3).expect("window"));
+        assert_eq!(consumer.state().pending_count, 3);
+        assert_eq!(
+            consumer.acknowledge_delivery(&first.attempt),
+            Ok(AckResolution::Committed {
+                obligation_id: obligation(30),
+                against: CursorLeaseHolder::Steward(NodeId::new("node-a")),
+            })
+        );
+        assert_eq!(consumer.state().pending_count, 0);
+        assert_eq!(consumer.state().ack_floor, 3);
+
+        consumer
+            .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::Tail).expect("tail"))
+            .expect("queue tail");
+        let tail_outcome = consumer
+            .dispatch_next_pull(12, obligation(31), &capsule, None)
+            .expect("dispatch tail");
+        let tail = if let PullDispatchOutcome::Scheduled(delivery) = tail_outcome {
+            delivery
+        } else {
+            assert!(false, "tail request should schedule");
+            return;
+        };
+        assert_eq!(tail.window, SequenceWindow::new(11, 12).expect("window"));
+    }
+
+    #[test]
+    fn fabric_consumer_pause_and_resume_gate_dispatch() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                flow_control: true,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let window = SequenceWindow::new(1, 1).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        consumer.pause().expect("pause");
+        assert_eq!(
+            consumer.dispatch_push(window, obligation(32), &capsule, None),
+            Err(FabricConsumerError::ConsumerPaused)
+        );
+
+        consumer.resume();
+        let delivery = consumer
+            .dispatch_push(window, obligation(32), &capsule, None)
+            .expect("dispatch after resume");
+        assert_eq!(delivery.window, window);
+    }
+
+    #[test]
+    fn fabric_consumer_max_ack_pending_blocks_until_ack_commit() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                max_ack_pending: 2,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let first_window = SequenceWindow::new(1, 2).expect("window");
+        let second_window = SequenceWindow::new(3, 3).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 3).expect("capsule"),
+        );
+
+        let first = consumer
+            .dispatch_push(first_window, obligation(33), &capsule, None)
+            .expect("first dispatch");
+        assert_eq!(consumer.state().pending_count, 2);
+        assert_eq!(
+            consumer.dispatch_push(second_window, obligation(34), &capsule, None),
+            Err(FabricConsumerError::MaxAckPendingExceeded {
+                limit: 2,
+                pending: 2,
+            })
+        );
+
+        assert!(matches!(
+            consumer.acknowledge_delivery(&first.attempt),
+            Ok(AckResolution::Committed { .. })
+        ));
+        assert_eq!(consumer.state().pending_count, 0);
+
+        let second = consumer
+            .dispatch_push(second_window, obligation(34), &capsule, None)
+            .expect("second dispatch");
+        assert_eq!(second.window, second_window);
     }
 }

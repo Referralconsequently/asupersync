@@ -195,7 +195,7 @@ impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
             ordering_guarantee: OrderingGuarantee::default(),
-            snapshot_interval: Duration::from_secs(60),
+            snapshot_interval: Duration::from_mins(1),
             catch_up_policy: CatchUpPolicy::default(),
         }
     }

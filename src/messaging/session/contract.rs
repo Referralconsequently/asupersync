@@ -187,14 +187,14 @@ pub enum SessionType {
         /// Message emitted at this step.
         message: MessageType,
         /// Continuation after the send.
-        next: Box<SessionType>,
+        next: Box<Self>,
     },
     /// The next step is a receive transition.
     Receive {
         /// Message consumed at this step.
         message: MessageType,
         /// Continuation after the receive.
-        next: Box<SessionType>,
+        next: Box<Self>,
     },
     /// The local decider chooses one labeled continuation.
     Choice {
@@ -220,7 +220,7 @@ pub enum SessionType {
         /// Recursion label bound by this node.
         label: Label,
         /// Recursive protocol body.
-        body: Box<SessionType>,
+        body: Box<Self>,
     },
     /// End of the protocol.
     #[default]
@@ -230,7 +230,7 @@ pub enum SessionType {
 impl SessionType {
     /// Construct a send step.
     #[must_use]
-    pub fn send(message: MessageType, next: SessionType) -> Self {
+    pub fn send(message: MessageType, next: Self) -> Self {
         Self::Send {
             message,
             next: Box::new(next),
@@ -239,7 +239,7 @@ impl SessionType {
 
     /// Construct a receive step.
     #[must_use]
-    pub fn receive(message: MessageType, next: SessionType) -> Self {
+    pub fn receive(message: MessageType, next: Self) -> Self {
         Self::Receive {
             message,
             next: Box::new(next),
@@ -274,7 +274,7 @@ impl SessionType {
 
     /// Construct a recursion point.
     #[must_use]
-    pub fn recurse_point(label: impl Into<Label>, body: SessionType) -> Self {
+    pub fn recurse_point(label: impl Into<Label>, body: Self) -> Self {
         Self::RecursePoint {
             label: label.into(),
             body: Box::new(body),
@@ -328,6 +328,7 @@ impl SessionType {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate(
         &self,
         roles: &[RoleName],
@@ -727,7 +728,10 @@ pub enum ProtocolContractValidationError {
     EmptyContractName,
     /// The current FABRIC surface is intentionally limited to two parties.
     #[error("protocol contract must declare exactly two roles for now, got {actual}")]
-    UnsupportedRoleCount { actual: usize },
+    UnsupportedRoleCount {
+        /// The actual role count found.
+        actual: usize,
+    },
     /// Role names must be symbolic identifiers.
     #[error("invalid role name `{0}`")]
     InvalidRoleName(RoleName),
@@ -736,7 +740,12 @@ pub enum ProtocolContractValidationError {
     DuplicateRole(RoleName),
     /// Message or branch references an undeclared role.
     #[error("{context} references undeclared role `{role}`")]
-    UnknownRole { context: String, role: RoleName },
+    UnknownRole {
+        /// Description of where the unknown role was referenced.
+        context: String,
+        /// The undeclared role name.
+        role: RoleName,
+    },
     /// Empty message names are not allowed.
     #[error("message name must not be empty")]
     EmptyMessageName,
@@ -745,28 +754,54 @@ pub enum ProtocolContractValidationError {
     EmptyPayloadSchema(String),
     /// Self-directed messages are not meaningful at the contract boundary.
     #[error("message `{message}` cannot send from and to the same role `{role}`")]
-    SelfDirectedMessage { message: String, role: RoleName },
+    SelfDirectedMessage {
+        /// The message name with sender equal to receiver.
+        message: String,
+        /// The role that is both sender and receiver.
+        role: RoleName,
+    },
     /// The grammar must contain at least one transition.
     #[error("protocol contract must contain at least one non-terminal step")]
     EmptyProtocol,
     /// Choice nodes need at least one labeled continuation.
     #[error("choice at `{path}` must contain at least one branch")]
-    ChoiceWithoutBranches { path: SessionPath },
+    ChoiceWithoutBranches {
+        /// Session path of the empty choice node.
+        path: SessionPath,
+    },
     /// Branch nodes need at least one labeled continuation.
     #[error("branch at `{path}` must contain at least one branch")]
-    BranchWithoutBranches { path: SessionPath },
+    BranchWithoutBranches {
+        /// Session path of the empty branch node.
+        path: SessionPath,
+    },
     /// Labels must be symbolic identifiers.
     #[error("invalid label `{0}`")]
     InvalidLabel(Label),
     /// Duplicate labels inside a single choice/branch are not allowed.
     #[error("duplicate branch label `{label}` at `{path}`")]
-    DuplicateBranchLabel { path: SessionPath, label: Label },
+    DuplicateBranchLabel {
+        /// Session path where the duplicate was found.
+        path: SessionPath,
+        /// The duplicated label.
+        label: Label,
+    },
     /// Recursion labels must be unique within the active scope.
     #[error("duplicate recursion label `{label}` at `{path}`")]
-    DuplicateRecursionLabel { path: SessionPath, label: Label },
+    DuplicateRecursionLabel {
+        /// Session path where the duplicate was found.
+        path: SessionPath,
+        /// The duplicated recursion label.
+        label: Label,
+    },
     /// Recursion references must target an active recursion point.
     #[error("undefined recursion label `{label}` at `{path}`")]
-    UndefinedRecursionLabel { path: SessionPath, label: Label },
+    UndefinedRecursionLabel {
+        /// Session path where the undefined reference was found.
+        path: SessionPath,
+        /// The undefined recursion label.
+        label: Label,
+    },
     /// Evidence checkpoint names must be present.
     #[error("evidence checkpoint name must not be empty")]
     EmptyEvidenceCheckpointName,
@@ -775,31 +810,58 @@ pub enum ProtocolContractValidationError {
     DuplicateEvidenceCheckpointName(String),
     /// Evidence checkpoints must point at a real transition.
     #[error("evidence checkpoint `{name}` references unknown path `{path}`")]
-    UnknownEvidencePath { name: String, path: SessionPath },
+    UnknownEvidencePath {
+        /// The evidence checkpoint name.
+        name: String,
+        /// The unresolvable session path.
+        path: SessionPath,
+    },
     /// Default timeouts must be positive when present.
     #[error("default timeout must be greater than zero")]
     ZeroDefaultTimeout,
     /// Per-step timeouts must be positive.
     #[error("timeout override at `{path}` must be greater than zero")]
-    ZeroTimeoutOverride { path: SessionPath },
+    ZeroTimeoutOverride {
+        /// The session path with the zero timeout.
+        path: SessionPath,
+    },
     /// Timeout overrides must point at a real transition.
     #[error("timeout override references unknown path `{path}`")]
-    UnknownTimeoutPath { path: SessionPath },
+    UnknownTimeoutPath {
+        /// The unresolvable session path.
+        path: SessionPath,
+    },
     /// Timeout overrides must be unique per path.
     #[error("duplicate timeout override for `{path}`")]
-    DuplicateTimeoutOverride { path: SessionPath },
+    DuplicateTimeoutOverride {
+        /// The duplicated session path.
+        path: SessionPath,
+    },
     /// Compensation path names must be present.
     #[error("compensation path name must not be empty")]
     EmptyCompensationPathName,
     /// Compensation paths must contain at least one step.
     #[error("compensation path `{name}` must contain at least one step")]
-    EmptyCompensationSequence { name: String },
+    EmptyCompensationSequence {
+        /// The compensation path name.
+        name: String,
+    },
     /// Compensation triggers must exist in the session tree.
     #[error("compensation path `{name}` references unknown trigger `{path}`")]
-    UnknownCompensationTrigger { name: String, path: SessionPath },
+    UnknownCompensationTrigger {
+        /// The compensation path name.
+        name: String,
+        /// The unresolvable trigger path.
+        path: SessionPath,
+    },
     /// Compensation steps must exist in the session tree.
     #[error("compensation path `{name}` references unknown step `{path}`")]
-    UnknownCompensationStep { name: String, path: SessionPath },
+    UnknownCompensationStep {
+        /// The compensation path name.
+        name: String,
+        /// The unresolvable step path.
+        path: SessionPath,
+    },
     /// Compensation path names must be unique.
     #[error("duplicate compensation path `{0}`")]
     DuplicateCompensationPath(String),
@@ -808,13 +870,26 @@ pub enum ProtocolContractValidationError {
     EmptyCutoffPathName,
     /// Cutoff paths must contain at least one step.
     #[error("cutoff path `{name}` must contain at least one step")]
-    EmptyCutoffSequence { name: String },
+    EmptyCutoffSequence {
+        /// The cutoff path name.
+        name: String,
+    },
     /// Cutoff triggers must exist in the session tree.
     #[error("cutoff path `{name}` references unknown trigger `{path}`")]
-    UnknownCutoffTrigger { name: String, path: SessionPath },
+    UnknownCutoffTrigger {
+        /// The cutoff path name.
+        name: String,
+        /// The unresolvable trigger path.
+        path: SessionPath,
+    },
     /// Cutoff steps must exist in the session tree.
     #[error("cutoff path `{name}` references unknown step `{path}`")]
-    UnknownCutoffStep { name: String, path: SessionPath },
+    UnknownCutoffStep {
+        /// The cutoff path name.
+        name: String,
+        /// The unresolvable step path.
+        path: SessionPath,
+    },
     /// Cutoff path names must be unique.
     #[error("duplicate cutoff path `{0}`")]
     DuplicateCutoffPath(String),

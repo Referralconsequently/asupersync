@@ -5,20 +5,26 @@
 //! behavior exists. The types here deliberately model declarations, policies,
 //! and contracts rather than live protocol machinery.
 
+#![allow(clippy::struct_field_names)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::semicolon_if_nothing_returned)]
+
 use super::class::{AckKind, DeliveryClass};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::time::Duration;
 use thiserror::Error;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "messaging-fabric")))]
 #[allow(dead_code)]
 #[path = "subject.rs"]
 mod subject_defs;
 
-#[cfg(not(test))]
+#[cfg(feature = "messaging-fabric")]
 pub use super::subject::SubjectPattern;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "messaging-fabric")))]
 pub use subject_defs::SubjectPattern;
 
 /// Schema version for the current FABRIC IR layout.
@@ -87,6 +93,7 @@ impl FabricIr {
 
         self.validate_unique_names(&mut errors);
         self.validate_entries(&mut errors);
+        self.validate_cross_references(&mut errors);
 
         errors
     }
@@ -194,6 +201,30 @@ impl FabricIr {
         }
         for (index, capability) in self.capability_tokens.iter().enumerate() {
             capability.validate_at(&format!("capability_tokens[{index}]"), errors);
+        }
+    }
+
+    fn validate_cross_references(&self, errors: &mut Vec<FabricIrValidationError>) {
+        let capability_names = self
+            .capability_tokens
+            .iter()
+            .map(|capability| capability.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for (index, service) in self.services.iter().enumerate() {
+            if let Some(required_capability) = service.required_capability.as_deref() {
+                let required_capability = required_capability.trim();
+                if !required_capability.is_empty()
+                    && !capability_names.contains(required_capability)
+                {
+                    errors.push(FabricIrValidationError::new(
+                        format!("services[{index}].required_capability"),
+                        format!(
+                            "required capability token `{required_capability}` is not declared in capability_tokens"
+                        ),
+                    ));
+                }
+            }
         }
     }
 }
@@ -1230,6 +1261,19 @@ impl ProtocolContract {
             "protocol role names must be unique and non-empty",
             errors,
         );
+
+        let declared_roles = self
+            .roles
+            .iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|role| !role.is_empty())
+            .collect::<BTreeSet<_>>();
+        self.session.validate_role_references_at(
+            &format!("{field}.session"),
+            &declared_roles,
+            errors,
+        );
     }
 }
 
@@ -1276,6 +1320,21 @@ impl SessionSchema {
                 format!("{field}.steps"),
                 "session schema must terminate with an `end` step",
             ));
+        }
+    }
+
+    fn validate_role_references_at(
+        &self,
+        field: &str,
+        declared_roles: &BTreeSet<&str>,
+        errors: &mut Vec<FabricIrValidationError>,
+    ) {
+        for (index, step) in self.steps.iter().enumerate() {
+            step.validate_role_references_at(
+                &format!("{field}.steps[{index}]"),
+                declared_roles,
+                errors,
+            );
         }
     }
 }
@@ -1350,6 +1409,38 @@ impl SessionStep {
             Self::End => {}
         }
     }
+
+    fn validate_role_references_at(
+        &self,
+        field: &str,
+        declared_roles: &BTreeSet<&str>,
+        errors: &mut Vec<FabricIrValidationError>,
+    ) {
+        match self {
+            Self::Send { role, .. } | Self::Receive { role, .. } => {
+                validate_declared_role(role, &format!("{field}.role"), declared_roles, errors)
+            }
+            Self::Choice {
+                decider_role,
+                branches,
+            } => {
+                validate_declared_role(
+                    decider_role,
+                    &format!("{field}.decider_role"),
+                    declared_roles,
+                    errors,
+                );
+                for (index, branch) in branches.iter().enumerate() {
+                    branch.validate_role_references_at(
+                        &format!("{field}.branches[{index}]"),
+                        declared_roles,
+                        errors,
+                    );
+                }
+            }
+            Self::End => {}
+        }
+    }
 }
 
 /// Named branch in a session choice.
@@ -1393,6 +1484,21 @@ impl SessionBranch {
                 format!("{field}.steps"),
                 "session branch must terminate with an `end` step",
             ));
+        }
+    }
+
+    fn validate_role_references_at(
+        &self,
+        field: &str,
+        declared_roles: &BTreeSet<&str>,
+        errors: &mut Vec<FabricIrValidationError>,
+    ) {
+        for (index, step) in self.steps.iter().enumerate() {
+            step.validate_role_references_at(
+                &format!("{field}.steps[{index}]"),
+                declared_roles,
+                errors,
+            );
         }
     }
 }
@@ -2103,6 +2209,21 @@ fn validate_unique_keys<I>(
     }
 }
 
+fn validate_declared_role(
+    role: &str,
+    field: &str,
+    declared_roles: &BTreeSet<&str>,
+    errors: &mut Vec<FabricIrValidationError>,
+) {
+    let role = role.trim();
+    if !role.is_empty() && !declared_roles.contains(role) {
+        errors.push(FabricIrValidationError::new(
+            field,
+            format!("session role `{role}` is not declared by the protocol contract"),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2521,6 +2642,77 @@ mod tests {
                     "degradation downgrade target must be strictly weaker than the baseline delivery class",
                 )
             })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_service_capabilities_missing_from_ir_declarations() {
+        let mut ir = sample_fabric_ir();
+        ir.services[0].required_capability = Some("fabric.orders.admin".to_owned());
+
+        let errors = ir.validate();
+        let messages = error_messages(&errors);
+
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("services[0].required_capability")
+                    && message.contains("fabric.orders.admin")
+                    && message.contains("is not declared in capability_tokens")
+            }),
+            "expected missing-capability validation error, got {messages:?}"
+        );
+    }
+
+    #[test]
+    fn validation_rejects_protocol_session_roles_not_declared_by_the_contract() {
+        let mut ir = sample_fabric_ir();
+        ir.protocols[0].session.steps = vec![
+            SessionStep::Send {
+                role: "shipper".to_owned(),
+                subject: SubjectPattern::new("protocol.checkout.begin"),
+            },
+            SessionStep::Choice {
+                decider_role: "approver".to_owned(),
+                branches: vec![SessionBranch {
+                    label: "approved".to_owned(),
+                    steps: vec![
+                        SessionStep::Receive {
+                            role: "auditor".to_owned(),
+                            subject: SubjectPattern::new("protocol.checkout.audit"),
+                        },
+                        SessionStep::End,
+                    ],
+                }],
+            },
+            SessionStep::End,
+        ];
+
+        let errors = ir.validate();
+        let messages = error_messages(&errors);
+
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("protocols[0].session.steps[0].role")
+                    && message.contains("shipper")
+                    && message.contains("is not declared by the protocol contract")
+            }),
+            "expected undeclared send-role validation error, got {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("protocols[0].session.steps[1].decider_role")
+                    && message.contains("approver")
+                    && message.contains("is not declared by the protocol contract")
+            }),
+            "expected undeclared decider-role validation error, got {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("protocols[0].session.steps[1].branches[0].steps[0].role")
+                    && message.contains("auditor")
+                    && message.contains("is not declared by the protocol contract")
+            }),
+            "expected undeclared branch-role validation error, got {messages:?}"
         );
     }
 

@@ -1,5 +1,12 @@
 //! Shared subject-language primitives for FABRIC declarations and placement.
 
+#![allow(dead_code)]
+#![allow(clippy::significant_drop_tightening)]
+#![allow(clippy::use_self)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::uninlined_format_args)]
+
 use crate::util::DetHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -739,6 +746,7 @@ impl ShardedSublist {
     }
 
     /// Subscribe to a pattern within the appropriate shard.
+    #[must_use]
     pub fn subscribe(
         &self,
         pattern: &SubjectPattern,
@@ -996,9 +1004,9 @@ fn count_subscribers(node: &TrieNode) -> usize {
 
 /// Semantic family classification for registered subject entries.
 ///
-/// This is a local mirror of the FABRIC IR `SubjectFamily` enum, kept here to
-/// avoid a circular dependency caused by ir.rs re-including subject.rs under
-/// `#[cfg(test)]` via `#[path = "subject.rs"] mod subject_defs;`.
+/// This is a local mirror of the FABRIC IR `SubjectFamily` enum so the subject
+/// registry stays independent from the higher-level IR module, including the
+/// standalone IR contract tests that path-include `ir.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RegistryFamily {
     /// Fire-and-forget command subjects.

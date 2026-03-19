@@ -273,7 +273,7 @@ impl SubjectCell {
     pub fn certify_mobility(
         &self,
         certificate: &CutCertificate,
-        operation: MobilityOperation,
+        operation: &MobilityOperation,
     ) -> Result<CertifiedMobility, CutMobilityError> {
         operation.certify(self, certificate)
     }
@@ -645,7 +645,7 @@ mod tests {
         let proof = cell
             .certify_mobility(
                 &certificate,
-                MobilityOperation::Evacuate {
+                &MobilityOperation::Evacuate {
                     from: NodeId::new("node-a"),
                     to: NodeId::new("node-b"),
                 },
@@ -697,7 +697,7 @@ mod tests {
         let proof = cell
             .certify_mobility(
                 &certificate,
-                MobilityOperation::Handoff {
+                &MobilityOperation::Handoff {
                     from: NodeId::new("node-a"),
                     to: NodeId::new("node-c"),
                 },
@@ -735,7 +735,7 @@ mod tests {
         let proof = cell
             .certify_mobility(
                 &certificate,
-                MobilityOperation::WarmRestore {
+                &MobilityOperation::WarmRestore {
                     target: NodeId::new("edge-restore"),
                     restored_epoch,
                     capsule_digest: CapsuleDigest::new(0x9abc),
@@ -774,7 +774,7 @@ mod tests {
         let proof = cell
             .certify_mobility(
                 &certificate,
-                MobilityOperation::Failover {
+                &MobilityOperation::Failover {
                     failed: NodeId::new("node-a"),
                     promote_to: NodeId::new("node-c"),
                 },
@@ -826,7 +826,7 @@ mod tests {
         let err = cell
             .certify_mobility(
                 &empty_certificate,
-                MobilityOperation::WarmRestore {
+                &MobilityOperation::WarmRestore {
                     target: NodeId::new("edge-restore"),
                     restored_epoch: CellEpoch::new(9, 1),
                     capsule_digest: CapsuleDigest::ZERO,

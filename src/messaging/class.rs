@@ -1,5 +1,7 @@
 //! Delivery-class taxonomy for the native FABRIC lane.
 
+#![allow(clippy::struct_field_names)]
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use thiserror::Error;

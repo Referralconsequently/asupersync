@@ -1,8 +1,12 @@
 //! Contract-carrying service schemas for the FABRIC lane.
 
-use super::class::{DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError};
+use super::class::{AckKind, DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError};
+use crate::obligation::ledger::{ObligationLedger, ObligationToken};
+use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
+use crate::types::{ObligationId, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::panic::Location;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -479,6 +483,507 @@ pub struct ValidatedServiceRequest {
     pub overload_policy: OverloadPolicy,
 }
 
+/// Typed failure recorded when a request/reply obligation aborts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceFailure {
+    /// The caller or runtime cancelled the request.
+    Cancelled,
+    /// The request timed out and was explicitly aborted.
+    TimedOut,
+    /// Admission or policy rejected the request before completion.
+    Rejected,
+    /// The service failed because it was overloaded.
+    Overloaded,
+    /// The reply path encountered transport failure.
+    TransportError,
+    /// Application logic failed while serving the request.
+    ApplicationError,
+}
+
+impl ServiceFailure {
+    fn abort_reason(self) -> ObligationAbortReason {
+        match self {
+            Self::Cancelled => ObligationAbortReason::Cancel,
+            Self::TimedOut | Self::Rejected => ObligationAbortReason::Explicit,
+            Self::Overloaded | Self::TransportError | Self::ApplicationError => {
+                ObligationAbortReason::Error
+            }
+        }
+    }
+}
+
+impl fmt::Display for ServiceFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Rejected => "rejected",
+            Self::Overloaded => "overloaded",
+            Self::TransportError => "transport_error",
+            Self::ApplicationError => "application_error",
+        };
+        write!(f, "{name}")
+    }
+}
+
+/// Transfer hop recorded when a request is forwarded through a morphism.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceTransferHop {
+    /// Human-readable morphism or import/export adapter name.
+    pub morphism: String,
+    /// New callee selected by the transfer.
+    pub callee: String,
+    /// New subject or route used after the transfer.
+    pub subject: String,
+    /// Timestamp when the transfer occurred.
+    pub transferred_at: Time,
+}
+
+/// Runtime request/reply obligation tracked against the global obligation
+/// ledger when the delivery class requires it.
+#[derive(Debug)]
+pub struct ServiceObligation {
+    /// Stable request identifier.
+    pub request_id: String,
+    /// Human-readable caller identity.
+    pub caller: String,
+    /// Human-readable callee identity.
+    pub callee: String,
+    /// Subject used for the request.
+    pub subject: String,
+    /// Delivery class selected for the request.
+    pub delivery_class: DeliveryClass,
+    /// Time when the request was created.
+    pub created_at: Time,
+    /// Optional request timeout carried into the service surface.
+    pub timeout: Option<Duration>,
+    /// Morphism transfer lineage captured across forwards.
+    pub lineage: Vec<ServiceTransferHop>,
+    token: Option<ObligationToken>,
+}
+
+impl ServiceObligation {
+    /// Allocate a service obligation for one request.
+    ///
+    /// The common-case `EphemeralInteractive` path stays cheap and does not
+    /// allocate a ledger entry. `ObligationBacked` and stronger service classes
+    /// allocate a ledger-backed lease obligation that must later be committed,
+    /// aborted, or intentionally surfaced as a leak by the runtime.
+    #[track_caller]
+    pub fn allocate(
+        ledger: &mut ObligationLedger,
+        request_id: impl Into<String>,
+        caller: impl Into<String>,
+        target: impl Into<String>,
+        subject: impl Into<String>,
+        delivery_class: DeliveryClass,
+        holder: TaskId,
+        region: RegionId,
+        created_at: Time,
+        timeout: Option<Duration>,
+    ) -> Result<Self, ServiceObligationError> {
+        let request_id = request_id.into();
+        let caller = caller.into();
+        let service_target = target.into();
+        let subject = subject.into();
+        validate_service_text("request_id", &request_id)?;
+        validate_service_text("caller", &caller)?;
+        validate_service_text("callee", &service_target)?;
+        validate_service_text("subject", &subject)?;
+        if timeout.is_some_and(|value| value.is_zero()) {
+            return Err(ServiceObligationError::ZeroTimeout);
+        }
+
+        let token = if delivery_class >= DeliveryClass::ObligationBacked {
+            let description = format!("service request {request_id}: {caller} -> {service_target}");
+            Some(ledger.acquire_with_context(
+                ObligationKind::Lease,
+                holder,
+                region,
+                created_at,
+                SourceLocation::from_panic_location(Location::caller()),
+                None,
+                Some(description),
+            ))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            request_id,
+            caller,
+            callee: service_target,
+            subject,
+            delivery_class,
+            created_at,
+            timeout,
+            lineage: Vec::new(),
+            token,
+        })
+    }
+
+    /// Return the underlying ledger obligation id when the request is tracked.
+    #[must_use]
+    pub fn obligation_id(&self) -> Option<ObligationId> {
+        self.token.as_ref().map(ObligationToken::id)
+    }
+
+    /// Return whether this request is currently backed by the obligation ledger.
+    #[must_use]
+    pub fn is_tracked(&self) -> bool {
+        self.token.is_some()
+    }
+
+    /// Transfer the request through an import/export morphism while preserving
+    /// the existing service obligation.
+    pub fn transfer(
+        mut self,
+        callee: impl Into<String>,
+        subject: impl Into<String>,
+        morphism: impl Into<String>,
+        transferred_at: Time,
+    ) -> Result<Self, ServiceObligationError> {
+        let callee = callee.into();
+        let subject = subject.into();
+        let morphism = morphism.into();
+        validate_service_text("transfer.callee", &callee)?;
+        validate_service_text("transfer.subject", &subject)?;
+        validate_service_text("transfer.morphism", &morphism)?;
+        self.callee = callee.clone();
+        self.subject = subject.clone();
+        self.lineage.push(ServiceTransferHop {
+            morphism,
+            callee,
+            subject,
+            transferred_at,
+        });
+        Ok(self)
+    }
+
+    /// Commit the service obligation with a reply payload and optionally create
+    /// a follow-on reply-delivery obligation.
+    #[track_caller]
+    pub fn commit_with_reply(
+        mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        payload: impl Into<Vec<u8>>,
+        delivery_boundary: AckKind,
+        receipt_required: bool,
+    ) -> Result<ServiceReplyCommit, ServiceObligationError> {
+        validate_reply_boundary(self.delivery_class, delivery_boundary, receipt_required)?;
+
+        let service_obligation_id = self.obligation_id();
+        let payload = payload.into();
+
+        let reply_obligation = if let Some(token) = self.token.take() {
+            let holder = token.holder();
+            let region = token.region();
+            let service_obligation_id = token.id();
+            ledger.commit(token, now);
+
+            if requires_follow_up_reply(delivery_boundary, receipt_required) {
+                Some(ReplyObligation::allocate(
+                    ledger,
+                    service_obligation_id,
+                    holder,
+                    region,
+                    now,
+                    payload.clone(),
+                    delivery_boundary,
+                    receipt_required,
+                ))
+            } else {
+                None
+            }
+        } else if requires_follow_up_reply(delivery_boundary, receipt_required) {
+            return Err(ServiceObligationError::ReplyTrackingUnavailable {
+                delivery_class: self.delivery_class,
+                requested_boundary: delivery_boundary,
+                receipt_required,
+            });
+        } else {
+            None
+        };
+
+        Ok(ServiceReplyCommit {
+            request_id: self.request_id,
+            service_obligation_id,
+            payload,
+            delivery_class: self.delivery_class,
+            reply_obligation,
+        })
+    }
+
+    /// Abort the service obligation with a typed failure.
+    pub fn abort(
+        mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        failure: ServiceFailure,
+    ) -> ServiceAbortReceipt {
+        let obligation_id = self.obligation_id();
+        if let Some(token) = self.token.take() {
+            ledger.abort(token, now, failure.abort_reason());
+        }
+        ServiceAbortReceipt {
+            request_id: self.request_id,
+            obligation_id,
+            failure,
+            delivery_class: self.delivery_class,
+        }
+    }
+
+    /// Explicitly timeout the service obligation instead of letting it vanish.
+    pub fn timeout(self, ledger: &mut ObligationLedger, now: Time) -> ServiceAbortReceipt {
+        self.abort(ledger, now, ServiceFailure::TimedOut)
+    }
+}
+
+/// Result of committing a service obligation with a reply.
+#[derive(Debug)]
+pub struct ServiceReplyCommit {
+    /// Stable request identifier.
+    pub request_id: String,
+    /// Service obligation resolved by the commit, when tracking was enabled.
+    pub service_obligation_id: Option<ObligationId>,
+    /// Reply payload returned by the callee.
+    pub payload: Vec<u8>,
+    /// Delivery class used for the request.
+    pub delivery_class: DeliveryClass,
+    /// Optional follow-on reply-delivery obligation.
+    pub reply_obligation: Option<ReplyObligation>,
+}
+
+/// Receipt emitted when a service obligation aborts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceAbortReceipt {
+    /// Stable request identifier.
+    pub request_id: String,
+    /// Service obligation id when the request was tracked.
+    pub obligation_id: Option<ObligationId>,
+    /// Typed failure recorded for the abort.
+    pub failure: ServiceFailure,
+    /// Delivery class used for the request.
+    pub delivery_class: DeliveryClass,
+}
+
+/// Follow-on obligation for reply delivery or receipt after the callee has
+/// already served the request.
+#[derive(Debug)]
+pub struct ReplyObligation {
+    /// Service obligation that produced this reply.
+    pub service_obligation_id: ObligationId,
+    /// Delivery or receipt boundary the reply still needs to cross.
+    pub delivery_boundary: AckKind,
+    /// Whether the caller required explicit receipt.
+    pub receipt_required: bool,
+    /// Reply payload bound to this follow-on obligation.
+    pub payload: Vec<u8>,
+    obligation_id: ObligationId,
+    token: Option<ObligationToken>,
+}
+
+impl ReplyObligation {
+    #[track_caller]
+    fn allocate(
+        ledger: &mut ObligationLedger,
+        service_obligation_id: ObligationId,
+        holder: TaskId,
+        region: RegionId,
+        created_at: Time,
+        payload: Vec<u8>,
+        delivery_boundary: AckKind,
+        receipt_required: bool,
+    ) -> Self {
+        let description = format!("reply obligation for service {service_obligation_id:?}");
+        let token = ledger.acquire_with_context(
+            ObligationKind::Ack,
+            holder,
+            region,
+            created_at,
+            SourceLocation::from_panic_location(Location::caller()),
+            None,
+            Some(description),
+        );
+        let obligation_id = token.id();
+        Self {
+            service_obligation_id,
+            delivery_boundary,
+            receipt_required,
+            payload,
+            obligation_id,
+            token: Some(token),
+        }
+    }
+
+    /// Return the reply-obligation id.
+    #[must_use]
+    pub const fn obligation_id(&self) -> ObligationId {
+        self.obligation_id
+    }
+
+    /// Commit the reply-delivery obligation.
+    pub fn commit_delivery(
+        mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> ReplyDeliveryReceipt {
+        let token = self
+            .token
+            .take()
+            .expect("reply obligation token must be present until resolved");
+        ledger.commit(token, now);
+        ReplyDeliveryReceipt {
+            obligation_id: self.obligation_id,
+            service_obligation_id: self.service_obligation_id,
+            delivery_boundary: self.delivery_boundary,
+            receipt_required: self.receipt_required,
+        }
+    }
+
+    /// Abort the reply-delivery obligation with a typed failure.
+    pub fn abort_delivery(
+        mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        failure: ServiceFailure,
+    ) -> ReplyAbortReceipt {
+        let token = self
+            .token
+            .take()
+            .expect("reply obligation token must be present until resolved");
+        ledger.abort(token, now, failure.abort_reason());
+        ReplyAbortReceipt {
+            obligation_id: self.obligation_id,
+            service_obligation_id: self.service_obligation_id,
+            delivery_boundary: self.delivery_boundary,
+            failure,
+        }
+    }
+
+    /// Explicitly timeout the reply-delivery obligation.
+    pub fn timeout(self, ledger: &mut ObligationLedger, now: Time) -> ReplyAbortReceipt {
+        self.abort_delivery(ledger, now, ServiceFailure::TimedOut)
+    }
+}
+
+/// Receipt emitted when a reply obligation commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyDeliveryReceipt {
+    /// Reply obligation id.
+    pub obligation_id: ObligationId,
+    /// Parent service obligation id.
+    pub service_obligation_id: ObligationId,
+    /// Boundary satisfied by the delivery.
+    pub delivery_boundary: AckKind,
+    /// Whether the original request required receipt.
+    pub receipt_required: bool,
+}
+
+/// Receipt emitted when a reply obligation aborts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyAbortReceipt {
+    /// Reply obligation id.
+    pub obligation_id: ObligationId,
+    /// Parent service obligation id.
+    pub service_obligation_id: ObligationId,
+    /// Boundary that failed to complete.
+    pub delivery_boundary: AckKind,
+    /// Typed failure recorded for the abort.
+    pub failure: ServiceFailure,
+}
+
+/// Validation failure for runtime service obligations.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ServiceObligationError {
+    /// Required string fields must be non-empty.
+    #[error("service obligation field `{field}` must not be empty")]
+    EmptyField {
+        /// Field that failed validation.
+        field: &'static str,
+    },
+    /// Timeout values must be strictly positive when present.
+    #[error("service obligation timeout must be greater than zero")]
+    ZeroTimeout,
+    /// Requested reply boundary is weaker than the selected delivery class can
+    /// honestly claim.
+    #[error(
+        "reply boundary `{requested_boundary}` is weaker than minimum `{minimum_boundary}` for delivery class `{delivery_class}`"
+    )]
+    ReplyBoundaryBelowMinimum {
+        /// Delivery class bound to the request.
+        delivery_class: DeliveryClass,
+        /// Minimum honest boundary for the class.
+        minimum_boundary: AckKind,
+        /// Boundary the caller attempted to use.
+        requested_boundary: AckKind,
+    },
+    /// Receipt-tracked replies must finish at the `received` boundary.
+    #[error(
+        "receipt-required replies must use the `received` boundary, not `{requested_boundary}`"
+    )]
+    ReceiptRequiresReceivedBoundary {
+        /// Boundary requested by the caller.
+        requested_boundary: AckKind,
+    },
+    /// Lower-cost classes stay cheap and cannot pretend to support tracked
+    /// reply delivery semantics they did not pay for.
+    #[error(
+        "delivery class `{delivery_class}` cannot support tracked reply boundary `{requested_boundary}` (receipt_required={receipt_required})"
+    )]
+    ReplyTrackingUnavailable {
+        /// Delivery class bound to the request.
+        delivery_class: DeliveryClass,
+        /// Boundary the caller attempted to use.
+        requested_boundary: AckKind,
+        /// Whether explicit receipt was requested.
+        receipt_required: bool,
+    },
+}
+
+fn validate_service_text(field: &'static str, value: &str) -> Result<(), ServiceObligationError> {
+    if value.trim().is_empty() {
+        return Err(ServiceObligationError::EmptyField { field });
+    }
+    Ok(())
+}
+
+fn requires_follow_up_reply(delivery_boundary: AckKind, receipt_required: bool) -> bool {
+    receipt_required || delivery_boundary > AckKind::Served
+}
+
+fn validate_reply_boundary(
+    delivery_class: DeliveryClass,
+    delivery_boundary: AckKind,
+    receipt_required: bool,
+) -> Result<(), ServiceObligationError> {
+    let minimum_boundary = delivery_class.minimum_ack();
+    if delivery_boundary < minimum_boundary {
+        return Err(ServiceObligationError::ReplyBoundaryBelowMinimum {
+            delivery_class,
+            minimum_boundary,
+            requested_boundary: delivery_boundary,
+        });
+    }
+    if receipt_required && delivery_boundary != AckKind::Received {
+        return Err(ServiceObligationError::ReceiptRequiresReceivedBoundary {
+            requested_boundary: delivery_boundary,
+        });
+    }
+    if delivery_class < DeliveryClass::ObligationBacked
+        && requires_follow_up_reply(delivery_boundary, receipt_required)
+    {
+        return Err(ServiceObligationError::ReplyTrackingUnavailable {
+            delivery_class,
+            requested_boundary: delivery_boundary,
+            receipt_required,
+        });
+    }
+    Ok(())
+}
+
 /// Registered FABRIC service surface with provider/caller authority split.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceRegistration {
@@ -647,6 +1152,8 @@ pub enum ServiceContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::{ObligationAbortReason, ObligationState};
+    use crate::util::ArenaIndex;
 
     fn provider_terms() -> ProviderTerms {
         ProviderTerms {
@@ -673,6 +1180,14 @@ mod tests {
             evidence_requirements: EvidenceLevel::Standard,
             ..ServiceContractSchema::default()
         }
+    }
+
+    fn make_task() -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(11, 0))
+    }
+
+    fn make_region() -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(7, 0))
     }
 
     #[test]
@@ -766,5 +1281,205 @@ mod tests {
             .expect_err("timeout override should be rejected");
 
         assert_eq!(err, ServiceContractError::TimeoutOverrideNotAllowed);
+    }
+
+    #[test]
+    fn ephemeral_request_reply_stays_untracked() {
+        let mut ledger = ObligationLedger::new();
+        let obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-ephemeral",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::EphemeralInteractive,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("ephemeral path should be valid");
+
+        assert!(!obligation.is_tracked());
+        assert_eq!(ledger.pending_count(), 0);
+
+        let reply = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(2),
+                b"ok".to_vec(),
+                AckKind::Accepted,
+                false,
+            )
+            .expect("cheap path commit should succeed");
+
+        assert_eq!(reply.service_obligation_id, None);
+        assert!(reply.reply_obligation.is_none());
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn obligation_backed_request_commits_and_creates_reply_obligation() {
+        let mut ledger = ObligationLedger::new();
+        let obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-1",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::MobilitySafe,
+            make_task(),
+            make_region(),
+            Time::from_nanos(10),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+
+        let service_id = obligation.obligation_id().expect("tracked obligation id");
+        assert_eq!(ledger.pending_count(), 1);
+
+        let committed = obligation
+            .commit_with_reply(
+                &mut ledger,
+                Time::from_nanos(20),
+                b"payload".to_vec(),
+                AckKind::Received,
+                true,
+            )
+            .expect("tracked commit should succeed");
+
+        assert_eq!(committed.service_obligation_id, Some(service_id));
+        assert_eq!(committed.payload, b"payload".to_vec());
+        let reply = committed
+            .reply_obligation
+            .expect("reply obligation expected");
+        let reply_id = reply.obligation_id();
+        assert_eq!(reply.service_obligation_id, service_id);
+        assert_eq!(ledger.pending_count(), 1);
+
+        let delivery = reply.commit_delivery(&mut ledger, Time::from_nanos(30));
+        assert_eq!(delivery.obligation_id, reply_id);
+        assert_eq!(delivery.service_obligation_id, service_id);
+        assert_eq!(delivery.delivery_boundary, AckKind::Received);
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn service_obligation_abort_records_typed_failure() {
+        let mut ledger = ObligationLedger::new();
+        let obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-2",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(5),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+        let obligation_id = obligation.obligation_id().expect("tracked id");
+
+        let aborted = obligation.abort(
+            &mut ledger,
+            Time::from_nanos(15),
+            ServiceFailure::ApplicationError,
+        );
+
+        assert_eq!(aborted.obligation_id, Some(obligation_id));
+        assert_eq!(aborted.failure, ServiceFailure::ApplicationError);
+        assert_eq!(ledger.pending_count(), 0);
+        let record = ledger.get(obligation_id).expect("ledger record exists");
+        assert_eq!(record.state, ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Error));
+    }
+
+    #[test]
+    fn service_obligation_transfer_preserves_identity_and_lineage() {
+        let mut ledger = ObligationLedger::new();
+        let obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-3",
+            "caller",
+            "callee-a",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(1),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("tracked request should allocate");
+        let obligation_id = obligation.obligation_id().expect("tracked id");
+
+        let transferred = obligation
+            .transfer(
+                "callee-b",
+                "svc.echo.imported",
+                "import/orders->edge",
+                Time::from_nanos(2),
+            )
+            .expect("transfer should succeed");
+
+        assert_eq!(transferred.obligation_id(), Some(obligation_id));
+        assert_eq!(transferred.callee, "callee-b");
+        assert_eq!(transferred.subject, "svc.echo.imported");
+        assert_eq!(transferred.lineage.len(), 1);
+        assert_eq!(transferred.lineage[0].morphism, "import/orders->edge");
+    }
+
+    #[test]
+    fn service_obligation_timeout_is_explicit_abort() {
+        let mut ledger = ObligationLedger::new();
+        let obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-4",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(3),
+            Some(Duration::from_secs(1)),
+        )
+        .expect("tracked request should allocate");
+        let obligation_id = obligation.obligation_id().expect("tracked id");
+
+        let timed_out = obligation.timeout(&mut ledger, Time::from_nanos(100));
+
+        assert_eq!(timed_out.failure, ServiceFailure::TimedOut);
+        let record = ledger.get(obligation_id).expect("ledger record exists");
+        assert_eq!(record.state, ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Explicit));
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn unresolved_service_obligation_is_visible_to_leak_checks() {
+        let mut ledger = ObligationLedger::new();
+        let obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-5",
+            "caller",
+            "callee",
+            "svc.echo",
+            DeliveryClass::ObligationBacked,
+            make_task(),
+            make_region(),
+            Time::from_nanos(3),
+            Some(Duration::from_secs(1)),
+        )
+        .expect("tracked request should allocate");
+        let obligation_id = obligation.obligation_id().expect("tracked id");
+
+        let leaks = ledger.check_leaks();
+
+        assert!(!leaks.is_clean());
+        assert_eq!(ledger.pending_count(), 1);
+        assert!(leaks.leaked.iter().any(|entry| entry.id == obligation_id));
+        drop(obligation);
     }
 }
