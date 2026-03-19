@@ -181,6 +181,7 @@ impl FabricSubscription {
     ///
     /// Cancellation propagates by returning `None` once the supplied `Cx`
     /// observes a cancellation request.
+    #[allow(clippy::unused_async)]
     pub async fn next(&mut self, cx: &Cx) -> Option<FabricMessage> {
         if cx.checkpoint().is_err() {
             return None;
@@ -203,6 +204,7 @@ impl FabricSubscription {
 
 impl Fabric {
     /// Connect to a known fabric endpoint.
+    #[allow(clippy::unused_async)]
     pub async fn connect(cx: &Cx, endpoint: impl AsRef<str>) -> Result<Self, AsupersyncError> {
         cx.checkpoint()?;
 
@@ -225,6 +227,7 @@ impl Fabric {
     }
 
     /// Publish a packet-plane message with the default delivery class.
+    #[allow(clippy::unused_async)]
     pub async fn publish(
         &self,
         cx: &Cx,
@@ -251,6 +254,7 @@ impl Fabric {
     }
 
     /// Subscribe to a packet-plane subject pattern.
+    #[allow(clippy::unused_async)]
     pub async fn subscribe(
         &self,
         cx: &Cx,
@@ -287,6 +291,7 @@ impl Fabric {
     }
 
     /// Opt into a stream declaration with explicit configuration.
+    #[allow(clippy::unused_async)]
     pub async fn stream(
         &self,
         cx: &Cx,
@@ -385,6 +390,7 @@ impl SubjectPattern {
     }
 
     /// Validate that the provided set of patterns is pairwise non-overlapping.
+    #[allow(clippy::result_large_err)]
     pub fn validate_non_overlapping(patterns: &[Self]) -> Result<(), FabricError> {
         for (index, left) in patterns.iter().enumerate() {
             for right in patterns.iter().skip(index + 1) {
@@ -503,6 +509,7 @@ pub struct NormalizationPolicy {
 
 impl NormalizationPolicy {
     /// Produce the authoritative canonical subject partition used for placement.
+    #[allow(clippy::result_large_err)]
     pub fn normalize(&self, pattern: &SubjectPattern) -> Result<SubjectPattern, FabricError> {
         let mut canonical = pattern.clone();
         let mut seen = BTreeSet::from([canonical.canonical_key()]);
@@ -827,6 +834,7 @@ impl PlacementPolicy {
     }
 
     /// Plan an incremental steward-set transition subject to the rebalance budget.
+    #[allow(clippy::result_large_err)]
     pub fn plan_rebalance(
         &self,
         subject_partition: &SubjectPattern,
@@ -864,6 +872,7 @@ impl PlacementPolicy {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn candidate_pool<'a>(
         &self,
         subject_partition: &SubjectPattern,
@@ -915,6 +924,7 @@ impl PlacementPolicy {
         Ok(pool)
     }
 
+    #[allow(clippy::result_large_err)]
     fn select_stewards(
         &self,
         subject_partition: &SubjectPattern,
@@ -1114,6 +1124,7 @@ pub struct SubjectCell {
 
 impl SubjectCell {
     /// Create a new subject cell with deterministic placement.
+    #[allow(clippy::result_large_err)]
     pub fn new(
         subject_partition: &SubjectPattern,
         epoch: CellEpoch,
