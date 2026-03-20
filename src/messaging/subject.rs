@@ -538,21 +538,26 @@ impl SublistLinkCache {
     }
 
     fn insert(&mut self, subject: String, entry: CacheEntry) {
-        if self.entries.contains_key(&subject) {
-            self.entries.insert(subject, entry);
-            return;
+        use std::collections::hash_map::Entry;
+
+        match self.entries.entry(subject.clone()) {
+            Entry::Occupied(mut o) => {
+                o.insert(entry);
+                return;
+            }
+            Entry::Vacant(v) => {
+                self.order.push_back(subject);
+                v.insert(entry);
+            }
         }
 
-        if self.entries.len() >= self.capacity {
+        if self.entries.len() > self.capacity {
             while let Some(oldest) = self.order.pop_front() {
                 if self.entries.remove(&oldest).is_some() {
                     break;
                 }
             }
         }
-
-        self.order.push_back(subject.clone());
-        self.entries.insert(subject, entry);
     }
 }
 

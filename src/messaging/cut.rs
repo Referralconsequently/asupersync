@@ -689,17 +689,35 @@ impl IncidentSnapshot {
                 .control_capsule
                 .steward_pool
                 .clone_from(stewards);
+            // If the current active_sequencer is no longer in the new set,
+            // promote the first new steward so the forked cell is operational.
+            if let Some(active) = &forked_cell.control_capsule.active_sequencer {
+                if !contains_node(stewards, active) {
+                    forked_cell.control_capsule.active_sequencer = stewards.first().cloned();
+                }
+            }
         }
 
         // Re-issue a certificate for the forked cell so rehearsal operations
-        // validate against the new epoch.
+        // validate against the new epoch. If a steward_override removed the
+        // original signer, pick the first node in the new steward set so
+        // certificate validation does not reject the rehearsal.
+        let forked_signer = if contains_node(&forked_cell.steward_set, &self.certificate.signer) {
+            self.certificate.signer.clone()
+        } else {
+            forked_cell.steward_set.first().cloned().ok_or(
+                RehearsalError::EmptyStewardOverride {
+                    label: self.label.clone(),
+                },
+            )?
+        };
         let forked_certificate = CutCertificate {
             cell_id: forked_cell.cell_id,
             epoch: forked_cell.epoch,
             obligation_frontier: self.certificate.obligation_frontier.clone(),
             consumer_state_digest: self.certificate.consumer_state_digest,
             timestamp: self.snapshot_time,
-            signer: self.certificate.signer.clone(),
+            signer: forked_signer,
         };
 
         Ok(RehearsalFork {
@@ -1008,6 +1026,12 @@ pub enum RehearsalError {
         rehearsal_epoch: CellEpoch,
         /// Epoch in the incident snapshot.
         snapshot_epoch: CellEpoch,
+    },
+    /// The steward override produced an empty steward set.
+    #[error("rehearsal `{label}`: steward_override produced an empty steward set")]
+    EmptyStewardOverride {
+        /// Incident label.
+        label: String,
     },
 }
 
@@ -2149,6 +2173,37 @@ mod tests {
 
         assert_eq!(fork.forked_cell.steward_set, new_stewards);
         assert_eq!(fork.forked_cell.control_capsule.steward_pool, new_stewards);
+        // The original signer (node-a) is NOT in the new steward set.
+        // The forked certificate must adapt the signer to node-x so
+        // replay validation does not reject the certificate.
+        assert_eq!(fork.forked_certificate.signer, NodeId::new("node-x"));
+    }
+
+    #[test]
+    fn fork_with_steward_override_that_excludes_signer_still_replays() {
+        let (_, _, snap) = make_snapshot();
+        let new_stewards = vec![NodeId::new("node-x"), NodeId::new("node-y")];
+
+        let fork = snap
+            .fork_rehearsal(
+                RehearsalPolicy {
+                    steward_override: Some(new_stewards),
+                    description: "entirely new steward set".to_owned(),
+                    ..Default::default()
+                },
+                CellEpoch::new(10, 1),
+            )
+            .expect("fork with replaced signers");
+
+        // Replay an evacuation from node-x to node-y in the forked steward set.
+        let outcome = fork.replay(&MobilityOperation::Evacuate {
+            from: NodeId::new("node-x"),
+            to: NodeId::new("node-y"),
+        });
+        assert!(
+            outcome.succeeded(),
+            "rehearsal with completely replaced steward set must succeed"
+        );
     }
 
     #[test]
