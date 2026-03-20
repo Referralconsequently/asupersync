@@ -1927,26 +1927,60 @@ fn classify_time_policy(
     TimePolicyClass::NotApplicable
 }
 
+fn eligibility_verdict(identity: &DualRunScenarioIdentity) -> Option<&str> {
+    identity
+        .metadata
+        .get("eligibility_verdict")
+        .map(String::as_str)
+}
+
+fn is_bridge_only_downgrade(identity: &DualRunScenarioIdentity) -> bool {
+    let has_bridge_only_support_class = matches!(
+        identity.metadata.get("support_class").map(String::as_str),
+        Some("bridge_only")
+    );
+
+    let has_supported_downgrade_reason = matches!(
+        identity.metadata.get("reason_code").map(String::as_str),
+        Some(
+            "downgrade_to_server_bridge"
+                | "downgrade_to_edge_bridge"
+                | "downgrade_to_websocket_or_fetch"
+                | "downgrade_to_export_bytes_for_download"
+                | "downgrade_to_bridge_only"
+        )
+    );
+
+    has_bridge_only_support_class && has_supported_downgrade_reason
+}
+
 fn unsupported_surface_reason(identity: &DualRunScenarioIdentity) -> Option<String> {
-    if let Some(reason) = identity.metadata.get("unsupported_reason") {
-        return Some(reason.clone());
+    match eligibility_verdict(identity) {
+        Some(
+            verdict @ ("blocked_missing_virtualization"
+            | "blocked_missing_verification"
+            | "blocked_scope_red_line"
+            | "unsupported"
+            | "rejected"
+            | "unsupported_surface"),
+        ) => return Some(format!("eligibility_verdict={verdict}")),
+        _ => {}
     }
-    if let Some(verdict) = identity.metadata.get("eligibility_verdict") {
-        if matches!(
-            verdict.as_str(),
-            "unsupported" | "rejected" | "unsupported_surface"
-        ) {
-            return Some(format!("eligibility_verdict={verdict}"));
-        }
-    }
+
     if let Some(class) = identity.metadata.get("support_class") {
-        if matches!(
-            class.as_str(),
-            "unsupported" | "unsupported_surface" | "bridge_only"
-        ) {
+        if matches!(class.as_str(), "unsupported" | "unsupported_surface") {
             return Some(format!("support_class={class}"));
         }
     }
+
+    if is_bridge_only_downgrade(identity) {
+        return None;
+    }
+
+    if let Some(reason) = identity.metadata.get("unsupported_reason") {
+        return Some(reason.clone());
+    }
+
     None
 }
 
@@ -1955,6 +1989,13 @@ fn insufficient_observability_reason(
     verdict: &ComparisonVerdict,
     live: &NormalizedObservable,
 ) -> Option<String> {
+    if matches!(
+        eligibility_verdict(identity),
+        Some("blocked_missing_observability")
+    ) {
+        return Some("eligibility_verdict=blocked_missing_observability".to_string());
+    }
+
     if let Some(status) = identity.metadata.get("observability_status") {
         let lowered = status.to_ascii_lowercase();
         if ["blocked", "missing", "limited", "insufficient"]
@@ -2021,6 +2062,26 @@ fn hard_contract_break_reason(
     None
 }
 
+fn terminal_policy_outcome(
+    provisional_class: ProvisionalDivergenceClass,
+    rerun_decision: RerunDecision,
+    suggested_final_class: Option<FinalDivergenceClass>,
+    time_policy_class: TimePolicyClass,
+    scheduler_noise_class: SchedulerNoiseClass,
+    suppression_reason: Option<String>,
+    explanation: impl Into<String>,
+) -> DifferentialPolicyOutcome {
+    DifferentialPolicyOutcome {
+        provisional_class,
+        rerun_decision,
+        suggested_final_class,
+        time_policy_class,
+        scheduler_noise_class,
+        suppression_reason,
+        explanation: explanation.into(),
+    }
+}
+
 fn classify_differential_policy(
     identity: &DualRunScenarioIdentity,
     lab: &NormalizedObservable,
@@ -2033,61 +2094,51 @@ fn classify_differential_policy(
     let time_policy_class = classify_time_policy(identity, verdict, noise_class);
 
     if lab.schema_version != live.schema_version {
-        return DifferentialPolicyOutcome {
-            provisional_class: ProvisionalDivergenceClass::ArtifactSchemaViolation,
-            rerun_decision: RerunDecision::None,
-            suggested_final_class: Some(FinalDivergenceClass::ArtifactSchemaViolation),
+        return terminal_policy_outcome(
+            ProvisionalDivergenceClass::ArtifactSchemaViolation,
+            RerunDecision::None,
+            Some(FinalDivergenceClass::ArtifactSchemaViolation),
             time_policy_class,
-            scheduler_noise_class: noise_class,
-            suppression_reason: Some("schema version mismatch".to_string()),
-            explanation:
-                "comparison artifacts do not share a schema contract, so reruns would not be honest"
-                    .to_string(),
-        };
+            noise_class,
+            Some("schema version mismatch".to_string()),
+            "comparison artifacts do not share a schema contract, so reruns would not be honest",
+        );
     }
 
     if let Some(reason) = unsupported_surface_reason(identity) {
-        return DifferentialPolicyOutcome {
-            provisional_class: ProvisionalDivergenceClass::UnsupportedSurface,
-            rerun_decision: RerunDecision::None,
-            suggested_final_class: Some(FinalDivergenceClass::UnsupportedSurface),
+        return terminal_policy_outcome(
+            ProvisionalDivergenceClass::UnsupportedSurface,
+            RerunDecision::None,
+            Some(FinalDivergenceClass::UnsupportedSurface),
             time_policy_class,
-            scheduler_noise_class: noise_class,
-            suppression_reason: Some(reason),
-            explanation:
-                "scenario metadata marks this surface unsupported, so the mismatch is rejected immediately"
-                    .to_string(),
-        };
+            noise_class,
+            Some(reason),
+            "scenario metadata marks this surface unsupported, so the mismatch is rejected immediately",
+        );
     }
 
     if let Some(reason) = insufficient_observability_reason(identity, verdict, live) {
-        return DifferentialPolicyOutcome {
-            provisional_class: ProvisionalDivergenceClass::InsufficientObservability,
-            rerun_decision: RerunDecision::ConfirmationIfRicherInstrumentationEnabled {
-                additional_runs: 1,
-            },
-            suggested_final_class: Some(FinalDivergenceClass::InsufficientObservability),
+        return terminal_policy_outcome(
+            ProvisionalDivergenceClass::InsufficientObservability,
+            RerunDecision::ConfirmationIfRicherInstrumentationEnabled { additional_runs: 1 },
+            Some(FinalDivergenceClass::InsufficientObservability),
             time_policy_class,
-            scheduler_noise_class: noise_class,
-            suppression_reason: Some(reason),
-            explanation:
-                "required evidence is missing or explicitly blocked, so this surface cannot be promoted honestly"
-                    .to_string(),
-        };
+            noise_class,
+            Some(reason),
+            "required evidence is missing or explicitly blocked, so this surface cannot be promoted honestly",
+        );
     }
 
     if let Some(reason) = hard_contract_break_reason(live, live_invariant_violations) {
-        return DifferentialPolicyOutcome {
-            provisional_class: ProvisionalDivergenceClass::HardContractBreak,
-            rerun_decision: RerunDecision::None,
-            suggested_final_class: Some(FinalDivergenceClass::RuntimeSemanticBug),
+        return terminal_policy_outcome(
+            ProvisionalDivergenceClass::HardContractBreak,
+            RerunDecision::None,
+            Some(FinalDivergenceClass::RuntimeSemanticBug),
             time_policy_class,
-            scheduler_noise_class: noise_class,
-            suppression_reason: Some(reason),
-            explanation:
-                "the live side already violates a hard semantic contract, so the framework should escalate immediately"
-                    .to_string(),
-        };
+            noise_class,
+            Some(reason),
+            "the live side already violates a hard semantic contract, so the framework should escalate immediately",
+        );
     }
 
     if verdict.passed
@@ -2095,49 +2146,44 @@ fn classify_differential_policy(
         && live_invariant_violations.is_empty()
         && noise_class != SchedulerNoiseClass::None
     {
-        return DifferentialPolicyOutcome {
-            provisional_class: ProvisionalDivergenceClass::SchedulerNoiseSuspected,
-            rerun_decision: RerunDecision::LiveConfirmations { additional_runs: 2 },
-            suggested_final_class: Some(FinalDivergenceClass::SchedulerNoiseSuspected),
+        return terminal_policy_outcome(
+            ProvisionalDivergenceClass::SchedulerNoiseSuspected,
+            RerunDecision::LiveConfirmations { additional_runs: 2 },
+            Some(FinalDivergenceClass::SchedulerNoiseSuspected),
             time_policy_class,
-            scheduler_noise_class: noise_class,
-            suppression_reason: Some(
+            noise_class,
+            Some(
                 "semantic observables stayed equal while only scheduler/provenance signals drifted"
                     .to_string(),
             ),
-            explanation:
-                "the semantic verdict remains a pass, but the report should retain scheduler-noise triage metadata"
-                    .to_string(),
-        };
+            "the semantic verdict remains a pass, but the report should retain scheduler-noise triage metadata",
+        );
     }
 
     if verdict.passed && lab_invariant_violations.is_empty() && live_invariant_violations.is_empty()
     {
-        return DifferentialPolicyOutcome {
-            provisional_class: ProvisionalDivergenceClass::Pass,
-            rerun_decision: RerunDecision::None,
-            suggested_final_class: None,
+        return terminal_policy_outcome(
+            ProvisionalDivergenceClass::Pass,
+            RerunDecision::None,
+            None,
             time_policy_class,
-            scheduler_noise_class: noise_class,
-            suppression_reason: None,
-            explanation: "semantic observables match and no invariant failures were observed"
-                .to_string(),
-        };
+            noise_class,
+            None,
+            "semantic observables match and no invariant failures were observed",
+        );
     }
 
-    DifferentialPolicyOutcome {
-        provisional_class: ProvisionalDivergenceClass::SemanticMismatchAdmittedSurface,
-        rerun_decision: RerunDecision::DeterministicLabReplayAndLiveConfirmations {
+    terminal_policy_outcome(
+        ProvisionalDivergenceClass::SemanticMismatchAdmittedSurface,
+        RerunDecision::DeterministicLabReplayAndLiveConfirmations {
             additional_live_runs: 2,
         },
-        suggested_final_class: None,
+        None,
         time_policy_class,
-        scheduler_noise_class: noise_class,
-        suppression_reason: None,
-        explanation:
-            "semantic mismatches survived the initial comparison on an admitted surface; schedule the canonical lab replay plus two live confirmation reruns"
-                .to_string(),
-    }
+        noise_class,
+        None,
+        "semantic mismatches survived the initial comparison on an admitted surface; schedule the canonical lab replay plus two live confirmation reruns",
+    )
 }
 
 // ============================================================================
@@ -5064,6 +5110,166 @@ mod tests {
             Some(FinalDivergenceClass::InsufficientObservability)
         );
         crate::test_complete!("harness_insufficient_observability_policy_marks_gap");
+    }
+
+    #[test]
+    fn harness_blocked_missing_observability_gate_is_not_a_pass() {
+        init_test("harness_blocked_missing_observability_gate_is_not_a_pass");
+        let ident = DualRunScenarioIdentity::phase1(
+            "test.observability.gate",
+            "timer.surface",
+            "v1",
+            "d",
+            42,
+        )
+        .with_metadata("eligibility_verdict", "blocked_missing_observability");
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| make_happy_semantics())
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::InsufficientObservability
+        );
+        assert_eq!(
+            result.policy.rerun_decision,
+            RerunDecision::ConfirmationIfRicherInstrumentationEnabled { additional_runs: 1 }
+        );
+        assert_eq!(
+            result.policy.suggested_final_class,
+            Some(FinalDivergenceClass::InsufficientObservability)
+        );
+        crate::test_complete!("harness_blocked_missing_observability_gate_is_not_a_pass");
+    }
+
+    #[test]
+    fn harness_bridge_only_downgrade_can_still_be_an_admitted_surface() {
+        init_test("harness_bridge_only_downgrade_can_still_be_an_admitted_surface");
+        let ident = DualRunScenarioIdentity::phase1(
+            "test.bridge_only_admitted",
+            "browser.surface",
+            "v1",
+            "bridge-only downgrade remains comparable when admitted",
+            42,
+        )
+        .with_metadata("eligibility_verdict", "eligible_for_pilot")
+        .with_metadata("support_class", "bridge_only")
+        .with_metadata("reason_code", "downgrade_to_server_bridge");
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| make_happy_semantics())
+            .run();
+
+        assert!(result.passed(), "{}", result.summary());
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::Pass
+        );
+        assert_eq!(result.policy.rerun_decision, RerunDecision::None);
+        assert_eq!(result.policy.suggested_final_class, None);
+        crate::test_complete!("harness_bridge_only_downgrade_can_still_be_an_admitted_surface");
+    }
+
+    #[test]
+    fn harness_bridge_only_without_downgrade_reason_stays_unsupported() {
+        init_test("harness_bridge_only_without_downgrade_reason_stays_unsupported");
+        let ident = DualRunScenarioIdentity::phase1(
+            "test.bridge_only_invalid_reason",
+            "browser.surface",
+            "v1",
+            "bridge-only without a supported downgrade reason must fail closed",
+            42,
+        )
+        .with_metadata("support_class", "bridge_only")
+        .with_metadata("reason_code", "unsupported_runtime_context")
+        .with_metadata(
+            "unsupported_reason",
+            "non-browser runtime context has no admitted downgrade lane",
+        );
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| make_happy_semantics())
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::UnsupportedSurface
+        );
+        assert_eq!(result.policy.rerun_decision, RerunDecision::None);
+        assert_eq!(
+            result.policy.suggested_final_class,
+            Some(FinalDivergenceClass::UnsupportedSurface)
+        );
+        crate::test_complete!("harness_bridge_only_without_downgrade_reason_stays_unsupported");
+    }
+
+    #[test]
+    fn harness_eligible_gate_does_not_override_unsupported_support_class() {
+        init_test("harness_eligible_gate_does_not_override_unsupported_support_class");
+        let ident = DualRunScenarioIdentity::phase1(
+            "test.eligible_gate_conflict",
+            "browser.surface",
+            "v1",
+            "contradictory unsupported support class must fail closed",
+            42,
+        )
+        .with_metadata("eligibility_verdict", "eligible_for_pilot")
+        .with_metadata("support_class", "unsupported")
+        .with_metadata(
+            "unsupported_reason",
+            "shared worker direct runtime not shipped",
+        );
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| make_happy_semantics())
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::UnsupportedSurface
+        );
+        assert_eq!(result.policy.rerun_decision, RerunDecision::None);
+        assert_eq!(
+            result.policy.suggested_final_class,
+            Some(FinalDivergenceClass::UnsupportedSurface)
+        );
+        crate::test_complete!("harness_eligible_gate_does_not_override_unsupported_support_class");
+    }
+
+    #[test]
+    fn harness_blocked_missing_verification_gate_stays_unsupported() {
+        init_test("harness_blocked_missing_verification_gate_stays_unsupported");
+        let ident = DualRunScenarioIdentity::phase1(
+            "test.verification.gate",
+            "browser.surface",
+            "v1",
+            "d",
+            42,
+        )
+        .with_metadata("eligibility_verdict", "blocked_missing_verification")
+        .with_metadata("support_class", "bridge_only")
+        .with_metadata("reason_code", "downgrade_to_server_bridge");
+
+        let result = DualRunHarness::from_identity(ident)
+            .lab(|_| make_happy_semantics())
+            .live(|_, _| make_happy_semantics())
+            .run();
+
+        assert_eq!(
+            result.policy.provisional_class,
+            ProvisionalDivergenceClass::UnsupportedSurface
+        );
+        assert_eq!(result.policy.rerun_decision, RerunDecision::None);
+        assert_eq!(
+            result.policy.suggested_final_class,
+            Some(FinalDivergenceClass::UnsupportedSurface)
+        );
+        crate::test_complete!("harness_blocked_missing_verification_gate_stays_unsupported");
     }
 
     #[test]
