@@ -1432,22 +1432,41 @@ impl FabricConsumer {
             return Ok(self.stale_attempt_noop(attempt.obligation_id));
         }
         let resolution = self.cursor.acknowledge(attempt)?;
-        if matches!(resolution, AckResolution::Committed { .. })
-            && let Some(pending) = self.state.pending_acks.remove(&attempt.obligation_id)
-        {
-            let token = self
-                .pending_ack_tokens
-                .remove(&attempt.obligation_id)
-                .ok_or(FabricConsumerError::MissingPendingAckToken {
-                    obligation_id: attempt.obligation_id,
-                })?;
-            let resolved_at = self.next_event_time();
-            self.ledger.commit(token, resolved_at);
-            self.state.pending_count = self
-                .state
-                .pending_count
-                .saturating_sub(window_len(pending.window));
-            self.state.ack_floor = self.state.ack_floor.max(pending.window.end());
+        match resolution {
+            AckResolution::Committed { .. } => {
+                if let Some(pending) = self.state.pending_acks.remove(&attempt.obligation_id) {
+                    let token = self
+                        .pending_ack_tokens
+                        .remove(&attempt.obligation_id)
+                        .ok_or(FabricConsumerError::MissingPendingAckToken {
+                            obligation_id: attempt.obligation_id,
+                        })?;
+                    let resolved_at = self.next_event_time();
+                    self.ledger.commit(token, resolved_at);
+                    self.state.pending_count = self
+                        .state
+                        .pending_count
+                        .saturating_sub(window_len(pending.window));
+                    self.state.ack_floor = self.state.ack_floor.max(pending.window.end());
+                }
+            }
+            AckResolution::StaleNoOp { .. } => {
+                if let Some(pending) = self.state.pending_acks.remove(&attempt.obligation_id) {
+                    let token = self
+                        .pending_ack_tokens
+                        .remove(&attempt.obligation_id)
+                        .ok_or(FabricConsumerError::MissingPendingAckToken {
+                            obligation_id: attempt.obligation_id,
+                        })?;
+                    let aborted_at = self.next_event_time();
+                    self.ledger
+                        .abort(token, aborted_at, ObligationAbortReason::Cancel);
+                    self.state.pending_count = self
+                        .state
+                        .pending_count
+                        .saturating_sub(window_len(pending.window));
+                }
+            }
         }
         Ok(resolution)
     }
