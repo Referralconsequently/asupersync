@@ -2706,9 +2706,11 @@ impl CaptureManifest {
     /// Whether all fields were directly observed (no inferred or unsupported).
     #[must_use]
     pub fn fully_observed(&self) -> bool {
-        self.annotations
-            .iter()
-            .all(|a| a.observability == FieldObservability::Observed)
+        !self.annotations.is_empty()
+            && self
+                .annotations
+                .iter()
+                .all(|a| a.observability == FieldObservability::Observed)
     }
 
     /// Resolve the capture annotation for a semantic field or one of its
@@ -5350,6 +5352,14 @@ mod tests {
         manifest.observed("cancel", "hook");
         assert!(manifest.fully_observed());
         crate::test_complete!("capture_manifest_fully_observed");
+    }
+
+    #[test]
+    fn capture_manifest_empty_is_not_fully_observed() {
+        init_test("capture_manifest_empty_is_not_fully_observed");
+        let manifest = CaptureManifest::new();
+        assert!(!manifest.fully_observed());
+        crate::test_complete!("capture_manifest_empty_is_not_fully_observed");
     }
 
     #[test]
