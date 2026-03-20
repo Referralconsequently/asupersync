@@ -119,7 +119,7 @@ mod inner {
                 Err(std::sync::TryLockError::WouldBlock) => (self.inner.lock(), true),
             };
 
-            let wait_ns = start.elapsed().as_nanos() as u64;
+            let wait_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
 
             self.metrics.acquisitions.fetch_add(1, Ordering::Relaxed);
             self.metrics.wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
@@ -224,7 +224,7 @@ mod inner {
 
     impl<T> Drop for ContendedMutexGuard<'_, T> {
         fn drop(&mut self) {
-            let hold_ns = self.acquired_at.elapsed().as_nanos() as u64;
+            let hold_ns = u64::try_from(self.acquired_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
             // Drop the inner guard (releases the mutex) BEFORE updating metrics
             // to minimize the critical section length.
             drop(self.guard.take());

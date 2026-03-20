@@ -501,7 +501,7 @@ impl ConformanceTarget for LabRuntimeTarget {
     }
 
     fn advance_time(runtime: &mut Self::Runtime, duration: Duration) {
-        let nanos = duration.as_nanos() as u64;
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
         runtime.advance_time(nanos);
     }
 
