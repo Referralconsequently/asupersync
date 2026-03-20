@@ -585,10 +585,14 @@ impl CancellationProtocolOracle {
                         | TaskStateKind::CompletedPanicked
                         | TaskStateKind::CancelRequested
                 )
-                // From CancelRequested: can strengthen or move to Cancelling
+                // From CancelRequested: can strengthen, move to Cancelling, or complete without acknowledging
                 | (
                     TaskStateKind::CancelRequested,
-                    TaskStateKind::CancelRequested | TaskStateKind::Cancelling
+                    TaskStateKind::CancelRequested
+                        | TaskStateKind::Cancelling
+                        | TaskStateKind::CompletedOk
+                        | TaskStateKind::CompletedErr
+                        | TaskStateKind::CompletedPanicked
                 )
                 // From Cancelling: can finalize or error/panic during cleanup
                 | (
@@ -1494,6 +1498,49 @@ mod tests {
         let ok = oracle.check().is_ok();
         crate::assert_with_log!(ok, "oracle ok", true, ok);
         crate::test_complete!("cancel_ack_after_unmask_passes");
+    }
+
+    #[test]
+    fn cancel_requested_then_completed_ok_passes() {
+        init_test("cancel_requested_then_completed_ok_passes");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        let reason = CancelReason::timeout();
+        let cleanup_budget = Budget::INFINITE;
+
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+
+        // Cancel requested
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+
+        // Then completes normally before acknowledging
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason,
+                cleanup_budget,
+            },
+            &TaskState::Completed(Outcome::Ok(())),
+            Time::from_nanos(200),
+        );
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("cancel_requested_then_completed_ok_passes");
     }
 
     #[test]
