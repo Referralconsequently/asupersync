@@ -196,8 +196,11 @@ pub fn read_jsonl(path: &Path) -> io::Result<Vec<EvidenceLedger>> {
         if line.contains("\"_schema\"") {
             continue;
         }
-        // Attempt to parse; skip corrupt/partial lines (crash recovery).
-        if let Ok(entry) = serde_json::from_str::<EvidenceLedger>(line) {
+        // Attempt to parse and validate; skip corrupt/partial/invalid lines
+        // (crash recovery + schema guardrail).
+        if let Ok(entry) = serde_json::from_str::<EvidenceLedger>(line)
+            && entry.is_valid()
+        {
             entries.push(entry);
         }
     }
@@ -303,6 +306,29 @@ mod tests {
 
         let entries = read_jsonl(&path).unwrap();
         assert_eq!(entries.len(), 1, "should skip corrupt line");
+        assert_eq!(entries[0].component, "valid");
+    }
+
+    #[test]
+    fn read_jsonl_skips_parsed_but_invalid_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.jsonl");
+
+        {
+            let mut exporter = JsonlExporter::open(path.clone()).unwrap();
+            exporter.append(&test_entry("valid")).unwrap();
+            exporter.flush().unwrap();
+        }
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"ts":2,"c":"broken","a":"chosen","p":[1.0],"el":{{"other":0.1}},"cel":0.1,"cal":0.8,"fb":false,"tf":[]}}"#
+        )
+        .unwrap();
+
+        let entries = read_jsonl(&path).unwrap();
+        assert_eq!(entries.len(), 1, "should skip invalid but parseable line");
         assert_eq!(entries[0].component, "valid");
     }
 

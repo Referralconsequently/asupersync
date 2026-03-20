@@ -76,14 +76,7 @@ pub fn level0(entry: &EvidenceLedger) -> String {
         "{} chose {} (EL={:.2}, cal={:.2}){}",
         entry.component, entry.action, entry.chosen_expected_loss, entry.calibration_score, fb,
     );
-    // Truncate to 120 chars if needed.
-    if line.len() > 120 {
-        let mut truncated = line[..117].to_string();
-        truncated.push_str("...");
-        truncated
-    } else {
-        line
-    }
+    truncate_with_ellipsis(&line, 120)
 }
 
 /// Render a Level 0 one-liner with ANSI colors.
@@ -237,6 +230,19 @@ fn calibration_color(score: f64) -> &'static str {
     } else {
         RED
     }
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    let char_count = input.chars().count();
+    if char_count <= max_chars {
+        return input.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    let mut truncated = String::with_capacity(input.len().min(max_chars));
+    truncated.extend(input.chars().take(keep));
+    truncated.push_str("...");
+    truncated
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +883,24 @@ mod tests {
             .build()
             .unwrap();
         let line = level0(&entry);
-        assert!(line.len() <= 120);
+        assert!(line.chars().count() <= 120);
+        assert!(line.ends_with("..."));
+    }
+
+    #[test]
+    fn level0_truncates_unicode_without_panicking() {
+        let long_component = "调".repeat(200);
+        let entry = EvidenceLedgerBuilder::new()
+            .ts_unix_ms(1)
+            .component(long_component)
+            .action("动作")
+            .posterior(vec![1.0])
+            .chosen_expected_loss(0.0)
+            .calibration_score(0.5)
+            .build()
+            .unwrap();
+        let line = level0(&entry);
+        assert!(line.chars().count() <= 120);
         assert!(line.ends_with("..."));
     }
 

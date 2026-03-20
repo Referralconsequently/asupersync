@@ -130,6 +130,20 @@ pub enum ValidationError {
         /// The negative loss value.
         value: f64,
     },
+    /// `expected_loss_by_action` is populated but does not include the chosen action.
+    ChosenActionMissingExpectedLoss {
+        /// The chosen action that is missing from the map.
+        action: String,
+    },
+    /// `chosen_expected_loss` disagrees with the chosen action's mapped loss.
+    ChosenExpectedLossMismatch {
+        /// The chosen action whose loss disagrees.
+        action: String,
+        /// The value recorded in `chosen_expected_loss`.
+        chosen: f64,
+        /// The value recorded in `expected_loss_by_action`.
+        mapped: f64,
+    },
     /// `component` is empty.
     EmptyComponent,
     /// `action` is empty.
@@ -151,6 +165,22 @@ impl fmt::Display for ValidationError {
             }
             Self::NegativeChosenExpectedLoss { value } => {
                 write!(f, "chosen_expected_loss is negative: {value}")
+            }
+            Self::ChosenActionMissingExpectedLoss { action } => {
+                write!(
+                    f,
+                    "expected_loss_by_action is missing the chosen action '{action}'"
+                )
+            }
+            Self::ChosenExpectedLossMismatch {
+                action,
+                chosen,
+                mapped,
+            } => {
+                write!(
+                    f,
+                    "chosen_expected_loss {chosen} disagrees with expected_loss_by_action['{action}']={mapped}"
+                )
             }
             Self::EmptyComponent => write!(f, "component must not be empty"),
             Self::EmptyAction => write!(f, "action must not be empty"),
@@ -205,6 +235,20 @@ impl EvidenceLedger {
                     value: loss,
                 });
             }
+        }
+
+        if let Some(&mapped) = self.expected_loss_by_action.get(&self.action) {
+            if (mapped - self.chosen_expected_loss).abs() > 1e-12 {
+                errors.push(ValidationError::ChosenExpectedLossMismatch {
+                    action: self.action.clone(),
+                    chosen: self.chosen_expected_loss,
+                    mapped,
+                });
+            }
+        } else if !self.expected_loss_by_action.is_empty() {
+            errors.push(ValidationError::ChosenActionMissingExpectedLoss {
+                action: self.action.clone(),
+            });
         }
 
         errors
@@ -502,6 +546,26 @@ mod tests {
             errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::NegativeChosenExpectedLoss { .. }))
+        );
+    }
+
+    #[test]
+    fn validation_missing_chosen_action_expected_loss() {
+        let errors = expect_validation(valid_builder().action("restart").build());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ChosenActionMissingExpectedLoss { .. }))
+        );
+    }
+
+    #[test]
+    fn validation_chosen_expected_loss_mismatch() {
+        let errors = expect_validation(valid_builder().expected_loss("preempt", 0.20).build());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ChosenExpectedLossMismatch { .. }))
         );
     }
 

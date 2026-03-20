@@ -250,6 +250,14 @@ fn full_pipeline_builder_to_jsonl_to_render() {
     let entries: Vec<EvidenceLedger> = (0_u32..10)
         .map(|i| {
             let fi = f64::from(i);
+            let action = if i < 5 { "preempt" } else { "restart" };
+            let preempt_loss = fi.mul_add(0.01, 0.05);
+            let restart_loss = fi.mul_add(-0.01, 0.15);
+            let chosen_expected_loss = if action == "preempt" {
+                preempt_loss
+            } else {
+                restart_loss
+            };
             EvidenceLedgerBuilder::new()
                 .ts_unix_ms(1_700_000_000_000 + u64::from(i) * 1000)
                 .component(if i % 2 == 0 {
@@ -257,11 +265,11 @@ fn full_pipeline_builder_to_jsonl_to_render() {
                 } else {
                     "supervisor"
                 })
-                .action(if i < 5 { "preempt" } else { "restart" })
+                .action(action)
                 .posterior(vec![fi.mul_add(0.01, 0.6), fi.mul_add(-0.01, 0.4)])
-                .expected_loss("preempt", fi.mul_add(0.01, 0.05))
-                .expected_loss("restart", fi.mul_add(-0.01, 0.15))
-                .chosen_expected_loss(fi.mul_add(0.01, 0.05))
+                .expected_loss("preempt", preempt_loss)
+                .expected_loss("restart", restart_loss)
+                .chosen_expected_loss(chosen_expected_loss)
                 .calibration_score(fi.mul_add(0.03, 0.7))
                 .fallback_active(i == 7)
                 .top_feature("depth", fi.mul_add(-0.02, 0.5))
@@ -424,6 +432,23 @@ fn file_with_missing_optional_fields_rejected() {
     // read_jsonl skips unparseable lines (crash recovery).
     let entries = read_jsonl(&path).unwrap();
     assert_eq!(entries.len(), 0, "entry missing 'cal' should be skipped");
+}
+
+#[test]
+fn file_with_parseable_but_invalid_entry_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid_semantics.jsonl");
+
+    let mut file = fs::File::create(&path).unwrap();
+    writeln!(file, r#"{{"_schema":"EvidenceLedger","_version":"1.0.0"}}"#).unwrap();
+    writeln!(
+        file,
+        r#"{{"ts":1,"c":"test","a":"chosen","p":[1.0],"el":{{"other":0.1}},"cel":0.1,"cal":0.5,"fb":false,"tf":[]}}"#
+    )
+    .unwrap();
+
+    let entries = read_jsonl(&path).unwrap();
+    assert_eq!(entries.len(), 0, "invalid semantic entry should be skipped");
 }
 
 // ---------------------------------------------------------------------------
