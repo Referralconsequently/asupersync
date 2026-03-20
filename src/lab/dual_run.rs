@@ -1192,6 +1192,51 @@ impl ComparisonVerdict {
             )
         }
     }
+
+    /// Format a human-readable summary augmented with capture provenance.
+    #[must_use]
+    pub fn summary_with_manifests(
+        &self,
+        lab_manifest: Option<&CaptureManifest>,
+        live_manifest: Option<&CaptureManifest>,
+    ) -> String {
+        if self.passed {
+            return self.summary();
+        }
+
+        let mismatch_list: Vec<String> = self
+            .mismatches
+            .iter()
+            .map(|mismatch| {
+                let mut line = mismatch.to_string();
+                let mut capture_notes = Vec::new();
+                if let Some(lab_capture) = lab_manifest
+                    .and_then(|manifest| manifest.describe_field_capture(&mismatch.field))
+                {
+                    capture_notes.push(format!("lab_capture={lab_capture}"));
+                }
+                if let Some(live_capture) = live_manifest
+                    .and_then(|manifest| manifest.describe_field_capture(&mismatch.field))
+                {
+                    capture_notes.push(format!("live_capture={live_capture}"));
+                }
+                if !capture_notes.is_empty() {
+                    line.push_str(" [");
+                    line.push_str(&capture_notes.join("; "));
+                    line.push(']');
+                }
+                line
+            })
+            .collect();
+
+        format!(
+            "FAIL: {} on {} — {} mismatch(es):\n  {}",
+            self.scenario_id,
+            self.surface_id,
+            self.mismatches.len(),
+            mismatch_list.join("\n  ")
+        )
+    }
 }
 
 impl fmt::Display for ComparisonVerdict {
@@ -2291,6 +2336,7 @@ pub struct LiveWitnessCollector {
     region_close: RegionCloseRecord,
     obligation_balance: ObligationBalanceRecord,
     resource_surface: ResourceSurfaceRecord,
+    manifest: CaptureManifest,
     /// Nondeterminism qualifiers observed during execution.
     nondeterminism_notes: Vec<String>,
 }
@@ -2302,6 +2348,22 @@ impl LiveWitnessCollector {
     /// overrides them as evidence is observed.
     #[must_use]
     pub fn new(surface_scope: impl Into<String>) -> Self {
+        let surface_scope = surface_scope.into();
+        let mut manifest = CaptureManifest::new();
+        manifest.inferred("terminal_outcome", "run_live_adapter.default_ok");
+        manifest.inferred("cancellation", "run_live_adapter.default_no_cancellation");
+        manifest.unsupported("cancellation.checkpoint_observed");
+        manifest.inferred("loser_drain", "run_live_adapter.default_not_applicable");
+        manifest.inferred("region_close", "run_live_adapter.default_quiescent");
+        manifest.inferred(
+            "obligation_balance",
+            "run_live_adapter.default_balanced_obligations",
+        );
+        manifest.observed(
+            "resource_surface.contract_scope",
+            "scenario_identity.surface_id",
+        );
+
         Self {
             terminal_outcome: TerminalOutcome::ok(),
             cancellation: CancellationRecord::none(),
@@ -2309,6 +2371,7 @@ impl LiveWitnessCollector {
             region_close: RegionCloseRecord::quiescent(),
             obligation_balance: ObligationBalanceRecord::zero(),
             resource_surface: ResourceSurfaceRecord::empty(surface_scope),
+            manifest,
             nondeterminism_notes: Vec::new(),
         }
     }
@@ -2316,35 +2379,60 @@ impl LiveWitnessCollector {
     /// Record the terminal outcome.
     pub fn set_outcome(&mut self, outcome: TerminalOutcome) {
         self.terminal_outcome = outcome;
+        self.manifest
+            .observed("terminal_outcome", "witness.set_outcome");
     }
 
     /// Record cancellation evidence.
     pub fn set_cancellation(&mut self, record: CancellationRecord) {
+        if record.checkpoint_observed.is_some() {
+            self.manifest.observed(
+                "cancellation.checkpoint_observed",
+                "witness.set_cancellation",
+            );
+        } else {
+            self.manifest
+                .unsupported("cancellation.checkpoint_observed");
+        }
         self.cancellation = record;
+        self.manifest
+            .observed("cancellation", "witness.set_cancellation");
     }
 
     /// Record loser drain evidence.
     pub fn set_loser_drain(&mut self, record: LoserDrainRecord) {
         self.loser_drain = record;
+        self.manifest
+            .observed("loser_drain", "witness.set_loser_drain");
     }
 
     /// Record region close evidence.
     pub fn set_region_close(&mut self, record: RegionCloseRecord) {
         self.region_close = record;
+        self.manifest
+            .observed("region_close", "witness.set_region_close");
     }
 
     /// Record obligation balance evidence.
     pub fn set_obligation_balance(&mut self, record: ObligationBalanceRecord) {
         self.obligation_balance = record;
+        self.manifest
+            .observed("obligation_balance", "witness.set_obligation_balance");
     }
 
     /// Set a resource counter.
     pub fn record_counter(&mut self, name: impl Into<String>, value: i64) {
         let n = name.into();
+        let counter_manifest_key = format!("resource_surface.counters.{n}");
+        let tolerance_manifest_key = format!("resource_surface.tolerances.{n}");
         self.resource_surface.counters.insert(n.clone(), value);
         self.resource_surface
             .tolerances
             .insert(n, CounterTolerance::Exact);
+        self.manifest
+            .observed(counter_manifest_key, "witness.record_counter");
+        self.manifest
+            .observed(tolerance_manifest_key, "witness.record_counter");
     }
 
     /// Set a resource counter with tolerance.
@@ -2356,7 +2444,17 @@ impl LiveWitnessCollector {
     ) {
         let n = name.into();
         self.resource_surface.counters.insert(n.clone(), value);
-        self.resource_surface.tolerances.insert(n, tolerance);
+        self.resource_surface
+            .tolerances
+            .insert(n.clone(), tolerance);
+        self.manifest.observed(
+            format!("resource_surface.counters.{n}"),
+            "witness.record_counter_with_tolerance",
+        );
+        self.manifest.observed(
+            format!("resource_surface.tolerances.{n}"),
+            "witness.record_counter_with_tolerance",
+        );
     }
 
     /// Note a nondeterminism qualifier (e.g., "scheduler ordering may vary").
@@ -2377,6 +2475,12 @@ impl LiveWitnessCollector {
         }
     }
 
+    /// Access the capture manifest built for the live run.
+    #[must_use]
+    pub fn capture_manifest(&self) -> &CaptureManifest {
+        &self.manifest
+    }
+
     /// Access nondeterminism notes.
     #[must_use]
     pub fn nondeterminism_notes(&self) -> &[String] {
@@ -2392,6 +2496,8 @@ pub struct LiveRunMetadata {
     /// Nondeterminism qualifiers observed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nondeterminism_notes: Vec<String>,
+    /// Capture provenance for the normalized live semantics.
+    pub capture_manifest: CaptureManifest,
     /// Replay metadata for this execution.
     pub replay: ReplayMetadata,
 }
@@ -2451,6 +2557,7 @@ pub fn run_live_adapter(
     f(&config, &mut witness);
 
     let nondeterminism_notes = witness.nondeterminism_notes().to_vec();
+    let capture_manifest = witness.capture_manifest().clone();
     let semantics = witness.finalize();
     let replay = ReplayMetadata::for_live(identity.family_id(), &identity.seed_plan);
 
@@ -2468,6 +2575,7 @@ pub fn run_live_adapter(
         metadata: LiveRunMetadata {
             config,
             nondeterminism_notes,
+            capture_manifest,
             replay,
         },
     }
@@ -2490,6 +2598,16 @@ pub enum FieldObservability {
     Inferred,
     /// Field is not observable on this adapter and was set to a default.
     Unsupported,
+}
+
+impl fmt::Display for FieldObservability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Observed => write!(f, "observed"),
+            Self::Inferred => write!(f, "inferred"),
+            Self::Unsupported => write!(f, "unsupported"),
+        }
+    }
 }
 
 /// Evidence annotation for a single captured field.
@@ -2516,6 +2634,38 @@ pub struct CaptureManifest {
 }
 
 impl CaptureManifest {
+    fn upsert(&mut self, field: String, observability: FieldObservability, source: String) {
+        self.unsupported_fields
+            .retain(|existing| existing != &field);
+        if observability == FieldObservability::Unsupported {
+            self.unsupported_fields.push(field.clone());
+            self.unsupported_fields.sort_unstable();
+            self.unsupported_fields.dedup();
+        }
+
+        if let Some(annotation) = self.annotations.iter_mut().find(|a| a.field == field) {
+            annotation.observability = observability;
+            annotation.source = source;
+        } else {
+            self.annotations.push(CaptureAnnotation {
+                field,
+                observability,
+                source,
+            });
+        }
+        self.annotations.sort_by(|left, right| {
+            left.field
+                .cmp(&right.field)
+                .then(left.source.cmp(&right.source))
+        });
+    }
+
+    fn annotation_for_candidate(&self, field: &str) -> Option<&CaptureAnnotation> {
+        self.annotations
+            .iter()
+            .find(|annotation| annotation.field == field)
+    }
+
     /// Create an empty manifest.
     #[must_use]
     pub fn new() -> Self {
@@ -2524,31 +2674,21 @@ impl CaptureManifest {
 
     /// Record that a field was directly observed.
     pub fn observed(&mut self, field: impl Into<String>, source: impl Into<String>) {
-        self.annotations.push(CaptureAnnotation {
-            field: field.into(),
-            observability: FieldObservability::Observed,
-            source: source.into(),
-        });
+        self.upsert(field.into(), FieldObservability::Observed, source.into());
     }
 
     /// Record that a field was inferred from indirect evidence.
     pub fn inferred(&mut self, field: impl Into<String>, source: impl Into<String>) {
-        self.annotations.push(CaptureAnnotation {
-            field: field.into(),
-            observability: FieldObservability::Inferred,
-            source: source.into(),
-        });
+        self.upsert(field.into(), FieldObservability::Inferred, source.into());
     }
 
     /// Record that a field is unsupported and was defaulted.
     pub fn unsupported(&mut self, field: impl Into<String>) {
-        let f = field.into();
-        self.annotations.push(CaptureAnnotation {
-            field: f.clone(),
-            observability: FieldObservability::Unsupported,
-            source: "default".to_string(),
-        });
-        self.unsupported_fields.push(f);
+        self.upsert(
+            field.into(),
+            FieldObservability::Unsupported,
+            "default".to_string(),
+        );
     }
 
     /// How many fields were captured total.
@@ -2569,6 +2709,37 @@ impl CaptureManifest {
         self.annotations
             .iter()
             .all(|a| a.observability == FieldObservability::Observed)
+    }
+
+    /// Resolve the capture annotation for a semantic field or one of its
+    /// parents.
+    #[must_use]
+    pub fn annotation_for_field(&self, field: &str) -> Option<&CaptureAnnotation> {
+        if let Some(annotation) = self.annotation_for_candidate(field) {
+            return Some(annotation);
+        }
+
+        let normalized = field.strip_prefix("semantics.").unwrap_or(field);
+        if let Some(annotation) = self.annotation_for_candidate(normalized) {
+            return Some(annotation);
+        }
+
+        let mut candidate = normalized;
+        while let Some((parent, _)) = candidate.rsplit_once('.') {
+            if let Some(annotation) = self.annotation_for_candidate(parent) {
+                return Some(annotation);
+            }
+            candidate = parent;
+        }
+
+        None
+    }
+
+    /// Render capture provenance for a semantic field.
+    #[must_use]
+    pub fn describe_field_capture(&self, field: &str) -> Option<String> {
+        self.annotation_for_field(field)
+            .map(|annotation| format!("{} via {}", annotation.observability, annotation.source))
     }
 }
 
@@ -5031,6 +5202,22 @@ mod tests {
         );
         assert_eq!(result.metadata.config.scenario_id, "test.happy");
         assert!(result.metadata.nondeterminism_notes.is_empty());
+        assert_eq!(
+            result
+                .metadata
+                .capture_manifest
+                .describe_field_capture("semantics.terminal_outcome.class")
+                .as_deref(),
+            Some("observed via witness.set_outcome")
+        );
+        assert_eq!(
+            result
+                .metadata
+                .capture_manifest
+                .describe_field_capture("semantics.resource_surface.counters.items_processed")
+                .as_deref(),
+            Some("observed via witness.record_counter")
+        );
         crate::test_complete!("run_live_adapter_happy_path");
     }
 
@@ -5069,6 +5256,14 @@ mod tests {
             result.metadata.replay.instance.runtime_kind,
             RuntimeKind::Live
         );
+        assert_eq!(
+            result
+                .metadata
+                .capture_manifest
+                .describe_field_capture("semantics.cancellation.checkpoint_observed")
+                .as_deref(),
+            Some("observed via witness.set_cancellation")
+        );
         crate::test_complete!("run_live_adapter_cancellation_scenario");
     }
 
@@ -5081,6 +5276,13 @@ mod tests {
         let parsed: LiveRunMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.config.seed, 42);
         assert_eq!(parsed.config.profile, LiveExecutionProfile::CurrentThread);
+        assert_eq!(
+            parsed
+                .capture_manifest
+                .describe_field_capture("semantics.region_close.quiescent")
+                .as_deref(),
+            Some("inferred via run_live_adapter.default_quiescent")
+        );
         crate::test_complete!("run_live_adapter_metadata_serde");
     }
 
@@ -5160,6 +5362,45 @@ mod tests {
         let parsed: CaptureManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.total_fields(), 2);
         crate::test_complete!("capture_manifest_serde");
+    }
+
+    #[test]
+    fn capture_manifest_canonicalizes_and_resolves_parent_fields() {
+        init_test("capture_manifest_canonicalizes_and_resolves_parent_fields");
+        let mut manifest = CaptureManifest::new();
+        manifest.unsupported("terminal_outcome");
+        manifest.observed("resource_surface.counters.items", "counter");
+        manifest.observed("terminal_outcome", "hook");
+        manifest.inferred("cancellation", "fallback");
+
+        let fields: Vec<&str> = manifest
+            .annotations
+            .iter()
+            .map(|annotation| annotation.field.as_str())
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                "cancellation",
+                "resource_surface.counters.items",
+                "terminal_outcome"
+            ]
+        );
+        assert!(manifest.unsupported_fields.is_empty());
+        assert_eq!(
+            manifest
+                .annotation_for_field("semantics.resource_surface.counters.items")
+                .unwrap()
+                .source,
+            "counter"
+        );
+        assert_eq!(
+            manifest
+                .describe_field_capture("semantics.terminal_outcome.class")
+                .as_deref(),
+            Some("observed via hook")
+        );
+        crate::test_complete!("capture_manifest_canonicalizes_and_resolves_parent_fields");
     }
 
     #[test]
@@ -5358,6 +5599,16 @@ mod tests {
         }
     }
 
+    fn make_golden_live_result(identity: &DualRunScenarioIdentity) -> LiveRunResult {
+        run_live_adapter(identity, |_, witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_loser_drain(LoserDrainRecord::complete(2));
+            witness.record_counter("items", 5);
+            witness.record_counter_with_tolerance("bytes", 128, CounterTolerance::AtLeast);
+            witness.note_nondeterminism("scheduler jitter");
+        })
+    }
+
     #[test]
     fn normalize_lab_report_happy_path() {
         init_test("normalize_lab_report_happy_path");
@@ -5368,6 +5619,133 @@ mod tests {
         assert!(sem.obligation_balance.balanced);
         assert!(manifest.total_fields() > 0);
         crate::test_complete!("normalize_lab_report_happy_path");
+    }
+
+    #[test]
+    fn normalize_lab_report_matches_golden_record() {
+        init_test("normalize_lab_report_matches_golden_record");
+        let identity = DualRunScenarioIdentity::phase1(
+            "golden.lab",
+            "test.surface",
+            "v1",
+            "Golden lab normalization",
+            42,
+        );
+        let report = make_passing_lab_report(42);
+        let (semantics, manifest) = normalize_lab_report(&report, "test.surface");
+        let observable = normalize_lab_observable(&identity, &report);
+
+        assert_eq!(observable.semantics, semantics);
+        assert_eq!(
+            serde_json::to_value(&manifest).unwrap(),
+            serde_json::json!({
+                "annotations": [
+                    {
+                        "field": "cancellation",
+                        "observability": "inferred",
+                        "source": "no_oracle_entry",
+                    },
+                    {
+                        "field": "loser_drain",
+                        "observability": "inferred",
+                        "source": "no_oracle_entry",
+                    },
+                    {
+                        "field": "obligation_balance",
+                        "observability": "observed",
+                        "source": "oracle.obligation_leak + invariants",
+                    },
+                    {
+                        "field": "region_close.quiescent",
+                        "observability": "observed",
+                        "source": "LabRunReport.quiescent",
+                    },
+                    {
+                        "field": "terminal_outcome",
+                        "observability": "observed",
+                        "source": "oracle_report.all_passed",
+                    }
+                ],
+                "unsupported_fields": [],
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&observable).unwrap(),
+            serde_json::json!({
+                "schema_version": NORMALIZED_OBSERVABLE_SCHEMA_VERSION,
+                "scenario_id": "golden.lab",
+                "surface_id": "test.surface",
+                "surface_contract_version": "v1",
+                "runtime_kind": "lab",
+                "semantics": {
+                    "terminal_outcome": {
+                        "class": "ok",
+                        "severity": "ok",
+                    },
+                    "cancellation": {
+                        "requested": false,
+                        "acknowledged": false,
+                        "cleanup_completed": false,
+                        "finalization_completed": false,
+                        "terminal_phase": "not_cancelled",
+                    },
+                    "loser_drain": {
+                        "applicable": false,
+                        "expected_losers": 0,
+                        "drained_losers": 0,
+                        "status": "not_applicable",
+                    },
+                    "region_close": {
+                        "root_state": "closed",
+                        "quiescent": true,
+                        "live_children": 0,
+                        "finalizers_pending": 0,
+                        "close_completed": true,
+                    },
+                    "obligation_balance": {
+                        "reserved": 0,
+                        "committed": 0,
+                        "aborted": 0,
+                        "leaked": 0,
+                        "unresolved": 0,
+                        "balanced": true,
+                    },
+                    "resource_surface": {
+                        "contract_scope": "test.surface",
+                        "counters": {},
+                        "tolerances": {},
+                    },
+                },
+                "provenance": {
+                    "family": {
+                        "id": "golden.lab",
+                        "surface_id": "test.surface",
+                        "surface_contract_version": "v1",
+                    },
+                    "instance": {
+                        "family_id": "golden.lab",
+                        "effective_seed": 42,
+                        "runtime_kind": "lab",
+                        "run_index": 0,
+                    },
+                    "seed_plan": {
+                        "canonical_seed": 42,
+                        "seed_lineage_id": "golden.lab",
+                        "lab_seed_mode": "inherit",
+                        "live_seed_mode": "inherit",
+                        "replay_policy": "single_seed",
+                    },
+                    "effective_seed": 42,
+                    "effective_entropy_seed": crate::test_logging::derive_component_seed(42, "entropy"),
+                    "trace_fingerprint": 43981,
+                    "schedule_hash": 22136,
+                    "event_hash": 4660,
+                    "event_count": 10,
+                    "steps_total": 100,
+                },
+            })
+        );
+        crate::test_complete!("normalize_lab_report_matches_golden_record");
     }
 
     #[test]
@@ -5421,6 +5799,162 @@ mod tests {
     }
 
     #[test]
+    fn normalize_live_observable_matches_golden_record_and_manifest() {
+        init_test("normalize_live_observable_matches_golden_record_and_manifest");
+        let identity = DualRunScenarioIdentity::phase1(
+            "golden.live",
+            "test.surface",
+            "v1",
+            "Golden live normalization",
+            42,
+        );
+        let live_result = make_golden_live_result(&identity);
+        let observable = normalize_live_observable(&identity, &live_result);
+
+        assert_eq!(
+            serde_json::to_value(&live_result.metadata.capture_manifest).unwrap(),
+            serde_json::json!({
+                "annotations": [
+                    {
+                        "field": "cancellation",
+                        "observability": "inferred",
+                        "source": "run_live_adapter.default_no_cancellation",
+                    },
+                    {
+                        "field": "cancellation.checkpoint_observed",
+                        "observability": "unsupported",
+                        "source": "default",
+                    },
+                    {
+                        "field": "loser_drain",
+                        "observability": "observed",
+                        "source": "witness.set_loser_drain",
+                    },
+                    {
+                        "field": "obligation_balance",
+                        "observability": "inferred",
+                        "source": "run_live_adapter.default_balanced_obligations",
+                    },
+                    {
+                        "field": "region_close",
+                        "observability": "inferred",
+                        "source": "run_live_adapter.default_quiescent",
+                    },
+                    {
+                        "field": "resource_surface.contract_scope",
+                        "observability": "observed",
+                        "source": "scenario_identity.surface_id",
+                    },
+                    {
+                        "field": "resource_surface.counters.bytes",
+                        "observability": "observed",
+                        "source": "witness.record_counter_with_tolerance",
+                    },
+                    {
+                        "field": "resource_surface.counters.items",
+                        "observability": "observed",
+                        "source": "witness.record_counter",
+                    },
+                    {
+                        "field": "resource_surface.tolerances.bytes",
+                        "observability": "observed",
+                        "source": "witness.record_counter_with_tolerance",
+                    },
+                    {
+                        "field": "resource_surface.tolerances.items",
+                        "observability": "observed",
+                        "source": "witness.record_counter",
+                    },
+                    {
+                        "field": "terminal_outcome",
+                        "observability": "observed",
+                        "source": "witness.set_outcome",
+                    }
+                ],
+                "unsupported_fields": ["cancellation.checkpoint_observed"],
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&observable).unwrap(),
+            serde_json::json!({
+                "schema_version": NORMALIZED_OBSERVABLE_SCHEMA_VERSION,
+                "scenario_id": "golden.live",
+                "surface_id": "test.surface",
+                "surface_contract_version": "v1",
+                "runtime_kind": "live",
+                "semantics": {
+                    "terminal_outcome": {
+                        "class": "ok",
+                        "severity": "ok",
+                    },
+                    "cancellation": {
+                        "requested": false,
+                        "acknowledged": false,
+                        "cleanup_completed": false,
+                        "finalization_completed": false,
+                        "terminal_phase": "not_cancelled",
+                    },
+                    "loser_drain": {
+                        "applicable": true,
+                        "expected_losers": 2,
+                        "drained_losers": 2,
+                        "status": "complete",
+                    },
+                    "region_close": {
+                        "root_state": "closed",
+                        "quiescent": true,
+                        "live_children": 0,
+                        "finalizers_pending": 0,
+                        "close_completed": true,
+                    },
+                    "obligation_balance": {
+                        "reserved": 0,
+                        "committed": 0,
+                        "aborted": 0,
+                        "leaked": 0,
+                        "unresolved": 0,
+                        "balanced": true,
+                    },
+                    "resource_surface": {
+                        "contract_scope": "test.surface",
+                        "counters": {
+                            "bytes": 128,
+                            "items": 5,
+                        },
+                        "tolerances": {
+                            "bytes": "at_least",
+                            "items": "exact",
+                        },
+                    },
+                },
+                "provenance": {
+                    "family": {
+                        "id": "golden.live",
+                        "surface_id": "test.surface",
+                        "surface_contract_version": "v1",
+                    },
+                    "instance": {
+                        "family_id": "golden.live",
+                        "effective_seed": 42,
+                        "runtime_kind": "live",
+                        "run_index": 0,
+                    },
+                    "seed_plan": {
+                        "canonical_seed": 42,
+                        "seed_lineage_id": "golden.live",
+                        "lab_seed_mode": "inherit",
+                        "live_seed_mode": "inherit",
+                        "replay_policy": "single_seed",
+                    },
+                    "effective_seed": 42,
+                    "effective_entropy_seed": crate::test_logging::derive_component_seed(42, "entropy"),
+                },
+            })
+        );
+        crate::test_complete!("normalize_live_observable_matches_golden_record_and_manifest");
+    }
+
+    #[test]
     fn normalize_and_compare_lab_vs_live() {
         init_test("normalize_and_compare_lab_vs_live");
         let ident = DualRunScenarioIdentity::phase1("test", "s", "v1", "d", 42);
@@ -5439,6 +5973,45 @@ mod tests {
         // Both should have ok outcomes and quiescent regions
         assert!(verdict.passed, "Verdict: {}", verdict.summary());
         crate::test_complete!("normalize_and_compare_lab_vs_live");
+    }
+
+    #[test]
+    fn mismatch_summary_with_manifests_includes_capture_sources() {
+        init_test("mismatch_summary_with_manifests_includes_capture_sources");
+        let identity = DualRunScenarioIdentity::phase1(
+            "capture.summary",
+            "test.surface",
+            "v1",
+            "Mismatch summaries should include capture provenance",
+            42,
+        );
+
+        let mut report = make_passing_lab_report(42);
+        report.invariant_violations = vec!["obligation leak detected".to_string()];
+        let (lab_semantics, lab_manifest) = normalize_lab_report(&report, "test.surface");
+        let lab = NormalizedObservable::new(
+            &identity,
+            RuntimeKind::Lab,
+            lab_semantics,
+            identity.lab_replay_metadata(),
+        );
+
+        let live_result = run_live_adapter(&identity, |_, witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+        });
+        let live = normalize_live_observable(&identity, &live_result);
+
+        let verdict = compare_observables(&lab, &live, identity.seed_lineage());
+        assert!(!verdict.passed);
+
+        let summary = verdict.summary_with_manifests(
+            Some(&lab_manifest),
+            Some(&live_result.metadata.capture_manifest),
+        );
+        assert!(summary.contains("semantics.terminal_outcome.class"));
+        assert!(summary.contains("lab_capture=observed via invariant_violations"));
+        assert!(summary.contains("live_capture=observed via witness.set_outcome"));
+        crate::test_complete!("mismatch_summary_with_manifests_includes_capture_sources");
     }
 
     // --- Fuzz-to-Scenario Promotion ---
