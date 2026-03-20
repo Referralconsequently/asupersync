@@ -755,11 +755,15 @@ impl InterestSummary {
     }
 
     /// Remove one subscriber interest for `pattern` on `replica`.
+    ///
+    /// Only decrements when the pattern already has local state (from a prior
+    /// subscribe or an inbound delta).  Calling unsubscribe on a pattern that
+    /// has never been observed is a no-op, preventing unbounded growth of
+    /// zero-value entries from spurious or adversarial unsubscribe calls.
     pub fn unsubscribe(&mut self, replica: &NodeId, pattern: &SubjectPattern) {
-        self.counts
-            .entry(pattern.clone())
-            .or_default()
-            .decrement(replica, 1);
+        if let Some(counter) = self.counts.get_mut(pattern) {
+            counter.decrement(replica, 1);
+        }
     }
 
     /// Current converged subscriber count for `pattern`.
@@ -1153,7 +1157,15 @@ impl JoinSemilattice for LagSketch {
 
     fn merge(&mut self, other: &Self) {
         if self.bucket_width != other.bucket_width {
-            return;
+            // Adopt the peer's width when the local state is empty (fresh
+            // replica).  Once data exists the width is locked in and
+            // mismatched peers are silently ignored — this is a deployment
+            // configuration error, not something merge can resolve.
+            if self.buckets.is_empty() {
+                self.bucket_width = other.bucket_width;
+            } else {
+                return;
+            }
         }
         for (bucket, counter) in &other.buckets {
             self.buckets.entry(*bucket).or_default().merge(counter);
@@ -1190,7 +1202,16 @@ impl JoinSemilattice for LagSketch {
 
     fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         if self.bucket_width != delta.bucket_width {
-            return false;
+            // Adopt the incoming width when the local state is empty (fresh
+            // replica joining an established cluster).  When local data
+            // already exists, return true to break the anti-entropy retry
+            // loop — the mismatch is a configuration error that retrying
+            // will never resolve.
+            if self.buckets.is_empty() {
+                self.bucket_width = delta.bucket_width;
+            } else {
+                return true;
+            }
         }
         for (bucket, counter_delta) in &delta.buckets {
             self.buckets
@@ -1285,7 +1306,11 @@ impl JoinSemilattice for AdvisoryAggregate {
 
     fn merge(&mut self, other: &Self) {
         if self.window_width_ms != other.window_width_ms {
-            return;
+            if self.windows.is_empty() {
+                self.window_width_ms = other.window_width_ms;
+            } else {
+                return;
+            }
         }
         for (window_start, kinds) in &other.windows {
             let window = self.windows.entry(*window_start).or_default();
@@ -1342,7 +1367,11 @@ impl JoinSemilattice for AdvisoryAggregate {
 
     fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         if self.window_width_ms != delta.window_width_ms {
-            return false;
+            if self.windows.is_empty() {
+                self.window_width_ms = delta.window_width_ms;
+            } else {
+                return true;
+            }
         }
         for (window_start, kinds) in &delta.windows {
             let window = self.windows.entry(*window_start).or_default();
@@ -2120,6 +2149,97 @@ mod tests {
         assert!(<AdvisoryAggregate as JoinSemilattice>::delta_is_empty(
             &delta
         ));
+    }
+
+    #[test]
+    fn lag_sketch_adopts_incoming_width_when_local_state_is_empty() {
+        let mut empty = LagSketch::new(16);
+        let mut other = LagSketch::new(8);
+        let replica = node("r1");
+        other.record(&replica, 42);
+
+        empty.merge(&other);
+
+        assert_eq!(empty.bucket_width, 8);
+        assert_eq!(empty.bucket_count(), 1);
+    }
+
+    #[test]
+    fn lag_sketch_apply_delta_adopts_width_when_empty_and_breaks_loop_when_non_empty() {
+        let replica = node("r1");
+
+        // Empty local adopts incoming width via apply_delta.
+        let mut empty = LagSketch::new(16);
+        let mut source = LagSketch::new(8);
+        source.record(&replica, 42);
+        let delta = source.delta(&LagSketch::new(8));
+        assert!(empty.apply_delta(&delta));
+        assert_eq!(empty.bucket_width, 8);
+        assert_eq!(empty.bucket_count(), 1);
+
+        // Non-empty local with different width returns true (breaks loop)
+        // but does NOT adopt the data.
+        let mut established = LagSketch::new(16);
+        established.record(&replica, 99);
+        let before_count = established.bucket_count();
+        let mismatched_delta = source.delta(&LagSketch::new(8));
+        assert!(established.apply_delta(&mismatched_delta));
+        assert_eq!(established.bucket_width, 16); // width unchanged
+        assert_eq!(established.bucket_count(), before_count); // data unchanged
+    }
+
+    #[test]
+    fn advisory_aggregate_adopts_incoming_window_width_when_empty() {
+        let mut empty = AdvisoryAggregate::new(500);
+        let mut other = AdvisoryAggregate::new(1_000);
+        other.record_kind(&node("r1"), "evt", 1_200);
+
+        empty.merge(&other);
+        assert_eq!(empty.window_width_ms, 1_000);
+        assert_eq!(empty.count(1_000, "evt"), 1);
+    }
+
+    #[test]
+    fn advisory_aggregate_apply_delta_breaks_loop_when_non_empty() {
+        let r = node("r1");
+        let mut established = AdvisoryAggregate::new(500);
+        established.record_kind(&r, "evt", 200);
+
+        let mut source = AdvisoryAggregate::new(1_000);
+        source.record_kind(&r, "evt", 1_200);
+        let delta = source.delta(&AdvisoryAggregate::new(1_000));
+
+        // Returns true to break anti-entropy loop, but doesn't adopt data.
+        assert!(established.apply_delta(&delta));
+        assert_eq!(established.window_width_ms, 500);
+    }
+
+    #[test]
+    fn unsubscribe_on_absent_pattern_does_not_create_entry() {
+        let r = node("r1");
+        let mut summary = InterestSummary::default();
+
+        // Unsubscribe from a pattern that was never subscribed to.
+        summary.unsubscribe(&r, &pattern("absent.>"));
+
+        // No entry should have been created.
+        assert_eq!(summary.interest_count(&pattern("absent.>")), 0);
+        assert!(summary.counts.is_empty());
+    }
+
+    #[test]
+    fn unsubscribe_after_subscribe_decrements_normally() {
+        let r = node("r1");
+        let p = pattern("orders.>");
+        let mut summary = InterestSummary::default();
+
+        summary.subscribe(&r, p.clone());
+        assert_eq!(summary.interest_count(&p), 1);
+
+        summary.unsubscribe(&r, &p);
+        assert_eq!(summary.interest_count(&p), 0);
+        // Entry exists (from subscribe) but value is zero.
+        assert_eq!(summary.counts.len(), 1);
     }
 
     #[test]
