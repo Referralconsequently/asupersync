@@ -98,6 +98,10 @@ pub mod kafka_consumer;
 #[cfg(feature = "messaging-fabric")]
 pub mod morphism;
 pub mod nats;
+#[cfg(feature = "messaging-fabric")]
+pub mod policy;
+#[cfg(feature = "messaging-fabric")]
+pub mod privacy;
 pub mod redis;
 #[cfg(feature = "messaging-fabric")]
 pub mod service;
@@ -151,6 +155,16 @@ pub use morphism::{
     SecrecyFacet, SemanticCycleClass, SharingPolicy, SubjectTransform, detect_semantic_cycles,
 };
 pub use nats::{Message as NatsMessage, NatsClient, NatsConfig, NatsError, Subscription};
+#[cfg(feature = "messaging-fabric")]
+pub use policy::{
+    DegradationDecision, DegradationDisposition, DegradationPlan, DegradationPolicy,
+    ObligationLoad, SemanticServiceClass, TrafficSlice,
+};
+#[cfg(feature = "messaging-fabric")]
+pub use privacy::{
+    AuthoritativeMetadataSummary, ExportedMetadataSummary, PrivacyBudgetLedger, PrivacyExportError,
+    export_metadata_summary,
+};
 pub use redis::{RedisClient, RedisConfig, RedisError};
 #[cfg(feature = "messaging-fabric")]
 pub use service::{

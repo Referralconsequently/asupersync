@@ -7,8 +7,8 @@ use asupersync::lab::replay::{
 };
 use asupersync::lab::runtime::InvariantViolation;
 use asupersync::lab::{
-    promote_exploration_report, CoverageMetrics, DualRunHarness, ExplorationReport,
-    ObligationBalanceRecord, RunResult, ViolationReport,
+    CoverageMetrics, DualRunHarness, ExplorationReport, ObligationBalanceRecord, RunResult,
+    ViolationReport, promote_exploration_report,
 };
 use std::collections::BTreeMap;
 
@@ -102,10 +102,12 @@ fn promoted_schedule_scenarios_preserve_lineage_and_class_shape() {
     assert_eq!(violating.original_seeds, vec![0x11, 0x22]);
     assert_eq!(violating.violation_seeds, vec![0x22]);
     assert_eq!(violating.class_run_count, 2);
-    assert!(violating
-        .violation_summaries
-        .iter()
-        .any(|summary| summary.contains("tasks leaked")));
+    assert!(
+        violating
+            .violation_summaries
+            .iter()
+            .any(|summary| summary.contains("tasks leaked"))
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Contract checks for the service-worker bounded broker policy
 //! (`asupersync-n6kwt.7.1`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const DOC_PATH: &str = "docs/wasm_service_worker_broker_contract.md";
 
@@ -11,7 +11,8 @@ fn repo_root() -> PathBuf {
 
 fn read_file(path: &str) -> String {
     let path = repo_root().join(path);
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     assert!(
         !content.is_empty(),
         "expected non-empty contract file at {}",
@@ -22,7 +23,10 @@ fn read_file(path: &str) -> String {
 
 #[test]
 fn doc_exists_and_pins_bead_and_contract_id() {
-    assert!(Path::new(DOC_PATH).exists(), "contract doc must exist");
+    assert!(
+        repo_root().join(DOC_PATH).exists(),
+        "contract doc must exist at repo-relative path"
+    );
     let doc = read_file(DOC_PATH);
     for marker in [
         "asupersync-n6kwt.7.1",
@@ -158,6 +162,39 @@ fn browser_package_and_runtime_builder_preserve_service_worker_fail_closed_marke
         assert!(
             builder.contains(marker),
             "runtime builder missing service-worker marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn doc_and_browser_package_pin_durable_handoff_listing_and_key_schema() {
+    let doc = read_file(DOC_PATH);
+    for marker in [
+        "listDurableHandoffs()",
+        "__service_worker_broker_registration__",
+        "broker_work:<broker_work_id>",
+        "broker_handoff:<broker_work_id>",
+        "service_worker_broker_v1",
+        "newest-first order",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "doc missing durable handoff/key-schema marker: {marker}"
+        );
+    }
+
+    let browser = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY",
+        "BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX",
+        "BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX",
+        "DEFAULT_BROWSER_SERVICE_WORKER_BROKER_NAMESPACE",
+        "async listDurableHandoffs()",
+        "right.recordedAtMs - left.recordedAtMs",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser package missing durable handoff/key-schema marker: {marker}"
         );
     }
 }

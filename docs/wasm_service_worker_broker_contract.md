@@ -50,6 +50,14 @@ that keeps this direct-runtime denial intact:
   keep `requested_lane = "lane.browser.service_worker.broker"` and force the
   fallback target to stay on a dedicated worker, browser main thread, or
   explicit bridge-only path.
+- `listDurableHandoffs()` enumerates persisted handoff records from the broker
+  namespace in newest-first order so restart reconciliation can replay the most
+  recent downgrade or resume decision without guessing.
+- durable broker records use stable broker-local keys:
+  `__service_worker_broker_registration__`,
+  `broker_work:<broker_work_id>`, and
+  `broker_handoff:<broker_work_id>` inside the
+  `service_worker_broker_v1` namespace.
 
 The downgrade promise is non-negotiable: browser reclaim, missing storage,
 scope drift, or capability mismatch may change the selected lane, but must not
@@ -177,6 +185,15 @@ IndexedDB-backed BrowserStorage / BrowserArtifactStore:
 - artifact manifests and retained evidence indexes,
 - replay bundles and crashpack metadata,
 - restart reconciliation journal and downgrade audit records.
+
+Recommended durable key layout:
+
+- `__service_worker_broker_registration__` for the current admission tuple and
+  registration manifest,
+- `broker_work:<broker_work_id>` for pending broker work descriptors,
+- `broker_handoff:<broker_work_id>` for durable handoff and downgrade records,
+- all scoped under the `service_worker_broker_v1` namespace so replay tooling
+  can enumerate and sort records deterministically.
 
 The service-worker broker owns no irreplaceable authoritative state. If a fact
 must survive browser reclaim or worker termination, it must already be durable
