@@ -1692,7 +1692,32 @@ where
                         self.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
 
-                    let resource = self.create_resource().await?;
+                    let now = get_now();
+                    let elapsed = Duration::from_nanos(now.duration_since(acquire_start));
+                    let remaining = self.config.acquire_timeout.saturating_sub(elapsed);
+
+                    if remaining.is_zero() {
+                        #[cfg(feature = "metrics")]
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.record_timeout(elapsed);
+                        }
+                        return Err(PoolError::Timeout);
+                    }
+
+                    let create_result =
+                        crate::time::timeout(now, remaining, self.create_resource()).await;
+                    let resource = match create_result {
+                        Ok(Ok(res)) => res,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            #[cfg(feature = "metrics")]
+                            if let Some(ref metrics) = self.metrics {
+                                metrics.record_timeout(self.config.acquire_timeout);
+                            }
+                            return Err(PoolError::Timeout);
+                        }
+                    };
+
                     let committed = create_slot.commit();
                     let acquire_duration =
                         Duration::from_nanos(get_now().duration_since(acquire_start));
