@@ -299,8 +299,13 @@ pub trait JoinSemilattice: Clone + PartialEq {
     /// Produce the sparse delta needed to advance `baseline` to `self`.
     fn delta(&self, baseline: &Self) -> Self::Delta;
 
+    /// Return whether `delta` carries no material state change.
+    fn delta_is_empty(delta: &Self::Delta) -> bool {
+        delta == &Self::Delta::default()
+    }
+
     /// Apply a sparse delta produced by [`Self::delta`].
-    fn apply_delta(&mut self, delta: &Self::Delta);
+    fn apply_delta(&mut self, delta: &Self::Delta) -> bool;
 }
 
 /// Version vector tracking the highest converged CRDT version per replica.
@@ -521,7 +526,7 @@ where
     /// Record a new local CRDT state and produce an incremental envelope.
     pub fn record_local_state(&mut self, updated: T) -> Option<PropagationEnvelope<T::Delta>> {
         let delta = updated.delta(&self.state);
-        if delta == T::Delta::default() {
+        if T::delta_is_empty(&delta) {
             return None;
         }
 
@@ -561,7 +566,7 @@ where
     #[must_use]
     pub fn snapshot_envelope(&self) -> Option<PropagationEnvelope<T::Delta>> {
         let delta = self.state.delta(&T::default());
-        if delta == T::Delta::default() {
+        if T::delta_is_empty(&delta) {
             return None;
         }
 
@@ -600,7 +605,11 @@ where
             return PropagationApply::NeedsAntiEntropy;
         }
 
-        self.state.apply_delta(&envelope.delta);
+        if !self.state.apply_delta(&envelope.delta) {
+            self.repair_needed
+                .insert(envelope.steward.clone(), remote_version);
+            return PropagationApply::NeedsAntiEntropy;
+        }
         self.frontier.merge(&envelope.frontier);
         self.repair_needed.remove(&envelope.steward);
         PropagationApply::Applied
@@ -611,7 +620,13 @@ where
             return PropagationApply::AlreadySatisfied;
         }
 
-        self.state.apply_delta(&envelope.delta);
+        if !self.state.apply_delta(&envelope.delta) {
+            self.repair_needed.insert(
+                envelope.steward.clone(),
+                envelope.frontier.version(&envelope.steward),
+            );
+            return PropagationApply::NeedsAntiEntropy;
+        }
         self.frontier.merge(&envelope.frontier);
         for replica in envelope.frontier.versions.keys() {
             self.repair_needed.remove(replica);
@@ -711,9 +726,10 @@ impl JoinSemilattice for ReplicaCounter {
         }
     }
 
-    fn apply_delta(&mut self, delta: &Self::Delta) {
+    fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         Self::apply_map(&mut self.positive, &delta.positive);
         Self::apply_map(&mut self.negative, &delta.negative);
+        true
     }
 }
 
@@ -779,13 +795,14 @@ impl JoinSemilattice for InterestSummary {
         InterestSummaryDelta { counts }
     }
 
-    fn apply_delta(&mut self, delta: &Self::Delta) {
+    fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         for (pattern, counter_delta) in &delta.counts {
             self.counts
                 .entry(pattern.clone())
                 .or_default()
                 .apply_delta(counter_delta);
         }
+        true
     }
 }
 
@@ -891,10 +908,11 @@ impl JoinSemilattice for CursorCheckpoint {
         CursorCheckpointDelta { checkpoints }
     }
 
-    fn apply_delta(&mut self, delta: &Self::Delta) {
+    fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         for (consumer, mark) in &delta.checkpoints {
             self.observe(consumer.clone(), mark.clone());
         }
+        true
     }
 }
 
@@ -1032,10 +1050,11 @@ impl JoinSemilattice for MembershipView {
         MembershipViewDelta { records }
     }
 
-    fn apply_delta(&mut self, delta: &Self::Delta) {
+    fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         for (node, record) in &delta.records {
             self.observe(node.clone(), record.clone());
         }
+        true
     }
 }
 
@@ -1165,9 +1184,13 @@ impl JoinSemilattice for LagSketch {
         }
     }
 
-    fn apply_delta(&mut self, delta: &Self::Delta) {
+    fn delta_is_empty(delta: &Self::Delta) -> bool {
+        delta.buckets.is_empty()
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         if self.bucket_width != delta.bucket_width {
-            return;
+            return false;
         }
         for (bucket, counter_delta) in &delta.buckets {
             self.buckets
@@ -1175,6 +1198,7 @@ impl JoinSemilattice for LagSketch {
                 .or_default()
                 .apply_delta(counter_delta);
         }
+        true
     }
 }
 
@@ -1220,6 +1244,16 @@ impl AdvisoryAggregate {
             .entry(advisory_kind.to_owned())
             .or_default()
             .increment(replica, 1);
+    }
+
+    /// Prune windows strictly older than the window containing `cutoff_unix_ms`.
+    ///
+    /// This is an explicit retention hook so callers can bound memory only once
+    /// a cutoff is known to be causally safe for every steward.
+    pub fn prune_before(&mut self, cutoff_unix_ms: u64) {
+        let first_retained_window = self.window_start(cutoff_unix_ms);
+        self.windows
+            .retain(|window_start, _| *window_start >= first_retained_window);
     }
 
     /// Return the converged count for `advisory_kind` in `window_start`.
@@ -1302,9 +1336,13 @@ impl JoinSemilattice for AdvisoryAggregate {
         }
     }
 
-    fn apply_delta(&mut self, delta: &Self::Delta) {
+    fn delta_is_empty(delta: &Self::Delta) -> bool {
+        delta.windows.is_empty()
+    }
+
+    fn apply_delta(&mut self, delta: &Self::Delta) -> bool {
         if self.window_width_ms != delta.window_width_ms {
-            return;
+            return false;
         }
         for (window_start, kinds) in &delta.windows {
             let window = self.windows.entry(*window_start).or_default();
@@ -1315,6 +1353,7 @@ impl JoinSemilattice for AdvisoryAggregate {
                     .apply_delta(counter_delta);
             }
         }
+        true
     }
 }
 
@@ -1916,7 +1955,7 @@ mod tests {
     {
         let delta = updated.delta(&baseline);
         let mut applied = baseline.clone();
-        applied.apply_delta(&delta);
+        assert!(applied.apply_delta(&delta));
         assert_eq!(applied, updated);
     }
 
@@ -2047,6 +2086,15 @@ mod tests {
     }
 
     #[test]
+    fn lag_sketch_empty_delta_with_only_bucket_width_change_is_noop() {
+        let baseline = LagSketch::default();
+        let updated = LagSketch::new(8);
+        let delta = updated.delta(&baseline);
+
+        assert!(<LagSketch as JoinSemilattice>::delta_is_empty(&delta));
+    }
+
+    #[test]
     fn advisory_aggregate_round_trips_delta_and_reports_rate() {
         let replica_a = node("replica-a");
         let replica_b = node("replica-b");
@@ -2061,6 +2109,17 @@ mod tests {
         assert_eq!(aggregate.rate_per_second(1_000, "policy_decision"), 2.0);
 
         assert_delta_round_trip(AdvisoryAggregate::new(1_000), aggregate);
+    }
+
+    #[test]
+    fn advisory_aggregate_empty_delta_with_only_window_width_change_is_noop() {
+        let baseline = AdvisoryAggregate::default();
+        let updated = AdvisoryAggregate::new(1_000);
+        let delta = updated.delta(&baseline);
+
+        assert!(<AdvisoryAggregate as JoinSemilattice>::delta_is_empty(
+            &delta
+        ));
     }
 
     #[test]
@@ -2153,7 +2212,7 @@ mod tests {
         let left_delta = left
             .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
             .expect("left delta");
-        let right_delta = right
+        let _right_delta = right
             .mutate(|summary| summary.subscribe(&replica_b, invoices.clone()))
             .expect("right delta");
 
@@ -2212,6 +2271,225 @@ mod tests {
         assert_eq!(incremental_counts, 1);
         assert_eq!(snapshot_counts, 2);
         assert!(incremental_counts < snapshot_counts);
+    }
+
+    #[test]
+    fn cursor_checkpoint_converges_and_ignores_stale_observations() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let replica_c = node("replica-c");
+
+        let mut left = CursorCheckpoint::default();
+        left.observe("consumer-a", CursorMark::new(12, 1_200, replica_a.clone()));
+        left.observe("consumer-a", CursorMark::new(11, 1_300, replica_b.clone()));
+
+        let checkpoint = left.checkpoint("consumer-a").expect("checkpoint");
+        assert_eq!(checkpoint.offset(), 12);
+        assert_eq!(checkpoint.checkpoint_unix_ms(), 1_200);
+        assert_eq!(checkpoint.steward(), &replica_a);
+
+        let mut middle = CursorCheckpoint::default();
+        middle.observe("consumer-b", CursorMark::new(4, 900, replica_b));
+
+        let mut right = CursorCheckpoint::default();
+        right.observe("consumer-c", CursorMark::new(2, 800, replica_c));
+
+        assert_converges(left, middle, right);
+    }
+
+    #[test]
+    fn lag_sketch_converges_across_merge_orders() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let replica_c = node("replica-c");
+
+        let mut left = LagSketch::new(8);
+        left.observe(&replica_a, 3);
+        left.observe(&replica_a, 7);
+
+        let mut middle = LagSketch::new(8);
+        middle.observe(&replica_b, 11);
+
+        let mut right = LagSketch::new(8);
+        right.observe(&replica_c, 19);
+
+        assert_converges(left, middle, right);
+    }
+
+    #[test]
+    fn propagation_duplicate_incremental_delta_is_idempotent() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let orders = pattern("tenant.orders.>");
+
+        let mut steward = CrdtPropagationReplica::<InterestSummary>::new(replica_a.clone());
+        let mut peer = CrdtPropagationReplica::<InterestSummary>::new(replica_b);
+
+        let envelope = steward
+            .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
+            .expect("incremental envelope");
+
+        assert_eq!(peer.apply(&envelope), PropagationApply::Applied);
+        assert_eq!(peer.apply(&envelope), PropagationApply::AlreadySatisfied);
+        assert_eq!(peer.state().interest_count(&orders), 1);
+    }
+
+    #[test]
+    fn propagation_resumes_incremental_after_snapshot_repair() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+        let orders = pattern("tenant.orders.>");
+        let invoices = pattern("tenant.invoices.>");
+        let payments = pattern("tenant.payments.>");
+
+        let mut steward = CrdtPropagationReplica::<InterestSummary>::new(replica_a.clone());
+        let mut peer = CrdtPropagationReplica::<InterestSummary>::new(replica_b);
+
+        let first = steward
+            .mutate(|summary| summary.subscribe(&replica_a, orders.clone()))
+            .expect("first delta");
+        let second = steward
+            .mutate(|summary| summary.subscribe(&replica_a, invoices.clone()))
+            .expect("second delta");
+
+        assert_eq!(peer.apply(&second), PropagationApply::NeedsAntiEntropy);
+        let repair = steward
+            .prepare_for(&peer.digest())
+            .expect("repair snapshot");
+        assert_eq!(repair.mode(), PropagationMode::AntiEntropy);
+        assert_eq!(peer.apply(&repair), PropagationApply::Applied);
+        assert_eq!(peer.apply(&first), PropagationApply::AlreadySatisfied);
+
+        let third = steward
+            .mutate(|summary| summary.subscribe(&replica_a, payments.clone()))
+            .expect("third delta");
+        assert_eq!(third.mode(), PropagationMode::Incremental);
+        assert_eq!(peer.apply(&third), PropagationApply::Applied);
+        assert_eq!(peer.state().interest_count(&orders), 1);
+        assert_eq!(peer.state().interest_count(&invoices), 1);
+        assert_eq!(peer.state().interest_count(&payments), 1);
+        assert_eq!(peer.frontier().version(&replica_a), 3);
+    }
+
+    #[test]
+    fn propagation_snapshot_rejects_mismatched_lag_sketch_delta_without_advancing_frontier() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+
+        let mut peer = CrdtPropagationReplica::<LagSketch>::new(replica_b);
+        let mut frontier = ReplicaVersionVector::default();
+        frontier.advance(&replica_a);
+
+        let mut counter_delta = ReplicaCounterDelta::default();
+        counter_delta.positive.insert(replica_a.clone(), 1);
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert(0, counter_delta);
+
+        let envelope = PropagationEnvelope {
+            steward: replica_a.clone(),
+            frontier,
+            mode: PropagationMode::AntiEntropy,
+            delta: LagSketchDelta {
+                bucket_width: 8,
+                buckets,
+            },
+        };
+
+        assert_eq!(peer.apply(&envelope), PropagationApply::NeedsAntiEntropy);
+        assert_eq!(peer.frontier().version(&replica_a), 0);
+        assert!(peer.state().estimated_mean().is_none());
+        assert!(peer.needs_anti_entropy());
+    }
+
+    #[test]
+    fn advisory_aggregate_collapses_decision_identity_to_kind_counts() {
+        let replica_a = node("replica-a");
+        let replica_b = node("replica-b");
+
+        let audit_a = make_test_audit_entry();
+        let mut audit_b = make_test_audit_entry();
+        audit_b.decision_id = DecisionId::from_raw(77);
+        audit_b.trace_id = TraceId::from_raw(200);
+        audit_b.action_chosen = "hold".to_owned();
+        audit_b.expected_loss = 0.7;
+        audit_b.ts_unix_ms = 1_700_000_000_500;
+
+        let outcome_a = DecisionOutcome {
+            action_index: 0,
+            action_name: audit_a.action_chosen.clone(),
+            expected_loss: audit_a.expected_loss,
+            expected_losses: audit_a.expected_loss_by_action.clone(),
+            fallback_active: false,
+            audit_entry: audit_a,
+        };
+        let outcome_b = DecisionOutcome {
+            action_index: 1,
+            action_name: audit_b.action_chosen.clone(),
+            expected_loss: audit_b.expected_loss,
+            expected_losses: audit_b.expected_loss_by_action.clone(),
+            fallback_active: false,
+            audit_entry: audit_b,
+        };
+
+        let advisory_a = ControlAdvisory::evidence_record(
+            SystemSubjectFamily::Drain,
+            Subject::new("$SYS.FABRIC.DRAIN.evidence"),
+            &outcome_a,
+            "drain evidence a",
+        );
+        let advisory_b = ControlAdvisory::evidence_record(
+            SystemSubjectFamily::Drain,
+            Subject::new("$SYS.FABRIC.DRAIN.evidence"),
+            &outcome_b,
+            "drain evidence b",
+        );
+
+        let mut aggregate = AdvisoryAggregate::new(1_000);
+        aggregate.record_kind(
+            &replica_a,
+            advisory_a.advisory_type.kind(),
+            advisory_a.ts_unix_ms,
+        );
+        aggregate.record_kind(
+            &replica_b,
+            advisory_b.advisory_type.kind(),
+            advisory_b.ts_unix_ms,
+        );
+
+        let window_start = 1_700_000_000_000;
+        let kind_window = aggregate.windows.get(&window_start).expect("window");
+        assert_eq!(aggregate.count(window_start, "evidence_record"), 2);
+        assert_eq!(kind_window.len(), 1);
+        assert!(kind_window.contains_key("evidence_record"));
+
+        let evidence_id_a = advisory_a.evidence_id();
+        let evidence_id_b = advisory_b.evidence_id();
+        assert!(
+            matches!((&evidence_id_a, &evidence_id_b), (Some(left), Some(right)) if left != right)
+        );
+        if let Some(evidence_id_a) = evidence_id_a {
+            assert!(!kind_window.contains_key(&evidence_id_a));
+        }
+        if let Some(evidence_id_b) = evidence_id_b {
+            assert!(!kind_window.contains_key(&evidence_id_b));
+        }
+    }
+
+    #[test]
+    fn advisory_aggregate_prune_before_retains_cutoff_window_and_newer() {
+        let replica_a = node("replica-a");
+        let mut aggregate = AdvisoryAggregate::new(1_000);
+
+        aggregate.record_kind(&replica_a, "evidence_record", 1_100);
+        aggregate.record_kind(&replica_a, "evidence_record", 2_100);
+        aggregate.record_kind(&replica_a, "evidence_record", 3_100);
+
+        aggregate.prune_before(2_500);
+
+        assert_eq!(aggregate.count(1_000, "evidence_record"), 0);
+        assert_eq!(aggregate.count(2_000, "evidence_record"), 1);
+        assert_eq!(aggregate.count(3_000, "evidence_record"), 1);
     }
 
     // -- SystemSubjectFamily -------------------------------------------------
