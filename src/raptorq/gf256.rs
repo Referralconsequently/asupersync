@@ -2018,12 +2018,10 @@ pub fn gf256_addmul_slices2(
     }
     let dispatch = dispatch();
     if c == Gf256::ONE {
-        if should_use_dual_addmul_fused(dst_a.len(), dst_b.len()) {
-            gf256_add_slices2(dst_a, src_a, dst_b, src_b);
-        } else {
-            (dispatch.add_slice)(dst_a, src_a);
-            (dispatch.add_slice)(dst_b, src_b);
-        }
+        // Reuse the dual-add fast path directly for c==1. The add path already
+        // owns the lane-size fallback rules, so gating through the heavier
+        // addmul policy here only suppresses valid XOR fusion windows.
+        gf256_add_slices2(dst_a, src_a, dst_b, src_b);
         return;
     }
     if !should_use_dual_addmul_fused(dst_a.len(), dst_b.len()) {
