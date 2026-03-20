@@ -3426,7 +3426,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         !closure_dependencies.is_empty(),
         "closure_readiness.dependencies must list at least one dependency"
     );
-    let dependency_beads = closure_dependencies
+    let dependency_evidence_refs = closure_dependencies
         .iter()
         .map(|entry| {
             let required_status = entry["required_status"]
@@ -3450,6 +3450,15 @@ fn g7_expected_loss_contract_schema_and_coverage() {
                 !evidence_refs.is_empty(),
                 "closure dependency must include at least one evidence ref"
             );
+            let evidence_refs = evidence_refs
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("closure dependency evidence_refs entries must be strings")
+                        .to_string()
+                })
+                .collect::<BTreeSet<_>>();
             let bead_id = entry["bead_id"]
                 .as_str()
                 .expect("closure dependency must include bead_id")
@@ -3461,8 +3470,12 @@ fn g7_expected_loss_contract_schema_and_coverage() {
                 current_status, canonical_status,
                 "closure dependency {bead_id} current_status must match canonical Beads issue status"
             );
-            bead_id
+            (bead_id, evidence_refs)
         })
+        .collect::<BTreeMap<_, _>>();
+    let dependency_beads = dependency_evidence_refs
+        .keys()
+        .cloned()
         .collect::<BTreeSet<_>>();
     for required in [
         "asupersync-3ltrv",
@@ -3476,6 +3489,19 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         );
     }
 
+    let e5_evidence_refs = dependency_evidence_refs
+        .get("asupersync-36m6p")
+        .expect("closure_readiness.dependencies must include the E5 bead");
+    for required in [
+        "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+    ] {
+        assert!(
+            e5_evidence_refs.contains(required),
+            "E5 closure dependency must retain evidence ref {required}"
+        );
+    }
+
     if !ready_to_close {
         let remaining_requirements = closure_readiness["remaining_requirements"]
             .as_array()
@@ -3483,6 +3509,21 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         assert!(
             !remaining_requirements.is_empty(),
             "remaining_requirements must be non-empty when ready_to_close is false"
+        );
+        let remaining_requirements = remaining_requirements
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("remaining_requirements entries must be strings")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            remaining_requirements
+                .iter()
+                .any(|entry| entry.contains("raw-sample") || entry.contains("longer-window")),
+            "remaining_requirements must preserve the missing closure-grade E5 evidence requirement"
         );
     }
 
@@ -3689,9 +3730,14 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "asupersync-2cyx5",
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
         "artifacts/raptorq_replay_catalog_v1.json",
+        "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
         "closure_readiness",
         "ready_to_close",
         "asupersync-3ltrv",
+        "highconf_v1",
+        "short_window_directional_not_closure_grade",
+        "raw-sample",
         "asupersync-2zu9p",
         "argmin_expected_loss",
         "deterministic_fallback_trigger",
