@@ -42,8 +42,6 @@ pub enum LockError {
     Poisoned,
     /// Cancelled while waiting for the lock.
     Cancelled,
-    /// The lock future was polled after returning a terminal result.
-    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for LockError {
@@ -51,7 +49,6 @@ impl std::fmt::Display for LockError {
         match self {
             Self::Poisoned => write!(f, "mutex poisoned"),
             Self::Cancelled => write!(f, "mutex lock cancelled"),
-            Self::PolledAfterCompletion => write!(f, "mutex lock future polled after completion"),
         }
     }
 }
@@ -61,7 +58,7 @@ impl std::error::Error for LockError {}
 /// Error returned when trying to lock without waiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryLockError {
-    /// The mutex is unavailable because it is locked or queued waiters must run first.
+    /// The mutex is currently locked.
     Locked,
     /// The mutex was poisoned.
     Poisoned,
@@ -109,124 +106,6 @@ struct Waiter {
     id: u64,
 }
 
-fn front_waiter_waker(state: &MutexState) -> Option<Waker> {
-    state.waiters.front().map(|waiter| waiter.waker.clone())
-}
-
-fn remove_waiter(state: &mut MutexState, waiter_id: u64) {
-    if state
-        .waiters
-        .front()
-        .is_some_and(|waiter| waiter.id == waiter_id)
-    {
-        state.waiters.pop_front();
-    } else if let Some(pos) = state
-        .waiters
-        .iter()
-        .position(|waiter| waiter.id == waiter_id)
-    {
-        state.waiters.remove(pos);
-    }
-}
-
-fn remove_waiter_and_take_next_waker(state: &mut MutexState, waiter_id: u64) -> Option<Waker> {
-    let removed_front = state
-        .waiters
-        .front()
-        .is_some_and(|waiter| waiter.id == waiter_id);
-    remove_waiter(state, waiter_id);
-
-    if removed_front {
-        if state.locked {
-            None
-        } else {
-            front_waiter_waker(state)
-        }
-    } else {
-        None
-    }
-}
-
-fn waiter_has_predecessor(state: &MutexState, waiter_id: Option<u64>) -> bool {
-    waiter_id.map_or_else(
-        || !state.waiters.is_empty(),
-        |waiter_id| {
-            state
-                .waiters
-                .front()
-                .is_some_and(|front| front.id != waiter_id)
-        },
-    )
-}
-
-fn update_waiter_waker(state: &mut MutexState, waiter_id: u64, waker: &Waker) {
-    let waiter = state
-        .waiters
-        .iter_mut()
-        .find(|waiter| waiter.id == waiter_id)
-        .expect("waiter removed from queue without acquiring lock");
-    if !waiter.waker.will_wake(waker) {
-        waiter.waker.clone_from(waker);
-    }
-}
-
-fn register_waiter(state: &mut MutexState, waker: &Waker) -> u64 {
-    let id = state.next_waiter_id;
-    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-    state.waiters.push_back(Waiter {
-        waker: waker.clone(),
-        id,
-    });
-    id
-}
-
-fn take_waiter_and_next_waker<T>(mutex: &Mutex<T>, waiter_id: &mut Option<u64>) -> Option<Waker> {
-    let waiter_id = waiter_id.take()?;
-    let mut state = mutex.state.lock();
-    remove_waiter_and_take_next_waker(&mut state, waiter_id)
-}
-
-enum LockPollState {
-    Ready,
-    Pending,
-    Poisoned(Option<Waker>),
-}
-
-fn poll_lock_state<T>(
-    mutex: &Mutex<T>,
-    waiter_id: &mut Option<u64>,
-    waker: &Waker,
-) -> LockPollState {
-    let mut state = mutex.state.lock();
-
-    if mutex.is_poisoned() {
-        let next_waker = waiter_id
-            .take()
-            .and_then(|waiter_id| remove_waiter_and_take_next_waker(&mut state, waiter_id));
-        drop(state);
-        return LockPollState::Poisoned(next_waker);
-    }
-
-    if !state.locked && !waiter_has_predecessor(&state, *waiter_id) {
-        state.locked = true;
-        if let Some(waiter_id) = waiter_id.take() {
-            remove_waiter(&mut state, waiter_id);
-        }
-        drop(state);
-        return LockPollState::Ready;
-    }
-
-    if let Some(waiter_id) = *waiter_id {
-        update_waiter_waker(&mut state, waiter_id, waker);
-        drop(state);
-        return LockPollState::Pending;
-    }
-
-    *waiter_id = Some(register_waiter(&mut state, waker));
-    drop(state);
-    LockPollState::Pending
-}
-
 impl<T> Mutex<T> {
     /// Creates a new mutex in an unlocked state.
     #[must_use]
@@ -257,7 +136,6 @@ impl<T> Mutex<T> {
     }
 
     /// Returns the number of tasks currently waiting for the lock.
-    #[inline]
     #[must_use]
     pub fn waiters(&self) -> usize {
         self.state.lock().waiters.len()
@@ -269,18 +147,16 @@ impl<T> Mutex<T> {
             mutex: self,
             cx,
             waiter_id: None,
-            completed: false,
         }
     }
 
     /// Tries to acquire the mutex without waiting.
-    #[inline]
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryLockError::Poisoned);
         }
-        if state.locked || !state.waiters.is_empty() {
+        if state.locked {
             return Err(TryLockError::Locked);
         }
 
@@ -314,7 +190,7 @@ impl<T> Mutex<T> {
         let waker_to_wake = {
             let mut state = self.state.lock();
             state.locked = false;
-            state.waiters.front().map(|w| w.waker.clone())
+            state.waiters.pop_front().map(|w| w.waker)
         };
         // Wake outside the lock
         if let Some(waker) = waker_to_wake {
@@ -334,7 +210,6 @@ pub struct LockFuture<'a, 'b, T> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx,
     waiter_id: Option<u64>,
-    completed: bool,
 }
 
 impl<'a, T> Future for LockFuture<'a, '_, T> {
@@ -342,92 +217,98 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.completed {
-            return Poll::Ready(Err(LockError::PolledAfterCompletion));
-        }
-
         // Check cancellation
         if let Err(_e) = self.cx.checkpoint() {
-            if let Some(next) = take_waiter_and_next_waker(self.mutex, &mut self.waiter_id) {
-                next.wake();
-            }
-            self.completed = true;
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
-        match poll_lock_state(self.mutex, &mut self.waiter_id, context.waker()) {
-            LockPollState::Ready => {
-                self.completed = true;
-                Poll::Ready(Ok(MutexGuard { mutex: self.mutex }))
-            }
-            LockPollState::Pending => Poll::Pending,
-            LockPollState::Poisoned(next_waker) => {
-                if let Some(next) = next_waker {
-                    next.wake();
-                }
-                self.completed = true;
-                Poll::Ready(Err(LockError::Poisoned))
-            }
+        let mut state = self.mutex.state.lock();
+
+        if self.mutex.is_poisoned() {
+            return Poll::Ready(Err(LockError::Poisoned));
         }
+
+        if !state.locked {
+            // Acquire lock
+            state.locked = true;
+
+            // Remove ourselves from the queue if we were still in it,
+            // to prevent our stale record from eating future wakeups.
+            if let Some(id) = self.waiter_id {
+                if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
+                    state.waiters.remove(pos);
+                }
+            }
+
+            // Clear waiter_id so Drop doesn't uselessly lock and search the queue
+            self.waiter_id = None;
+            return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
+        }
+
+        // Register waiter or update existing waker. We must update the waker
+        // when it changes because some executors provide different wakers on
+        // each poll - failing to update would cause the task to never be woken.
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(existing) = state.waiters.iter_mut().find(|w| w.id == waiter_id) {
+                // Still queued — update the waker in case it changed.
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                // Was dequeued by unlock() but someone stole the lock.
+                // Re-register at the FRONT to preserve FIFO fairness.
+                let new_id = state.next_waiter_id;
+                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                state.waiters.push_front(Waiter {
+                    waker: context.waker().clone(),
+                    id: new_id,
+                });
+                drop(state);
+                self.waiter_id = Some(new_id);
+                return Poll::Pending;
+            }
+        } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+            state.waiters.push_back(Waiter {
+                waker: context.waker().clone(),
+                id,
+            });
+            drop(state);
+            self.waiter_id = Some(id);
+            return Poll::Pending;
+        }
+        drop(state);
+
+        Poll::Pending
     }
 }
 
 impl<T> Drop for LockFuture<'_, '_, T> {
     fn drop(&mut self) {
-        if let Some(next) = take_waiter_and_next_waker(self.mutex, &mut self.waiter_id) {
-            next.wake();
-        }
-    }
-}
+        if let Some(waiter_id) = self.waiter_id {
+            let waker_to_wake = {
+                let mut state = self.mutex.state.lock();
 
-struct OwnedLockFuture<'b, T> {
-    mutex: Arc<Mutex<T>>,
-    cx: &'b Cx,
-    waiter_id: Option<u64>,
-    completed: bool,
-}
-
-impl<T> Drop for OwnedLockFuture<'_, T> {
-    fn drop(&mut self) {
-        if let Some(next) = take_waiter_and_next_waker(self.mutex.as_ref(), &mut self.waiter_id) {
-            next.wake();
-        }
-    }
-}
-
-impl<T> Future for OwnedLockFuture<'_, T> {
-    type Output = Result<OwnedMutexGuard<T>, LockError>;
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        if this.completed {
-            return Poll::Ready(Err(LockError::PolledAfterCompletion));
-        }
-
-        if this.cx.checkpoint().is_err() {
-            if let Some(next) = take_waiter_and_next_waker(this.mutex.as_ref(), &mut this.waiter_id)
-            {
-                next.wake();
-            }
-            this.completed = true;
-            return Poll::Ready(Err(LockError::Cancelled));
-        }
-
-        match poll_lock_state(this.mutex.as_ref(), &mut this.waiter_id, context.waker()) {
-            LockPollState::Ready => {
-                this.completed = true;
-                Poll::Ready(Ok(OwnedMutexGuard {
-                    mutex: Arc::clone(&this.mutex),
-                }))
-            }
-            LockPollState::Pending => Poll::Pending,
-            LockPollState::Poisoned(next_waker) => {
-                if let Some(next) = next_waker {
-                    next.wake();
+                // Try to remove from queue
+                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                    state.waiters.remove(pos);
                 }
-                this.completed = true;
-                Poll::Ready(Err(LockError::Poisoned))
+
+                // If the lock is free, pass the baton to the next waiter.
+                // This is safe even if we were not the designated heir, as spurious
+                // wakeups are harmless. We do this unconditionally (without checking
+                // if we were in the queue) because a chain of dropped waiters might
+                // include some that were still in the queue when they dropped.
+                if state.locked {
+                    None
+                } else {
+                    state.waiters.front().map(|next| next.waker.clone())
+                }
+            };
+
+            if let Some(waker) = waker_to_wake {
+                waker.wake();
             }
         }
     }
@@ -484,19 +365,113 @@ unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}
 
 impl<T> OwnedMutexGuard<T> {
     /// Acquires the mutex asynchronously (owned).
-    pub fn lock<'b>(
-        mutex: Arc<Mutex<T>>,
-        cx: &'b Cx,
-    ) -> impl Future<Output = Result<Self, LockError>> + 'b
-    where
-        T: 'b,
-    {
+    pub async fn lock(mutex: Arc<Mutex<T>>, cx: &Cx) -> Result<Self, LockError> {
+        // Reuse the logic from LockFuture or reimplement?
+        // Since we need to return OwnedMutexGuard, we can't use LockFuture directly
+        // unless we change it to be generic over the guard type or use a helper.
+        // Re-implementing for simplicity (or use a shared internal lock async fn).
+
+        struct OwnedLockFuture<T> {
+            mutex: Arc<Mutex<T>>,
+            cx: Cx, // clone of cx
+            waiter_id: Option<u64>,
+        }
+
+        impl<T> Drop for OwnedLockFuture<T> {
+            fn drop(&mut self) {
+                if let Some(waiter_id) = self.waiter_id {
+                    let waker_to_wake = {
+                        let mut state = self.mutex.state.lock();
+
+                        // Try to remove from queue
+                        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                            state.waiters.remove(pos);
+                        }
+
+                        if state.locked {
+                            None
+                        } else {
+                            state.waiters.front().map(|next| next.waker.clone())
+                        }
+                    };
+
+                    if let Some(waker) = waker_to_wake {
+                        waker.wake();
+                    }
+                }
+            }
+        }
+
+        impl<T> Future for OwnedLockFuture<T> {
+            type Output = Result<OwnedMutexGuard<T>, LockError>;
+            #[inline]
+            fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+                let this = self.get_mut();
+                if this.cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(LockError::Cancelled));
+                }
+                let mut state = this.mutex.state.lock();
+                if this.mutex.is_poisoned() {
+                    return Poll::Ready(Err(LockError::Poisoned));
+                }
+                if !state.locked {
+                    state.locked = true;
+
+                    // Remove ourselves from the queue if we were still in it,
+                    // to prevent our stale record from eating future wakeups.
+                    if let Some(id) = this.waiter_id {
+                        if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
+                            state.waiters.remove(pos);
+                        }
+                    }
+
+                    drop(state);
+                    // Clear waiter_id so Drop doesn't uselessly lock and search the queue
+                    this.waiter_id = None;
+                    return Poll::Ready(Ok(OwnedMutexGuard {
+                        mutex: this.mutex.clone(),
+                    }));
+                }
+                if let Some(waiter_id) = this.waiter_id {
+                    if let Some(existing) = state.waiters.iter_mut().find(|w| w.id == waiter_id) {
+                        if !existing.waker.will_wake(context.waker()) {
+                            existing.waker.clone_from(context.waker());
+                        }
+                    } else {
+                        // Was dequeued by unlock() but someone stole the lock.
+                        // Re-register at the FRONT to preserve FIFO fairness.
+                        let new_id = state.next_waiter_id;
+                        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                        state.waiters.push_front(Waiter {
+                            waker: context.waker().clone(),
+                            id: new_id,
+                        });
+                        drop(state);
+                        this.waiter_id = Some(new_id);
+                        return Poll::Pending;
+                    }
+                } else {
+                    let id = state.next_waiter_id;
+                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                    state.waiters.push_back(Waiter {
+                        waker: context.waker().clone(),
+                        id,
+                    });
+                    drop(state);
+                    this.waiter_id = Some(id);
+                    return Poll::Pending;
+                }
+                drop(state);
+                Poll::Pending
+            }
+        }
+
         OwnedLockFuture {
             mutex,
-            cx,
+            cx: cx.clone(),
             waiter_id: None,
-            completed: false,
         }
+        .await
     }
 
     /// Tries to acquire the mutex without waiting.
@@ -506,7 +481,7 @@ impl<T> OwnedMutexGuard<T> {
             if mutex.is_poisoned() {
                 return Err(TryLockError::Poisoned);
             }
-            if state.locked || !state.waiters.is_empty() {
+            if state.locked {
                 return Err(TryLockError::Locked);
             }
             state.locked = true;
@@ -620,78 +595,6 @@ mod tests {
             .expect("lock failed");
         crate::assert_with_log!(*guard == 42, "guard should read value", 42, *guard);
         crate::test_complete!("lock_acquires_mutex");
-    }
-
-    #[test]
-    fn lock_future_second_poll_fails_closed_while_guard_alive() {
-        init_test("lock_future_second_poll_fails_closed_while_guard_alive");
-        let cx = test_cx();
-        let mutex = Mutex::new(42_u32);
-
-        let mut future = mutex.lock(&cx);
-        let guard = poll_once(&mut future)
-            .expect("should complete immediately")
-            .expect("lock failed");
-
-        let second = poll_once(&mut future);
-        let failed_closed = matches!(second, Some(Err(LockError::PolledAfterCompletion)));
-        crate::assert_with_log!(
-            failed_closed,
-            "second poll should fail closed",
-            true,
-            failed_closed
-        );
-
-        let waiters = mutex.waiters();
-        crate::assert_with_log!(
-            waiters == 0,
-            "terminal repoll must not enqueue a waiter",
-            0_usize,
-            waiters
-        );
-
-        drop(guard);
-
-        let reacquired = mutex.try_lock().is_ok();
-        crate::assert_with_log!(
-            reacquired,
-            "terminal repoll must not retain or reacquire the lock",
-            true,
-            reacquired
-        );
-        crate::test_complete!("lock_future_second_poll_fails_closed_while_guard_alive");
-    }
-
-    #[test]
-    fn lock_future_second_poll_after_release_still_fails_closed() {
-        init_test("lock_future_second_poll_after_release_still_fails_closed");
-        let cx = test_cx();
-        let mutex = Mutex::new(7_u32);
-
-        let mut future = mutex.lock(&cx);
-        let guard = poll_once(&mut future)
-            .expect("should complete immediately")
-            .expect("lock failed");
-        drop(guard);
-
-        let second = poll_once(&mut future);
-        let failed_closed = matches!(second, Some(Err(LockError::PolledAfterCompletion)));
-        crate::assert_with_log!(
-            failed_closed,
-            "second poll after release should still fail closed",
-            true,
-            failed_closed
-        );
-
-        let lock = mutex.try_lock();
-        let available = lock.is_ok();
-        crate::assert_with_log!(
-            available,
-            "terminal repoll must not reacquire the mutex",
-            true,
-            available
-        );
-        crate::test_complete!("lock_future_second_poll_after_release_still_fails_closed");
     }
 
     #[test]
@@ -966,8 +869,7 @@ mod tests {
         let waiters = mutex.waiters();
         crate::assert_with_log!(waiters == 2, "2 waiters queued", 2usize, waiters);
 
-        // Release the lock. unlock() wakes waiter A but keeps it queued until it
-        // either acquires the lock or drops, preserving baton ownership.
+        // Release the lock. unlock() pops waiter A and marks it dequeued.
         drop(guard);
 
         // Drop waiter A WITHOUT polling it. LockFuture::drop must detect
@@ -984,8 +886,8 @@ mod tests {
     }
 
     #[test]
-    fn try_lock_does_not_bypass_queued_waiter() {
-        init_test("try_lock_does_not_bypass_queued_waiter");
+    fn try_lock_steal_does_not_lose_waiter() {
+        init_test("try_lock_steal_does_not_lose_waiter");
         let cx = test_cx();
         let mutex = Mutex::new(0u32);
 
@@ -1000,63 +902,23 @@ mod tests {
         // Release — unlock wakes the waiter (noop waker, no actual schedule).
         drop(guard);
 
-        // try_lock must respect queued waiter turn, even though the lock is free.
-        let try_result = mutex.try_lock();
-        let locked = matches!(try_result, Err(TryLockError::Locked));
-        crate::assert_with_log!(locked, "try_lock blocked by queued waiter", true, locked);
+        // Steal the lock before the waiter can poll.
+        let steal_guard = mutex.try_lock().expect("steal should succeed");
+
+        // Waiter polls: lock is busy (stolen). It re-registers at the front.
+        let pending = poll_once(&mut fut_w).is_none();
+        crate::assert_with_log!(pending, "waiter blocked by steal", true, pending);
+
+        // Release stolen lock.
+        drop(steal_guard);
 
         // Waiter should now acquire.
         let guard_w = poll_once(&mut fut_w)
             .expect("should complete")
             .expect("no error");
-        crate::assert_with_log!(*guard_w == 0, "waiter acquired first", 0u32, *guard_w);
+        crate::assert_with_log!(*guard_w == 0, "waiter acquired after steal", 0u32, *guard_w);
 
-        crate::test_complete!("try_lock_does_not_bypass_queued_waiter");
-    }
-
-    #[test]
-    fn try_lock_with_two_waiters_preserves_fifo() {
-        init_test("try_lock_with_two_waiters_preserves_fifo");
-        let cx = test_cx();
-        let mutex = Mutex::new(0u32);
-
-        // Hold the lock.
-        let mut fut_hold = mutex.lock(&cx);
-        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
-
-        // Queue waiter A then waiter B.
-        let mut fut_a = mutex.lock(&cx);
-        let _ = poll_once(&mut fut_a);
-        let mut fut_b = mutex.lock(&cx);
-        let _ = poll_once(&mut fut_b);
-
-        // Wake waiter A, then attempt a non-blocking acquire before it can poll.
-        drop(guard);
-        let try_result = mutex.try_lock();
-        let locked = matches!(try_result, Err(TryLockError::Locked));
-        crate::assert_with_log!(locked, "try_lock blocked by queued waiters", true, locked);
-
-        let b_still_pending = poll_once(&mut fut_b).is_none();
-        crate::assert_with_log!(
-            b_still_pending,
-            "waiter B must not bypass waiter A",
-            true,
-            b_still_pending
-        );
-
-        let guard_a = poll_once(&mut fut_a)
-            .expect("waiter A should acquire after try_lock yields to the queue")
-            .expect("waiter A should not error");
-        crate::assert_with_log!(*guard_a == 0, "waiter A acquired first", 0u32, *guard_a);
-
-        drop(guard_a);
-
-        let guard_b = poll_once(&mut fut_b)
-            .expect("waiter B should acquire after waiter A releases")
-            .expect("waiter B should not error");
-        crate::assert_with_log!(*guard_b == 0, "waiter B acquired second", 0u32, *guard_b);
-
-        crate::test_complete!("try_lock_with_two_waiters_preserves_fifo");
+        crate::test_complete!("try_lock_steal_does_not_lose_waiter");
     }
 
     #[test]
@@ -1099,81 +961,6 @@ mod tests {
         let guard2 = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after async");
         crate::assert_with_log!(*guard2 == 99, "async mutation persisted", 99u32, *guard2);
         crate::test_complete!("test_owned_mutex_guard_async_lock");
-    }
-
-    #[test]
-    fn owned_lock_future_second_poll_fails_closed_while_guard_alive() {
-        init_test("owned_lock_future_second_poll_fails_closed_while_guard_alive");
-        let cx = test_cx();
-        let mutex = Arc::new(Mutex::new(5_u32));
-
-        let mut future = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
-        let guard = poll_pinned_until_ready(future.as_mut()).expect("async lock should succeed");
-
-        let second = {
-            let waker = Waker::noop();
-            let mut task_cx = Context::from_waker(waker);
-            future.as_mut().poll(&mut task_cx)
-        };
-        let failed_closed = matches!(second, Poll::Ready(Err(LockError::PolledAfterCompletion)));
-        crate::assert_with_log!(
-            failed_closed,
-            "owned second poll should fail closed",
-            true,
-            failed_closed
-        );
-
-        let waiters = mutex.waiters();
-        crate::assert_with_log!(
-            waiters == 0,
-            "owned terminal repoll must not enqueue a waiter",
-            0_usize,
-            waiters
-        );
-
-        drop(guard);
-
-        let reacquired = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).is_ok();
-        crate::assert_with_log!(
-            reacquired,
-            "owned terminal repoll must not retain or reacquire the lock",
-            true,
-            reacquired
-        );
-        crate::test_complete!("owned_lock_future_second_poll_fails_closed_while_guard_alive");
-    }
-
-    #[test]
-    fn owned_lock_future_second_poll_after_release_still_fails_closed() {
-        init_test("owned_lock_future_second_poll_after_release_still_fails_closed");
-        let cx = test_cx();
-        let mutex = Arc::new(Mutex::new(9_u32));
-
-        let mut future = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
-        let guard = poll_pinned_until_ready(future.as_mut()).expect("async lock should succeed");
-        drop(guard);
-
-        let second = {
-            let waker = Waker::noop();
-            let mut task_cx = Context::from_waker(waker);
-            future.as_mut().poll(&mut task_cx)
-        };
-        let failed_closed = matches!(second, Poll::Ready(Err(LockError::PolledAfterCompletion)));
-        crate::assert_with_log!(
-            failed_closed,
-            "owned second poll after release should fail closed",
-            true,
-            failed_closed
-        );
-
-        let available = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).is_ok();
-        crate::assert_with_log!(
-            available,
-            "owned terminal repoll must not reacquire the mutex",
-            true,
-            available
-        );
-        crate::test_complete!("owned_lock_future_second_poll_after_release_still_fails_closed");
     }
 
     #[test]
@@ -1377,43 +1164,6 @@ mod tests {
         crate::test_complete!("owned_mutex_try_lock_returns_poisoned");
     }
 
-    #[test]
-    fn owned_mutex_try_lock_blocked_by_queued_waiter() {
-        init_test("owned_mutex_try_lock_blocked_by_queued_waiter");
-        let cx = test_cx();
-        let mutex = Arc::new(Mutex::new(0_u32));
-
-        let mut fut_hold = mutex.lock(&cx);
-        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
-
-        let mut fut_waiter = mutex.lock(&cx);
-        let pending = poll_once(&mut fut_waiter).is_none();
-        crate::assert_with_log!(pending, "waiter queued", true, pending);
-
-        drop(guard);
-
-        let try_result = OwnedMutexGuard::try_lock(Arc::clone(&mutex));
-        let locked = matches!(try_result, Err(TryLockError::Locked));
-        crate::assert_with_log!(
-            locked,
-            "owned try_lock blocked by queued waiter",
-            true,
-            locked
-        );
-
-        let waiter_guard = poll_once(&mut fut_waiter)
-            .expect("waiter should acquire")
-            .expect("waiter should not error");
-        crate::assert_with_log!(
-            *waiter_guard == 0,
-            "queued waiter acquired before owned try_lock",
-            0_u32,
-            *waiter_guard
-        );
-
-        crate::test_complete!("owned_mutex_try_lock_blocked_by_queued_waiter");
-    }
-
     // =========================================================================
     // Pure data-type tests (wave 41 – CyanBarn)
     // =========================================================================
@@ -1422,7 +1172,6 @@ mod tests {
     fn lock_error_debug_clone_copy_eq_display() {
         let poisoned = LockError::Poisoned;
         let cancelled = LockError::Cancelled;
-        let done = LockError::PolledAfterCompletion;
         let copied = poisoned;
         let cloned = poisoned;
         assert_eq!(copied, cloned);
@@ -1430,10 +1179,8 @@ mod tests {
         assert_ne!(poisoned, cancelled);
         assert!(format!("{poisoned:?}").contains("Poisoned"));
         assert!(format!("{cancelled:?}").contains("Cancelled"));
-        assert!(format!("{done:?}").contains("PolledAfterCompletion"));
         assert!(poisoned.to_string().contains("poisoned"));
         assert!(cancelled.to_string().contains("cancelled"));
-        assert!(done.to_string().contains("polled after completion"));
     }
 
     #[test]

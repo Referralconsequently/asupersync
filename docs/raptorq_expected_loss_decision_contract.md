@@ -110,10 +110,6 @@ Primary replay anchor:
 
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture`
 
-Replay-bundle integrity verifier:
-
-- `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture`
-
 ## Closure Readiness Contract
 
 The artifact includes a machine-checkable `closure_readiness` section to avoid
@@ -122,32 +118,19 @@ hand-off ambiguity while dependencies are still active.
 Current dependency set in the artifact:
 
 1. `asupersync-3ltrv` (G3 decision records) must be `closed`
-2. `asupersync-36m6p` (E5 closure evidence contract: narrowed guardrail plus broader refresh) must be `closed`
+2. `asupersync-36m6p` (E5 high-confidence p95/p99 corpus) must be `closed`
 3. `asupersync-n5fk6` (F7 final closure evidence in G3 cards) must be `closed`
 4. `asupersync-2zu9p` (F8 implementation + closure evidence) must be `closed`
 
-Current closure-readiness status (2026-03-20 audit pass):
+Current closure-readiness status (2026-03-05 refresh):
 
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`
 - `asupersync-2zu9p`: `closed`
-- `asupersync-36m6p`: `open`
+- `asupersync-36m6p`: still `in_progress`
 
 `ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
 `closed`.
-
-The E5 dependency is intentionally two-part, not a plain bead-status check:
-
-- `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` remains the narrowed
-  guardrail packet and still records `ready_for_e5_closure = false`.
-- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` widens the
-  checked-in corpus, but it is still
-  `confidence_contract = short_window_directional_not_closure_grade`.
-
-That means G7 cannot treat E5 as satisfied merely because a broader packet
-exists; the closure dependency remains open until `asupersync-36m6p` closes with
-raw-sample or longer-window multi-scenario closure-grade evidence that
-supersedes the current guardrail-plus-refresh pair.
 
 Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `residual_risk_register`, `go_no_go_decision`) are now attached in
@@ -159,7 +142,4 @@ Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `asupersync-m7o6i` can close after:
 
 1. `asupersync-36m6p` reaches `closed` (dependency status requirement),
-2. E5 publishes raw-sample or longer-window multi-scenario closure-grade
-   evidence that supersedes the current `highconf_v1` +
-   `multiscenario_refresh_v2` pair,
-3. Track-G summary packet for `asupersync-2cyx5` remains synchronized with this contract artifact as the canonical G7 source.
+2. Track-G summary packet for `asupersync-2cyx5` remains synchronized with this contract artifact as the canonical G7 source.
