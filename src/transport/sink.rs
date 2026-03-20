@@ -844,12 +844,14 @@ mod tests {
                 return Poll::Pending;
             }
             state.sent.push(symbol);
+            drop(state);
             Poll::Ready(Ok(()))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
             let mut state = self.state.lock();
             state.flush_count = state.flush_count.saturating_add(1);
+            drop(state);
             Poll::Ready(Ok(()))
         }
 

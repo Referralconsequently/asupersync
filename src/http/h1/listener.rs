@@ -465,6 +465,11 @@ impl ConnectionTasks {
 
     fn push(&mut self, handle: JoinHandle<()>) {
         self.handles.push(handle);
+        // Clean up finished tasks periodically to prevent unbounded memory growth
+        // Check every 64 connections.
+        if self.handles.len().is_multiple_of(64) {
+            self.handles.retain(|h| !h.is_finished());
+        }
     }
 
     async fn join_all(&mut self) {

@@ -460,10 +460,10 @@ impl FrameCodec {
             let mask_key = generate_mask_key(entropy);
             dst.put_slice(&mask_key);
 
-            // Apply mask to payload and write
-            let mut masked_payload = BytesMut::from(frame.payload.as_ref());
-            apply_mask(&mut masked_payload, mask_key);
-            dst.put_slice(&masked_payload);
+            // Apply mask directly in the destination buffer to avoid double copy
+            let start = dst.len();
+            dst.put_slice(&frame.payload);
+            apply_mask(&mut dst[start..], mask_key);
         } else {
             dst.put_slice(&frame.payload);
         }

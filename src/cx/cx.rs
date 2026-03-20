@@ -1978,6 +1978,7 @@ impl<Caps> Cx<Caps> {
                 .store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
             let waker = inner.cancel_waker.clone();
+            drop(inner);
             (region, waker)
         };
 

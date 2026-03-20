@@ -7,8 +7,8 @@
 
 use crate::tracing_compat::trace;
 use crate::types::TaskId;
+use crate::util::DetHashSet;
 use parking_lot::Mutex;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::task::{Wake, Waker};
 
@@ -34,8 +34,12 @@ pub enum WakeSource {
 /// Shared state for the waker system.
 #[derive(Debug, Default)]
 pub struct WakerState {
-    /// Tasks that have been woken (HashSet for O(1) dedup on the wake hot path).
-    woken: Mutex<HashSet<TaskId>>,
+    /// Tasks that have been woken.
+    ///
+    /// We keep O(1)-style hash-set dedup on the wake hot path, but use the
+    /// deterministic build hasher to avoid ambient hash seeding and sort at
+    /// drain time so the returned order is replay-stable.
+    woken: Mutex<DetHashSet<TaskId>>,
 }
 
 impl WakerState {
@@ -69,8 +73,12 @@ impl WakerState {
     /// Drains all woken tasks.
     #[inline]
     pub fn drain_woken(&self) -> Vec<TaskId> {
-        let mut woken = self.woken.lock();
-        woken.drain().collect()
+        let mut drained: Vec<_> = {
+            let mut woken = self.woken.lock();
+            woken.drain().collect()
+        };
+        drained.sort_unstable();
+        drained
     }
 
     /// Returns true if any tasks have been woken.
@@ -270,42 +278,30 @@ mod tests {
         crate::test_complete!("has_woken_tracks_state");
     }
 
-    /// Invariant: multiple tasks wake independently.
+    /// Invariant: multiple tasks wake independently and drain order is stable.
     #[test]
-    fn multi_task_waking() {
-        init_test("multi_task_waking");
+    fn multi_task_waking_is_deterministically_sorted() {
+        init_test("multi_task_waking_is_deterministically_sorted");
         let state = Arc::new(WakerState::new());
 
         let w1 = state.waker_for(task(10));
         let w2 = state.waker_for(task(20));
         let w3 = state.waker_for(task(30));
 
+        w3.wake();
         w1.wake();
         w2.wake();
-        w3.wake();
 
-        let mut woken = state.drain_woken();
-        woken.sort();
+        let woken = state.drain_woken();
+        let expected = vec![task(10), task(20), task(30)];
         crate::assert_with_log!(woken.len() == 3, "3 tasks woken", 3, woken.len());
         crate::assert_with_log!(
-            woken.contains(&task(10)),
-            "contains 10",
-            true,
-            woken.contains(&task(10))
+            woken == expected,
+            "drain_woken returns stable ascending task order",
+            expected,
+            woken
         );
-        crate::assert_with_log!(
-            woken.contains(&task(20)),
-            "contains 20",
-            true,
-            woken.contains(&task(20))
-        );
-        crate::assert_with_log!(
-            woken.contains(&task(30)),
-            "contains 30",
-            true,
-            woken.contains(&task(30))
-        );
-        crate::test_complete!("multi_task_waking");
+        crate::test_complete!("multi_task_waking_is_deterministically_sorted");
     }
 
     #[test]

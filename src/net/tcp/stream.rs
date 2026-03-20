@@ -56,7 +56,7 @@ pub struct TcpStreamBuilder<A> {
     addr: A,
     connect_timeout: Option<Duration>,
     nodelay: Option<bool>,
-    keepalive: Option<Duration>,
+    keepalive: Option<Option<Duration>>,
 }
 
 impl<A> TcpStreamBuilder<A>
@@ -94,7 +94,7 @@ where
     /// this may return `io::ErrorKind::Unsupported`.
     #[must_use]
     pub fn keepalive(mut self, keepalive: Option<Duration>) -> Self {
-        self.keepalive = keepalive;
+        self.keepalive = Some(keepalive);
         self
     }
 
@@ -117,8 +117,8 @@ where
             stream.set_nodelay(enable)?;
         }
 
-        if let Some(keepalive) = keepalive {
-            stream.set_keepalive(Some(keepalive))?;
+        if let Some(keepalive_opt) = keepalive {
+            stream.set_keepalive(keepalive_opt)?;
         }
 
         Ok(stream)
@@ -1057,7 +1057,7 @@ mod tests {
 
         assert_eq!(builder.connect_timeout, Some(Duration::from_secs(1)));
         assert_eq!(builder.nodelay, Some(true));
-        assert_eq!(builder.keepalive, Some(Duration::from_secs(30)));
+        assert_eq!(builder.keepalive, Some(Some(Duration::from_secs(30))));
     }
 
     #[test]
