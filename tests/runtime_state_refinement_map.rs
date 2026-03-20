@@ -854,7 +854,7 @@ fn runtime_state_refinement_map_conformance_harness_contract_is_complete() {
             .and_then(Value::as_array)
             .expect("required_artifacts must be an array")
             .iter()
-            .map(|artifact| {
+            .map(|artifact: &Value| {
                 artifact
                     .as_str()
                     .expect("required_artifacts values must be strings")
