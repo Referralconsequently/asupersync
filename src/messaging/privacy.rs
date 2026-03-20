@@ -14,8 +14,6 @@ use std::hash::{Hash, Hasher};
 use thiserror::Error;
 
 const KEY_MATERIAL_BYTES: usize = 32;
-const TWO_POW_21_F64: f64 = 2_097_152.0;
-const TWO_POW_53_F64: f64 = 9_007_199_254_740_992.0;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Exact internal metadata summary before any privacy transform is applied.
@@ -781,22 +779,19 @@ fn laplace_noise(seed: u64, epsilon: Option<f64>) -> i64 {
     };
 
     let centered = unit_interval(seed) - 0.5;
-    if centered == 0.0 {
-        return 0;
-    }
-
     let scale = 1.0 / epsilon;
     let noise = -scale * centered.signum() * 2.0f64.mul_add(-centered.abs(), 1.0).ln();
     noise.round() as i64
 }
 
 fn unit_interval(seed: u64) -> f64 {
-    let bits = splitmix64(seed) >> 11;
-    let upper = u32::try_from(bits >> 21)
-        .unwrap_or_else(|_| unreachable!("53-bit splitmix sample should fit in u32 upper limb"));
-    let lower = u32::try_from(bits & ((1_u64 << 21) - 1))
-        .unwrap_or_else(|_| unreachable!("53-bit splitmix sample should fit in u32 lower limb"));
-    (f64::from(upper) * TWO_POW_21_F64 + f64::from(lower) + 0.5) / TWO_POW_53_F64
+    // Generate 52 bits of randomness (range 0 to 2^52 - 1).
+    let bits = splitmix64(seed) >> 12;
+    // By using 52 bits, `bits + 0.5` strictly fits within the 53-bit mantissa of f64.
+    // This avoids the even-rounding that produces exactly 1.0.
+    // The result is exactly uniformly distributed in the open interval (0, 1).
+    const TWO_POW_52_F64: f64 = 4_503_599_627_370_496.0;
+    (bits as f64 + 0.5) / TWO_POW_52_F64
 }
 
 fn splitmix64(mut state: u64) -> u64 {
@@ -835,8 +830,14 @@ mod tests {
         PrivacyBudgetLedger::new(5.0).expect("valid privacy budget")
     }
 
-    fn policy() -> PrivacyPolicy {
+    fn default_policy() -> PrivacyPolicy {
         PrivacyPolicy::default()
+    }
+
+    fn full_policy() -> PrivacyPolicy {
+        let mut policy = default_policy();
+        policy.metadata_disclosure = MetadataDisclosure::Full;
+        policy
     }
 
     fn pool_epoch() -> PoolEpochKeyMaterial {
@@ -863,7 +864,7 @@ mod tests {
     #[test]
     fn full_export_without_noise_preserves_authoritative_values() {
         let mut ledger = ledger();
-        let exported = export_metadata_summary(&policy(), &mut ledger, &summary(), 7)
+        let exported = export_metadata_summary(&full_policy(), &mut ledger, &summary(), 7)
             .expect("full export should succeed");
 
         assert_eq!(exported.summary_name, "fabric.advisory");
@@ -882,12 +883,12 @@ mod tests {
     #[test]
     fn hashed_export_blinds_subject_and_tenant() {
         let mut ledger = ledger();
-        let mut policy = policy();
-        policy.metadata_disclosure = MetadataDisclosure::Hashed;
+        let policy = default_policy();
 
         let exported = export_metadata_summary(&policy, &mut ledger, &summary(), 17)
             .expect("hashed export should succeed");
 
+        assert_eq!(exported.disclosure, MetadataDisclosure::Hashed);
         assert!(exported.subject_token.starts_with("sha256:"));
         assert!(exported.tenant_token.starts_with("sha256:"));
         assert_ne!(exported.subject_token, "orders.eu.created");
@@ -895,9 +896,17 @@ mod tests {
     }
 
     #[test]
+    fn default_privacy_policy_uses_hashed_disclosure() {
+        assert_eq!(
+            default_policy().metadata_disclosure,
+            MetadataDisclosure::Hashed
+        );
+    }
+
+    #[test]
     fn full_export_can_redact_subject_literals() {
         let mut ledger = ledger();
-        let mut policy = policy();
+        let mut policy = full_policy();
         policy.redact_subject_literals = true;
 
         let exported = export_metadata_summary(&policy, &mut ledger, &summary(), 3)
@@ -913,7 +922,7 @@ mod tests {
         let mut summary = summary();
         summary.cross_tenant = true;
 
-        let err = export_metadata_summary(&policy(), &mut ledger, &summary, 5)
+        let err = export_metadata_summary(&default_policy(), &mut ledger, &summary, 5)
             .expect_err("cross-tenant export should be rejected");
 
         assert!(matches!(
@@ -939,7 +948,7 @@ mod tests {
         let original = summary();
         let mut left_ledger = ledger();
         let mut right_ledger = ledger();
-        let mut policy = policy();
+        let mut policy = default_policy();
         policy.noise_budget = Some(0.5);
 
         let left = export_metadata_summary(&policy, &mut left_ledger, &original, 99)
@@ -962,10 +971,27 @@ mod tests {
         let mut invalid = summary();
         invalid.subject = "   ".to_owned();
 
-        let err = export_metadata_summary(&policy(), &mut ledger, &invalid, 11)
+        let err = export_metadata_summary(&default_policy(), &mut ledger, &invalid, 11)
             .expect_err("invalid subject should fail");
 
         assert_eq!(err, PrivacyExportError::EmptyField { field: "subject" });
+    }
+
+    #[test]
+    fn unit_interval_stays_inside_open_bounds_for_extreme_seeds() {
+        for seed in [
+            0,
+            1,
+            2,
+            0x5555_5555_5555_5555,
+            0xaaaa_aaaa_aaaa_aaaa,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            let sample = unit_interval(seed);
+            assert!(sample > 0.0, "seed {seed} should stay above zero");
+            assert!(sample < 1.0, "seed {seed} should stay below one");
+        }
     }
 
     #[test]

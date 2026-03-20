@@ -204,6 +204,24 @@ struct DeliverySender {
 }
 
 #[cfg(feature = "kafka")]
+impl Drop for DeliverySender {
+    fn drop(&mut self) {
+        let waker = {
+            let mut state = self.inner.lock();
+            if state.closed || state.value.is_some() {
+                return;
+            }
+            state.value = Some(Err(KafkaError::Cancelled));
+            state.closed = true;
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
 impl DeliverySender {
     fn complete(self, value: Result<RecordMetadata, KafkaError>) {
         let waker = {
