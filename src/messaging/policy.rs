@@ -158,12 +158,13 @@ impl TrafficSlice {
     }
 
     fn priority_score(&self) -> u16 {
-        self.service_class.base_priority()
-            + self.delivery_boost()
-            + self.cleanup_boost()
-            + self.cancellation_boost()
-            + self.obligation_load.priority_boost()
-            + self.deadline_boost()
+        self.service_class
+            .base_priority()
+            .saturating_add(self.delivery_boost())
+            .saturating_add(self.cleanup_boost())
+            .saturating_add(self.cancellation_boost())
+            .saturating_add(self.obligation_load.priority_boost())
+            .saturating_add(self.deadline_boost())
     }
 
     fn delivery_boost(&self) -> u16 {
@@ -204,6 +205,9 @@ impl TrafficSlice {
 
     fn degradation_disposition(&self) -> DegradationDisposition {
         match self.service_class {
+            // Control/recovery traffic "must stay live" — widen repair budget
+            // rather than rejecting work that prevents semantic debt growth.
+            SemanticServiceClass::ControlRecovery => DegradationDisposition::WidenRepair,
             SemanticServiceClass::LowValueFanout => DegradationDisposition::ReduceFanout,
             SemanticServiceClass::ReadModel => DegradationDisposition::Defer,
             SemanticServiceClass::ExpensiveReplay => DegradationDisposition::PauseReplay,
@@ -531,6 +535,30 @@ mod tests {
         assert_eq!(
             plan.degraded[0].disposition,
             DegradationDisposition::RejectNew
+        );
+    }
+
+    #[test]
+    fn control_recovery_widens_repair_when_degraded() {
+        // ControlRecovery is documented as "must stay live" traffic.
+        // When it can't be admitted, its degradation disposition must be
+        // WidenRepair (not RejectNew), because rejecting control/recovery
+        // work grows semantic debt.
+        let policy = DegradationPolicy::new(0, 0);
+        let control = slice(
+            "control",
+            SemanticServiceClass::ControlRecovery,
+            DeliveryClass::EphemeralInteractive,
+        );
+
+        let plan = policy.plan(&[control]);
+
+        assert!(plan.admitted.is_empty());
+        assert_eq!(plan.degraded.len(), 1);
+        assert_eq!(plan.degraded[0].slice, "control");
+        assert_eq!(
+            plan.degraded[0].disposition,
+            DegradationDisposition::WidenRepair
         );
     }
 
