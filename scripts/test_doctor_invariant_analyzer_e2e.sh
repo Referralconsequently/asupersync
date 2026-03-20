@@ -14,6 +14,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+FIXTURE_TEMPLATE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_workspace_scan_e2e"
+
+if [[ "${1:-}" == "__remote_analyze" ]]; then
+    REMOTE_STAGE_ROOT="${2:?remote stage root required}"
+    REMOTE_TARGET_DIR="${3:?remote target dir required}"
+    mkdir -p "${REMOTE_STAGE_ROOT}"
+    cp -R "${FIXTURE_TEMPLATE_ROOT}/." "${REMOTE_STAGE_ROOT}/"
+    printf '%s\n' \
+        '[package]' \
+        'name = beta' \
+        'version = "0.1.0"' \
+        'edition = "2024"' \
+        > "${REMOTE_STAGE_ROOT}/beta/Cargo.toml"
+    env CARGO_TARGET_DIR="${REMOTE_TARGET_DIR}" \
+        cargo run --quiet --features cli --bin asupersync -- \
+        --format json \
+        --color never \
+        doctor analyze-invariants \
+        --root "${REMOTE_STAGE_ROOT}"
+    exit $?
+fi
+
 OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_invariant_analyzer"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -21,10 +43,10 @@ ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
 RUN1_JSON="${ARTIFACT_DIR}/analysis_run1.json"
 RUN2_JSON="${ARTIFACT_DIR}/analysis_run2.json"
+RUN1_NORM_JSON="${ARTIFACT_DIR}/analysis_run1.normalized.json"
+RUN2_NORM_JSON="${ARTIFACT_DIR}/analysis_run2.normalized.json"
 RUN1_LOG="${ARTIFACT_DIR}/run1.log"
 RUN2_LOG="${ARTIFACT_DIR}/run2.log"
-FIXTURE_TEMPLATE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_workspace_scan_e2e"
-FIXTURE_TEMPLATE_REL="tests/fixtures/doctor_workspace_scan_e2e"
 SUITE_ID="doctor_invariant_analyzer_e2e"
 SCENARIO_ID="E2E-SUITE-DOCTOR-INVARIANT-ANALYZER"
 
@@ -36,6 +58,7 @@ RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-900}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+RCH_REMOTE_TARGET_DIR="${RCH_REMOTE_TARGET_DIR:-}"
 if [[ ! -x "${RCH_BIN}" ]]; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
     exit 1
@@ -55,6 +78,9 @@ echo "  Retry attempts:   ${RCH_RETRY_ATTEMPTS}"
 echo "  Artifact dir:     ${ARTIFACT_DIR}"
 echo "  Fixture template: ${FIXTURE_TEMPLATE_ROOT}"
 echo "  Remote fixture:   /tmp/asupersync-doctor-invariant-analyzer-${TIMESTAMP}-<run>"
+if [[ -n "${RCH_REMOTE_TARGET_DIR}" ]]; then
+    echo "  Remote target:    ${RCH_REMOTE_TARGET_DIR}"
+fi
 echo ""
 
 if [[ ! -f "${FIXTURE_TEMPLATE_ROOT}/Cargo.toml" ]]; then
@@ -96,11 +122,9 @@ run_analysis_call() {
     local fell_back_local=0
     local remote_stage_root="/tmp/asupersync-doctor-invariant-analyzer-${TIMESTAMP}-${run_id}"
     local remote_target_dir="/tmp/rch-doctor-invariant-analyzer-${TIMESTAMP}"
-    local remote_analysis_script="set -euo pipefail; stage_root='${remote_stage_root}'; \
-mkdir -p \"\${stage_root}\"; \
-cp -R '${FIXTURE_TEMPLATE_REL}/.' \"\${stage_root}/\"; \
-printf '%s\\n' '[package]' 'name = beta' 'version = \"0.1.0\"' 'edition = \"2024\"' > \"\${stage_root}/beta/Cargo.toml\"; \
-env CARGO_TARGET_DIR='${remote_target_dir}' cargo run --quiet --features cli --bin asupersync -- --format json --color never doctor analyze-invariants --root \"\${stage_root}\""
+    if [[ -n "${RCH_REMOTE_TARGET_DIR}" ]]; then
+        remote_target_dir="${RCH_REMOTE_TARGET_DIR}"
+    fi
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         # Keep one deterministic target dir per script invocation so run1/run2
@@ -108,7 +132,11 @@ env CARGO_TARGET_DIR='${remote_target_dir}' cargo run --quiet --features cli --b
         attempt_log="${run_log%.log}.attempt${attempt}.log"
         if (
             cd "${PROJECT_ROOT}"
-            timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- bash -lc "${remote_analysis_script}"
+            timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- \
+                bash ./scripts/test_doctor_invariant_analyzer_e2e.sh \
+                __remote_analyze \
+                "${remote_stage_root}" \
+                "${remote_target_dir}"
         ) >"${attempt_log}" 2>&1; then
             rc=0
         else
@@ -165,7 +193,9 @@ fi
 
 if [[ ${EXIT_CODE} -eq 0 ]]; then
     echo ">>> [3/4] Verifying deterministic output..."
-    if diff -u "${RUN1_JSON}" "${RUN2_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
+    jq 'del(.correlation_id) | .rule_traces |= map(del(.correlation_id))' "${RUN1_JSON}" > "${RUN1_NORM_JSON}"
+    jq 'del(.correlation_id) | .rule_traces |= map(del(.correlation_id))' "${RUN2_JSON}" > "${RUN2_NORM_JSON}"
+    if diff -u "${RUN1_NORM_JSON}" "${RUN2_NORM_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
         rm -f "${ARTIFACT_DIR}/determinism.diff"
     else

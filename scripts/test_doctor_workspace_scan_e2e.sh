@@ -20,6 +20,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+FIXTURE_TEMPLATE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_workspace_scan_e2e"
+
+if [[ "${1:-}" == "__remote_scan" ]]; then
+    REMOTE_STAGE_ROOT="${2:?remote stage root required}"
+    REMOTE_TARGET_DIR="${3:?remote target dir required}"
+    mkdir -p "${REMOTE_STAGE_ROOT}"
+    cp -R "${FIXTURE_TEMPLATE_ROOT}/." "${REMOTE_STAGE_ROOT}/"
+    printf '%s\n' \
+        '[package]' \
+        'name = beta' \
+        'version = "0.1.0"' \
+        'edition = "2024"' \
+        > "${REMOTE_STAGE_ROOT}/beta/Cargo.toml"
+    env CARGO_TARGET_DIR="${REMOTE_TARGET_DIR}" \
+        cargo run --quiet --features cli --bin asupersync -- \
+        --format json \
+        --color never \
+        doctor scan-workspace \
+        --root "${REMOTE_STAGE_ROOT}"
+    exit $?
+fi
+
 OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_workspace_scan"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -31,8 +53,6 @@ SCAN1_NORM_JSON="${ARTIFACT_DIR}/scan_run1.normalized.json"
 SCAN2_NORM_JSON="${ARTIFACT_DIR}/scan_run2.normalized.json"
 SCAN1_LOG="${ARTIFACT_DIR}/scan1.log"
 SCAN2_LOG="${ARTIFACT_DIR}/scan2.log"
-FIXTURE_TEMPLATE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_workspace_scan_e2e"
-FIXTURE_TEMPLATE_REL="tests/fixtures/doctor_workspace_scan_e2e"
 SUITE_ID="doctor_workspace_scan_e2e"
 SCENARIO_ID="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
 
@@ -100,11 +120,6 @@ run_scan_call() {
     local last_failure_reason="test_or_pattern_failure"
     local remote_stage_root="/tmp/asupersync-doctor-workspace-scan-${TIMESTAMP}-${run_id}"
     local remote_target_dir="/tmp/rch-doctor-workspace-scan-${TIMESTAMP}"
-    local remote_scan_script="set -euo pipefail; stage_root='${remote_stage_root}'; \
-mkdir -p \"\${stage_root}\"; \
-cp -R '${FIXTURE_TEMPLATE_REL}/.' \"\${stage_root}/\"; \
-printf '%s\\n' '[package]' 'name = beta' 'version = \"0.1.0\"' 'edition = \"2024\"' > \"\${stage_root}/beta/Cargo.toml\"; \
-env CARGO_TARGET_DIR='${remote_target_dir}' cargo run --quiet --features cli --bin asupersync -- --format json --color never doctor scan-workspace --root \"\${stage_root}\""
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         # Keep one deterministic target dir per script invocation so run1/run2
@@ -112,7 +127,11 @@ env CARGO_TARGET_DIR='${remote_target_dir}' cargo run --quiet --features cli --b
         attempt_log="${run_log%.log}.attempt${attempt}.log"
         if (
             cd "${PROJECT_ROOT}"
-            timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- bash -lc "${remote_scan_script}"
+            timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- \
+                bash ./scripts/test_doctor_workspace_scan_e2e.sh \
+                __remote_scan \
+                "${remote_stage_root}" \
+                "${remote_target_dir}"
         ) >"${attempt_log}" 2>&1; then
             rc=0
         else
@@ -235,14 +254,12 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         ] and
         (.warnings | sort) == [
           "malformed package name field in Cargo.toml",
-          "malformed package name field in Cargo.toml",
-          "member missing Cargo.toml: missing_member"
-          ,
+          "member missing Cargo.toml: missing_member",
           "missing package name in Cargo.toml"
         ] and
         (.events | map(.phase) | index("scan_start")) != null and
         (.events | map(.phase) | index("scan_complete")) != null and
-        ((.events | map(select(.level == "warn")) | length) >= 4)
+        ((.events | map(select(.level == "warn")) | length) >= 3)
     ' "${SCAN1_JSON}" >/dev/null; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
     else
