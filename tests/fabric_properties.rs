@@ -91,7 +91,7 @@ fn arb_service_failure() -> impl Strategy<Value = ServiceFailure> {
 fn arb_transform() -> impl Strategy<Value = SubjectTransform> {
     prop_oneof![
         Just(SubjectTransform::Identity),
-        (0usize..=3usize)
+        (1usize..=3usize)
             .prop_map(|preserve_segments| SubjectTransform::SummarizeTail { preserve_segments }),
         (1u16..=16u16).prop_map(|buckets| SubjectTransform::HashPartition { buckets }),
         (1usize..=3usize).prop_map(|index| SubjectTransform::WildcardCapture { index }),

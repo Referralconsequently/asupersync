@@ -780,19 +780,20 @@ pub struct RehearsalFork {
 
 impl RehearsalFork {
     /// Replay a mobility operation in the rehearsal branch.
-    pub fn replay(
-        &self,
-        operation: &MobilityOperation,
-    ) -> Result<RehearsalOutcome, RehearsalError> {
+    ///
+    /// The replay always produces an outcome — mobility failures are captured
+    /// inside `RehearsalOutcome::result` rather than propagated as errors.
+    #[must_use]
+    pub fn replay(&self, operation: &MobilityOperation) -> RehearsalOutcome {
         let result = operation.certify(&self.forked_cell, &self.forked_certificate);
-        Ok(RehearsalOutcome {
+        RehearsalOutcome {
             snapshot_digest: self.snapshot_digest,
             label: self.label.clone(),
             rehearsal_epoch: self.rehearsal_epoch,
             operation: operation.clone(),
             result,
             policy_description: self.alternative_policy.description.clone(),
-        })
+        }
     }
 
     /// Deterministic digest of the fork state.
@@ -958,6 +959,9 @@ fn diff_cells(a: &SubjectCell, b: &SubjectCell) -> Vec<String> {
     }
     if a.epoch != b.epoch {
         diffs.push("epoch".to_owned());
+    }
+    if a.subject_partition != b.subject_partition {
+        diffs.push("subject_partition".to_owned());
     }
     if a.steward_set != b.steward_set {
         diffs.push("steward_set".to_owned());
@@ -1162,6 +1166,9 @@ impl CutLatticeIndex {
     }
 
     /// Index a new cut certificate with its associated metadata.
+    ///
+    /// If an entry with the same certificate digest already exists, the
+    /// existing entry is returned without modification (idempotent).
     pub fn index_cut(
         &mut self,
         certificate: CutCertificate,
@@ -1172,6 +1179,12 @@ impl CutLatticeIndex {
         indexed_at: Time,
     ) -> u64 {
         let entry_id = certificate.certificate_digest();
+
+        // Idempotent: if we already have this certificate, return its ID.
+        if self.entries.iter().any(|e| e.entry_id == entry_id) {
+            return entry_id;
+        }
+
         let cell_id = certificate.cell_id;
         let epoch = certificate.epoch;
 
@@ -1329,15 +1342,18 @@ impl CutLatticeIndex {
                     .cmp(&self.entries[a].certificate.timestamp.as_nanos())
             });
 
-            for (rank, &idx) in cell_indices.iter().enumerate() {
-                let entry = &self.entries[idx];
-                if entry.materialization == MaterializationState::Compacted {
-                    continue;
-                }
+            // Only rank non-compacted entries so that previously compacted
+            // entries don't consume rank slots and cause over-aggressive eviction.
+            let active_indices: Vec<usize> = cell_indices
+                .iter()
+                .copied()
+                .filter(|&idx| self.entries[idx].materialization != MaterializationState::Compacted)
+                .collect();
 
+            for (rank, &idx) in active_indices.iter().enumerate() {
                 let age_nanos = current_time
                     .as_nanos()
-                    .saturating_sub(entry.indexed_at.as_nanos());
+                    .saturating_sub(self.entries[idx].indexed_at.as_nanos());
                 let exceeds_age = age_nanos > self.retention.max_age_nanos;
                 let exceeds_count = rank >= self.retention.max_materialized_per_cell;
 
@@ -2169,12 +2185,10 @@ mod tests {
             .fork_rehearsal(RehearsalPolicy::default(), rehearsal_epoch)
             .expect("fork");
 
-        let outcome = fork
-            .replay(&MobilityOperation::Evacuate {
-                from: NodeId::new("node-a"),
-                to: NodeId::new("node-b"),
-            })
-            .expect("replay");
+        let outcome = fork.replay(&MobilityOperation::Evacuate {
+            from: NodeId::new("node-a"),
+            to: NodeId::new("node-b"),
+        });
 
         assert!(outcome.succeeded());
         let resulting = outcome.resulting_cell().expect("cell");
@@ -2193,12 +2207,10 @@ mod tests {
             .fork_rehearsal(RehearsalPolicy::default(), rehearsal_epoch)
             .expect("fork");
 
-        let outcome = fork
-            .replay(&MobilityOperation::Handoff {
-                from: NodeId::new("node-a"),
-                to: NodeId::new("node-c"),
-            })
-            .expect("replay");
+        let outcome = fork.replay(&MobilityOperation::Handoff {
+            from: NodeId::new("node-a"),
+            to: NodeId::new("node-c"),
+        });
 
         assert!(outcome.succeeded());
         assert_eq!(
@@ -2227,12 +2239,10 @@ mod tests {
             )
             .expect("fork");
 
-        let outcome = fork
-            .replay(&MobilityOperation::Evacuate {
-                from: NodeId::new("node-a"),
-                to: NodeId::new("node-b"),
-            })
-            .expect("replay");
+        let outcome = fork.replay(&MobilityOperation::Evacuate {
+            from: NodeId::new("node-a"),
+            to: NodeId::new("node-b"),
+        });
 
         assert!(!outcome.succeeded());
     }
@@ -2245,7 +2255,7 @@ mod tests {
             .fork_rehearsal(RehearsalPolicy::default(), CellEpoch::new(10, 1))
             .expect("fork");
 
-        let rehearsal_outcome = fork.replay(&snap.original_operation).expect("replay");
+        let rehearsal_outcome = fork.replay(&snap.original_operation);
 
         let comparison =
             RehearsalComparison::compare(&snap, rehearsal_outcome).expect("comparison");
@@ -2276,12 +2286,10 @@ mod tests {
             )
             .expect("fork");
 
-        let rehearsal_outcome = fork
-            .replay(&MobilityOperation::Evacuate {
-                from: NodeId::new("node-a"),
-                to: NodeId::new("node-b"),
-            })
-            .expect("replay");
+        let rehearsal_outcome = fork.replay(&MobilityOperation::Evacuate {
+            from: NodeId::new("node-a"),
+            to: NodeId::new("node-b"),
+        });
 
         let comparison =
             RehearsalComparison::compare(&snap, rehearsal_outcome).expect("comparison");
@@ -2299,13 +2307,13 @@ mod tests {
         let fork = snap
             .fork_rehearsal(RehearsalPolicy::default(), CellEpoch::new(10, 1))
             .expect("fork");
-        let outcome = fork.replay(&snap.original_operation).expect("replay");
+        let outcome = fork.replay(&snap.original_operation);
         let c1 = RehearsalComparison::compare(&snap, outcome).expect("comparison");
 
         let fork2 = snap
             .fork_rehearsal(RehearsalPolicy::default(), CellEpoch::new(10, 1))
             .expect("fork");
-        let outcome2 = fork2.replay(&snap.original_operation).expect("replay");
+        let outcome2 = fork2.replay(&snap.original_operation);
         let c2 = RehearsalComparison::compare(&snap, outcome2).expect("comparison");
 
         assert_eq!(c1.comparison_digest(), c2.comparison_digest());
@@ -2345,7 +2353,7 @@ mod tests {
         assert_eq!(fork.forked_cell.repair_policy.recoverability_target, 5);
         assert_eq!(fork.forked_cell.repair_policy.cold_witnesses, 10);
 
-        let outcome = fork.replay(&snap.original_operation).expect("replay");
+        let outcome = fork.replay(&snap.original_operation);
         assert!(outcome.succeeded());
     }
 
@@ -2390,12 +2398,10 @@ mod tests {
             )
             .expect("fork");
 
-        let outcome = fork
-            .replay(&MobilityOperation::Failover {
-                failed: NodeId::new("node-a"),
-                promote_to: NodeId::new("node-d"),
-            })
-            .expect("replay");
+        let outcome = fork.replay(&MobilityOperation::Failover {
+            failed: NodeId::new("node-a"),
+            promote_to: NodeId::new("node-d"),
+        });
 
         assert!(outcome.succeeded());
         assert_eq!(
@@ -2835,8 +2841,39 @@ mod tests {
 
         assert_eq!(eid1, eid2);
 
-        let entries = idx.query(&CutIndexQuery::default());
-        assert_eq!(entries[0].entry_digest(), entries[1].entry_digest());
+        // Idempotent: second insert is a no-op, only 1 entry exists.
+        assert_eq!(idx.len(), 1);
+    }
+
+    #[test]
+    fn entry_digest_deterministic_across_indexes() {
+        let cell = test_cell();
+        let mut idx1 = CutLatticeIndex::with_defaults();
+        let mut idx2 = CutLatticeIndex::with_defaults();
+
+        let cert1 = make_index_cert(&cell, "node-a", &[1, 2], 100);
+        let cert2 = make_index_cert(&cell, "node-a", &[1, 2], 100);
+
+        idx1.index_cut(
+            cert1,
+            make_regime(1, "v1"),
+            CutAccessClass::Operator,
+            2,
+            0,
+            Time::from_secs(100),
+        );
+        idx2.index_cut(
+            cert2,
+            make_regime(1, "v1"),
+            CutAccessClass::Operator,
+            2,
+            0,
+            Time::from_secs(100),
+        );
+
+        let e1 = &idx1.query(&CutIndexQuery::default())[0];
+        let e2 = &idx2.query(&CutIndexQuery::default())[0];
+        assert_eq!(e1.entry_digest(), e2.entry_digest());
     }
 
     #[test]

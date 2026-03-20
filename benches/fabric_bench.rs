@@ -40,9 +40,9 @@ fn bench_literal_lookup(c: &mut Criterion) {
         b.iter(|| sl.lookup(&subject));
     });
 
-    let wildcard_subject = Subject::new("orders.region99.created");
+    let miss_subject = Subject::new("orders.region999.created");
     group.bench_function("literal_miss", |b| {
-        b.iter(|| sl.lookup(&wildcard_subject));
+        b.iter(|| sl.lookup(&miss_subject));
     });
 
     drop(guards);

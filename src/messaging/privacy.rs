@@ -14,6 +14,8 @@ use std::hash::{Hash, Hasher};
 use thiserror::Error;
 
 const KEY_MATERIAL_BYTES: usize = 32;
+const TWO_POW_21_F64: f64 = 2_097_152.0;
+const TWO_POW_53_F64: f64 = 9_007_199_254_740_992.0;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Exact internal metadata summary before any privacy transform is applied.
@@ -784,13 +786,17 @@ fn laplace_noise(seed: u64, epsilon: Option<f64>) -> i64 {
     }
 
     let scale = 1.0 / epsilon;
-    let noise = -scale * centered.signum() * (1.0 - 2.0 * centered.abs()).ln();
+    let noise = -scale * centered.signum() * 2.0f64.mul_add(-centered.abs(), 1.0).ln();
     noise.round() as i64
 }
 
 fn unit_interval(seed: u64) -> f64 {
     let bits = splitmix64(seed) >> 11;
-    ((bits as f64) + 0.5) / ((1_u64 << 53) as f64)
+    let upper = u32::try_from(bits >> 21)
+        .unwrap_or_else(|_| unreachable!("53-bit splitmix sample should fit in u32 upper limb"));
+    let lower = u32::try_from(bits & ((1_u64 << 21) - 1))
+        .unwrap_or_else(|_| unreachable!("53-bit splitmix sample should fit in u32 lower limb"));
+    (f64::from(upper) * TWO_POW_21_F64 + f64::from(lower) + 0.5) / TWO_POW_53_F64
 }
 
 fn splitmix64(mut state: u64) -> u64 {
@@ -803,7 +809,7 @@ fn splitmix64(mut state: u64) -> u64 {
 
 fn apply_noise(value: u64, delta: i64) -> u64 {
     if delta >= 0 {
-        value.saturating_add(delta as u64)
+        value.saturating_add(delta.unsigned_abs())
     } else {
         value.saturating_sub(delta.unsigned_abs())
     }
