@@ -1215,3 +1215,5 @@
 {"file":"src/messaging/snapshot.rs","lines":9,"batch":401,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"stub placeholder"}
 {"file":"src/messaging/morphism.rs","lines":2126,"batch":401,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/service.rs","lines":2068,"batch":401,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/cut.rs","lines":2485,"batch":402,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/policy.rs","lines":563,"batch":402,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
