@@ -1370,6 +1370,381 @@ impl CutLatticeIndex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Branch-addressable reality
+// ---------------------------------------------------------------------------
+
+/// Type of addressable branch within the hosted boundary.
+///
+/// Each branch type maps to a different operational workflow:
+/// - **Live**: the current production reality
+/// - **Lagged**: a certified cut trailing live by a bounded delay
+/// - **Replayed**: a past incident replayed under alternative policy
+/// - **Canary**: a sandboxed fork for evaluating policy changes on real state
+/// - **Forensic**: a frozen branch for post-hoc "explain this outcome" analysis
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BranchType {
+    /// The current production reality.
+    Live,
+    /// A certified cut trailing live by a bounded delay.
+    Lagged,
+    /// A past incident replayed under alternative policy.
+    Replayed,
+    /// A sandboxed fork for evaluating policy changes on real state.
+    Canary,
+    /// A frozen branch for post-hoc forensic analysis.
+    Forensic,
+}
+
+impl BranchType {
+    /// Whether this branch type allows mutations by default.
+    #[must_use]
+    pub const fn default_mutable(self) -> bool {
+        matches!(self, Self::Live | Self::Canary)
+    }
+
+    /// Whether this branch type is fenced from production side effects.
+    #[must_use]
+    pub const fn is_fenced(self) -> bool {
+        !matches!(self, Self::Live)
+    }
+}
+
+/// Access policy governing what operations are permitted on a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BranchAccessPolicy {
+    /// Read-only observation — no mutations allowed.
+    ReadOnly,
+    /// Sandboxed mutations — writes are captured but never propagate to live.
+    Sandboxed,
+    /// Full read-write access (only valid for Live branches).
+    ReadWrite,
+}
+
+impl BranchAccessPolicy {
+    /// Whether this policy permits writes.
+    #[must_use]
+    pub const fn allows_writes(self) -> bool {
+        matches!(self, Self::Sandboxed | Self::ReadWrite)
+    }
+
+    /// Whether writes under this policy propagate to the live branch.
+    #[must_use]
+    pub const fn propagates_to_live(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+}
+
+/// An addressable branch within the hosted boundary, tied to a certified cut
+/// and a specific policy context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchAddress {
+    /// Unique identifier for this branch (deterministic from type + cut + policy).
+    pub branch_id: u64,
+    /// Type of this branch.
+    pub branch_type: BranchType,
+    /// Cut index entry ID this branch is rooted at (or 0 for Live).
+    pub cut_entry_id: u64,
+    /// Cell this branch addresses.
+    pub cell_id: CellId,
+    /// Policy override applied to this branch (empty string = inherit from cut).
+    pub policy_label: String,
+    /// Access policy governing this branch.
+    pub access_policy: BranchAccessPolicy,
+    /// Human-readable description.
+    pub description: String,
+    /// Logical time when the branch was created.
+    pub created_at: Time,
+}
+
+impl BranchAddress {
+    /// Create a new branch address.
+    fn new(
+        branch_type: BranchType,
+        cut_entry_id: u64,
+        cell_id: CellId,
+        policy_label: impl Into<String>,
+        access_policy: BranchAccessPolicy,
+        description: impl Into<String>,
+        created_at: Time,
+    ) -> Self {
+        let policy_label = policy_label.into();
+        let description = description.into();
+        let branch_id = stable_hash((
+            "branch-address",
+            branch_type,
+            cut_entry_id,
+            cell_id.raw(),
+            &policy_label,
+        ));
+        Self {
+            branch_id,
+            branch_type,
+            cut_entry_id,
+            cell_id,
+            policy_label,
+            access_policy,
+            description,
+            created_at,
+        }
+    }
+
+    /// Deterministic digest of this branch address.
+    #[must_use]
+    pub fn address_digest(&self) -> u64 {
+        self.branch_id
+    }
+}
+
+/// Error type for branch registry operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchError {
+    /// ReadWrite access is only valid for Live branches.
+    ReadWriteOnNonLive {
+        /// The branch type that was requested.
+        branch_type: BranchType,
+    },
+    /// The referenced cut entry was not found in the index.
+    CutNotFound {
+        /// The entry ID that was not found.
+        entry_id: u64,
+    },
+    /// Branch with this ID already exists.
+    DuplicateBranch {
+        /// The duplicate branch ID.
+        branch_id: u64,
+    },
+}
+
+impl std::fmt::Display for BranchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReadWriteOnNonLive { branch_type } => {
+                write!(f, "ReadWrite access not allowed on {branch_type:?} branch")
+            }
+            Self::CutNotFound { entry_id } => {
+                write!(f, "cut entry {entry_id} not found in index")
+            }
+            Self::DuplicateBranch { branch_id } => {
+                write!(f, "branch {branch_id} already exists")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BranchError {}
+
+/// Registry of addressable branches for a cell.
+///
+/// Manages the lifecycle of branches: creation, lookup, and teardown.
+/// Non-operator workflows default to read-only; only Live branches get
+/// ReadWrite access.
+#[derive(Debug, Clone)]
+pub struct BranchRegistry {
+    branches: Vec<BranchAddress>,
+}
+
+impl BranchRegistry {
+    /// Create a new empty branch registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            branches: Vec::new(),
+        }
+    }
+
+    /// Create the canonical Live branch for a cell.
+    pub fn create_live(
+        &mut self,
+        cell_id: CellId,
+        created_at: Time,
+    ) -> Result<&BranchAddress, BranchError> {
+        let branch = BranchAddress::new(
+            BranchType::Live,
+            0,
+            cell_id,
+            "",
+            BranchAccessPolicy::ReadWrite,
+            "live production branch",
+            created_at,
+        );
+        self.insert(branch)
+    }
+
+    /// Create a lagged branch tracking a certified cut.
+    pub fn create_lagged(
+        &mut self,
+        cut_entry_id: u64,
+        cell_id: CellId,
+        description: impl Into<String>,
+        created_at: Time,
+        index: &CutLatticeIndex,
+    ) -> Result<&BranchAddress, BranchError> {
+        self.require_cut_exists(cut_entry_id, index)?;
+        let branch = BranchAddress::new(
+            BranchType::Lagged,
+            cut_entry_id,
+            cell_id,
+            "",
+            BranchAccessPolicy::ReadOnly,
+            description,
+            created_at,
+        );
+        self.insert(branch)
+    }
+
+    /// Create a replayed branch from a certified cut under alternative policy.
+    pub fn create_replayed(
+        &mut self,
+        cut_entry_id: u64,
+        cell_id: CellId,
+        policy_label: impl Into<String>,
+        description: impl Into<String>,
+        created_at: Time,
+        index: &CutLatticeIndex,
+    ) -> Result<&BranchAddress, BranchError> {
+        self.require_cut_exists(cut_entry_id, index)?;
+        let branch = BranchAddress::new(
+            BranchType::Replayed,
+            cut_entry_id,
+            cell_id,
+            policy_label,
+            BranchAccessPolicy::ReadOnly,
+            description,
+            created_at,
+        );
+        self.insert(branch)
+    }
+
+    /// Create a canary branch — sandboxed mutations fenced from production.
+    pub fn create_canary(
+        &mut self,
+        cut_entry_id: u64,
+        cell_id: CellId,
+        policy_label: impl Into<String>,
+        description: impl Into<String>,
+        created_at: Time,
+        index: &CutLatticeIndex,
+    ) -> Result<&BranchAddress, BranchError> {
+        self.require_cut_exists(cut_entry_id, index)?;
+        let branch = BranchAddress::new(
+            BranchType::Canary,
+            cut_entry_id,
+            cell_id,
+            policy_label,
+            BranchAccessPolicy::Sandboxed,
+            description,
+            created_at,
+        );
+        self.insert(branch)
+    }
+
+    /// Create a forensic branch — frozen, read-only, for post-hoc analysis.
+    pub fn create_forensic(
+        &mut self,
+        cut_entry_id: u64,
+        cell_id: CellId,
+        description: impl Into<String>,
+        created_at: Time,
+        index: &CutLatticeIndex,
+    ) -> Result<&BranchAddress, BranchError> {
+        self.require_cut_exists(cut_entry_id, index)?;
+        let branch = BranchAddress::new(
+            BranchType::Forensic,
+            cut_entry_id,
+            cell_id,
+            "",
+            BranchAccessPolicy::ReadOnly,
+            description,
+            created_at,
+        );
+        self.insert(branch)
+    }
+
+    /// Look up a branch by ID.
+    #[must_use]
+    pub fn get(&self, branch_id: u64) -> Option<&BranchAddress> {
+        self.branches.iter().find(|b| b.branch_id == branch_id)
+    }
+
+    /// Look up the Live branch for a cell.
+    #[must_use]
+    pub fn live_for_cell(&self, cell_id: CellId) -> Option<&BranchAddress> {
+        self.branches
+            .iter()
+            .find(|b| b.branch_type == BranchType::Live && b.cell_id == cell_id)
+    }
+
+    /// List all branches for a cell.
+    #[must_use]
+    pub fn branches_for_cell(&self, cell_id: CellId) -> Vec<&BranchAddress> {
+        self.branches
+            .iter()
+            .filter(|b| b.cell_id == cell_id)
+            .collect()
+    }
+
+    /// List all branches of a given type.
+    #[must_use]
+    pub fn branches_of_type(&self, branch_type: BranchType) -> Vec<&BranchAddress> {
+        self.branches
+            .iter()
+            .filter(|b| b.branch_type == branch_type)
+            .collect()
+    }
+
+    /// Total number of registered branches.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.branches.len()
+    }
+
+    /// Whether the registry is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.branches.is_empty()
+    }
+
+    /// Remove a branch by ID. Returns true if found and removed.
+    pub fn remove(&mut self, branch_id: u64) -> bool {
+        let before = self.branches.len();
+        self.branches.retain(|b| b.branch_id != branch_id);
+        self.branches.len() < before
+    }
+
+    fn require_cut_exists(
+        &self,
+        entry_id: u64,
+        index: &CutLatticeIndex,
+    ) -> Result<(), BranchError> {
+        if index.entries.iter().any(|e| e.entry_id == entry_id) {
+            Ok(())
+        } else {
+            Err(BranchError::CutNotFound { entry_id })
+        }
+    }
+
+    fn insert(&mut self, branch: BranchAddress) -> Result<&BranchAddress, BranchError> {
+        if self
+            .branches
+            .iter()
+            .any(|b| b.branch_id == branch.branch_id)
+        {
+            return Err(BranchError::DuplicateBranch {
+                branch_id: branch.branch_id,
+            });
+        }
+        self.branches.push(branch);
+        Ok(self.branches.last().expect("just pushed"))
+    }
+}
+
+impl Default for BranchRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2481,5 +2856,254 @@ mod tests {
             .is_none()
         );
         assert!(idx.latest_for_policy("any").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Branch-addressable reality tests
+    // -----------------------------------------------------------------------
+
+    fn make_index_with_entry() -> (SubjectCell, CutLatticeIndex, u64) {
+        let cell = test_cell();
+        let mut idx = CutLatticeIndex::with_defaults();
+        let cert = make_index_cert(&cell, "node-a", &[1, 2], 100);
+        let eid = idx.index_cut(
+            cert,
+            make_regime(1, "v1"),
+            CutAccessClass::Operator,
+            2,
+            0,
+            Time::from_secs(100),
+        );
+        (cell, idx, eid)
+    }
+
+    #[test]
+    fn branch_type_default_mutability() {
+        assert!(BranchType::Live.default_mutable());
+        assert!(BranchType::Canary.default_mutable());
+        assert!(!BranchType::Lagged.default_mutable());
+        assert!(!BranchType::Replayed.default_mutable());
+        assert!(!BranchType::Forensic.default_mutable());
+    }
+
+    #[test]
+    fn branch_type_fencing() {
+        assert!(!BranchType::Live.is_fenced());
+        assert!(BranchType::Lagged.is_fenced());
+        assert!(BranchType::Replayed.is_fenced());
+        assert!(BranchType::Canary.is_fenced());
+        assert!(BranchType::Forensic.is_fenced());
+    }
+
+    #[test]
+    fn access_policy_write_semantics() {
+        assert!(!BranchAccessPolicy::ReadOnly.allows_writes());
+        assert!(BranchAccessPolicy::Sandboxed.allows_writes());
+        assert!(BranchAccessPolicy::ReadWrite.allows_writes());
+
+        assert!(!BranchAccessPolicy::ReadOnly.propagates_to_live());
+        assert!(!BranchAccessPolicy::Sandboxed.propagates_to_live());
+        assert!(BranchAccessPolicy::ReadWrite.propagates_to_live());
+    }
+
+    #[test]
+    fn create_live_branch() {
+        let cell = test_cell();
+        let mut reg = BranchRegistry::new();
+        let branch = reg
+            .create_live(cell.cell_id, Time::from_secs(1))
+            .expect("live");
+        assert_eq!(branch.branch_type, BranchType::Live);
+        assert_eq!(branch.access_policy, BranchAccessPolicy::ReadWrite);
+        assert_eq!(branch.cell_id, cell.cell_id);
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn create_lagged_branch() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        let branch = reg
+            .create_lagged(eid, cell.cell_id, "trailing live", Time::from_secs(2), &idx)
+            .expect("lagged");
+        assert_eq!(branch.branch_type, BranchType::Lagged);
+        assert_eq!(branch.access_policy, BranchAccessPolicy::ReadOnly);
+        assert_eq!(branch.cut_entry_id, eid);
+    }
+
+    #[test]
+    fn create_replayed_branch() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        let branch = reg
+            .create_replayed(
+                eid,
+                cell.cell_id,
+                "v2-strict",
+                "replay under strict policy",
+                Time::from_secs(3),
+                &idx,
+            )
+            .expect("replayed");
+        assert_eq!(branch.branch_type, BranchType::Replayed);
+        assert_eq!(branch.policy_label, "v2-strict");
+        assert_eq!(branch.access_policy, BranchAccessPolicy::ReadOnly);
+    }
+
+    #[test]
+    fn create_canary_branch_is_sandboxed() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        let branch = reg
+            .create_canary(
+                eid,
+                cell.cell_id,
+                "candidate-policy",
+                "canary evaluation",
+                Time::from_secs(4),
+                &idx,
+            )
+            .expect("canary");
+        assert_eq!(branch.branch_type, BranchType::Canary);
+        assert_eq!(branch.access_policy, BranchAccessPolicy::Sandboxed);
+        assert!(branch.access_policy.allows_writes());
+        assert!(!branch.access_policy.propagates_to_live());
+    }
+
+    #[test]
+    fn create_forensic_branch() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        let branch = reg
+            .create_forensic(
+                eid,
+                cell.cell_id,
+                "explain ticket-1234",
+                Time::from_secs(5),
+                &idx,
+            )
+            .expect("forensic");
+        assert_eq!(branch.branch_type, BranchType::Forensic);
+        assert_eq!(branch.access_policy, BranchAccessPolicy::ReadOnly);
+    }
+
+    #[test]
+    fn create_branch_rejects_missing_cut() {
+        let (cell, idx, _eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        let err = reg
+            .create_lagged(0xdead, cell.cell_id, "orphan", Time::from_secs(6), &idx)
+            .expect_err("should reject missing cut");
+        assert!(matches!(err, BranchError::CutNotFound { .. }));
+    }
+
+    #[test]
+    fn create_duplicate_branch_rejected() {
+        let cell = test_cell();
+        let mut reg = BranchRegistry::new();
+        reg.create_live(cell.cell_id, Time::from_secs(1))
+            .expect("first");
+        let err = reg
+            .create_live(cell.cell_id, Time::from_secs(2))
+            .expect_err("duplicate");
+        assert!(matches!(err, BranchError::DuplicateBranch { .. }));
+    }
+
+    #[test]
+    fn lookup_by_id() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        let branch = reg
+            .create_forensic(eid, cell.cell_id, "lookup test", Time::from_secs(7), &idx)
+            .expect("forensic");
+        let bid = branch.branch_id;
+
+        assert!(reg.get(bid).is_some());
+        assert!(reg.get(0xffff).is_none());
+    }
+
+    #[test]
+    fn live_for_cell() {
+        let cell = test_cell();
+        let mut reg = BranchRegistry::new();
+        assert!(reg.live_for_cell(cell.cell_id).is_none());
+
+        reg.create_live(cell.cell_id, Time::from_secs(1))
+            .expect("live");
+        assert!(reg.live_for_cell(cell.cell_id).is_some());
+    }
+
+    #[test]
+    fn branches_for_cell_lists_all() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        reg.create_live(cell.cell_id, Time::from_secs(1))
+            .expect("live");
+        reg.create_forensic(eid, cell.cell_id, "forensic", Time::from_secs(2), &idx)
+            .expect("forensic");
+        reg.create_canary(
+            eid,
+            cell.cell_id,
+            "canary-pol",
+            "canary",
+            Time::from_secs(3),
+            &idx,
+        )
+        .expect("canary");
+
+        assert_eq!(reg.branches_for_cell(cell.cell_id).len(), 3);
+    }
+
+    #[test]
+    fn branches_of_type() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg = BranchRegistry::new();
+        reg.create_live(cell.cell_id, Time::from_secs(1))
+            .expect("live");
+        reg.create_forensic(eid, cell.cell_id, "f1", Time::from_secs(2), &idx)
+            .expect("f1");
+
+        assert_eq!(reg.branches_of_type(BranchType::Live).len(), 1);
+        assert_eq!(reg.branches_of_type(BranchType::Forensic).len(), 1);
+        assert_eq!(reg.branches_of_type(BranchType::Canary).len(), 0);
+    }
+
+    #[test]
+    fn remove_branch() {
+        let cell = test_cell();
+        let mut reg = BranchRegistry::new();
+        let branch = reg
+            .create_live(cell.cell_id, Time::from_secs(1))
+            .expect("live");
+        let bid = branch.branch_id;
+
+        assert!(reg.remove(bid));
+        assert!(reg.is_empty());
+        assert!(!reg.remove(bid)); // idempotent
+    }
+
+    #[test]
+    fn branch_address_digest_is_deterministic() {
+        let (cell, idx, eid) = make_index_with_entry();
+        let mut reg1 = BranchRegistry::new();
+        let mut reg2 = BranchRegistry::new();
+
+        let b1 = reg1
+            .create_canary(eid, cell.cell_id, "pol", "test", Time::from_secs(1), &idx)
+            .expect("b1");
+        let b2 = reg2
+            .create_canary(eid, cell.cell_id, "pol", "test", Time::from_secs(2), &idx)
+            .expect("b2");
+
+        // Same branch type + cut + cell + policy → same address digest
+        // (created_at differs but doesn't affect the address identity).
+        assert_eq!(b1.address_digest(), b2.address_digest());
+    }
+
+    #[test]
+    fn empty_registry() {
+        let reg = BranchRegistry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
     }
 }
