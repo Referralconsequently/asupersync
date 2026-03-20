@@ -1580,7 +1580,7 @@ impl BranchRegistry {
         created_at: Time,
         index: &CutLatticeIndex,
     ) -> Result<&BranchAddress, BranchError> {
-        self.require_cut_exists(cut_entry_id, index)?;
+        Self::require_cut_exists(cut_entry_id, index)?;
         let branch = BranchAddress::new(
             BranchType::Lagged,
             cut_entry_id,
@@ -1603,7 +1603,7 @@ impl BranchRegistry {
         created_at: Time,
         index: &CutLatticeIndex,
     ) -> Result<&BranchAddress, BranchError> {
-        self.require_cut_exists(cut_entry_id, index)?;
+        Self::require_cut_exists(cut_entry_id, index)?;
         let branch = BranchAddress::new(
             BranchType::Replayed,
             cut_entry_id,
@@ -1626,7 +1626,7 @@ impl BranchRegistry {
         created_at: Time,
         index: &CutLatticeIndex,
     ) -> Result<&BranchAddress, BranchError> {
-        self.require_cut_exists(cut_entry_id, index)?;
+        Self::require_cut_exists(cut_entry_id, index)?;
         let branch = BranchAddress::new(
             BranchType::Canary,
             cut_entry_id,
@@ -1648,7 +1648,7 @@ impl BranchRegistry {
         created_at: Time,
         index: &CutLatticeIndex,
     ) -> Result<&BranchAddress, BranchError> {
-        self.require_cut_exists(cut_entry_id, index)?;
+        Self::require_cut_exists(cut_entry_id, index)?;
         let branch = BranchAddress::new(
             BranchType::Forensic,
             cut_entry_id,
@@ -1712,11 +1712,7 @@ impl BranchRegistry {
         self.branches.len() < before
     }
 
-    fn require_cut_exists(
-        &self,
-        entry_id: u64,
-        index: &CutLatticeIndex,
-    ) -> Result<(), BranchError> {
+    fn require_cut_exists(entry_id: u64, index: &CutLatticeIndex) -> Result<(), BranchError> {
         if index.entries.iter().any(|e| e.entry_id == entry_id) {
             Ok(())
         } else {
