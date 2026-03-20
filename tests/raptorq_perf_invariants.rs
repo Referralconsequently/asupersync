@@ -3025,6 +3025,24 @@ fn e5_profile_pack_doc_explains_command_bundle_split() {
     }
 }
 
+/// Validate the baseline/profile doc explains that override runs fail closed
+/// instead of claiming canonical profile-selection provenance.
+#[test]
+fn e5_profile_pack_doc_explains_override_truthfulness_rule() {
+    for required in [
+        "manual-env-override-unbacked",
+        "runtime_override_not_canonical_profile_selection",
+        "manual_env_override_unbacked",
+        "replay:rq-e-gf256-profile-pack-env-override-v1",
+        "override-specific `command_bundle` placeholder",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline profile doc must explain override truthfulness token {required}"
+        );
+    }
+}
+
 /// Validate the baseline/profile doc makes the SIMD ablation decision
 /// chronology explicit instead of relying on date ordering alone.
 #[test]

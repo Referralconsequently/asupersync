@@ -152,6 +152,7 @@ Probe log schema:
 - `manifest_schema_version`, `profile_schema_version`
 - `scenario_id`, `seed`
 - `kernel`, `mode`, `profile_pack`, `profile_fallback_reason`
+- `rejected_profile_packs` lists every non-selected pack id for the active profile selection
 - `profile_pack_env_requested`
 - `mul_min_total_env_override`, `mul_max_total_env_override`
 - `addmul_min_total_env_override`, `addmul_max_total_env_override`, `addmul_min_lane_env_override`
@@ -168,6 +169,15 @@ Probe log schema:
 - `selected_addmul_delta_vs_baseline_pct`
 - `selected_targeted_addmul_average_delta_pct`
 - `artifact_path`, `repro_command`
+
+Override truthfulness rule:
+
+- if forced mode or numeric `ASUPERSYNC_GF256_*` window overrides mutate the live contract, the manifest/probe surface must fail closed instead of pretending the run still matches the catalog default
+- override runs therefore scrub canonical selection provenance to `selected_tuning_candidate_id = manual-env-override-unbacked`,
+  `decision_role = runtime_override_not_canonical_profile_selection`,
+  `decision_artifact_id = manual_env_override_unbacked`,
+  `replay_pointer = replay:rq-e-gf256-profile-pack-env-override-v1`
+  and an override-specific `command_bundle` placeholder that tells operators to replay from the emitted override fields
 
 Coverage intent:
 

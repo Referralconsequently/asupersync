@@ -417,7 +417,7 @@ pub struct DualKernelPolicySnapshot {
     pub rejected_tuning_candidate_ids: &'static [&'static str],
     /// Fallback reason when requested profile is unavailable on this host.
     pub fallback_reason: Option<Gf256ProfileFallbackReason>,
-    /// Deterministically rejected profile-pack candidates for this host class.
+    /// Deterministically rejected profile-pack candidates for the active selection.
     pub rejected_candidates: &'static [Gf256ProfilePackId],
     /// Stable replay pointer for policy-tuning provenance and forensics.
     pub replay_pointer: &'static str,
@@ -452,8 +452,8 @@ pub struct Gf256ProfilePackManifestSnapshot {
     pub schema_version: &'static str,
     /// Active runtime dual-kernel policy selection.
     pub active_policy: DualKernelPolicySnapshot,
-    /// Active profile-pack metadata entry aligned with `active_policy.profile_pack`.
-    pub active_profile_metadata: &'static Gf256ProfilePackMetadata,
+    /// Active effective profile-pack metadata aligned with `active_policy`.
+    pub active_profile_metadata: Gf256ProfilePackMetadata,
     /// Active selected tuning candidate metadata, if catalog entry is available.
     pub active_selected_tuning_candidate: Option<&'static Gf256TuningCandidateMetadata>,
     /// Full deterministic profile-pack catalog used by runtime policy.
@@ -640,6 +640,19 @@ impl DualKernelOverrideMask {
     pub const fn max_lane_ratio_env_override(self) -> bool {
         (self.0 & Self::MAX_LANE_RATIO_ENV_OVERRIDE) != 0
     }
+
+    /// Whether any numeric dual-policy env override changed the tuned window contract.
+    #[must_use]
+    pub const fn numeric_window_env_override(self) -> bool {
+        (self.0
+            & (Self::MUL_MIN_TOTAL_ENV_OVERRIDE
+                | Self::MUL_MAX_TOTAL_ENV_OVERRIDE
+                | Self::ADDMUL_MIN_TOTAL_ENV_OVERRIDE
+                | Self::ADDMUL_MAX_TOTAL_ENV_OVERRIDE
+                | Self::ADDMUL_MIN_LANE_ENV_OVERRIDE
+                | Self::MAX_LANE_RATIO_ENV_OVERRIDE))
+            != 0
+    }
 }
 
 impl Gf256ProfileFallbackReason {
@@ -739,6 +752,13 @@ const X86_SELECTED_MUL_DELTA_VS_BASELINE_PCT: &str = "0.3048";
 const X86_SELECTED_ADDMUL_DELTA_VS_BASELINE_PCT: &str = "-3.3759";
 const X86_SELECTED_TARGETED_ADDMUL_AVERAGE_DELTA_PCT: &str = "-8.9924";
 const NA_PROFILE_DELTA_PCT: &str = "n/a";
+const MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE: &str = "manual-env-override-unbacked";
+const MANUAL_OVERRIDE_DECISION_ARTIFACT_ID: &str = "manual_env_override_unbacked";
+const MANUAL_OVERRIDE_DECISION_ROLE: &str = "runtime_override_not_canonical_profile_selection";
+const MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY: &str = "runtime override changed the effective dual-policy contract; canonical selected candidate suppressed";
+const MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY: &str = "override run is not a catalog-backed offline selection result; use emitted override fields to reproduce";
+const MANUAL_OVERRIDE_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-env-override-v1";
+const MANUAL_OVERRIDE_COMMAND_BUNDLE: &str = "rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives";
 
 const SCALAR_REJECTED_TUNING_CANDIDATES: &[&str] = &["scalar-t8-u1-pf0-fused-off-v1"];
 const X86_REJECTED_TUNING_CANDIDATES: &[&str] = &[
@@ -750,14 +770,18 @@ const AARCH64_REJECTED_TUNING_CANDIDATES: &[&str] = &[
     "aarch64-neon-t32-u4-pf32-split-balanced-v1",
 ];
 
-const REJECTED_PROFILE_GENERIC_SCALAR: &[Gf256ProfilePackId] = &[
+const REJECTED_PROFILE_SELECTED_SCALAR: &[Gf256ProfilePackId] = &[
     Gf256ProfilePackId::X86Avx2BalancedV1,
     Gf256ProfilePackId::Aarch64NeonBalancedV1,
 ];
-const REJECTED_PROFILE_X86_AVX2: &[Gf256ProfilePackId] =
-    &[Gf256ProfilePackId::Aarch64NeonBalancedV1];
-const REJECTED_PROFILE_AARCH64_NEON: &[Gf256ProfilePackId] =
-    &[Gf256ProfilePackId::X86Avx2BalancedV1];
+const REJECTED_PROFILE_SELECTED_X86_AVX2: &[Gf256ProfilePackId] = &[
+    Gf256ProfilePackId::ScalarConservativeV1,
+    Gf256ProfilePackId::Aarch64NeonBalancedV1,
+];
+const REJECTED_PROFILE_SELECTED_AARCH64_NEON: &[Gf256ProfilePackId] = &[
+    Gf256ProfilePackId::ScalarConservativeV1,
+    Gf256ProfilePackId::X86Avx2BalancedV1,
+];
 
 const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
     Gf256ProfilePackMetadata {
@@ -1049,13 +1073,13 @@ fn default_profile_pack_for_arch(class: Gf256ArchitectureClass) -> Gf256ProfileP
     }
 }
 
-const fn rejected_profile_candidates_for_arch(
-    class: Gf256ArchitectureClass,
+const fn rejected_profile_candidates_for_selection(
+    profile_pack: Gf256ProfilePackId,
 ) -> &'static [Gf256ProfilePackId] {
-    match class {
-        Gf256ArchitectureClass::GenericScalar => REJECTED_PROFILE_GENERIC_SCALAR,
-        Gf256ArchitectureClass::X86Avx2 => REJECTED_PROFILE_X86_AVX2,
-        Gf256ArchitectureClass::Aarch64Neon => REJECTED_PROFILE_AARCH64_NEON,
+    match profile_pack {
+        Gf256ProfilePackId::ScalarConservativeV1 => REJECTED_PROFILE_SELECTED_SCALAR,
+        Gf256ProfilePackId::X86Avx2BalancedV1 => REJECTED_PROFILE_SELECTED_X86_AVX2,
+        Gf256ProfilePackId::Aarch64NeonBalancedV1 => REJECTED_PROFILE_SELECTED_AARCH64_NEON,
     }
 }
 
@@ -1073,8 +1097,6 @@ fn select_profile_pack(
     let architecture_class = architecture_class_for_kernel(kernel);
     let default_pack = default_profile_pack_for_arch(architecture_class);
     let mut fallback_reason = None;
-    let rejected_candidates = rejected_profile_candidates_for_arch(architecture_class);
-
     let profile_pack = match requested.unwrap_or(ProfilePackRequest::Auto) {
         ProfilePackRequest::Auto => default_pack,
         ProfilePackRequest::ScalarConservativeV1 => Gf256ProfilePackId::ScalarConservativeV1,
@@ -1095,6 +1117,7 @@ fn select_profile_pack(
             }
         }
     };
+    let rejected_candidates = rejected_profile_candidates_for_selection(profile_pack);
 
     ProfilePackSelection {
         profile_pack,
@@ -1178,11 +1201,55 @@ fn detect_dual_policy() -> DualKernelPolicy {
         policy.max_lane_ratio = v.max(1);
     }
 
+    apply_effective_selection_contract(&mut policy);
+
     policy
 }
 
 fn parse_usize_env(key: &str) -> Option<usize> {
     std::env::var(key).ok()?.parse::<usize>().ok()
+}
+
+fn policy_uses_canonical_selection_contract(policy: &DualKernelPolicy) -> bool {
+    matches!(policy.mode, DualKernelOverride::Auto)
+        && !policy.override_mask.numeric_window_env_override()
+}
+
+fn apply_effective_selection_contract(policy: &mut DualKernelPolicy) {
+    if policy_uses_canonical_selection_contract(policy) {
+        return;
+    }
+
+    policy.selected_tuning_candidate_id = MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE;
+    policy.rejected_tuning_candidate_ids = &[];
+    policy.replay_pointer = MANUAL_OVERRIDE_REPLAY_POINTER;
+    policy.command_bundle = MANUAL_OVERRIDE_COMMAND_BUNDLE;
+}
+
+fn effective_profile_pack_metadata(policy: &DualKernelPolicy) -> Gf256ProfilePackMetadata {
+    let mut metadata = *profile_pack_metadata(policy.profile_pack);
+    metadata.selected_tuning_candidate_id = policy.selected_tuning_candidate_id;
+    metadata.rejected_tuning_candidate_ids = policy.rejected_tuning_candidate_ids;
+    metadata.mul_min_total = policy.mul_min_total;
+    metadata.mul_max_total = policy.mul_max_total;
+    metadata.addmul_min_total = policy.addmul_min_total;
+    metadata.addmul_max_total = policy.addmul_max_total;
+    metadata.addmul_min_lane = policy.addmul_min_lane;
+    metadata.max_lane_ratio = policy.max_lane_ratio;
+    metadata.replay_pointer = policy.replay_pointer;
+    metadata.command_bundle = policy.command_bundle;
+
+    if !policy_uses_canonical_selection_contract(policy) {
+        metadata.decision_artifact_id = MANUAL_OVERRIDE_DECISION_ARTIFACT_ID;
+        metadata.decision_role = MANUAL_OVERRIDE_DECISION_ROLE;
+        metadata.selected_candidate_summary = MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY;
+        metadata.rejected_candidate_set_summary = MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY;
+        metadata.selected_mul_delta_vs_baseline_pct = NA_PROFILE_DELTA_PCT;
+        metadata.selected_addmul_delta_vs_baseline_pct = NA_PROFILE_DELTA_PCT;
+        metadata.selected_targeted_addmul_average_delta_pct = NA_PROFILE_DELTA_PCT;
+    }
+
+    metadata
 }
 
 const fn to_public_mode(mode: DualKernelOverride) -> DualKernelMode {
@@ -1346,7 +1413,7 @@ pub fn gf256_profile_pack_manifest_snapshot() -> Gf256ProfilePackManifestSnapsho
     let active_policy = dual_kernel_policy_snapshot();
     Gf256ProfilePackManifestSnapshot {
         schema_version: GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION,
-        active_profile_metadata: profile_pack_metadata(active_policy.profile_pack),
+        active_profile_metadata: effective_profile_pack_metadata(dual_policy()),
         active_selected_tuning_candidate: tuning_candidate_metadata(
             active_policy.selected_tuning_candidate_id,
         ),
@@ -3853,7 +3920,7 @@ mod tests {
             selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
             rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
             fallback_reason: None,
-            rejected_candidates: REJECTED_PROFILE_X86_AVX2,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
             replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
             command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelOverride::Auto,
@@ -3894,7 +3961,7 @@ mod tests {
             selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
             rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
             fallback_reason: None,
-            rejected_candidates: REJECTED_PROFILE_X86_AVX2,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
             replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
             command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelOverride::Auto,
@@ -4018,7 +4085,7 @@ mod tests {
             selected_tuning_candidate_id: metadata.selected_tuning_candidate_id,
             rejected_tuning_candidate_ids: metadata.rejected_tuning_candidate_ids,
             fallback_reason: None,
-            rejected_candidates: REJECTED_PROFILE_GENERIC_SCALAR,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_SCALAR,
             replay_pointer: metadata.replay_pointer,
             command_bundle: metadata.command_bundle,
             mode: DualKernelOverride::Auto,
@@ -4378,11 +4445,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_pack_selection_exposes_arch_rejected_candidates() {
+    fn profile_pack_selection_exposes_non_selected_profile_candidates() {
         let selected = select_profile_pack(Gf256Kernel::Scalar, None);
         assert_eq!(
             selected.rejected_candidates,
-            REJECTED_PROFILE_GENERIC_SCALAR
+            REJECTED_PROFILE_SELECTED_SCALAR
         );
     }
 
@@ -4406,7 +4473,111 @@ mod tests {
         );
         assert_eq!(
             selected.rejected_candidates,
-            REJECTED_PROFILE_GENERIC_SCALAR
+            REJECTED_PROFILE_SELECTED_SCALAR
+        );
+    }
+
+    #[test]
+    fn manual_numeric_override_scrubs_canonical_selection_metadata() {
+        let mut policy = DualKernelPolicy {
+            profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
+            architecture_class: Gf256ArchitectureClass::X86Avx2,
+            tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
+            selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
+            rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
+            fallback_reason: None,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
+            replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
+            command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+            mode: DualKernelOverride::Auto,
+            override_mask: DualKernelOverrideMask::empty(),
+            mul_min_total: usize::MAX,
+            mul_max_total: 0,
+            addmul_min_total: 24 * 1024,
+            addmul_max_total: 32 * 1024,
+            addmul_min_lane: 8 * 1024,
+            max_lane_ratio: 8,
+        };
+        policy.override_mask.set_addmul_min_total_env_override();
+        policy.addmul_min_total = 16 * 1024;
+
+        apply_effective_selection_contract(&mut policy);
+        let metadata = effective_profile_pack_metadata(&policy);
+
+        assert_eq!(
+            policy.selected_tuning_candidate_id,
+            MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+        );
+        assert!(policy.rejected_tuning_candidate_ids.is_empty());
+        assert_eq!(policy.replay_pointer, MANUAL_OVERRIDE_REPLAY_POINTER);
+        assert_eq!(policy.command_bundle, MANUAL_OVERRIDE_COMMAND_BUNDLE);
+        assert_eq!(
+            metadata.decision_artifact_id,
+            MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+        );
+        assert_eq!(metadata.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
+        assert_eq!(metadata.addmul_min_total, 16 * 1024);
+        assert_eq!(
+            metadata.selected_mul_delta_vs_baseline_pct,
+            NA_PROFILE_DELTA_PCT
+        );
+        assert_eq!(
+            tuning_candidate_metadata(policy.selected_tuning_candidate_id),
+            None
+        );
+    }
+
+    #[test]
+    fn forced_mode_scrubs_canonical_selection_metadata() {
+        let mut policy = DualKernelPolicy {
+            profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
+            architecture_class: Gf256ArchitectureClass::X86Avx2,
+            tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
+            selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
+            rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
+            fallback_reason: None,
+            rejected_candidates: REJECTED_PROFILE_SELECTED_X86_AVX2,
+            replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
+            command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+            mode: DualKernelOverride::ForceSequential,
+            override_mask: DualKernelOverrideMask::empty(),
+            mul_min_total: usize::MAX,
+            mul_max_total: 0,
+            addmul_min_total: 24 * 1024,
+            addmul_max_total: 32 * 1024,
+            addmul_min_lane: 8 * 1024,
+            max_lane_ratio: 8,
+        };
+
+        apply_effective_selection_contract(&mut policy);
+        let metadata = effective_profile_pack_metadata(&policy);
+
+        assert_eq!(
+            policy.selected_tuning_candidate_id,
+            MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+        );
+        assert_eq!(metadata.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    fn forced_scalar_profile_selection_reports_non_selected_simd_packs() {
+        let selected = select_profile_pack(
+            Gf256Kernel::X86Avx2,
+            Some(ProfilePackRequest::ScalarConservativeV1),
+        );
+        assert_eq!(
+            selected.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(selected.architecture_class, Gf256ArchitectureClass::X86Avx2);
+        assert_eq!(selected.fallback_reason, None);
+        assert_eq!(
+            selected.rejected_candidates,
+            REJECTED_PROFILE_SELECTED_SCALAR
         );
     }
 
@@ -4455,6 +4626,7 @@ mod tests {
     fn profile_pack_manifest_snapshot_is_deterministic_and_self_consistent() {
         let manifest = gf256_profile_pack_manifest_snapshot();
         let policy = manifest.active_policy;
+        let canonical_selection = policy_uses_canonical_selection_contract(dual_policy());
         assert_eq!(
             manifest.schema_version,
             GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION
@@ -4466,10 +4638,6 @@ mod tests {
         assert_eq!(
             manifest.active_profile_metadata.profile_pack,
             policy.profile_pack
-        );
-        assert_eq!(
-            manifest.active_profile_metadata.architecture_class,
-            policy.architecture_class
         );
         assert_eq!(
             manifest
@@ -4493,11 +4661,32 @@ mod tests {
                 .iter()
                 .any(|metadata| metadata.profile_pack == policy.profile_pack)
         );
-        let selected = manifest
-            .active_selected_tuning_candidate
-            .expect("selected tuning candidate must exist in deterministic catalog");
-        assert_eq!(selected.candidate_id, policy.selected_tuning_candidate_id);
-        assert_eq!(selected.profile_pack, policy.profile_pack);
+        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        assert_eq!(
+            manifest.active_profile_metadata.architecture_class,
+            catalog_profile.architecture_class
+        );
+        if canonical_selection {
+            let selected = manifest
+                .active_selected_tuning_candidate
+                .expect("selected tuning candidate must exist in deterministic catalog");
+            assert_eq!(selected.candidate_id, policy.selected_tuning_candidate_id);
+            assert_eq!(selected.profile_pack, policy.profile_pack);
+            assert_eq!(
+                manifest.active_profile_metadata.decision_artifact_id,
+                catalog_profile.decision_artifact_id
+            );
+        } else {
+            assert_eq!(manifest.active_selected_tuning_candidate, None);
+            assert_eq!(
+                policy.selected_tuning_candidate_id,
+                MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+            );
+            assert_eq!(
+                manifest.active_profile_metadata.decision_artifact_id,
+                MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+            );
+        }
         assert_eq!(
             manifest.environment_metadata.target_arch,
             std::env::consts::ARCH
