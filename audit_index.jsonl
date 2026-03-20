@@ -1215,6 +1215,11 @@
 {"file":"src/messaging/snapshot.rs","lines":9,"batch":401,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"stub placeholder"}
 {"file":"src/messaging/morphism.rs","lines":2126,"batch":401,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/service.rs","lines":2068,"batch":401,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"franken_evidence/src/lib.rs","lines":686,"batch":402,"date":"2026-03-20","agent":"SageHawk","verdict":"FIXED","bugs":1,"notes":"fresh-eyes audit: EvidenceLedger validation now rejects non-empty expected-loss maps that omit the chosen action or disagree with chosen_expected_loss"}
+{"file":"franken_evidence/src/export.rs","lines":381,"batch":402,"date":"2026-03-20","agent":"SageHawk","verdict":"FIXED","bugs":1,"notes":"fresh-eyes audit: read_jsonl previously accepted semantically invalid but parseable ledger entries despite claiming validation"}
+{"file":"franken_evidence/src/render.rs","lines":1398,"batch":402,"date":"2026-03-20","agent":"SageHawk","verdict":"FIXED","bugs":1,"notes":"fresh-eyes audit: level0 truncated by byte index and could panic on long Unicode component/action text"}
+{"file":"src/evidence_sink.rs","lines":600,"batch":402,"date":"2026-03-20","agent":"SageHawk","verdict":"FIXED","bugs":1,"notes":"fresh-eyes audit: scheduler evidence emitted stale/misaligned action-loss records with chosen_expected_loss inconsistent with expected_loss_by_action"}
+{"file":"franken_evidence/tests/comprehensive.rs","lines":564,"batch":402,"date":"2026-03-20","agent":"SageHawk","verdict":"FIXED","bugs":1,"notes":"integration fixture bug: full-pipeline evidence sample chose restart while recording preempt's chosen_expected_loss"}
 {"file":"src/messaging/cut.rs","lines":2485,"batch":402,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/policy.rs","lines":563,"batch":402,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/class.rs","lines":496,"batch":402,"date":"2026-03-20","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"delivery class taxonomy, cost vectors, provider policy"}

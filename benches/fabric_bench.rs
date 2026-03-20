@@ -83,7 +83,9 @@ fn bench_link_cache(c: &mut Criterion) {
     let mut link_cache = SublistLinkCache::new(64);
     let _ = sl.lookup_with_link_cache(&subject, &mut link_cache); // warm
     group.bench_function("cached_hit", |b| {
-        b.iter(|| sl.lookup_with_link_cache(&subject, &mut link_cache));
+        b.iter(|| {
+            let _ = sl.lookup_with_link_cache(&subject, &mut link_cache);
+        });
     });
 
     group.finish();
