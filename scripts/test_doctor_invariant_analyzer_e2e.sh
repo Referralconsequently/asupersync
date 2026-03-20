@@ -126,7 +126,10 @@ run_analysis_call() {
             --root "${STAGED_FIXTURE_ROOT}"
         )
         attempt_log="${run_log%.log}.attempt${attempt}.log"
-        if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${run_cmd[@]}" >"${attempt_log}" 2>&1; then
+        if (
+            cd "${PROJECT_ROOT}"
+            timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${run_cmd[@]}"
+        ) >"${attempt_log}" 2>&1; then
             rc=0
         else
             rc=$?
