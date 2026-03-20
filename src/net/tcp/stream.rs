@@ -47,6 +47,18 @@ pub struct TcpStream {
     shutdown_on_drop: bool,
 }
 
+/// Configuration for TCP Keepalive behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeepaliveConfig {
+    /// Keepalive behavior is not explicitly configured, deferring to OS defaults.
+    #[default]
+    Default,
+    /// Explicitly disable TCP keepalive.
+    Disabled,
+    /// Explicitly enable TCP keepalive with the given duration.
+    Enabled(Duration),
+}
+
 /// Builder for configuring TCP stream options before connecting.
 ///
 /// This mirrors [`TcpListenerBuilder`](super::traits::TcpListenerBuilder) for client connections.
@@ -56,7 +68,7 @@ pub struct TcpStreamBuilder<A> {
     addr: A,
     connect_timeout: Option<Duration>,
     nodelay: Option<bool>,
-    keepalive: Option<Option<Duration>>,
+    keepalive: KeepaliveConfig,
 }
 
 impl<A> TcpStreamBuilder<A>
@@ -70,7 +82,7 @@ where
             addr,
             connect_timeout: None,
             nodelay: None,
-            keepalive: None,
+            keepalive: KeepaliveConfig::Default,
         }
     }
 
@@ -94,7 +106,10 @@ where
     /// this may return `io::ErrorKind::Unsupported`.
     #[must_use]
     pub fn keepalive(mut self, keepalive: Option<Duration>) -> Self {
-        self.keepalive = Some(keepalive);
+        self.keepalive = match keepalive {
+            Some(d) => KeepaliveConfig::Enabled(d),
+            None => KeepaliveConfig::Disabled,
+        };
         self
     }
 
@@ -117,8 +132,10 @@ where
             stream.set_nodelay(enable)?;
         }
 
-        if let Some(keepalive_opt) = keepalive {
-            stream.set_keepalive(keepalive_opt)?;
+        match keepalive {
+            KeepaliveConfig::Enabled(duration) => stream.set_keepalive(Some(duration))?,
+            KeepaliveConfig::Disabled => stream.set_keepalive(None)?,
+            KeepaliveConfig::Default => {} // Do nothing, let OS decide
         }
 
         Ok(stream)
@@ -1045,7 +1062,7 @@ mod tests {
         let builder = TcpStreamBuilder::new("127.0.0.1:0");
         assert!(builder.connect_timeout.is_none());
         assert!(builder.nodelay.is_none());
-        assert!(builder.keepalive.is_none());
+        assert_eq!(builder.keepalive, KeepaliveConfig::Default);
     }
 
     #[test]
@@ -1057,7 +1074,7 @@ mod tests {
 
         assert_eq!(builder.connect_timeout, Some(Duration::from_secs(1)));
         assert_eq!(builder.nodelay, Some(true));
-        assert_eq!(builder.keepalive, Some(Some(Duration::from_secs(30))));
+        assert_eq!(builder.keepalive, KeepaliveConfig::Enabled(Duration::from_secs(30)));
     }
 
     #[test]

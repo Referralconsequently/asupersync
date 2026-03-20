@@ -50,6 +50,6 @@ mod stream;
 
 pub use config::{ClientAuth, QuicConfig};
 pub use connection::QuicConnection;
-pub use endpoint::QuicEndpoint;
+pub use endpoint::{QuicEndpoint, QuicIncoming};
 pub use error::QuicError;
 pub use stream::{RecvStream, SendStream, StreamTracker};

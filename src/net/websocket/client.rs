@@ -340,6 +340,8 @@ pub struct WebSocket<IO> {
     pub(super) protocol: Option<String>,
     /// Pending pong payloads to send.
     pub(super) pending_pongs: std::collections::VecDeque<Bytes>,
+    /// Whether there are encoded pongs in the write buffer that need flushing.
+    pub(super) pending_pong_flush: bool,
     /// Entropy used for client masking when no per-call Cx is available.
     pub(super) entropy: Arc<dyn EntropySource>,
 }
@@ -376,6 +378,7 @@ where
             assembler: MessageAssembler::new(max_message_size),
             protocol: None,
             pending_pongs: std::collections::VecDeque::new(),
+            pending_pong_flush: false,
             entropy,
         }
     }
@@ -479,10 +482,17 @@ where
 
             // Send any pending pongs in FIFO order (cancel-safe: pop_front() takes
             // one at a time from the front without reversing the whole queue).
+            let mut flush_pending_pongs = self.pending_pong_flush;
             while let Some(payload) = self.pending_pongs.pop_front() {
+                flush_pending_pongs = true;
+                self.pending_pong_flush = true;
                 let pong = Frame::pong(payload);
                 self.encode_frame_with_entropy(&pong, cx.entropy())?;
+            }
+
+            if flush_pending_pongs {
                 self.flush_write_buf().await?;
+                self.pending_pong_flush = false;
             }
 
             if let Some(frame) = self.codec.decode(&mut self.read_buf)? {

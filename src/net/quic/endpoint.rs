@@ -187,17 +187,19 @@ impl QuicEndpoint {
         Ok(QuicConnection::new(connection))
     }
 
-    /// Accept an incoming connection.
+    /// Accept an incoming connection request.
     ///
-    /// Returns `None` if the endpoint is closed.
-    pub async fn accept(&self, cx: &Cx) -> Result<QuicConnection, QuicError> {
+    /// The returned [`QuicIncoming`] represents a connection that has not yet completed
+    /// the TLS handshake. You should spawn a new task to call `handshake()` on it to
+    /// avoid blocking the endpoint from accepting other connections concurrently.
+    ///
+    /// Returns an error if the endpoint is closed.
+    pub async fn accept(&self, cx: &Cx) -> Result<QuicIncoming, QuicError> {
         cx.checkpoint()?;
 
         let incoming = self.inner.accept().await.ok_or(QuicError::EndpointClosed)?;
 
-        let connection = incoming.await?;
-
-        Ok(QuicConnection::new(connection))
+        Ok(QuicIncoming { inner: incoming })
     }
 
     /// Get the local address this endpoint is bound to.
@@ -221,6 +223,25 @@ impl QuicEndpoint {
     #[must_use]
     pub fn inner(&self) -> &quinn::Endpoint {
         &self.inner
+    }
+}
+
+/// An incoming QUIC connection that has not yet completed the TLS handshake.
+#[derive(Debug)]
+pub struct QuicIncoming {
+    inner: quinn::Connecting,
+}
+
+impl QuicIncoming {
+    /// Wait for the TLS handshake to complete and establish the connection.
+    pub async fn handshake(self) -> Result<QuicConnection, QuicError> {
+        let connection = self.inner.await?;
+        Ok(QuicConnection::new(connection))
+    }
+
+    /// Get the remote address of the incoming connection.
+    pub fn remote_address(&self) -> SocketAddr {
+        self.inner.remote_address()
     }
 }
 

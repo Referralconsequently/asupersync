@@ -248,13 +248,15 @@ impl LossRecovery {
         if ack_ranges.is_empty() {
             return AckEvent::empty();
         }
-        let largest_acked = ack_ranges
+        let local_largest_acked = ack_ranges
             .iter()
             .map(|range| range.largest)
             .max()
             .unwrap_or(0);
         self.largest_acked[space.idx()] =
-            Some(self.largest_acked[space.idx()].map_or(largest_acked, |v| v.max(largest_acked)));
+            Some(self.largest_acked[space.idx()].map_or(local_largest_acked, |v| v.max(local_largest_acked)));
+
+        let global_largest_acked = self.largest_acked[space.idx()].unwrap();
 
         let loss_delay = self.loss_delay_micros();
         let time_threshold = now_micros.saturating_sub(loss_delay);
@@ -298,9 +300,9 @@ impl LossRecovery {
         let mut survivors = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
             let packet_threshold_lost =
-                pkt.space == space && pkt.packet_number.saturating_add(3) <= largest_acked;
+                pkt.space == space && pkt.packet_number.saturating_add(3) <= global_largest_acked;
             let time_threshold_lost = pkt.space == space
-                && pkt.packet_number <= largest_acked
+                && pkt.packet_number <= global_largest_acked
                 && pkt.time_sent_micros <= time_threshold;
             let lost = packet_threshold_lost || time_threshold_lost;
             if lost {
