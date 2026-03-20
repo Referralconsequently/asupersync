@@ -41,7 +41,12 @@ const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
 #[derive(Debug)]
 pub enum ScenarioRunnerError {
     /// Scenario validation failed.
-    Validation(Vec<ValidationError>),
+    Validation {
+        /// Scenario identifier that failed validation.
+        scenario_id: String,
+        /// Validation errors emitted by the scenario contract.
+        errors: Vec<ValidationError>,
+    },
     /// An oracle listed in the scenario is not recognized.
     UnknownOracle(String),
     /// Replay divergence: two runs with the same seed produced different traces.
@@ -58,8 +63,15 @@ pub enum ScenarioRunnerError {
 impl std::fmt::Display for ScenarioRunnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Validation(errors) => {
-                write!(f, "scenario validation failed:")?;
+            Self::Validation {
+                scenario_id,
+                errors,
+            } => {
+                write!(
+                    f,
+                    "scenario validation failed for {scenario_id} ({} issue(s)):",
+                    errors.len()
+                )?;
                 for e in errors {
                     write!(f, " {e};")?;
                 }
@@ -404,6 +416,13 @@ impl ScenarioRunner {
             ))
     }
 
+    fn validation_error(scenario: &Scenario, errors: Vec<ValidationError>) -> ScenarioRunnerError {
+        ScenarioRunnerError::Validation {
+            scenario_id: scenario.id.clone(),
+            errors,
+        }
+    }
+
     /// Validate oracle names in a scenario against the known oracle registry.
     fn validate_oracle_names(scenario: &Scenario) -> Result<(), ScenarioRunnerError> {
         for name in &scenario.oracles {
@@ -535,7 +554,7 @@ impl ScenarioRunner {
     ) -> Result<ScenarioRunResult, ScenarioRunnerError> {
         let errors = scenario.validate();
         if !errors.is_empty() {
-            return Err(ScenarioRunnerError::Validation(errors));
+            return Err(Self::validation_error(scenario, errors));
         }
         Self::validate_oracle_names(scenario)?;
 
@@ -580,7 +599,7 @@ impl ScenarioRunner {
         // 1. Validate
         let errors = scenario.validate();
         if !errors.is_empty() {
-            return Err(ScenarioRunnerError::Validation(errors));
+            return Err(Self::validation_error(scenario, errors));
         }
         Self::validate_oracle_names(scenario)?;
 
@@ -639,7 +658,7 @@ impl ScenarioRunner {
         // Validate once up front
         let errors = scenario.validate();
         if !errors.is_empty() {
-            return Err(ScenarioRunnerError::Validation(errors));
+            return Err(Self::validation_error(scenario, errors));
         }
         Self::validate_oracle_names(scenario)?;
 
@@ -901,7 +920,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ScenarioRunnerError::Validation(_)
+            ScenarioRunnerError::Validation { .. }
         ));
         crate::test_complete!("validation_rejects_bad_scenario");
     }
@@ -1074,12 +1093,17 @@ mod tests {
     #[test]
     fn error_display_validation() {
         init_test("error_display_validation");
-        let err = ScenarioRunnerError::Validation(vec![ValidationError {
-            field: "id".into(),
-            message: "empty".into(),
-        }]);
+        let err = ScenarioRunnerError::Validation {
+            scenario_id: "invalid-smoke".into(),
+            errors: vec![ValidationError {
+                field: "id".into(),
+                message: "empty".into(),
+            }],
+        };
         let msg = err.to_string();
         assert!(msg.contains("validation failed"));
+        assert!(msg.contains("invalid-smoke"));
+        assert!(msg.contains("1 issue(s)"));
         assert!(msg.contains("id"));
         crate::test_complete!("error_display_validation");
     }

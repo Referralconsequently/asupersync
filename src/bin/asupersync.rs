@@ -3461,14 +3461,21 @@ fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, Cli
 
 fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerError) -> CliError {
     match err {
-        asupersync::lab::scenario_runner::ScenarioRunnerError::Validation(errors) => {
+        asupersync::lab::scenario_runner::ScenarioRunnerError::Validation {
+            scenario_id,
+            errors,
+        } => {
             let detail = errors
                 .iter()
                 .map(|e| format!("- {e}"))
                 .collect::<Vec<_>>()
                 .join("\n");
             CliError::new("scenario_validation", "Scenario validation failed")
-                .detail(detail)
+                .detail(format!(
+                    "Scenario '{scenario_id}' failed validation with {} issue(s):\n{detail}",
+                    errors.len()
+                ))
+                .context("scenario_id", scenario_id)
                 .exit_code(ExitCode::RUNTIME_ERROR)
         }
         asupersync::lab::scenario_runner::ScenarioRunnerError::UnknownOracle(name) => {
