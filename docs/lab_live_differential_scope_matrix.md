@@ -36,6 +36,33 @@ lab fidelity would make the whole differential program operationally useless.
 
 ---
 
+### Parent Contract Map (`asupersync-2a6k9.1`)
+
+The parent bead `asupersync-2a6k9.1` is intentionally a four-part contract. The
+sub-beads are not competing designs. Together they define the only claim set
+that later differential-validation beads are allowed to rely on:
+
+| Contract slice | Source of truth | What later beads inherit |
+|---|---|---|
+| supported semantic surfaces, rollout order, and explicit non-goals | `asupersync-2a6k9.1.1` in this document | which surfaces are admitted now, deferred, or forbidden |
+| comparator inputs and semantic-equivalence rules | `asupersync-2a6k9.1.2` in `docs/lab_live_normalized_observable_schema.md` | which normalized fields are semantic, provenance-only, exact-match, or contract-scoped |
+| divergence classes, rerun policy, and escalation law | `asupersync-2a6k9.1.3` in `docs/lab_live_divergence_taxonomy.md` | what counts as a runtime bug, lab-model bug, unsupported surface, or noise |
+| verification floor, logging vocabulary, and retained artifact contract | `asupersync-2a6k9.1.4` in `docs/lab_live_verification_taxonomy.md` | which `T0`/`T1`/`T2`/`T3`/`T4` evidence and stable bundle fields are required before a surface claim is credible |
+
+Later beads that cite `asupersync-2a6k9.1` inherit all four documents together.
+They are not allowed to redefine comparator inputs, admitted surfaces, or
+policy classes ad hoc inside harness code or suite-local prose.
+
+A lab-vs-live parity claim is therefore in-bounds only when all of the
+following are simultaneously true:
+
+1. the surface is admitted by this scope matrix,
+2. the comparison only uses semantic fields allowed by `docs/lab_live_normalized_observable_schema.md`,
+3. any mismatch is classified by `docs/lab_live_divergence_taxonomy.md`,
+4. the evidence bundle and validation depth satisfy `docs/lab_live_verification_taxonomy.md`.
+
+---
+
 ## 2. Scope Buckets
 
 Three scope buckets are normative:

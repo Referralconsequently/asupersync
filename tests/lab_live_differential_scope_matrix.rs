@@ -43,6 +43,24 @@ fn doc_references_bead_parent_and_inputs() {
 }
 
 #[test]
+fn doc_exposes_parent_contract_map() {
+    let doc = load_doc();
+    for token in [
+        "Parent Contract Map (`asupersync-2a6k9.1`)",
+        "docs/lab_live_normalized_observable_schema.md",
+        "docs/lab_live_divergence_taxonomy.md",
+        "docs/lab_live_verification_taxonomy.md",
+        "inherit all four documents together",
+        "not allowed to redefine comparator inputs, admitted surfaces, or",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing parent-contract token: {token}"
+        );
+    }
+}
+
+#[test]
 fn doc_defines_three_scope_buckets() {
     let doc = load_doc();
     for token in ["supported-now", "supported-later", "unsupported"] {
