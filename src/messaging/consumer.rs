@@ -1379,7 +1379,7 @@ impl FabricConsumer {
             return Err(FabricConsumerError::PullModeRequired);
         }
 
-        let Some(mut queued) = self.pop_next_live_pull_request() else {
+        let Some(queued) = self.pop_next_live_pull_request() else {
             return Err(FabricConsumerError::NoQueuedPullRequests);
         };
         let request = queued.request.clone();
@@ -1390,30 +1390,37 @@ impl FabricConsumer {
                     available_tail,
                 });
             }
-            queued.enqueued_at_tick = self.cursor.ticket_clock();
+            // Preserve the original enqueued_at_tick so the request's
+            // expiry deadline is measured from the first enqueue, not each
+            // re-enqueue attempt.
             self.insert_pull_request(queued);
             return Ok(PullDispatchOutcome::Waiting(request));
         };
         if let Some(pinned_client) = &request.pinned_client
-            && ticket
-                .as_ref()
-                .is_some_and(|provided| &provided.relay != pinned_client)
+            && let Some(ticket) = ticket
+            && &ticket.relay != pinned_client
         {
+            self.insert_pull_request(queued);
             return Err(FabricConsumerError::PinnedClientTicketMismatch {
                 pinned_client: pinned_client.clone(),
-                ticket_relay: ticket.expect("ticket presence checked above").relay.clone(),
+                ticket_relay: ticket.relay.clone(),
             });
         }
-
-        let delivery = self.schedule_delivery(
-            ScheduledConsumerRequest::Pull(request),
+        let scheduled_request = ScheduledConsumerRequest::Pull(request);
+        match self.schedule_delivery(
+            scheduled_request,
             CursorDeliveryMode::Pull(CursorRequest::Window(window)),
             window,
             capsule,
             ticket,
             None,
-        )?;
-        Ok(PullDispatchOutcome::Scheduled(Box::new(delivery)))
+        ) {
+            Ok(delivery) => Ok(PullDispatchOutcome::Scheduled(Box::new(delivery))),
+            Err(err) => {
+                self.insert_pull_request(queued);
+                Err(err)
+            }
+        }
     }
 
     /// Apply an acknowledgement attempt and update pending state on success.
@@ -3342,6 +3349,36 @@ mod tests {
                 ticket_relay: wrong_relay,
             })
         );
+        assert_eq!(consumer.waiting_pull_request_count(), 1);
+    }
+
+    #[test]
+    fn fabric_consumer_keeps_pull_request_queued_when_dispatch_is_paused() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                flow_control: true,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 4).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::CatchUp).expect("pull"))
+            .expect("queue pull");
+        consumer.pause().expect("pause");
+
+        assert_eq!(
+            consumer.dispatch_next_pull(4, &capsule, None),
+            Err(FabricConsumerError::ConsumerPaused)
+        );
+        assert_eq!(consumer.waiting_pull_request_count(), 1);
     }
 
     #[test]
@@ -3684,5 +3721,44 @@ mod tests {
         assert_eq!(record.abort_reason, Some(ObligationAbortReason::Error));
         assert_eq!(consumer.obligation_stats().pending, 0);
         assert_eq!(consumer.obligation_stats().total_aborted, 1);
+    }
+
+    #[test]
+    fn pull_request_expiry_measured_from_original_enqueue_not_re_enqueue() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                max_waiting: 4,
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+
+        // Enqueue a pull request that expires in 10 ticks.
+        let request = PullRequest::new(1, ConsumerDemandClass::Tail).expect("request");
+        let request = request.with_expires(10);
+        consumer.queue_pull_request(request).expect("enqueue");
+
+        // Advance clock 5 ticks, then dispatch — no data available, so it
+        // re-enqueues.  The request should still remember its original
+        // enqueue time.
+        consumer.advance_clock(5);
+        let capsule = RecoverableCapsule::default();
+        let outcome = consumer
+            .dispatch_next_pull(0, &capsule, None)
+            .expect("dispatch with no data");
+        assert!(matches!(outcome, PullDispatchOutcome::Waiting(_)));
+        assert_eq!(consumer.waiting_pull_request_count(), 1);
+
+        // Advance 6 more ticks — original deadline (tick 0 + 10 = 10) is
+        // now passed (current tick = 11).  The request must have expired.
+        consumer.advance_clock(6);
+        let err = consumer.dispatch_next_pull(0, &capsule, None);
+        assert!(
+            err.is_err(),
+            "request should have expired by its original enqueue time"
+        );
     }
 }
