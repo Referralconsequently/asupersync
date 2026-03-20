@@ -232,7 +232,7 @@ where
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let read_future = Box::pin(async {
+        let read_future = async {
             let mut pending_expectation_flush = None;
             let mut handled_expectation = false;
             let mut shutdown_fut: Option<ShutdownWaitFuture<'_>> =
@@ -285,7 +285,7 @@ where
                 }
             })
             .await
-        });
+        };
 
         if let Some(idle_timeout) = self.config.idle_timeout {
             let now = Cx::current()

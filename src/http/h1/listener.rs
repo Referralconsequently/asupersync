@@ -454,20 +454,24 @@ where
 
 struct ConnectionTasks {
     handles: Vec<JoinHandle<()>>,
+    push_count: u64,
 }
 
 impl ConnectionTasks {
     fn new() -> Self {
         Self {
             handles: Vec::new(),
+            push_count: 0,
         }
     }
 
     fn push(&mut self, handle: JoinHandle<()>) {
         self.handles.push(handle);
+        self.push_count = self.push_count.wrapping_add(1);
         // Clean up finished tasks periodically to prevent unbounded memory growth
-        // Check every 64 connections.
-        if self.handles.len().is_multiple_of(64) {
+        // Check every 64 connections using an independent counter to avoid
+        // pathological O(N^2) scanning if active connection count hovers near 64.
+        if self.push_count.is_multiple_of(64) {
             self.handles.retain(|h| !h.is_finished());
         }
     }
