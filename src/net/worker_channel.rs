@@ -751,6 +751,9 @@ impl WorkerCoordinator {
 
     /// Enqueue a cancel-job message.
     pub fn cancel_job(&mut self, job_id: u64, reason: String) -> Result<(), WorkerChannelError> {
+        if self.shutdown_requested {
+            return Err(WorkerChannelError::ShutdownInProgress);
+        }
         {
             let job = self
                 .jobs
@@ -764,6 +767,9 @@ impl WorkerCoordinator {
 
     /// Enqueue an explicit poll-status message for an in-flight job.
     pub fn poll_status(&mut self, job_id: u64) -> Result<(), WorkerChannelError> {
+        if self.shutdown_requested {
+            return Err(WorkerChannelError::ShutdownInProgress);
+        }
         if !self.jobs.contains_key(&job_id) {
             return Err(WorkerChannelError::UnknownJobId(job_id));
         }
@@ -1672,6 +1678,68 @@ mod tests {
             .cancel_job(1, "shutdown supersedes cancel".into())
             .unwrap();
         coord.request_shutdown("shutdown now".into()).unwrap();
+
+        let shutdown = coord.drain_outbox().unwrap();
+        assert!(matches!(shutdown.op, WorkerOp::ShutdownWorker { .. }));
+        assert!(coord.drain_outbox().is_none());
+    }
+
+    #[test]
+    fn coordinator_rejects_cancel_after_shutdown_requested_without_mutating_job() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.request_shutdown("shutdown now".into()).unwrap();
+        assert_eq!(
+            coord.cancel_job(1, "too late".into()),
+            Err(WorkerChannelError::ShutdownInProgress)
+        );
+        assert_eq!(coord.job_state(1), Some(JobState::Running));
+
+        let shutdown = coord.drain_outbox().unwrap();
+        assert!(matches!(shutdown.op, WorkerOp::ShutdownWorker { .. }));
+        assert!(coord.drain_outbox().is_none());
+    }
+
+    #[test]
+    fn coordinator_rejects_poll_after_shutdown_requested_without_enqueuing_follow_up() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.request_shutdown("shutdown now".into()).unwrap();
+        assert_eq!(
+            coord.poll_status(1),
+            Err(WorkerChannelError::ShutdownInProgress)
+        );
+        assert_eq!(coord.job_state(1), Some(JobState::Running));
 
         let shutdown = coord.drain_outbox().unwrap();
         assert!(matches!(shutdown.op, WorkerOp::ShutdownWorker { .. }));
