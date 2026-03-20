@@ -330,6 +330,25 @@ validate_dual_policy_probe_contract() {
             (.profile_pack | type == "string" and length > 0) and
             (.profile_fallback_reason | type == "string" and length > 0) and
             (.rejected_profile_packs | type == "string" and length > 0) and
+            (.selected_tuning_candidate_id | type == "string" and length > 0) and
+            (.selected_tuning_tile_bytes | type == "number" and . >= 0 and floor == .) and
+            (.selected_tuning_unroll | type == "number" and . >= 0 and floor == .) and
+            (.selected_tuning_prefetch_distance | type == "number" and . >= 0 and floor == .) and
+            (.selected_tuning_fusion_shape | type == "string" and length > 0) and
+            (.decision_artifact_id | type == "string" and length > 0) and
+            (.decision_role | type == "string" and length > 0) and
+            (.selected_candidate_summary | type == "string" and length > 0) and
+            (.rejected_candidate_set_summary | type == "string" and length > 0) and
+            (.selected_mul_delta_vs_baseline_pct | type == "string" and length > 0) and
+            (.selected_addmul_delta_vs_baseline_pct | type == "string" and length > 0) and
+            (.selected_targeted_addmul_average_delta_pct | type == "string" and length > 0) and
+            (.profile_pack_env_requested | type == "boolean") and
+            (.mul_min_total_env_override | type == "boolean") and
+            (.mul_max_total_env_override | type == "boolean") and
+            (.addmul_min_total_env_override | type == "boolean") and
+            (.addmul_max_total_env_override | type == "boolean") and
+            (.addmul_min_lane_env_override | type == "boolean") and
+            (.max_lane_ratio_env_override | type == "boolean") and
             (.lane_len_a | type == "number" and . >= 0 and floor == .) and
             (.lane_len_b | type == "number" and . >= 0 and floor == .) and
             (.total_len | type == "number" and . >= 0 and floor == .) and
@@ -350,6 +369,32 @@ validate_dual_policy_probe_contract() {
             (.replay_pointer | type == "string" and length > 0) and
             (.artifact_path | type == "string" and length > 0) and
             (.repro_command | type == "string" and test("^((rch exec -- )?cargo bench --bench raptorq_benchmark -- gf256_dual_policy)")) and
+            (if .selected_tuning_candidate_id == "manual-env-override-unbacked"
+                then
+                    .selected_tuning_tile_bytes == 0 and
+                    .selected_tuning_unroll == 0 and
+                    .selected_tuning_prefetch_distance == 0 and
+                    .selected_tuning_fusion_shape == "unknown" and
+                    .decision_artifact_id == "manual_env_override_unbacked" and
+                    .decision_role == "runtime_override_not_canonical_profile_selection" and
+                    .replay_pointer == "replay:rq-e-gf256-profile-pack-env-override-v1" and
+                    (
+                        .mode != "auto" or
+                        .mul_min_total_env_override or
+                        .mul_max_total_env_override or
+                        .addmul_min_total_env_override or
+                        .addmul_max_total_env_override or
+                        .addmul_min_lane_env_override or
+                        .max_lane_ratio_env_override
+                    )
+                else
+                    .selected_tuning_tile_bytes >= 1 and
+                    .selected_tuning_unroll >= 1 and
+                    .selected_tuning_fusion_shape != "unknown" and
+                    .decision_artifact_id != "manual_env_override_unbacked" and
+                    .decision_role != "runtime_override_not_canonical_profile_selection" and
+                    .replay_pointer != "replay:rq-e-gf256-profile-pack-env-override-v1"
+             end) and
             (if .addmul_decision == "fused"
                 then
                     (.total_len >= .addmul_window_min and .total_len <= .addmul_window_max) and
