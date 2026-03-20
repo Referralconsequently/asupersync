@@ -2300,6 +2300,36 @@ fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
         "live x86 profile-pack metadata must keep the manifest command-bundle contract"
     );
     assert_eq!(
+        x86.decision_artifact_id, "simd_policy_ablation_2026_03_04",
+        "live x86 profile-pack metadata must keep the canonical decision artifact id"
+    );
+    assert_eq!(
+        x86.decision_role, "canonical_current_x86_default_contract",
+        "live x86 profile-pack metadata must keep the canonical decision role"
+    );
+    assert_eq!(
+        x86.selected_candidate_summary,
+        "material addmul auto uplift on balanced large-lane scenarios while mul auto remained near neutral",
+        "live x86 profile-pack metadata must keep the selected-candidate rationale"
+    );
+    assert_eq!(
+        x86.rejected_candidate_set_summary,
+        "candidate mul windows improved addmul but regressed mul auto, so default rollout keeps mul auto disabled",
+        "live x86 profile-pack metadata must keep the rejected-candidate rationale"
+    );
+    assert_eq!(
+        x86.selected_mul_delta_vs_baseline_pct, "0.3048",
+        "live x86 profile-pack metadata must keep the selected mul delta"
+    );
+    assert_eq!(
+        x86.selected_addmul_delta_vs_baseline_pct, "-3.3759",
+        "live x86 profile-pack metadata must keep the selected addmul delta"
+    );
+    assert_eq!(
+        x86.selected_targeted_addmul_average_delta_pct, "-8.9924",
+        "live x86 profile-pack metadata must keep the targeted addmul delta"
+    );
+    assert_eq!(
         decision["changes"]["mul_window"].as_str(),
         Some("unchanged: disabled (mul_min_total > mul_max_total)"),
         "artifact must keep the x86 mul-window contract in sync with live metadata"
@@ -2314,6 +2344,30 @@ fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
         Some(x86.addmul_min_lane as u64),
         "artifact must keep the x86 addmul lane-floor contract in sync with live metadata"
     );
+}
+
+/// Validate the Track-E bench policy logs emit the live decision-metadata
+/// fields needed to keep runtime policy and artifact reasoning aligned.
+#[test]
+fn e5_bench_policy_logs_emit_decision_metadata_fields() {
+    assert!(
+        RAPTORQ_BENCH_RS.contains("let payload = serde_json::json!({"),
+        "Track-E bench log surface must serialize structured payloads instead of hand-assembling JSON"
+    );
+    for required in [
+        "decision_artifact_id",
+        "decision_role",
+        "selected_candidate_summary",
+        "rejected_candidate_set_summary",
+        "selected_mul_delta_vs_baseline_pct",
+        "selected_addmul_delta_vs_baseline_pct",
+        "selected_targeted_addmul_average_delta_pct",
+    ] {
+        assert!(
+            RAPTORQ_BENCH_RS.contains(required),
+            "Track-E bench log surface must emit {required}"
+        );
+    }
 }
 
 /// Validate the E5 artifact makes the narrow 2026-03-02 same-session result a
@@ -2914,8 +2968,13 @@ fn e5_profile_pack_doc_mentions_current_x86_default_contract() {
     for required in [
         "artifacts/raptorq_track_e_gf256_bench_v1.json",
         "simd_policy_ablation_2026_03_04",
-        "raptorq-track-e-dual-policy-probe-v3",
+        "raptorq-track-e-dual-policy-probe-v4",
+        "profile-pack schema v4",
         "replay:rq-e-gf256-profile-pack-v3",
+        "decision_artifact_id = simd_policy_ablation_2026_03_04",
+        "decision_role = canonical_current_x86_default_contract",
+        "selected_candidate_summary",
+        "rejected_candidate_set_summary",
         "mul_min_total > mul_max_total",
         "24576..32768",
         "addmul_min_lane=8192",
@@ -4712,7 +4771,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
     for required in [
         "validate_dual_policy_probe_contract",
         "bench-smoke-gf256-dual-policy-contract",
-        "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v3\"",
+        "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v4\"",
         ".addmul_min_lane",
         ".max_lane_ratio",
         ".lane_len_a",

@@ -255,8 +255,8 @@ struct Gf256Dispatch {
 
 static DISPATCH: std::sync::OnceLock<Gf256Dispatch> = std::sync::OnceLock::new();
 static DUAL_POLICY: std::sync::OnceLock<DualKernelPolicy> = std::sync::OnceLock::new();
-const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v3";
-const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-manifest-v3";
+const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v4";
+const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-manifest-v4";
 const GF256_PROFILE_PACK_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-v3";
 // Keep manifest-level profile-pack command bundles on the broader comparator
 // surface; dual-policy probe logs emit their own narrower repro command.
@@ -684,6 +684,20 @@ pub struct Gf256ProfilePackMetadata {
     pub replay_pointer: &'static str,
     /// Repro command bundle for validating this profile pack.
     pub command_bundle: &'static str,
+    /// Canonical artifact packet that justified the current defaults.
+    pub decision_artifact_id: &'static str,
+    /// Stable role label for the decision artifact.
+    pub decision_role: &'static str,
+    /// Selected-candidate rationale carried into runtime/bench forensics.
+    pub selected_candidate_summary: &'static str,
+    /// Rejected-candidate-set rationale carried into runtime/bench forensics.
+    pub rejected_candidate_set_summary: &'static str,
+    /// Average mul auto delta versus baseline from the selection packet.
+    pub selected_mul_delta_vs_baseline_pct: &'static str,
+    /// Average addmul auto delta versus baseline from the selection packet.
+    pub selected_addmul_delta_vs_baseline_pct: &'static str,
+    /// Targeted large-lane addmul average delta versus baseline.
+    pub selected_targeted_addmul_average_delta_pct: &'static str,
 }
 
 /// Deterministic metadata for a single offline tuning candidate.
@@ -708,6 +722,23 @@ pub struct Gf256TuningCandidateMetadata {
 const SCALAR_SELECTED_TUNING_CANDIDATE: &str = "scalar-t16-u1-pf0-fused-off-v1";
 const X86_SELECTED_TUNING_CANDIDATE: &str = "x86-avx2-t32-u4-pf64-split-balanced-v1";
 const AARCH64_SELECTED_TUNING_CANDIDATE: &str = "aarch64-neon-t32-u2-pf32-fused-balanced-v1";
+
+const SCALAR_DECISION_ARTIFACT_ID: &str = "policy_snapshot_rq_e_gf256_005";
+const SCALAR_DECISION_ROLE: &str = "historical_pre_refresh_scalar_policy_wiring_reference";
+const SCALAR_SELECTED_CANDIDATE_SUMMARY: &str =
+    "pre-refresh scalar wiring reference retained for provenance only";
+const SCALAR_REJECTED_CANDIDATE_SET_SUMMARY: &str =
+    "generic-scalar host class rejects SIMD profile-pack defaults";
+const PENDING_PROFILE_DECISION_ARTIFACT_ID: &str = "pending_same_target_profile_ablation";
+const PENDING_PROFILE_DECISION_ROLE: &str = "catalog_bootstrap_pending_same_target_ablation";
+const X86_DECISION_ARTIFACT_ID: &str = "simd_policy_ablation_2026_03_04";
+const X86_DECISION_ROLE: &str = "canonical_current_x86_default_contract";
+const X86_SELECTED_CANDIDATE_SUMMARY: &str = "material addmul auto uplift on balanced large-lane scenarios while mul auto remained near neutral";
+const X86_REJECTED_CANDIDATE_SET_SUMMARY: &str = "candidate mul windows improved addmul but regressed mul auto, so default rollout keeps mul auto disabled";
+const X86_SELECTED_MUL_DELTA_VS_BASELINE_PCT: &str = "0.3048";
+const X86_SELECTED_ADDMUL_DELTA_VS_BASELINE_PCT: &str = "-3.3759";
+const X86_SELECTED_TARGETED_ADDMUL_AVERAGE_DELTA_PCT: &str = "-8.9924";
+const NA_PROFILE_DELTA_PCT: &str = "n/a";
 
 const SCALAR_REJECTED_TUNING_CANDIDATES: &[&str] = &["scalar-t8-u1-pf0-fused-off-v1"];
 const X86_REJECTED_TUNING_CANDIDATES: &[&str] = &[
@@ -744,6 +775,13 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         max_lane_ratio: 1,
         replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
         command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+        decision_artifact_id: SCALAR_DECISION_ARTIFACT_ID,
+        decision_role: SCALAR_DECISION_ROLE,
+        selected_candidate_summary: SCALAR_SELECTED_CANDIDATE_SUMMARY,
+        rejected_candidate_set_summary: SCALAR_REJECTED_CANDIDATE_SET_SUMMARY,
+        selected_mul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
+        selected_addmul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
+        selected_targeted_addmul_average_delta_pct: NA_PROFILE_DELTA_PCT,
     },
     Gf256ProfilePackMetadata {
         schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
@@ -765,6 +803,13 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         max_lane_ratio: 8,
         replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
         command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+        decision_artifact_id: X86_DECISION_ARTIFACT_ID,
+        decision_role: X86_DECISION_ROLE,
+        selected_candidate_summary: X86_SELECTED_CANDIDATE_SUMMARY,
+        rejected_candidate_set_summary: X86_REJECTED_CANDIDATE_SET_SUMMARY,
+        selected_mul_delta_vs_baseline_pct: X86_SELECTED_MUL_DELTA_VS_BASELINE_PCT,
+        selected_addmul_delta_vs_baseline_pct: X86_SELECTED_ADDMUL_DELTA_VS_BASELINE_PCT,
+        selected_targeted_addmul_average_delta_pct: X86_SELECTED_TARGETED_ADDMUL_AVERAGE_DELTA_PCT,
     },
     Gf256ProfilePackMetadata {
         schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
@@ -785,6 +830,13 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         max_lane_ratio: 8,
         replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
         command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+        decision_artifact_id: PENDING_PROFILE_DECISION_ARTIFACT_ID,
+        decision_role: PENDING_PROFILE_DECISION_ROLE,
+        selected_candidate_summary: "catalog default retained pending same-target aarch64 ablation evidence",
+        rejected_candidate_set_summary: "nonselected aarch64 tuning candidates remain historical offline-tuning rejects",
+        selected_mul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
+        selected_addmul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
+        selected_targeted_addmul_average_delta_pct: NA_PROFILE_DELTA_PCT,
     },
 ];
 
@@ -4254,6 +4306,10 @@ mod tests {
             }
             assert!(!metadata.command_bundle.is_empty());
             assert!(metadata.command_bundle.contains("rch exec --"));
+            assert!(!metadata.decision_artifact_id.is_empty());
+            assert!(!metadata.decision_role.is_empty());
+            assert!(!metadata.selected_candidate_summary.is_empty());
+            assert!(!metadata.rejected_candidate_set_summary.is_empty());
         }
     }
 
@@ -4461,6 +4517,37 @@ mod tests {
         ));
         assert!(manifest.profile_pack_catalog.len() >= 3);
         assert!(manifest.tuning_candidate_catalog.len() >= 3);
+    }
+
+    #[test]
+    fn x86_profile_pack_decision_metadata_matches_current_contract() {
+        let x86 = gf256_profile_pack_catalog()
+            .iter()
+            .find(|metadata| metadata.profile_pack == Gf256ProfilePackId::X86Avx2BalancedV1)
+            .expect("x86 profile-pack metadata must exist");
+
+        assert_eq!(x86.decision_artifact_id, X86_DECISION_ARTIFACT_ID);
+        assert_eq!(x86.decision_role, X86_DECISION_ROLE);
+        assert_eq!(
+            x86.selected_candidate_summary,
+            X86_SELECTED_CANDIDATE_SUMMARY
+        );
+        assert_eq!(
+            x86.rejected_candidate_set_summary,
+            X86_REJECTED_CANDIDATE_SET_SUMMARY
+        );
+        assert_eq!(
+            x86.selected_mul_delta_vs_baseline_pct,
+            X86_SELECTED_MUL_DELTA_VS_BASELINE_PCT
+        );
+        assert_eq!(
+            x86.selected_addmul_delta_vs_baseline_pct,
+            X86_SELECTED_ADDMUL_DELTA_VS_BASELINE_PCT
+        );
+        assert_eq!(
+            x86.selected_targeted_addmul_average_delta_pct,
+            X86_SELECTED_TARGETED_ADDMUL_AVERAGE_DELTA_PCT
+        );
     }
 
     #[test]

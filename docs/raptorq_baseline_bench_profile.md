@@ -148,7 +148,7 @@ rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy
 
 Probe log schema:
 
-- `schema_version = raptorq-track-e-dual-policy-probe-v3`
+- `schema_version = raptorq-track-e-dual-policy-probe-v4`
 - `manifest_schema_version`, `profile_schema_version`
 - `scenario_id`, `seed`
 - `kernel`, `mode`, `profile_pack`, `profile_fallback_reason`
@@ -162,6 +162,11 @@ Probe log schema:
 - `max_lane_ratio`
 - `mul_decision`, `mul_decision_reason`
 - `addmul_decision`, `addmul_decision_reason`
+- `decision_artifact_id`, `decision_role`
+- `selected_candidate_summary`, `rejected_candidate_set_summary`
+- `selected_mul_delta_vs_baseline_pct`
+- `selected_addmul_delta_vs_baseline_pct`
+- `selected_targeted_addmul_average_delta_pct`
 - `artifact_path`, `repro_command`
 
 Coverage intent:
@@ -177,10 +182,16 @@ Command-surface split:
 - Probe-specific bundle: the dual-policy log `repro_command` remains anchored to
   `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`.
 
-Current default policy note (profile-pack schema v3):
+Current default policy note (profile-pack schema v4):
 
 - `x86-avx2-balanced-v1` is split-biased for `mul_slices2` (`mul_window_min > mul_window_max`), so auto mode keeps dual-mul on the sequential path by default.
 - `addmul_slices2` uses the bounded fused window (`24576..32768`, lane floor `8192`) from the 2026-03-04 deterministic corpus refresh, preserving balanced-lane gains while filtering asymmetric/small-lane regressions.
+- Schema v4 is additive over v3: the profile-pack and dual-policy log surfaces now carry decision-metadata fields, while the replay pointer remains `replay:rq-e-gf256-profile-pack-v3` because the tuned window/corpus contract itself did not change.
+- The live manifest/log surface now carries the same decision anchor as the checked-in Track-E artifact:
+  `decision_artifact_id = simd_policy_ablation_2026_03_04`,
+  `decision_role = canonical_current_x86_default_contract`,
+  selected-candidate summary `material addmul auto uplift on balanced large-lane scenarios while mul auto remained near neutral`,
+  and rejected-candidate-set summary `candidate mul windows improved addmul but regressed mul auto, so default rollout keeps mul auto disabled`.
 
 ### E5 Profile-Pack Capture (`asupersync-36m6p.1`, 2026-02-22)
 
