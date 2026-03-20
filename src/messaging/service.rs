@@ -3001,7 +3001,7 @@ mod tests {
             "family-6".into(),
             "req-6".into(),
             None,
-            Some(5),
+            None, // unbounded stream — finalize is allowed at any count
             DeliveryClass::ObligationBacked,
             AckKind::Recoverable,
         )
@@ -3013,6 +3013,29 @@ mod tests {
         assert!(matches!(
             chunked.receive_chunk(),
             Err(ServiceObligationError::AlreadyResolved { .. })
+        ));
+    }
+
+    #[test]
+    fn chunked_reply_finalize_rejects_incomplete() {
+        let mut chunked = ChunkedReplyObligation::new(
+            "family-7".into(),
+            "req-7".into(),
+            None,
+            Some(5),
+            DeliveryClass::ObligationBacked,
+            AckKind::Recoverable,
+        )
+        .unwrap();
+
+        chunked.receive_chunk().unwrap();
+        // Finalize with only 1 of 5 chunks should fail
+        assert!(matches!(
+            chunked.finalize(),
+            Err(ServiceObligationError::ChunkedReplyIncomplete {
+                expected: 5,
+                received: 1,
+            })
         ));
     }
 }
