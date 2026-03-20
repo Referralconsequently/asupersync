@@ -195,8 +195,64 @@ try {
     `preferred main-thread scope selection must report the requested lane, got ${bootstrap.scopeSelectionPreferredMainThread.preferredLane ?? "missing"}`,
   );
   assert(
+    bootstrap.laneHealthRetrying.status === "retrying",
+    `lane health retrying step must report retrying, got ${bootstrap.laneHealthRetrying.status ?? "missing"}`,
+  );
+  assert(
+    bootstrap.laneHealthRetrying.failureCount === 1,
+    `lane health retrying step must record one failure, got ${bootstrap.laneHealthRetrying.failureCount ?? "missing"}`,
+  );
+  assert(
+    bootstrap.laneHealthRetrying.retryBudgetRemaining === 1,
+    `lane health retrying step must preserve one retry budget, got ${bootstrap.laneHealthRetrying.retryBudgetRemaining ?? "missing"}`,
+  );
+  assert(
+    bootstrap.laneHealthRetrying.cooldownUntilMs === null,
+    `lane health retrying step must not start cooldown yet, got ${bootstrap.laneHealthRetrying.cooldownUntilMs ?? "missing"}`,
+  );
+  assert(
+    bootstrap.laneHealthRetrying.lastTrigger === "worker_crash",
+    `lane health retrying step must record worker_crash, got ${bootstrap.laneHealthRetrying.lastTrigger ?? "missing"}`,
+  );
+  assert(
+    bootstrap.executionLadderRetrying.supported === true,
+    "retrying execution ladder must stay on the supported worker lane",
+  );
+  assert(
+    bootstrap.executionLadderRetrying.selectedLane === DEDICATED_WORKER_LANE,
+    `retrying execution ladder chose unexpected lane: ${bootstrap.executionLadderRetrying.selectedLane ?? "missing"}`,
+  );
+  assert(
+    bootstrap.executionLadderRetrying.health.status === "retrying",
+    `retrying execution ladder must expose retrying health, got ${bootstrap.executionLadderRetrying.health?.status ?? "missing"}`,
+  );
+  assert(
+    bootstrap.executionLadderRetrying.reasonCode === "supported",
+    `retrying execution ladder must remain on the supported reason code, got ${bootstrap.executionLadderRetrying.reasonCode ?? "missing"}`,
+  );
+  assert(
+    bootstrap.executionLadderRetrying.health.retryBudgetRemaining === 1,
+    `retrying execution ladder must preserve retry budget, got ${bootstrap.executionLadderRetrying.health?.retryBudgetRemaining ?? "missing"}`,
+  );
+  assert(
     bootstrap.laneHealthDemotion.status === "demoted",
     `lane health demotion must report demoted, got ${bootstrap.laneHealthDemotion.status ?? "missing"}`,
+  );
+  assert(
+    bootstrap.laneHealthDemotion.failureCount === 2,
+    `lane health demotion must record two failures, got ${bootstrap.laneHealthDemotion.failureCount ?? "missing"}`,
+  );
+  assert(
+    bootstrap.laneHealthDemotion.retryBudgetRemaining === 0,
+    `lane health demotion must exhaust retry budget, got ${bootstrap.laneHealthDemotion.retryBudgetRemaining ?? "missing"}`,
+  );
+  assert(
+    bootstrap.laneHealthDemotion.cooldownUntilMs !== null,
+    "lane health demotion must start a cooldown window",
+  );
+  assert(
+    bootstrap.laneHealthDemotion.lastTrigger === "worker_bootstrap_timeout",
+    `lane health demotion must record worker_bootstrap_timeout, got ${bootstrap.laneHealthDemotion.lastTrigger ?? "missing"}`,
   );
   assert(
     bootstrap.runtimeSelectionDemoted.supported === false,
@@ -213,6 +269,10 @@ try {
   assert(
     bootstrap.runtimeSelectionDemoted.outcome === null,
     `demoted runtime selection must stay on the no-throw path, got ${bootstrap.runtimeSelectionDemoted.outcome ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionDemoted.health.status === "demoted",
+    `demoted runtime selection must surface demoted health, got ${bootstrap.runtimeSelectionDemoted.health?.status ?? "missing"}`,
   );
   assert(preferredCandidate?.reasonCode === "candidate_lane_unhealthy", "demoted candidate matrix must preserve candidate_lane_unhealthy for the worker lane");
   assert(
@@ -256,7 +316,14 @@ try {
     baseline_scope_outcome: bootstrap.scopeSelectionBaseline.outcome,
     preferred_scope_selected_lane: bootstrap.scopeSelectionPreferredMainThread.selectedLane,
     preferred_scope_outcome: bootstrap.scopeSelectionPreferredMainThread.outcome,
+    retrying_status: bootstrap.laneHealthRetrying.status,
+    retrying_selected_lane: bootstrap.executionLadderRetrying.selectedLane,
+    retrying_last_trigger: bootstrap.laneHealthRetrying.lastTrigger,
+    retrying_retry_budget_remaining: bootstrap.laneHealthRetrying.retryBudgetRemaining,
     demotion_status: bootstrap.laneHealthDemotion.status,
+    demotion_failure_count: bootstrap.laneHealthDemotion.failureCount,
+    demotion_retry_budget_remaining: bootstrap.laneHealthDemotion.retryBudgetRemaining,
+    demotion_cooldown_until_ms: bootstrap.laneHealthDemotion.cooldownUntilMs,
     demoted_selected_lane: bootstrap.runtimeSelectionDemoted.selectedLane,
     demoted_reason_code: bootstrap.runtimeSelectionDemoted.reasonCode,
     demoted_outcome: bootstrap.runtimeSelectionDemoted.outcome,

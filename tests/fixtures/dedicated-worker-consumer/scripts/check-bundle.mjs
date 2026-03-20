@@ -31,6 +31,8 @@ let sawShutdownMarker = false;
 let sawRuntimeSelectionBaselineMarker = false;
 let sawScopeSelectionBaselineMarker = false;
 let sawScopeSelectionPreferredMainThreadMarker = false;
+let sawLaneHealthRetryingMarker = false;
+let sawExecutionLadderRetryingMarker = false;
 let sawLaneHealthDemotionMarker = false;
 let sawRuntimeSelectionDemotedMarker = false;
 let sawLaneHealthResetMarker = false;
@@ -52,6 +54,8 @@ for (const assetName of jsAssets) {
   sawScopeSelectionPreferredMainThreadMarker ||= content.includes(
     "worker-scope-selection-preferred-main-thread",
   );
+  sawLaneHealthRetryingMarker ||= content.includes("worker-lane-health-retrying");
+  sawExecutionLadderRetryingMarker ||= content.includes("worker-execution-ladder-retrying");
   sawLaneHealthDemotionMarker ||= content.includes("worker-lane-health-demotion");
   sawRuntimeSelectionDemotedMarker ||= content.includes("worker-runtime-selection-demoted");
   sawLaneHealthResetMarker ||= content.includes("worker-lane-health-reset");
@@ -96,8 +100,16 @@ if (!sawLaneHealthDemotionMarker) {
   throw new Error("Built worker bundle must retain the worker-lane-health-demotion marker");
 }
 
+if (!sawLaneHealthRetryingMarker) {
+  throw new Error("Built worker bundle must retain the worker-lane-health-retrying marker");
+}
+
 if (!sawRuntimeSelectionDemotedMarker) {
   throw new Error("Built worker bundle must retain the worker-runtime-selection-demoted marker");
+}
+
+if (!sawExecutionLadderRetryingMarker) {
+  throw new Error("Built worker bundle must retain the worker-execution-ladder-retrying marker");
 }
 
 if (!sawLaneHealthResetMarker) {

@@ -107,7 +107,15 @@ timestamp = sys.argv[3]
 browser_run_path = pathlib.Path(sys.argv[4])
 dist = consumer / "dist"
 assets = dist / "assets"
-asset_files = list(assets.glob("*.js")) if assets.exists() else []
+asset_files = (
+    sorted(
+        asset
+        for asset in assets.iterdir()
+        if asset.is_file() and asset.suffix in {".js", ".mjs"}
+    )
+    if assets.exists()
+    else []
+)
 browser_run = json.loads(browser_run_path.read_text())
 
 markers = {
@@ -116,6 +124,8 @@ markers = {
     "worker_runtime_selection_baseline_marker": False,
     "worker_scope_selection_baseline_marker": False,
     "worker_scope_selection_preferred_main_thread_marker": False,
+    "worker_lane_health_retrying_marker": False,
+    "worker_execution_ladder_retrying_marker": False,
     "worker_lane_health_demotion_marker": False,
     "worker_runtime_selection_demoted_marker": False,
     "worker_lane_health_reset_marker": False,
@@ -137,6 +147,10 @@ for asset in asset_files:
     markers["worker_scope_selection_baseline_marker"] |= "worker-scope-selection-baseline" in content
     markers["worker_scope_selection_preferred_main_thread_marker"] |= (
         "worker-scope-selection-preferred-main-thread" in content
+    )
+    markers["worker_lane_health_retrying_marker"] |= "worker-lane-health-retrying" in content
+    markers["worker_execution_ladder_retrying_marker"] |= (
+        "worker-execution-ladder-retrying" in content
     )
     markers["worker_lane_health_demotion_marker"] |= "worker-lane-health-demotion" in content
     markers["worker_runtime_selection_demoted_marker"] |= "worker-runtime-selection-demoted" in content
@@ -161,7 +175,9 @@ summary = {
     "checks": {
         "dist_exists": dist.exists(),
         "index_html_exists": (dist / "index.html").exists(),
-        "asset_js_count": len(asset_files),
+        "asset_script_count": len(asset_files),
+        "asset_js_count": sum(1 for asset in asset_files if asset.suffix == ".js"),
+        "asset_mjs_count": sum(1 for asset in asset_files if asset.suffix == ".mjs"),
         "real_browser_run_ok": browser_run["status"] == "ok",
         "browser_scenario_id": browser_run["scenario_id"],
         "browser_final_phase_is_shutdown_complete": browser_run["final_phase"] == "shutdown_complete",
@@ -171,7 +187,14 @@ summary = {
         "browser_baseline_scope_outcome_is_ok": browser_run["baseline_scope_outcome"] == "ok",
         "browser_preferred_scope_selected_lane": browser_run["preferred_scope_selected_lane"],
         "browser_preferred_scope_outcome_is_ok": browser_run["preferred_scope_outcome"] == "ok",
+        "browser_retrying_status": browser_run["retrying_status"],
+        "browser_retrying_selected_lane": browser_run["retrying_selected_lane"],
+        "browser_retrying_last_trigger": browser_run["retrying_last_trigger"],
+        "browser_retrying_retry_budget_remaining": browser_run["retrying_retry_budget_remaining"],
         "browser_demotion_status": browser_run["demotion_status"],
+        "browser_demotion_failure_count": browser_run["demotion_failure_count"],
+        "browser_demotion_retry_budget_remaining": browser_run["demotion_retry_budget_remaining"],
+        "browser_demotion_cooldown_until_ms": browser_run["demotion_cooldown_until_ms"],
         "browser_demoted_selected_lane": browser_run["demoted_selected_lane"],
         "browser_demoted_reason_code": browser_run["demoted_reason_code"],
         "browser_demoted_outcome_is_null": browser_run["demoted_outcome"] is None,

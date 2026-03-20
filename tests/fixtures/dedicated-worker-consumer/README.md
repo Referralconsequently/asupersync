@@ -28,8 +28,9 @@ local package copies to keep runs deterministic and side-effect free.
 - `src/worker.ts`
   dedicated-worker bootstrap that detects direct-runtime support, initializes a
   Browser Edition runtime, proves `createBrowserRuntimeSelection()` and
-  `createBrowserScopeSelection()` stay on the no-throw path, forces a
-  lane-health demotion with `reportBrowserLaneUnhealthy()`, proves recovery with
+  `createBrowserScopeSelection()` stay on the no-throw path, proves the bounded
+  lane-health retry window first, then forces a lane-health demotion with
+  `reportBrowserLaneUnhealthy()`, proves recovery with
   `resetBrowserLaneHealth()`, performs a `BrowserStorage` round-trip,
   persists/export-clears evidence through `BrowserArtifactStore`, proves
   `downloadArchive()` fails closed in workers, and reports shutdown completion

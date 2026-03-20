@@ -10,6 +10,7 @@ import {
   createBrowserRuntimeSelection,
   createBrowserScopeSelection,
   createBrowserStorage,
+  detectBrowserExecutionLadder,
   detectBrowserRuntimeSupport,
   detectBrowserStorageSupport,
   formatOutcomeFailure,
@@ -38,6 +39,8 @@ const WORKER_RUNTIME_SELECTION_BASELINE_MARKER = "worker-runtime-selection-basel
 const WORKER_SCOPE_SELECTION_BASELINE_MARKER = "worker-scope-selection-baseline";
 const WORKER_SCOPE_SELECTION_PREFERRED_MAIN_THREAD_MARKER =
   "worker-scope-selection-preferred-main-thread";
+const WORKER_LANE_HEALTH_RETRYING_MARKER = "worker-lane-health-retrying";
+const WORKER_EXECUTION_LADDER_RETRYING_MARKER = "worker-execution-ladder-retrying";
 const WORKER_LANE_HEALTH_DEMOTION_MARKER = "worker-lane-health-demotion";
 const WORKER_RUNTIME_SELECTION_DEMOTED_MARKER = "worker-runtime-selection-demoted";
 const WORKER_LANE_HEALTH_RESET_MARKER = "worker-lane-health-reset";
@@ -119,6 +122,13 @@ function summarizeSelection(
   };
 }
 
+function summarizeExecutionLadder(
+  marker: string,
+  executionLadder: RuntimeSelection["executionLadder"],
+): Record<string, unknown> {
+  return summarizeSelection(marker, executionLadder, null, false, false);
+}
+
 function summarizeLaneHealth(
   marker: string,
   health: ReturnType<typeof reportBrowserLaneUnhealthy>,
@@ -172,7 +182,7 @@ function errorReason(error: unknown): string | null {
 async function bootstrap(): Promise<void> {
   const workerGlobalObject = self as unknown as Record<string, unknown>;
   const laneHealthPolicy = {
-    maxConsecutiveFailures: 1,
+    maxConsecutiveFailures: 2,
     cooldownMs: 60_000,
   } as const;
   const support = detectBrowserRuntimeSupport(workerGlobalObject);
@@ -193,10 +203,24 @@ async function bootstrap(): Promise<void> {
     label: "dedicated-worker-preferred-main-thread",
     preferredLane: BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE,
   });
-  const laneHealthDemotion = reportBrowserLaneUnhealthy({
+  const laneHealthRetrying = reportBrowserLaneUnhealthy({
     globalObject: workerGlobalObject,
     laneId: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
     trigger: "worker_crash",
+    message: WORKER_LANE_HEALTH_RETRYING_MARKER,
+    healthScopeKey: WORKER_LANE_HEALTH_SCOPE_KEY,
+    healthPolicy: laneHealthPolicy,
+  });
+  const executionLadderRetrying = detectBrowserExecutionLadder({
+    globalObject: workerGlobalObject,
+    preferredLane: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+    healthScopeKey: WORKER_LANE_HEALTH_SCOPE_KEY,
+    healthPolicy: laneHealthPolicy,
+  });
+  const laneHealthDemotion = reportBrowserLaneUnhealthy({
+    globalObject: workerGlobalObject,
+    laneId: BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
+    trigger: "worker_bootstrap_timeout",
     message: WORKER_LANE_HEALTH_DEMOTION_MARKER,
     healthScopeKey: WORKER_LANE_HEALTH_SCOPE_KEY,
     healthPolicy: laneHealthPolicy,
@@ -387,6 +411,14 @@ async function bootstrap(): Promise<void> {
         scopeSelectionPreferredMainThread.outcome,
         scopeSelectionPreferredMainThread.runtime !== null,
         scopeSelectionPreferredMainThread.scope !== null,
+      ),
+      laneHealthRetrying: summarizeLaneHealth(
+        WORKER_LANE_HEALTH_RETRYING_MARKER,
+        laneHealthRetrying,
+      ),
+      executionLadderRetrying: summarizeExecutionLadder(
+        WORKER_EXECUTION_LADDER_RETRYING_MARKER,
+        executionLadderRetrying,
       ),
       laneHealthDemotion: summarizeLaneHealth(
         WORKER_LANE_HEALTH_DEMOTION_MARKER,
