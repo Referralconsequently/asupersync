@@ -454,9 +454,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             // Need more data - read from underlying IO
             match self.poll_read_tls(cx) {
                 Poll::Ready(Ok(0)) => {
-                    // EOF - mark as closed
-                    self.note_read_eof();
-                    return Poll::Ready(Ok(()));
+                    // Transport EOF without close_notify (since Reader::read didn't return Ok(0))
+                    self.state = TlsState::Closed;
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "tls connection closed without close_notify",
+                    )));
                 }
                 Poll::Ready(Ok(_)) => {
                     // Process the new TLS data
