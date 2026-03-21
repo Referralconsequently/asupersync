@@ -623,6 +623,7 @@ impl PartialEq for FederationBridge {
             && self.remote_morphisms == other.remote_morphisms
             && self.capability_scope == other.capability_scope
             && self.state == other.state
+            && self.runtime() == other.runtime()
     }
 }
 
@@ -897,6 +898,13 @@ impl FederationBridge {
             .replication_config("plan_replication_catch_up")?
             .clone();
         self.ensure_not_closed("plan_replication_catch_up")?;
+
+        if remote_sequence > local_sequence {
+            return Err(FederationError::ReplicationCatchUpRemoteAhead {
+                local_sequence,
+                remote_sequence,
+            });
+        }
 
         let lag = local_sequence.saturating_sub(remote_sequence);
         let action = if lag == 0 {
@@ -1358,6 +1366,16 @@ pub enum FederationError {
         expected: u64,
         /// Hash recomputed from the decoded snapshot payload.
         actual: u64,
+    },
+    /// Catch-up planning fails closed if the remote peer reports a newer sequence.
+    #[error(
+        "replication catch-up cannot treat remote peer as converged when remote sequence {remote_sequence} exceeds local sequence {local_sequence}"
+    )]
+    ReplicationCatchUpRemoteAhead {
+        /// Local sequence available to export.
+        local_sequence: u64,
+        /// Remote sequence reported by the peer.
+        remote_sequence: u64,
     },
     /// Underlying morphism validation failed.
     #[error(transparent)]
@@ -1991,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn federation_bridge_json_round_trip_ignores_ephemeral_runtime() {
+    fn federation_bridge_json_round_trip_preserves_config_and_resets_ephemeral_runtime() {
         let mut bridge = FederationBridge::new(
             FederationRole::LeafFabric(LeafConfig::default()),
             vec![derived_view_morphism()],
@@ -2010,7 +2028,66 @@ mod tests {
 
         let json = serde_json::to_string(&bridge).expect("serialize bridge");
         let roundtrip: FederationBridge = serde_json::from_str(&json).expect("deserialize bridge");
+        assert_eq!(bridge.role, roundtrip.role);
+        assert_eq!(bridge.local_morphisms, roundtrip.local_morphisms);
+        assert_eq!(bridge.remote_morphisms, roundtrip.remote_morphisms);
+        assert_eq!(bridge.capability_scope, roundtrip.capability_scope);
+        assert_eq!(bridge.state, roundtrip.state);
+        assert!(roundtrip.runtime.is_none());
+        assert_eq!(
+            roundtrip.runtime(),
+            FederationBridgeRuntime::Leaf(LeafBridgeRuntime::default())
+        );
+        assert_ne!(bridge.runtime(), roundtrip.runtime());
+    }
+
+    #[test]
+    fn federation_bridge_pristine_round_trip_preserves_normalized_equality() {
+        let bridge = FederationBridge::new(
+            FederationRole::GatewayFabric(GatewayConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&bridge).expect("serialize bridge");
+        let roundtrip: FederationBridge = serde_json::from_str(&json).expect("deserialize bridge");
+
+        assert!(roundtrip.runtime.is_none());
+        assert_eq!(bridge.runtime(), roundtrip.runtime());
         assert_eq!(bridge, roundtrip);
+    }
+
+    #[test]
+    fn federation_bridge_equality_ignores_ephemeral_runtime_state() {
+        let mut buffered = FederationBridge::new(
+            FederationRole::LeafFabric(LeafConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        let mut pristine = FederationBridge::new(
+            FederationRole::LeafFabric(LeafConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+
+        buffered.mark_degraded().unwrap();
+        pristine.mark_degraded().unwrap();
+        let _ = buffered
+            .queue_leaf_route(
+                FederationDirection::LocalToRemote,
+                SubjectPattern::new("tenant.audit.>"),
+                1,
+            )
+            .unwrap();
+
+        assert_ne!(buffered.runtime(), pristine.runtime());
+        assert_eq!(buffered, pristine);
     }
 
     #[test]
@@ -2363,6 +2440,33 @@ mod tests {
 
         assert_eq!(log_plan.action, ReplicationCatchUpAction::DeltaOnly);
         assert_eq!(snapshot_plan.action, ReplicationCatchUpAction::Snapshot);
+    }
+
+    #[test]
+    fn replication_bridge_rejects_remote_ahead_catch_up_plan() {
+        let mut federation = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+
+        let err = federation.plan_replication_catch_up(4, 7).unwrap_err();
+        assert_eq!(
+            err,
+            FederationError::ReplicationCatchUpRemoteAhead {
+                local_sequence: 4,
+                remote_sequence: 7,
+            }
+        );
+
+        match federation.runtime() {
+            FederationBridgeRuntime::Replication(runtime) => {
+                assert_eq!(runtime.last_catch_up, None);
+            }
+            other => panic!("expected replication runtime, got {other:?}"),
+        }
     }
 
     #[test]

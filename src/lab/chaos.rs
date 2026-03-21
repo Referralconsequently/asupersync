@@ -496,7 +496,7 @@ impl ChaosRng {
         let range = &config.delay_range;
         let start_nanos = range.start.as_nanos();
         let end_nanos = range.end.as_nanos();
-        if end_nanos < start_nanos {
+        if end_nanos <= start_nanos {
             return Duration::ZERO;
         }
         let min_nanos = if start_nanos == 0 && end_nanos > 1 {
@@ -556,7 +556,7 @@ impl ChaosRng {
     #[must_use]
     pub fn next_wakeup_count(&mut self, config: &ChaosConfig) -> usize {
         let range = &config.wakeup_storm_count;
-        if range.end < range.start {
+        if range.end <= range.start {
             return 0;
         }
         let min_count = if range.start == 0 && range.end > 1 {
@@ -799,11 +799,11 @@ fn nanos_to_duration_saturating(nanos: u128) -> Duration {
 fn delay_range_can_emit_nonzero(range: &Range<Duration>) -> bool {
     let start_nanos = range.start.as_nanos();
     let end_nanos = range.end.as_nanos();
-    end_nanos >= start_nanos && (start_nanos > 0 || end_nanos > 1)
+    end_nanos > start_nanos && (start_nanos > 0 || end_nanos > 1)
 }
 
 fn wakeup_range_can_emit_positive(range: &Range<usize>) -> bool {
-    range.end >= range.start && (range.start > 0 || range.end > 1)
+    range.end > range.start && (range.start > 0 || range.end > 1)
 }
 
 #[cfg(test)]
@@ -965,6 +965,24 @@ mod tests {
     }
 
     #[test]
+    fn delay_probability_with_empty_positive_range_is_effectively_disabled() {
+        let config = ChaosConfig::new(42)
+            .with_delay_probability(1.0)
+            .with_delay_range(Duration::from_millis(5)..Duration::from_millis(5));
+        assert!(!config.is_enabled());
+        assert_eq!(config.summary(), "off");
+
+        let mut rng = config.rng();
+        for _ in 0..32 {
+            assert!(
+                !rng.should_inject_delay(&config),
+                "delay chaos with an empty range must never inject"
+            );
+            assert_eq!(rng.next_delay(&config), Duration::ZERO);
+        }
+    }
+
+    #[test]
     fn rng_delay_generation_excludes_zero_when_positive_delays_are_possible() {
         let config = ChaosConfig::new(42).with_delay_range(Duration::ZERO..Duration::from_nanos(3));
 
@@ -1080,6 +1098,24 @@ mod tests {
             assert!(
                 !rng.should_inject_wakeup_storm(&config),
                 "wakeup storms with a reversed count range must never inject"
+            );
+            assert_eq!(rng.next_wakeup_count(&config), 0);
+        }
+    }
+
+    #[test]
+    fn wakeup_probability_with_empty_positive_count_range_is_effectively_disabled() {
+        let config = ChaosConfig::new(42)
+            .with_wakeup_storm_probability(1.0)
+            .with_wakeup_storm_count(5..5);
+        assert!(!config.is_enabled());
+        assert_eq!(config.summary(), "off");
+
+        let mut rng = config.rng();
+        for _ in 0..32 {
+            assert!(
+                !rng.should_inject_wakeup_storm(&config),
+                "wakeup storms with an empty count range must never inject"
             );
             assert_eq!(rng.next_wakeup_count(&config), 0);
         }

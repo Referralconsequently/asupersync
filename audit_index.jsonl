@@ -1264,3 +1264,23 @@
 {"file":"src/http/h1/listener.rs","lines":574,"batch":407,"date":"2026-03-20","agent":"Gemini","verdict":"SOUND","bugs":0,"notes":"Fresh-eyes deep trace of connection manager and push_count bounds. Correct."}
 {"file":"src/observability/task_inspector.rs","lines":0,"batch":408,"date":"2026-03-20","agent":"CobaltGate","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes diff audit: TaskInspector::render_summary ignored highlight_stuck_tasks and always emitted the stuck-task section; fixed config-gated rendering and added focused regression tests."}
 {"file":"src/messaging/control.rs","lines":3700,"batch":405,"date":"2026-03-20","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"MEDIUM: LagSketch/AdvisoryAggregate width mismatch infinite anti-entropy loop (empty adopts, non-empty breaks loop). LOW: InterestSummary unsubscribe on absent pattern created unbounded zero entries."}
+{"file":"src/messaging/redis.rs","lines":2144,"batch":409,"date":"2026-03-20","agent":"BlackMeadow","verdict":"FIXED","bugs":1,"notes":"Deep audit: positive sub-millisecond TTLs truncated to zero and produced invalid/unsafe Redis expiry behavior; centralized TTL encoding now rejects zero and rounds positive durations up to 1ms for SET PX / PEXPIRE."}
+{"file":"src/messaging/federation.rs","lines":0,"batch":409,"date":"2026-03-20","agent":"CobaltGate","verdict":"FIXED","bugs":3,"notes":"Peer-review diff audit under asupersync-28c51.302: fixed manual FederationBridge PartialEq ignoring runtime state, then corrected the follow-on normalization bug by comparing normalized runtime() rather than raw Option storage so pristine serde round-trips stay equal, and made plan_replication_catch_up fail closed when remote_sequence exceeds local_sequence instead of reporting AlreadyConverged."}
+{"file": "src/lab/dual_run.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:17:09Z", "agent": "yolo"}
+{"file": "src/lab/oracle/determinism.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:17:09Z", "agent": "yolo"}
+{"file": "src/lab/oracle/eprocess.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:17:09Z", "agent": "yolo"}
+{"file": "src/lab/oracle/evidence.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:17:09Z", "agent": "yolo"}
+{"file": "src/lab/oracle/region_tree.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:17:09Z", "agent": "yolo"}
+{"file": "src/observability/metrics.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/observability/level.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/observability/resource_accounting.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/observability/otel.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/observability/analyzer_plugin.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/obligation/crdt.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/obligation/ledger.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/obligation/calm.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/obligation/marking.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/net/quic/config.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/net/quic/connection.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/net/quic/stream.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
+{"file": "src/net/quic_native/connection.rs", "commit": "7d3f9e7b9ba1bf3ed103a7d8c716a774bd8240a0", "date": "2026-03-21T01:20:52Z", "agent": "yolo"}
