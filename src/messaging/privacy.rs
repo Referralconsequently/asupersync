@@ -648,11 +648,6 @@ pub fn export_metadata_summary(
     // composition, the total privacy cost is 3×per-field-epsilon. We
     // charge the full epsilon from the budget and divide by 3 for each
     // field so the aggregate cost stays within the charged budget.
-    // Differential privacy composition: we release 3 independent noised
-    // quantities (message_count, byte_count, error_count). By basic
-    // composition, the total privacy cost is 3×per-field-epsilon. We
-    // charge the full epsilon from the budget and divide by 3 for each
-    // field so the aggregate cost stays within the charged budget.
     const NOISED_FIELD_COUNT: f64 = 3.0;
     let (per_field_epsilon, privacy_budget_spent) = if let Some(epsilon) = policy.noise_budget {
         ledger.spend(epsilon)?;
