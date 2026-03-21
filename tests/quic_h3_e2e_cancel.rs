@@ -243,7 +243,7 @@ fn close_immediately_skips_drain_phase() {
         .expect_err("open after close");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 
     let err = pair
@@ -252,7 +252,7 @@ fn close_immediately_skips_drain_phase() {
         .expect_err("write after close");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 }
 
@@ -305,7 +305,7 @@ fn drain_with_in_flight_streams() {
         .expect_err("open bidi while draining");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 
     let err = pair
@@ -314,7 +314,7 @@ fn drain_with_in_flight_streams() {
         .expect_err("open uni while draining");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 
     // Accepting remote streams while draining is also blocked
@@ -639,7 +639,7 @@ fn finalize_after_begin_close_via_poll() {
         .expect_err("open after close");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
+        NativeQuicConnectionError::InvalidState("connection is closed")
     );
 }
 

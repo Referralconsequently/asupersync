@@ -1,3 +1,5 @@
+//! Tests for ORSet CRDT regressions.
+
 use asupersync::trace::distributed::crdt::{ORSet, Merge};
 use asupersync::remote::NodeId;
 
