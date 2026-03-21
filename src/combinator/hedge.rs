@@ -151,8 +151,10 @@ impl AdaptiveHedgePolicy {
     #[must_use]
     pub fn next_hedge_delay(&self) -> Duration {
         let n = self.samples_seen;
-        if n < 10 {
+        let warmup_samples = self.history.len().min(10);
+        if n < warmup_samples {
             // Not enough data for a stable quantile; fallback to conservative max.
+            // Small configured windows should still become usable once filled.
             return self.max_delay;
         }
 
@@ -1290,6 +1292,22 @@ mod tests {
 
         // Rank = ceil((10 + 1) * (1 - 0.5)) = 6, zero-indexed -> 5, value -> 16ms.
         assert_eq!(policy.next_hedge_delay(), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn test_adaptive_hedge_policy_small_window_calibrates_once_full() {
+        let min_delay = Duration::from_millis(1);
+        let max_delay = Duration::from_millis(250);
+        let mut policy = AdaptiveHedgePolicy::new(4, 0.25, min_delay, max_delay);
+
+        for _ in 0..3 {
+            policy.record(Duration::from_millis(20));
+        }
+        assert_eq!(policy.next_hedge_delay(), max_delay);
+
+        policy.record(Duration::from_millis(20));
+        assert_eq!(policy.sample_count(), 4);
+        assert_eq!(policy.next_hedge_delay(), Duration::from_millis(20));
     }
 
     #[test]
