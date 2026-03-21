@@ -1775,6 +1775,244 @@ impl RepairPolicy {
     }
 }
 
+/// Declared reordering contract for one protocol kernel inside a subject cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReorderingLaw {
+    /// Preserve submission order across all conversation families in the cell.
+    PreserveSubmissionOrder,
+    /// Independent conversation families may be reordered across lanes.
+    IndependentFamiliesMayReorder,
+}
+
+/// Declared issuance contract for one protocol kernel inside a subject cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelIssueLaw {
+    /// All work in the cell must serialize through one execution lane.
+    SerializeWithinCell,
+    /// Independent conversation families may issue on separate lanes.
+    IndependentFamiliesMayIssueInParallel,
+}
+
+/// Protocol-level concurrency contract carried by a FABRIC subject family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolKernel {
+    /// Stable protocol or service family name.
+    pub name: String,
+    /// Delivery tier attached to the protocol family.
+    pub delivery_class: DeliveryClass,
+    /// Semantic interference classes that must serialize together.
+    pub interference_classes: BTreeSet<String>,
+    /// Obligation surfaces touched by the protocol family.
+    pub obligation_footprint: BTreeSet<String>,
+    /// Whether the kernel permits independent families to reorder.
+    pub reordering_law: ReorderingLaw,
+    /// Whether the kernel permits independent families to issue in parallel.
+    pub parallel_issue_law: ParallelIssueLaw,
+}
+
+impl ProtocolKernel {
+    /// Construct a protocol kernel with fail-closed serialization defaults.
+    #[must_use]
+    pub fn new(name: impl Into<String>, delivery_class: DeliveryClass) -> Self {
+        Self {
+            name: name.into(),
+            delivery_class,
+            interference_classes: BTreeSet::new(),
+            obligation_footprint: BTreeSet::new(),
+            reordering_law: ReorderingLaw::PreserveSubmissionOrder,
+            parallel_issue_law: ParallelIssueLaw::SerializeWithinCell,
+        }
+    }
+
+    /// Declare an interference class that must not execute concurrently.
+    #[must_use]
+    pub fn with_interference_class(mut self, interference_class: impl Into<String>) -> Self {
+        self.interference_classes.insert(interference_class.into());
+        self
+    }
+
+    /// Declare an obligation footprint touched by the kernel.
+    #[must_use]
+    pub fn with_obligation_footprint(mut self, footprint: impl Into<String>) -> Self {
+        self.obligation_footprint.insert(footprint.into());
+        self
+    }
+
+    /// Allow independent conversation families to reorder across lanes.
+    #[must_use]
+    pub fn allow_reordering(mut self) -> Self {
+        self.reordering_law = ReorderingLaw::IndependentFamiliesMayReorder;
+        self
+    }
+
+    /// Allow independent conversation families to issue on separate lanes.
+    #[must_use]
+    pub fn allow_parallel_issue(mut self) -> Self {
+        self.parallel_issue_law = ParallelIssueLaw::IndependentFamiliesMayIssueInParallel;
+        self
+    }
+
+    /// Return true when the kernel explicitly permits semantic lane splitting.
+    #[must_use]
+    pub fn permits_semantic_lane_split(&self) -> bool {
+        self.reordering_law == ReorderingLaw::IndependentFamiliesMayReorder
+            && self.parallel_issue_law == ParallelIssueLaw::IndependentFamiliesMayIssueInParallel
+    }
+}
+
+/// One protocol-carrying conversation family routed within a subject cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticConversationFamily {
+    /// Stable family identifier for diagnostics and deterministic ordering.
+    pub family_id: String,
+    /// Protocol-bearing subject routed through the cell.
+    pub protocol_subject: SubjectPattern,
+    /// Declared kernel semantics for the conversation family.
+    pub kernel: ProtocolKernel,
+    /// Shared-state surface touched by the family.
+    pub shared_state_footprint: BTreeSet<String>,
+    /// Relative work estimate used for deterministic lane ordering.
+    pub estimated_work_units: usize,
+}
+
+impl SemanticConversationFamily {
+    /// Construct a conversation family with one unit of projected work.
+    #[must_use]
+    pub fn new(
+        family_id: impl Into<String>,
+        protocol_subject: SubjectPattern,
+        kernel: ProtocolKernel,
+    ) -> Self {
+        Self {
+            family_id: family_id.into(),
+            protocol_subject,
+            kernel,
+            shared_state_footprint: BTreeSet::new(),
+            estimated_work_units: 1,
+        }
+    }
+
+    /// Declare one shared-state surface touched by the family.
+    #[must_use]
+    pub fn with_shared_state_footprint(mut self, footprint: impl Into<String>) -> Self {
+        self.shared_state_footprint.insert(footprint.into());
+        self
+    }
+
+    /// Override the relative projected work units for deterministic planning.
+    #[must_use]
+    pub fn with_estimated_work_units(mut self, estimated_work_units: usize) -> Self {
+        self.estimated_work_units = estimated_work_units.max(1);
+        self
+    }
+
+    /// Return true when two families must serialize on the same execution lane.
+    #[must_use]
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        self.family_id == other.family_id
+            || !self.kernel.permits_semantic_lane_split()
+            || !other.kernel.permits_semantic_lane_split()
+            || footprints_overlap(
+                &self.kernel.interference_classes,
+                &other.kernel.interference_classes,
+            )
+            || footprints_overlap(
+                &self.kernel.obligation_footprint,
+                &other.kernel.obligation_footprint,
+            )
+            || footprints_overlap(&self.shared_state_footprint, &other.shared_state_footprint)
+    }
+
+    #[must_use]
+    fn scheduling_pressure(&self) -> usize {
+        self.estimated_work_units
+            + self.kernel.interference_classes.len()
+            + self.kernel.obligation_footprint.len()
+            + self.shared_state_footprint.len()
+    }
+}
+
+/// Deterministic execution lane inside one `SubjectCell`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticExecutionLane {
+    /// Stable lane identity rooted in the canonical subject cell.
+    pub lane_id: String,
+    /// Conversation families serialized on this lane.
+    pub families: Vec<SemanticConversationFamily>,
+    /// Aggregate interference classes covered by the lane.
+    pub interference_classes: BTreeSet<String>,
+    /// Aggregate obligation footprint covered by the lane.
+    pub obligation_footprint: BTreeSet<String>,
+    /// Aggregate shared-state footprint covered by the lane.
+    pub shared_state_footprint: BTreeSet<String>,
+    /// Total projected work units serialized through the lane.
+    pub projected_work_units: usize,
+}
+
+impl SemanticExecutionLane {
+    #[must_use]
+    fn new(
+        cell_id: CellId,
+        lane_index: usize,
+        mut families: Vec<SemanticConversationFamily>,
+    ) -> Self {
+        families.sort_by(compare_semantic_families);
+
+        let mut interference_classes = BTreeSet::new();
+        let mut obligation_footprint = BTreeSet::new();
+        let mut shared_state_footprint = BTreeSet::new();
+        let projected_work_units = families
+            .iter()
+            .map(|family| family.estimated_work_units)
+            .sum();
+
+        for family in &families {
+            interference_classes.extend(family.kernel.interference_classes.iter().cloned());
+            obligation_footprint.extend(family.kernel.obligation_footprint.iter().cloned());
+            shared_state_footprint.extend(family.shared_state_footprint.iter().cloned());
+        }
+
+        Self {
+            lane_id: format!("{cell_id}:semantic-lane-{lane_index}"),
+            families,
+            interference_classes,
+            obligation_footprint,
+            shared_state_footprint,
+            projected_work_units,
+        }
+    }
+}
+
+/// Semantic lane plan layered above canonical `SubjectCell` ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticLanePlan {
+    /// Canonical subject cell owning the plan.
+    pub cell_id: CellId,
+    /// Deterministic execution lanes for the cell.
+    pub lanes: Vec<SemanticExecutionLane>,
+}
+
+impl SemanticLanePlan {
+    /// Projected work if every family serialized through one lane.
+    #[must_use]
+    pub fn serial_work_units(&self) -> usize {
+        self.lanes
+            .iter()
+            .map(|lane| lane.projected_work_units)
+            .sum()
+    }
+
+    /// Projected work on the critical lane after semantic partitioning.
+    #[must_use]
+    pub fn projected_parallel_rounds(&self) -> usize {
+        self.lanes
+            .iter()
+            .map(|lane| lane.projected_work_units)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 /// Smallest sovereign unit of the brokerless subject fabric.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubjectCell {
@@ -1825,6 +2063,90 @@ impl SubjectCell {
             repair_policy,
             epoch,
         })
+    }
+
+    /// Partition protocol families into deterministic execution lanes above the
+    /// canonical subject-cell ownership boundary.
+    #[must_use]
+    pub fn plan_semantic_execution_lanes(
+        &self,
+        families: &[SemanticConversationFamily],
+    ) -> SemanticLanePlan {
+        if families.is_empty() {
+            return SemanticLanePlan {
+                cell_id: self.cell_id,
+                lanes: Vec::new(),
+            };
+        }
+
+        let mut ordered = families.to_vec();
+        ordered.sort_by(compare_semantic_families);
+
+        let mut visited = vec![false; ordered.len()];
+        let mut lane_families = Vec::new();
+
+        for start in 0..ordered.len() {
+            if visited[start] {
+                continue;
+            }
+
+            visited[start] = true;
+            let mut stack = vec![start];
+            let mut component = Vec::new();
+
+            while let Some(index) = stack.pop() {
+                component.push(ordered[index].clone());
+                for candidate in 0..ordered.len() {
+                    if visited[candidate] || index == candidate {
+                        continue;
+                    }
+                    if ordered[index].conflicts_with(&ordered[candidate]) {
+                        visited[candidate] = true;
+                        stack.push(candidate);
+                    }
+                }
+            }
+
+            component.sort_by(compare_semantic_families);
+            lane_families.push(component);
+        }
+
+        lane_families.sort_by(|left, right| {
+            right
+                .iter()
+                .map(|family| family.estimated_work_units)
+                .sum::<usize>()
+                .cmp(
+                    &left
+                        .iter()
+                        .map(|family| family.estimated_work_units)
+                        .sum::<usize>(),
+                )
+                .then_with(|| {
+                    let left_name = left
+                        .first()
+                        .map(|family| family.family_id.as_str())
+                        .unwrap_or("");
+                    let right_name = right
+                        .first()
+                        .map(|family| family.family_id.as_str())
+                        .unwrap_or("");
+                    left_name.cmp(right_name)
+                })
+        });
+
+        let lanes = lane_families
+            .into_iter()
+            .enumerate()
+            .map(|(lane_index, component)| {
+                SemanticExecutionLane::new(self.cell_id, lane_index, component)
+            })
+            .collect();
+
+        SemanticLanePlan {
+            cell_id: self.cell_id,
+            lanes,
+        }
     }
 
     /// Certify an explicit steward-set self-rebalance under the current epoch,
@@ -2849,6 +3171,26 @@ fn stable_hash<T: Hash>(value: T) -> u64 {
     hasher.finish()
 }
 
+fn footprints_overlap(left: &BTreeSet<String>, right: &BTreeSet<String>) -> bool {
+    left.iter().any(|entry| right.contains(entry))
+}
+
+fn compare_semantic_families(
+    left: &SemanticConversationFamily,
+    right: &SemanticConversationFamily,
+) -> std::cmp::Ordering {
+    right
+        .scheduling_pressure()
+        .cmp(&left.scheduling_pressure())
+        .then_with(|| right.estimated_work_units.cmp(&left.estimated_work_units))
+        .then_with(|| left.family_id.cmp(&right.family_id))
+        .then_with(|| {
+            left.protocol_subject
+                .as_str()
+                .cmp(right.protocol_subject.as_str())
+        })
+}
+
 fn compare_candidates(
     left: &StewardCandidate,
     right: &StewardCandidate,
@@ -3802,6 +4144,33 @@ mod tests {
                 required_holders,
             ),
         }
+    }
+
+    fn split_capable_kernel(
+        name: &str,
+        interference_class: &str,
+        obligation_footprint: &str,
+    ) -> ProtocolKernel {
+        ProtocolKernel::new(name, DeliveryClass::ObligationBacked)
+            .with_interference_class(interference_class)
+            .with_obligation_footprint(obligation_footprint)
+            .allow_reordering()
+            .allow_parallel_issue()
+    }
+
+    fn semantic_family(
+        family_id: &str,
+        kernel: ProtocolKernel,
+        shared_state_footprint: &str,
+        estimated_work_units: usize,
+    ) -> SemanticConversationFamily {
+        SemanticConversationFamily::new(
+            family_id,
+            SubjectPattern::parse("orders.created").expect("family subject"),
+            kernel,
+        )
+        .with_shared_state_footprint(shared_state_footprint)
+        .with_estimated_work_units(estimated_work_units)
     }
 
     fn subscribe_capability(subject: &str) -> FabricCapability {
@@ -4909,6 +5278,143 @@ mod tests {
                 slot_index: 3,
                 cardinality_limit: 3,
             }
+        );
+    }
+
+    #[test]
+    fn semantic_conversation_family_requires_explicit_parallel_contracts_to_split() {
+        let ledger_issue = semantic_family(
+            "ledger-issue",
+            split_capable_kernel("ledger-issue", "ledger-issue", "publish-ledger"),
+            "order:123",
+            3,
+        );
+        let billing_notify = semantic_family(
+            "billing-notify",
+            split_capable_kernel("billing-notify", "billing-notify", "notify-billing"),
+            "billing:invoice-123",
+            1,
+        );
+        assert!(
+            !ledger_issue.conflicts_with(&billing_notify),
+            "disjoint footprints with explicit split permissions should commute"
+        );
+
+        let serial_kernel = semantic_family(
+            "serial-repair",
+            ProtocolKernel::new("serial-repair", DeliveryClass::DurableOrdered)
+                .with_interference_class("serial-repair")
+                .with_obligation_footprint("repair-ledger"),
+            "repair:cell-7",
+            2,
+        );
+        assert!(
+            ledger_issue.conflicts_with(&serial_kernel),
+            "families without explicit reorder/parallel contracts must fail closed"
+        );
+
+        let overlapping_state = semantic_family(
+            "ledger-confirm",
+            split_capable_kernel("ledger-confirm", "ledger-confirm", "confirm-ledger"),
+            "order:123",
+            2,
+        );
+        assert!(
+            ledger_issue.conflicts_with(&overlapping_state),
+            "shared-state overlap must keep families on the same lane"
+        );
+    }
+
+    #[test]
+    fn subject_cell_semantic_lane_plan_decomposes_hot_namespace_by_shared_state_footprint() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+
+        let families = vec![
+            semantic_family(
+                "orders-123-authorize",
+                split_capable_kernel("payments-authorize", "payments-authorize", "obligation:123"),
+                "order:123",
+                4,
+            ),
+            semantic_family(
+                "orders-987-authorize",
+                split_capable_kernel(
+                    "payments-authorize",
+                    "payments-authorize-987",
+                    "obligation:987",
+                ),
+                "order:987",
+                1,
+            ),
+            semantic_family(
+                "orders-123-settle",
+                split_capable_kernel("payments-settle", "payments-settle", "obligation:123"),
+                "order:123",
+                2,
+            ),
+        ];
+
+        let plan = cell.plan_semantic_execution_lanes(&families);
+        assert_eq!(plan.lanes.len(), 2);
+
+        let lane_families: Vec<Vec<&str>> = plan
+            .lanes
+            .iter()
+            .map(|lane| {
+                lane.families
+                    .iter()
+                    .map(|family| family.family_id.as_str())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            lane_families,
+            vec![
+                vec!["orders-123-authorize", "orders-123-settle"],
+                vec!["orders-987-authorize"],
+            ]
+        );
+    }
+
+    #[test]
+    fn subject_cell_semantic_lane_plan_projects_parallel_round_reduction() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+
+        let families = vec![
+            semantic_family(
+                "inventory-rebuild",
+                split_capable_kernel("inventory-rebuild", "inventory", "inventory-scan"),
+                "inventory:west",
+                5,
+            ),
+            semantic_family(
+                "billing-snapshot",
+                split_capable_kernel("billing-snapshot", "billing", "billing-scan"),
+                "billing:east",
+                4,
+            ),
+            semantic_family(
+                "analytics-flush",
+                split_capable_kernel("analytics-flush", "analytics", "analytics-flush"),
+                "analytics:global",
+                3,
+            ),
+        ];
+
+        let first = cell.plan_semantic_execution_lanes(&families);
+        let second = cell.plan_semantic_execution_lanes(&families);
+
+        assert_eq!(first, second, "lane planning must be deterministic");
+        assert_eq!(first.lanes.len(), 3);
+        assert_eq!(first.serial_work_units(), 12);
+        assert_eq!(first.projected_parallel_rounds(), 5);
+        assert!(
+            first.serial_work_units() > first.projected_parallel_rounds(),
+            "independent families should reduce projected serialized rounds"
         );
     }
 }
