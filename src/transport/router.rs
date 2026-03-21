@@ -343,6 +343,91 @@ impl LoadBalancer {
         ranked.into_iter().map(|(_, endpoint)| endpoint).collect()
     }
 
+    #[inline]
+    fn weighted_endpoint_index_for_slot(available: &[&Arc<Endpoint>], slot: u64) -> usize {
+        let mut cumulative = 0u64;
+        for (idx, endpoint) in available.iter().enumerate() {
+            cumulative += u64::from(endpoint.weight);
+            if slot < cumulative {
+                return idx;
+            }
+        }
+
+        available.len().saturating_sub(1)
+    }
+
+    /// Unique weighted round-robin selection for multicast/quorum routing.
+    ///
+    /// `select_n` must return distinct healthy endpoints, but it still needs to
+    /// honor the weighted wheel so that repeated multicast/quorum selections keep
+    /// preferring higher-weight endpoints instead of silently degrading to plain
+    /// round-robin. We walk the weighted ring until we have `n` unique picks,
+    /// then fall back to the remaining healthy endpoints only if zero-weight
+    /// entries prevented the weighted wheel from producing enough distinct picks.
+    fn select_n_weighted_round_robin<'a>(
+        &self,
+        available: Vec<&'a Arc<Endpoint>>,
+        n: usize,
+    ) -> Vec<&'a Arc<Endpoint>> {
+        let len = available.len();
+        let total_weight: u64 = available
+            .iter()
+            .map(|endpoint| u64::from(endpoint.weight))
+            .sum();
+
+        if total_weight == 0 {
+            let counter = self.rr_counter.fetch_add(n as u64, Ordering::Relaxed);
+            let start = counter as usize;
+            return (0..n).map(|i| available[(start + i) % len]).collect();
+        }
+
+        loop {
+            let counter = self.rr_counter.load(Ordering::Relaxed);
+            let mut selected = Vec::with_capacity(n);
+            let mut selected_indices = SmallVec::<[usize; 16]>::new();
+            let mut slot = counter % total_weight;
+            let mut consumed_slots = 0u64;
+
+            while consumed_slots < total_weight {
+                let idx = Self::weighted_endpoint_index_for_slot(&available, slot);
+                consumed_slots += 1;
+                if !selected_indices.contains(&idx) {
+                    selected_indices.push(idx);
+                    selected.push(available[idx]);
+                    if selected.len() == n {
+                        break;
+                    }
+                }
+                slot = if slot + 1 == total_weight {
+                    0
+                } else {
+                    slot + 1
+                };
+            }
+
+            let fallback_start = counter as usize % len;
+            for offset in 0..len {
+                let idx = (fallback_start + offset) % len;
+                if selected_indices.contains(&idx) {
+                    continue;
+                }
+                selected.push(available[idx]);
+                if selected.len() == n {
+                    break;
+                }
+            }
+
+            let next_counter = counter.saturating_add(consumed_slots.max(1));
+            if self
+                .rr_counter
+                .compare_exchange_weak(counter, next_counter, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return selected;
+            }
+        }
+    }
+
     /// Creates a new load balancer.
     #[must_use]
     pub fn new(strategy: LoadBalanceStrategy) -> Self {
@@ -699,12 +784,8 @@ impl LoadBalancer {
                 let len = available.len();
                 (0..n).map(|i| available[(start_idx + i) % len]).collect()
             }
-            // For WeightedRoundRobin and FirstAvailable, fallback to simple round robin
-            // or first available logic.
             LoadBalanceStrategy::WeightedRoundRobin => {
-                let start = self.rr_counter.fetch_add(n as u64, Ordering::Relaxed) as usize;
-                let len = available.len();
-                (0..n).map(|i| available[(start + i) % len]).collect()
+                self.select_n_weighted_round_robin(available, n)
             }
             LoadBalanceStrategy::FirstAvailable => available.into_iter().take(n).collect(),
         }
@@ -2255,6 +2336,36 @@ mod tests {
         assert_eq!(selected_ids, vec![e1.id, e2.id, e3.id]);
     }
 
+    #[test]
+    fn test_load_balancer_weighted_round_robin_select_n_honors_weight_ring() {
+        let lb = LoadBalancer::new(LoadBalanceStrategy::WeightedRoundRobin);
+
+        let heavy = Arc::new(test_endpoint(1).with_weight(5));
+        let medium = Arc::new(test_endpoint(2).with_weight(1));
+        let light = Arc::new(test_endpoint(3).with_weight(1));
+        let endpoints = vec![heavy.clone(), medium.clone(), light.clone()];
+
+        let first: Vec<_> = lb
+            .select_n(&endpoints, 2, None)
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+        let second: Vec<_> = lb
+            .select_n(&endpoints, 2, None)
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+        let third: Vec<_> = lb
+            .select_n(&endpoints, 2, None)
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+
+        assert_eq!(first, vec![heavy.id, medium.id]);
+        assert_eq!(second, vec![light.id, heavy.id]);
+        assert_eq!(third, vec![heavy.id, medium.id]);
+    }
+
     // Test 6: Routing table basic operations
     #[test]
     fn test_routing_table_basic() {
@@ -2493,6 +2604,48 @@ mod tests {
 
         assert!(results.is_ok());
         assert_eq!(results.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_symbol_router_multicast_weighted_round_robin_respects_weights_across_calls() {
+        let table = Arc::new(RoutingTable::new());
+        let heavy = table.register_endpoint(test_endpoint(1).with_weight(5));
+        let medium = table.register_endpoint(test_endpoint(2).with_weight(1));
+        let light = table.register_endpoint(test_endpoint(3).with_weight(1));
+
+        let object_id = ObjectId::new_for_test(77);
+        let entry = RoutingEntry::new(
+            vec![heavy.clone(), medium.clone(), light.clone()],
+            Time::ZERO,
+        )
+        .with_strategy(LoadBalanceStrategy::WeightedRoundRobin);
+        table.add_route(RouteKey::Object(object_id), entry);
+
+        let router = SymbolRouter::new(table);
+        let symbol = Symbol::new_for_test(77, 0, 0, &[7, 7]);
+
+        let first: Vec<_> = router
+            .route_multicast(&symbol, 2)
+            .expect("first weighted multicast")
+            .into_iter()
+            .map(|route| route.endpoint.id)
+            .collect();
+        let second: Vec<_> = router
+            .route_multicast(&symbol, 2)
+            .expect("second weighted multicast")
+            .into_iter()
+            .map(|route| route.endpoint.id)
+            .collect();
+        let third: Vec<_> = router
+            .route_multicast(&symbol, 2)
+            .expect("third weighted multicast")
+            .into_iter()
+            .map(|route| route.endpoint.id)
+            .collect();
+
+        assert_eq!(first, vec![heavy.id, medium.id]);
+        assert_eq!(second, vec![light.id, heavy.id]);
+        assert_eq!(third, vec![heavy.id, medium.id]);
     }
 
     #[test]
