@@ -378,3 +378,35 @@
 {"file":"src/service/buffer.rs","lines":895,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"MEDIUM: pending slot leak on panic during WaitingForReady->Active transition (fixed with temp state restore). LOW: waker vec growth under alternating contention (noted)."}
 {"file":"src/service/discover.rs","lines":1242,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS discovery, generation-based staleness, symmetric diff changes. Clean."}
 {"file":"src/service/steer.rs","lines":727,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request routing, fail-closed index validation, cancel-safe state machine. Clean."}
+"src/http/h1/http_client.rs"
+3452
+404
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"URL parsing rejects userinfo, SOCKS5 protocol correct, CONNECT tunnel has CRLF injection checks, redirect strips sensitive headers"
+"src/http/h1/codec.rs"
+1547
+404
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Request smuggling resistant: rejects TE+CL combo, duplicate TE/CL, TE on HTTP/1.0. Chunked decoder state machine correct."
+"src/database/postgres.rs"
+5518
+404
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"SCRAM-SHA-256 correct: constant-time sig verify, username escaping order, PBKDF2 single-block, nonce prefix check"
+"src/sync/pool.rs"
+4280
+404
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Positional waiter waking correct, RAII slot reservation, health check guard, cancel-safe acquire with baton passing"
