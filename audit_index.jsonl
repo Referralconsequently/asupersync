@@ -600,3 +600,5 @@
 {"file":"src/supervision.rs","lines":8362,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Restart window detection, topological sort, escalation, region cleanup. Clean."}
 {"file":"src/link.rs","lines":1836,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Link symmetry, self-links, exit resolution, region cleanup. Clean."}
 {"file":"src/process.rs","lines":1863,"batch":411,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kill-on-drop SIGKILL+reap, stdin close before wait, pipe handles. Clean."}
+{"file":"src/messaging/subject.rs","lines":2687,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"NATS-style subject patterns, trie routing, queue groups, sharded sublist, subject registry with specificity lookup, namespace kernel. 30+ tests. Clean."}
+{"file":"src/messaging/stream.rs","lines":811,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Region-owned stream state machine. Lifecycle, retention limits, quiescence, capture policy, in-memory backend. 8 tests. Clean."}
