@@ -202,7 +202,8 @@ impl InjectionStrategy {
                     rng_state = rng_state
                         .wrapping_mul(6_364_136_223_846_793_005)
                         .wrapping_add(1_442_695_040_888_963_407);
-                    let j = (rng_state % ((i + 1) as u64)) as usize;
+                    // Use upper bits for better randomness, as lower bits of LCG have short periods
+                    let j = ((rng_state >> 32) % ((i + 1) as u64)) as usize;
                     indices.swap(i, j);
                 }
 
