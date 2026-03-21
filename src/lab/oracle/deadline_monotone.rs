@@ -131,9 +131,54 @@ impl DeadlineMonotoneOracle {
         }
     }
 
+    fn record_violation_if_needed(
+        &mut self,
+        child: RegionId,
+        child_deadline: Option<Time>,
+        parent: RegionId,
+        parent_deadline: Option<Time>,
+        time: Time,
+    ) {
+        if !Self::is_deadline_monotone(child_deadline, parent_deadline) {
+            self.violations.push(DeadlineMonotoneViolation {
+                child,
+                child_deadline,
+                parent,
+                parent_deadline,
+                detected_at: time,
+            });
+        }
+    }
+
+    fn check_existing_children(
+        &mut self,
+        parent: RegionId,
+        parent_deadline: Option<Time>,
+        time: Time,
+    ) {
+        let children_to_check: Vec<(RegionId, Option<Time>)> = self
+            .regions
+            .iter()
+            .filter_map(|(region_id, entry)| {
+                if entry.parent == Some(parent) {
+                    Some((*region_id, entry.deadline))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (child, child_deadline) in children_to_check {
+            self.record_violation_if_needed(child, child_deadline, parent, parent_deadline, time);
+        }
+    }
+
     /// Records a region creation event.
     ///
     /// Checks deadline monotonicity immediately against the parent.
+    /// Also re-validates any already-tracked children of this region so the
+    /// oracle remains correct even if region-create events arrive out of
+    /// parent-first order.
     pub fn on_region_create(
         &mut self,
         region: RegionId,
@@ -146,15 +191,13 @@ impl DeadlineMonotoneOracle {
         // Check against parent's deadline if parent exists
         if let Some(parent_id) = parent {
             if let Some(parent_entry) = self.regions.get(&parent_id) {
-                if !Self::is_deadline_monotone(deadline, parent_entry.deadline) {
-                    self.violations.push(DeadlineMonotoneViolation {
-                        child: region,
-                        child_deadline: deadline,
-                        parent: parent_id,
-                        parent_deadline: parent_entry.deadline,
-                        detected_at: time,
-                    });
-                }
+                self.record_violation_if_needed(
+                    region,
+                    deadline,
+                    parent_id,
+                    parent_entry.deadline,
+                    time,
+                );
             }
         }
 
@@ -166,6 +209,8 @@ impl DeadlineMonotoneOracle {
                 timestamp: time,
             },
         );
+
+        self.check_existing_children(region, deadline, time);
     }
 
     /// Records a budget update event for a region.
@@ -179,15 +224,13 @@ impl DeadlineMonotoneOracle {
             // Check against parent if we have one
             if let Some(parent_id) = entry.parent {
                 if let Some(parent_entry) = self.regions.get(&parent_id).cloned() {
-                    if !Self::is_deadline_monotone(new_deadline, parent_entry.deadline) {
-                        self.violations.push(DeadlineMonotoneViolation {
-                            child: region,
-                            child_deadline: new_deadline,
-                            parent: parent_id,
-                            parent_deadline: parent_entry.deadline,
-                            detected_at: time,
-                        });
-                    }
+                    self.record_violation_if_needed(
+                        region,
+                        new_deadline,
+                        parent_id,
+                        parent_entry.deadline,
+                        time,
+                    );
                 }
             }
 
@@ -213,31 +256,7 @@ impl DeadlineMonotoneOracle {
             entry.timestamp = time;
         }
 
-        // Collect children to check (to avoid borrow issues)
-        let children_to_check: Vec<(RegionId, Option<Time>)> = self
-            .regions
-            .iter()
-            .filter_map(|(rid, entry)| {
-                if entry.parent == Some(parent) {
-                    Some((*rid, entry.deadline))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Check each child
-        for (child_id, child_deadline) in children_to_check {
-            if !Self::is_deadline_monotone(child_deadline, parent_deadline) {
-                self.violations.push(DeadlineMonotoneViolation {
-                    child: child_id,
-                    child_deadline,
-                    parent,
-                    parent_deadline,
-                    detected_at: time,
-                });
-            }
-        }
+        self.check_existing_children(parent, parent_deadline, time);
     }
 
     /// Verifies the invariant holds.
@@ -413,6 +432,63 @@ mod tests {
         crate::test_complete!("child_with_looser_deadline_fails");
     }
 
+    #[test]
+    fn child_created_before_parent_violation_detected_when_parent_arrives() {
+        init_test("child_created_before_parent_violation_detected_when_parent_arrives");
+        let mut oracle = DeadlineMonotoneOracle::new();
+
+        oracle.on_region_create(
+            region(1),
+            Some(region(0)),
+            &budget_with_deadline(t(1_000)),
+            t(0),
+        );
+        oracle.on_region_create(region(0), None, &budget_with_deadline(t(500)), t(1));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.child == region(1),
+            "violation child",
+            region(1),
+            violation.child
+        );
+        crate::assert_with_log!(
+            violation.parent == region(0),
+            "violation parent",
+            region(0),
+            violation.parent
+        );
+        crate::assert_with_log!(
+            violation.detected_at == t(1),
+            "detected at parent insert",
+            t(1),
+            violation.detected_at
+        );
+        crate::test_complete!("child_created_before_parent_violation_detected_when_parent_arrives");
+    }
+
+    #[test]
+    fn child_created_before_parent_valid_deadline_stays_ok() {
+        init_test("child_created_before_parent_valid_deadline_stays_ok");
+        let mut oracle = DeadlineMonotoneOracle::new();
+
+        oracle.on_region_create(
+            region(1),
+            Some(region(0)),
+            &budget_with_deadline(t(500)),
+            t(0),
+        );
+        oracle.on_region_create(region(0), None, &budget_with_deadline(t(1_000)), t(1));
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("child_created_before_parent_valid_deadline_stays_ok");
+    }
+
     // =========================================================================
     // Unbounded (None) deadline tests
     // =========================================================================
@@ -572,6 +648,49 @@ mod tests {
             violation.parent
         );
         crate::test_complete!("violation_in_deep_hierarchy_detected");
+    }
+
+    #[test]
+    fn grandchild_created_before_intermediate_parent_violation_detected_on_parent_insert() {
+        init_test(
+            "grandchild_created_before_intermediate_parent_violation_detected_on_parent_insert",
+        );
+        let mut oracle = DeadlineMonotoneOracle::new();
+
+        oracle.on_region_create(
+            region(2),
+            Some(region(1)),
+            &budget_with_deadline(t(700)),
+            t(0),
+        );
+        oracle.on_region_create(region(1), None, &budget_with_deadline(t(600)), t(1));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.child == region(2),
+            "violation child",
+            region(2),
+            violation.child
+        );
+        crate::assert_with_log!(
+            violation.parent == region(1),
+            "violation parent",
+            region(1),
+            violation.parent
+        );
+        crate::assert_with_log!(
+            violation.detected_at == t(1),
+            "detected at parent insert",
+            t(1),
+            violation.detected_at
+        );
+        crate::test_complete!(
+            "grandchild_created_before_intermediate_parent_violation_detected_on_parent_insert"
+        );
     }
 
     #[test]
