@@ -549,3 +549,27 @@
 "SOUND"
 0
 "TaskExecutionGuard panic safety, work steal order correct, spin/yield/park backoff"
+"src/runtime/scheduler/three_lane.rs"
+6879
+407
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"EXP3 weights correct, Lyapunov governor sound, Tarjan SCC correct, work-stealing safe, lock ordering respected"
+"src/http/h2/hpack.rs"
+2520
+407
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Huffman fast paths verified complete, integer decode overflow-safe, dynamic table eviction correct, DoS protections"
+"src/runtime/scheduler/intrusive.rs"
+1554
+407
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Tag-based membership + &mut Arena exclusive access eliminates ABA by construction"
