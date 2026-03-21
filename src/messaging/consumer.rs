@@ -1,8 +1,7 @@
 //! Consumer cursor leases over recoverable FABRIC capsules.
 //!
-//! The current fabric lane still lacks the full delegated cursor-partition and
-//! read-ticket control plane, but this module establishes the deterministic
-//! state machine that later beads can refine:
+//! This module establishes a deterministic cursor-lease state machine with
+//! delegated cursor partitions and lease-bound read tickets:
 //!
 //! - cursor authority is fenced by cell epoch plus lease generation,
 //! - delivery attempts are certified with obligation-backed metadata,
@@ -237,6 +236,155 @@ impl CursorLeaseRef {
     }
 }
 
+/// Partition-scoped lease extracted from a delegated cursor authority lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPartitionLease {
+    /// Deterministic delegated partition identifier.
+    pub partition: u16,
+    /// Peer currently leading the partition.
+    pub leader: CursorLeaseHolder,
+    /// Generation fencing stale partition state.
+    pub lease_generation: u64,
+}
+
+impl CursorPartitionLease {
+    /// Capture a partition lease only when the authority lease is delegated.
+    #[must_use]
+    pub fn from_authority_lease(lease: &CursorAuthorityLease) -> Option<Self> {
+        match lease.scope {
+            CursorLeaseScope::ControlCapsule => None,
+            CursorLeaseScope::DelegatedCursorPartition { partition } => Some(Self {
+                partition,
+                leader: lease.holder.clone(),
+                lease_generation: lease.lease_generation,
+            }),
+        }
+    }
+}
+
+/// Deterministic strategy used to assign consumers into delegated partitions.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CursorPartitionSelector {
+    /// Partition is responsible for one named consumer group.
+    ConsumerGroup(String),
+    /// Partition owns a contiguous subject-key sub-range.
+    SubjectSubRange {
+        /// Inclusive lower bound for the sub-range.
+        start: String,
+        /// Inclusive upper bound for the sub-range.
+        end: String,
+    },
+    /// Partition owns one hash bucket from a bounded bucket set.
+    HashBucket {
+        /// Zero-based bucket index.
+        bucket: u16,
+        /// Total bucket count.
+        buckets: u16,
+    },
+}
+
+impl CursorPartitionSelector {
+    fn validate(&self) -> Result<(), ConsumerCursorError> {
+        match self {
+            Self::ConsumerGroup(group) if group.trim().is_empty() => {
+                Err(ConsumerCursorError::EmptyCursorPartitionSelector {
+                    field: "consumer_group",
+                })
+            }
+            Self::SubjectSubRange { start, end } if start.trim().is_empty() => {
+                Err(ConsumerCursorError::EmptyCursorPartitionSelector { field: "start" })
+            }
+            Self::SubjectSubRange { start: _, end } if end.trim().is_empty() => {
+                Err(ConsumerCursorError::EmptyCursorPartitionSelector { field: "end" })
+            }
+            Self::SubjectSubRange { start, end } if start > end => {
+                Err(ConsumerCursorError::InvalidCursorPartitionSubRange {
+                    start: start.clone(),
+                    end: end.clone(),
+                })
+            }
+            Self::HashBucket { buckets, .. } if *buckets == 0 => {
+                Err(ConsumerCursorError::InvalidCursorPartitionBucket {
+                    bucket: 0,
+                    buckets: *buckets,
+                })
+            }
+            Self::HashBucket { bucket, buckets } if *bucket >= *buckets => {
+                Err(ConsumerCursorError::InvalidCursorPartitionBucket {
+                    bucket: *bucket,
+                    buckets: *buckets,
+                })
+            }
+            Self::ConsumerGroup(_) | Self::SubjectSubRange { .. } | Self::HashBucket { .. } => {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Deterministic delegated cursor-partition assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPartitionAssignment {
+    /// Deterministic delegated partition identifier.
+    pub partition: u16,
+    /// Partition leader currently responsible for this slice of cursor state.
+    pub leader: CursorLeaseHolder,
+    /// Partitioning strategy used to assign consumers.
+    pub selector: CursorPartitionSelector,
+    /// Stable identifiers for consumers served by this partition.
+    pub consumers: BTreeSet<String>,
+}
+
+impl CursorPartitionAssignment {
+    fn validate(&self) -> Result<(), ConsumerCursorError> {
+        self.selector.validate()?;
+        if self.consumers.is_empty() {
+            return Err(ConsumerCursorError::EmptyCursorPartitionConsumers {
+                partition: self.partition,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Coarse checkpoint report emitted by one delegated partition leader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPartitionCheckpoint {
+    /// Partition issuing the report.
+    pub partition: u16,
+    /// Lease generation this report was computed against.
+    pub lease_generation: u64,
+    /// Highest sequence durably acknowledged by the partition.
+    pub ack_floor: u64,
+    /// Highest sequence delivered by the partition.
+    pub delivered_through: u64,
+    /// Number of outstanding pending deliveries in the partition.
+    pub pending_count: u64,
+    /// Deterministic count of consumers assigned to the partition.
+    pub consumer_count: u32,
+}
+
+/// Coarse checkpoint summary retained by the control capsule for one partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPartitionSummary {
+    /// Partition the summary belongs to.
+    pub partition: u16,
+    /// Partitioning strategy used to assign consumers.
+    pub selector: CursorPartitionSelector,
+    /// Partition leader that reported the summary.
+    pub leader: CursorLeaseHolder,
+    /// Lease generation the summary is bound to.
+    pub lease_generation: u64,
+    /// Highest sequence durably acknowledged by the partition.
+    pub ack_floor: u64,
+    /// Highest sequence delivered by the partition.
+    pub delivered_through: u64,
+    /// Number of outstanding pending deliveries in the partition.
+    pub pending_count: u64,
+    /// Deterministic count of consumers assigned to the partition.
+    pub consumer_count: u32,
+}
+
 /// Cacheability metadata carried by a delegated read ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CacheabilityRule {
@@ -400,6 +548,15 @@ pub struct AttemptCertificate {
     pub supersedes_obligation_id: Option<ObligationId>,
 }
 
+impl AttemptCertificate {
+    /// Expose the partition-scoped lease when the attempt was minted from a
+    /// delegated partition leader.
+    #[must_use]
+    pub fn cursor_partition_lease(&self) -> Option<CursorPartitionLease> {
+        CursorPartitionLease::from_authority_lease(&self.cursor_authority_lease)
+    }
+}
+
 /// Coverage map for symbols retained in recoverable capsules.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecoverableCapsule {
@@ -513,10 +670,56 @@ pub enum AckResolution {
 pub struct CursorTransferProposal {
     /// Peer that wants authority next.
     pub proposed_holder: CursorLeaseHolder,
+    /// Scope the proposer wants authority over.
+    pub proposed_scope: CursorLeaseScope,
     /// Generation the proposer believes is current.
     pub expected_generation: u64,
     /// Obligation backing the transfer attempt.
     pub transfer_obligation: ObligationId,
+}
+
+impl CursorTransferProposal {
+    /// Build a transfer proposal that returns authority to the control capsule.
+    #[must_use]
+    pub fn control_capsule(
+        proposed_holder: CursorLeaseHolder,
+        expected_generation: u64,
+        transfer_obligation: ObligationId,
+    ) -> Self {
+        Self {
+            proposed_holder,
+            proposed_scope: CursorLeaseScope::ControlCapsule,
+            expected_generation,
+            transfer_obligation,
+        }
+    }
+
+    /// Build a transfer proposal that delegates authority to one partition.
+    #[must_use]
+    pub fn delegated_partition(
+        proposed_holder: CursorLeaseHolder,
+        partition: u16,
+        expected_generation: u64,
+        transfer_obligation: ObligationId,
+    ) -> Self {
+        Self {
+            proposed_holder,
+            proposed_scope: CursorLeaseScope::DelegatedCursorPartition { partition },
+            expected_generation,
+            transfer_obligation,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ConsumerCursorError> {
+        match (&self.proposed_holder, self.proposed_scope) {
+            (CursorLeaseHolder::Relay(relay), CursorLeaseScope::ControlCapsule) => {
+                Err(ConsumerCursorError::RelayTransferRequiresPartition {
+                    relay: relay.clone(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Deterministic outcome of contested transfer resolution.
@@ -541,6 +744,8 @@ pub enum ContestedTransferResolution {
 pub struct FabricConsumerCursor {
     steward_pool: Vec<NodeId>,
     current_lease: CursorAuthorityLease,
+    partition_assignments: BTreeMap<u16, CursorPartitionAssignment>,
+    partition_summaries: BTreeMap<u16, CursorPartitionSummary>,
     ticket_clock: u64,
     next_revocation_handle: u64,
     revoked_tickets: BTreeSet<ReadDelegationRevocationHandle>,
@@ -552,6 +757,8 @@ impl FabricConsumerCursor {
         Ok(Self {
             steward_pool: cell.control_capsule.steward_pool.clone(),
             current_lease: CursorAuthorityLease::from_subject_cell(cell)?,
+            partition_assignments: BTreeMap::new(),
+            partition_summaries: BTreeMap::new(),
             ticket_clock: 0,
             next_revocation_handle: 1,
             revoked_tickets: BTreeSet::new(),
@@ -564,6 +771,18 @@ impl FabricConsumerCursor {
         &self.current_lease
     }
 
+    /// Return one delegated partition assignment when present.
+    #[must_use]
+    pub fn partition_assignment(&self, partition: u16) -> Option<&CursorPartitionAssignment> {
+        self.partition_assignments.get(&partition)
+    }
+
+    /// Return the last coarse checkpoint summary for one partition.
+    #[must_use]
+    pub fn partition_summary(&self, partition: u16) -> Option<&CursorPartitionSummary> {
+        self.partition_summaries.get(&partition)
+    }
+
     /// Return the current logical ticket clock.
     #[must_use]
     pub const fn ticket_clock(&self) -> u64 {
@@ -574,6 +793,24 @@ impl FabricConsumerCursor {
     pub fn advance_ticket_clock(&mut self, ticks: u64) -> u64 {
         self.ticket_clock = self.ticket_clock.saturating_add(ticks);
         self.ticket_clock
+    }
+
+    /// Register or replace the deterministic assignment for one delegated
+    /// cursor partition.
+    pub fn assign_partition(
+        &mut self,
+        assignment: CursorPartitionAssignment,
+    ) -> Result<&CursorPartitionAssignment, ConsumerCursorError> {
+        assignment.validate()?;
+        let partition = assignment.partition;
+        self.partition_assignments.insert(partition, assignment);
+        // Any assignment change invalidates the retained coarse summary until
+        // the active leader reports against the new partition state.
+        self.partition_summaries.remove(&partition);
+        Ok(self
+            .partition_assignments
+            .get(&partition)
+            .expect("assignment inserted"))
     }
 
     /// Mint an obligation-backed attempt certificate.
@@ -700,39 +937,132 @@ impl FabricConsumerCursor {
     pub fn resolve_contested_transfer(
         &mut self,
         proposals: &[CursorTransferProposal],
-    ) -> ContestedTransferResolution {
+    ) -> Result<ContestedTransferResolution, ConsumerCursorError> {
         let valid = proposals
             .iter()
+            .map(|proposal| proposal.validate().map(|()| proposal))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter(|proposal| proposal.expected_generation == self.current_lease.lease_generation)
             .filter_map(|proposal| {
                 self.transfer_rank(&proposal.proposed_holder)
-                    .map(|rank| (rank, proposal))
+                    .map(|rank| (rank, scope_rank(proposal.proposed_scope), proposal))
             })
             .min_by(|left, right| {
                 left.0
                     .cmp(&right.0)
-                    .then_with(|| left.1.transfer_obligation.cmp(&right.1.transfer_obligation))
+                    .then_with(|| left.1.cmp(&right.1))
+                    .then_with(|| left.2.transfer_obligation.cmp(&right.2.transfer_obligation))
             });
 
-        let Some((_, winner)) = valid else {
-            return ContestedTransferResolution::StaleNoOp {
+        let Some((_, _, winner)) = valid else {
+            return Ok(ContestedTransferResolution::StaleNoOp {
                 current_lease: self.current_lease.clone(),
-            };
+            });
         };
+
+        if let CursorLeaseScope::DelegatedCursorPartition { partition } = self.current_lease.scope {
+            self.partition_summaries.remove(&partition);
+        }
+        if let CursorLeaseScope::DelegatedCursorPartition { partition } = winner.proposed_scope {
+            let Some(assignment) = self.partition_assignments.get_mut(&partition) else {
+                return Err(ConsumerCursorError::UnknownCursorPartition { partition });
+            };
+            assignment.leader = winner.proposed_holder.clone();
+            self.partition_summaries.remove(&partition);
+        }
 
         self.current_lease.holder = winner.proposed_holder.clone();
         self.current_lease.lease_generation = self.current_lease.lease_generation.saturating_add(1);
-        self.current_lease.scope = match winner.proposed_holder {
-            CursorLeaseHolder::Steward(_) => CursorLeaseScope::ControlCapsule,
-            CursorLeaseHolder::Relay(_) => {
-                CursorLeaseScope::DelegatedCursorPartition { partition: 0 }
-            }
-        };
+        self.current_lease.scope = winner.proposed_scope;
 
-        ContestedTransferResolution::Accepted {
+        Ok(ContestedTransferResolution::Accepted {
             new_lease: self.current_lease.clone(),
             winning_obligation: winner.transfer_obligation,
+        })
+    }
+
+    /// Report a coarse checkpoint from the currently delegated partition leader.
+    pub fn report_partition_checkpoint(
+        &mut self,
+        checkpoint: CursorPartitionCheckpoint,
+    ) -> Result<&CursorPartitionSummary, ConsumerCursorError> {
+        let CursorLeaseScope::DelegatedCursorPartition { partition } = self.current_lease.scope
+        else {
+            return Err(
+                ConsumerCursorError::PartitionCheckpointRequiresDelegatedLease {
+                    partition: checkpoint.partition,
+                    current_scope: self.current_lease.scope,
+                },
+            );
+        };
+
+        if checkpoint.partition != partition {
+            return Err(
+                ConsumerCursorError::PartitionCheckpointRequiresDelegatedLease {
+                    partition: checkpoint.partition,
+                    current_scope: self.current_lease.scope,
+                },
+            );
         }
+
+        if checkpoint.lease_generation != self.current_lease.lease_generation {
+            return Err(ConsumerCursorError::StaleCursorPartitionCheckpoint {
+                partition: checkpoint.partition,
+                report_generation: checkpoint.lease_generation,
+                current_generation: self.current_lease.lease_generation,
+            });
+        }
+
+        let Some(assignment) = self.partition_assignments.get(&partition) else {
+            return Err(ConsumerCursorError::UnknownCursorPartition { partition });
+        };
+        if usize::try_from(checkpoint.consumer_count).ok() != Some(assignment.consumers.len()) {
+            return Err(
+                ConsumerCursorError::PartitionCheckpointConsumerCountMismatch {
+                    partition,
+                    reported_consumer_count: checkpoint.consumer_count,
+                    assigned_consumer_count: assignment.consumers.len(),
+                },
+            );
+        }
+
+        let summary = CursorPartitionSummary {
+            partition,
+            selector: assignment.selector.clone(),
+            leader: self.current_lease.holder.clone(),
+            lease_generation: checkpoint.lease_generation,
+            ack_floor: checkpoint.ack_floor,
+            delivered_through: checkpoint.delivered_through,
+            pending_count: checkpoint.pending_count,
+            consumer_count: checkpoint.consumer_count,
+        };
+        self.partition_summaries.insert(partition, summary);
+        Ok(self
+            .partition_summaries
+            .get(&partition)
+            .expect("partition summary inserted"))
+    }
+
+    /// Rebalance one delegated cursor partition to a new leader with lease
+    /// fencing.
+    pub fn rebalance_partition(
+        &mut self,
+        partition: u16,
+        next_leader: CursorLeaseHolder,
+        expected_generation: u64,
+        transfer_obligation: ObligationId,
+    ) -> Result<ContestedTransferResolution, ConsumerCursorError> {
+        if !self.partition_assignments.contains_key(&partition) {
+            return Err(ConsumerCursorError::UnknownCursorPartition { partition });
+        }
+
+        self.resolve_contested_transfer(&[CursorTransferProposal::delegated_partition(
+            next_leader,
+            partition,
+            expected_generation,
+            transfer_obligation,
+        )])
     }
 
     /// Apply an acknowledgement attempt against the current lease.
@@ -774,6 +1104,13 @@ impl FabricConsumerCursor {
                 .map(|index| (0, index, node.as_str().to_owned())),
             CursorLeaseHolder::Relay(node) => Some((1, usize::MAX, node.as_str().to_owned())),
         }
+    }
+}
+
+fn scope_rank(scope: CursorLeaseScope) -> (u8, u16) {
+    match scope {
+        CursorLeaseScope::ControlCapsule => (0, 0),
+        CursorLeaseScope::DelegatedCursorPartition { partition } => (1, partition),
     }
 }
 
@@ -1815,21 +2152,25 @@ impl FabricConsumer {
         delivery_attempt: u32,
         supersedes_obligation_id: Option<ObligationId>,
     ) -> ObligationToken {
-        let description = match supersedes_obligation_id {
-            Some(previous) => format!(
-                "consumer ack attempt {} for window {}-{} superseding {:?}",
-                delivery_attempt,
-                window.start(),
-                window.end(),
-                previous
-            ),
-            None => format!(
-                "consumer ack attempt {} for window {}-{}",
-                delivery_attempt,
-                window.start(),
-                window.end()
-            ),
-        };
+        let description = supersedes_obligation_id.map_or_else(
+            || {
+                format!(
+                    "consumer ack attempt {} for window {}-{}",
+                    delivery_attempt,
+                    window.start(),
+                    window.end()
+                )
+            },
+            |previous| {
+                format!(
+                    "consumer ack attempt {} for window {}-{} superseding {:?}",
+                    delivery_attempt,
+                    window.start(),
+                    window.end(),
+                    previous
+                )
+            },
+        );
         let acquired_at = self.next_event_time();
         self.ledger.acquire_with_context(
             ObligationKind::Ack,
@@ -2124,7 +2465,7 @@ impl ConsumerPullDecisionContract {
 }
 
 impl DecisionContract for ConsumerPullDecisionContract {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "fabric_consumer_pull_scheduler"
     }
 
@@ -2256,7 +2597,7 @@ impl ConsumerOverflowDecisionContract {
 }
 
 impl DecisionContract for ConsumerOverflowDecisionContract {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "fabric_consumer_overflow_policy"
     }
 
@@ -2375,7 +2716,7 @@ impl ConsumerRedeliveryDecisionContract {
 }
 
 impl DecisionContract for ConsumerRedeliveryDecisionContract {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "fabric_consumer_redelivery_policy"
     }
 
@@ -2590,6 +2931,81 @@ pub enum ConsumerCursorError {
         /// Relay peer that was already part of the steward set.
         relay: NodeId,
     },
+    /// Relay authority transfers must identify the delegated partition they own.
+    #[error("relay `{relay}` transfer must target a delegated cursor partition")]
+    RelayTransferRequiresPartition {
+        /// Relay peer that attempted a control-capsule transfer.
+        relay: NodeId,
+    },
+    /// Partition assignment strategy requires non-empty selector fields.
+    #[error("cursor partition selector field `{field}` must not be empty")]
+    EmptyCursorPartitionSelector {
+        /// Selector field that failed validation.
+        field: &'static str,
+    },
+    /// Subject sub-ranges must be ordered.
+    #[error("cursor partition subject sub-range `{start}`..=`{end}` is invalid")]
+    InvalidCursorPartitionSubRange {
+        /// Proposed start key.
+        start: String,
+        /// Proposed end key.
+        end: String,
+    },
+    /// Hash-bucket partition selectors must stay inside their bucket set.
+    #[error("cursor partition bucket `{bucket}` is invalid for bucket set size `{buckets}`")]
+    InvalidCursorPartitionBucket {
+        /// Proposed bucket index.
+        bucket: u16,
+        /// Total bucket count.
+        buckets: u16,
+    },
+    /// Delegated partitions must own at least one consumer.
+    #[error("cursor partition `{partition}` must own at least one consumer")]
+    EmptyCursorPartitionConsumers {
+        /// Partition that was missing consumer assignments.
+        partition: u16,
+    },
+    /// Partition-scoped operations must refer to a registered partition.
+    #[error("cursor partition `{partition}` is unknown to the current cursor state")]
+    UnknownCursorPartition {
+        /// Partition referenced by the caller.
+        partition: u16,
+    },
+    /// Coarse checkpoint reports only make sense while the matching partition is leased.
+    #[error(
+        "cursor partition `{partition}` checkpoint does not match the current delegated lease scope `{current_scope:?}`"
+    )]
+    PartitionCheckpointRequiresDelegatedLease {
+        /// Partition the report was trying to update.
+        partition: u16,
+        /// Current lease scope that fenced out the report.
+        current_scope: CursorLeaseScope,
+    },
+    /// Coarse checkpoint reports must be bound to the active lease generation.
+    #[error(
+        "cursor partition `{partition}` checkpoint generation `{report_generation}` is stale; current generation is `{current_generation}`"
+    )]
+    StaleCursorPartitionCheckpoint {
+        /// Partition the stale report targeted.
+        partition: u16,
+        /// Generation carried by the report.
+        report_generation: u64,
+        /// Generation currently owned by the cursor state machine.
+        current_generation: u64,
+    },
+    /// Partition summaries must preserve the control capsule's assigned
+    /// consumer cardinality.
+    #[error(
+        "cursor partition `{partition}` reported consumer_count `{reported_consumer_count}` but assignment owns `{assigned_consumer_count}` consumers"
+    )]
+    PartitionCheckpointConsumerCountMismatch {
+        /// Partition whose summary mismatched the assigned consumer set.
+        partition: u16,
+        /// Count reported by the delegated partition leader.
+        reported_consumer_count: u32,
+        /// Deterministic count from the control-capsule assignment.
+        assigned_consumer_count: usize,
+    },
     /// Relay serving requires a lease-bound read ticket.
     #[error("relay `{relay}` is missing a read-delegation ticket")]
     MissingReadDelegationTicket {
@@ -2707,6 +3123,52 @@ mod tests {
         ObligationId::new_for_test(index, 0)
     }
 
+    fn partition_consumers(partition: u16) -> BTreeSet<String> {
+        [
+            format!("consumer-{partition}-a"),
+            format!("consumer-{partition}-b"),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn partition_assignment(
+        partition: u16,
+        selector: CursorPartitionSelector,
+    ) -> CursorPartitionAssignment {
+        CursorPartitionAssignment {
+            partition,
+            leader: CursorLeaseHolder::Steward(NodeId::new("node-a")),
+            selector,
+            consumers: partition_consumers(partition),
+        }
+    }
+
+    fn delegate_partition_to_holder(
+        cursor: &mut FabricConsumerCursor,
+        partition: u16,
+        holder: CursorLeaseHolder,
+        transfer_obligation: ObligationId,
+    ) -> ContestedTransferResolution {
+        if cursor.partition_assignment(partition).is_none() {
+            cursor
+                .assign_partition(partition_assignment(
+                    partition,
+                    CursorPartitionSelector::ConsumerGroup(format!("group-{partition}")),
+                ))
+                .expect("assign partition");
+        }
+
+        cursor
+            .resolve_contested_transfer(&[CursorTransferProposal::delegated_partition(
+                holder,
+                partition,
+                cursor.current_lease().lease_generation,
+                transfer_obligation,
+            )])
+            .expect("delegate partition")
+    }
+
     #[test]
     fn cursor_lease_starts_from_the_control_capsule() {
         let cell = test_cell();
@@ -2814,11 +3276,12 @@ mod tests {
         let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
         let window = SequenceWindow::new(30, 35).expect("window");
 
-        let resolution = cursor.resolve_contested_transfer(&[CursorTransferProposal {
-            proposed_holder: CursorLeaseHolder::Relay(NodeId::new("relay-1")),
-            expected_generation: cursor.current_lease().lease_generation,
-            transfer_obligation: obligation(14),
-        }]);
+        let resolution = delegate_partition_to_holder(
+            &mut cursor,
+            7,
+            CursorLeaseHolder::Relay(NodeId::new("relay-1")),
+            obligation(14),
+        );
         assert!(matches!(
             resolution,
             ContestedTransferResolution::Accepted { .. }
@@ -2862,11 +3325,12 @@ mod tests {
         let window = SequenceWindow::new(36, 38).expect("window");
         let relay = NodeId::new("relay-2");
 
-        cursor.resolve_contested_transfer(&[CursorTransferProposal {
-            proposed_holder: CursorLeaseHolder::Relay(relay.clone()),
-            expected_generation: cursor.current_lease().lease_generation,
-            transfer_obligation: obligation(15),
-        }]);
+        delegate_partition_to_holder(
+            &mut cursor,
+            8,
+            CursorLeaseHolder::Relay(relay.clone()),
+            obligation(15),
+        );
 
         let capsule = RecoverableCapsule::default().with_window(relay.clone(), window);
 
@@ -2883,11 +3347,12 @@ mod tests {
         let window = SequenceWindow::new(46, 49).expect("window");
         let relay = NodeId::new("relay-expiring");
 
-        cursor.resolve_contested_transfer(&[CursorTransferProposal {
-            proposed_holder: CursorLeaseHolder::Relay(relay.clone()),
-            expected_generation: cursor.current_lease().lease_generation,
-            transfer_obligation: obligation(16),
-        }]);
+        delegate_partition_to_holder(
+            &mut cursor,
+            9,
+            CursorLeaseHolder::Relay(relay.clone()),
+            obligation(16),
+        );
 
         let ticket = cursor
             .grant_read_ticket(relay.clone(), window, 1, CacheabilityRule::NoCache)
@@ -2913,11 +3378,12 @@ mod tests {
         let window = SequenceWindow::new(50, 52).expect("window");
         let relay = NodeId::new("relay-revoked");
 
-        cursor.resolve_contested_transfer(&[CursorTransferProposal {
-            proposed_holder: CursorLeaseHolder::Relay(relay.clone()),
-            expected_generation: cursor.current_lease().lease_generation,
-            transfer_obligation: obligation(17),
-        }]);
+        delegate_partition_to_holder(
+            &mut cursor,
+            10,
+            CursorLeaseHolder::Relay(relay.clone()),
+            obligation(17),
+        );
 
         let ticket = cursor
             .grant_read_ticket(
@@ -2947,11 +3413,12 @@ mod tests {
         let window = SequenceWindow::new(60, 63).expect("window");
         let relay = NodeId::new("relay-stale");
 
-        cursor.resolve_contested_transfer(&[CursorTransferProposal {
-            proposed_holder: CursorLeaseHolder::Relay(relay.clone()),
-            expected_generation: cursor.current_lease().lease_generation,
-            transfer_obligation: obligation(18),
-        }]);
+        delegate_partition_to_holder(
+            &mut cursor,
+            11,
+            CursorLeaseHolder::Relay(relay.clone()),
+            obligation(18),
+        );
 
         let mut ticket = cursor
             .grant_read_ticket(relay.clone(), window, 5, CacheabilityRule::NoCache)
@@ -2970,6 +3437,337 @@ mod tests {
                 current_epoch: cell.epoch,
             })
         );
+    }
+
+    #[test]
+    fn partition_assignments_preserve_selector_strategies_and_consumers() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+        let by_group = partition_assignment(
+            20,
+            CursorPartitionSelector::ConsumerGroup("orders-tail".to_owned()),
+        );
+        let by_range = partition_assignment(
+            21,
+            CursorPartitionSelector::SubjectSubRange {
+                start: "orders.a".to_owned(),
+                end: "orders.m".to_owned(),
+            },
+        );
+        let by_bucket = partition_assignment(
+            22,
+            CursorPartitionSelector::HashBucket {
+                bucket: 1,
+                buckets: 4,
+            },
+        );
+
+        cursor
+            .assign_partition(by_group.clone())
+            .expect("assign group partition");
+        cursor
+            .assign_partition(by_range.clone())
+            .expect("assign range partition");
+        cursor
+            .assign_partition(by_bucket.clone())
+            .expect("assign bucket partition");
+
+        assert_eq!(cursor.partition_assignment(20), Some(&by_group));
+        assert_eq!(cursor.partition_assignment(21), Some(&by_range));
+        assert_eq!(cursor.partition_assignment(22), Some(&by_bucket));
+        assert_eq!(
+            cursor
+                .partition_assignment(21)
+                .map(|entry| entry.consumers.len()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn delegated_attempts_expose_partition_lease_metadata() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+        let relay = NodeId::new("relay-partition");
+
+        let resolution = delegate_partition_to_holder(
+            &mut cursor,
+            23,
+            CursorLeaseHolder::Relay(relay.clone()),
+            obligation(181),
+        );
+        assert!(matches!(
+            resolution,
+            ContestedTransferResolution::Accepted { .. }
+        ));
+
+        let attempt = cursor
+            .issue_attempt(
+                CursorDeliveryMode::Push {
+                    window: SequenceWindow::new(64, 66).expect("window"),
+                },
+                1,
+                obligation(182),
+            )
+            .expect("attempt");
+
+        assert_eq!(
+            attempt.cursor_partition_lease(),
+            Some(CursorPartitionLease {
+                partition: 23,
+                leader: CursorLeaseHolder::Relay(relay),
+                lease_generation: cursor.current_lease().lease_generation,
+            })
+        );
+    }
+
+    #[test]
+    fn relay_transfer_requires_partition_scope_and_registered_partition() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+        let relay = NodeId::new("relay-invalid");
+        let generation = cursor.current_lease().lease_generation;
+
+        assert_eq!(
+            cursor.resolve_contested_transfer(&[CursorTransferProposal::control_capsule(
+                CursorLeaseHolder::Relay(relay.clone()),
+                generation,
+                obligation(183),
+            )]),
+            Err(ConsumerCursorError::RelayTransferRequiresPartition {
+                relay: relay.clone()
+            })
+        );
+        assert_eq!(
+            cursor.resolve_contested_transfer(&[CursorTransferProposal::delegated_partition(
+                CursorLeaseHolder::Relay(relay),
+                99,
+                generation,
+                obligation(184),
+            )]),
+            Err(ConsumerCursorError::UnknownCursorPartition { partition: 99 })
+        );
+    }
+
+    #[test]
+    fn partition_checkpoint_reporting_records_summary_for_active_partition() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+        let relay = NodeId::new("relay-summary");
+
+        delegate_partition_to_holder(
+            &mut cursor,
+            24,
+            CursorLeaseHolder::Relay(relay.clone()),
+            obligation(185),
+        );
+
+        let summary = cursor
+            .report_partition_checkpoint(CursorPartitionCheckpoint {
+                partition: 24,
+                lease_generation: cursor.current_lease().lease_generation,
+                ack_floor: 120,
+                delivered_through: 127,
+                pending_count: 3,
+                consumer_count: 2,
+            })
+            .expect("checkpoint")
+            .clone();
+
+        assert_eq!(
+            summary,
+            CursorPartitionSummary {
+                partition: 24,
+                selector: CursorPartitionSelector::ConsumerGroup("group-24".to_owned()),
+                leader: CursorLeaseHolder::Relay(relay),
+                lease_generation: cursor.current_lease().lease_generation,
+                ack_floor: 120,
+                delivered_through: 127,
+                pending_count: 3,
+                consumer_count: 2,
+            }
+        );
+        assert_eq!(cursor.partition_summary(24), Some(&summary));
+    }
+
+    #[test]
+    fn partition_checkpoint_reporting_requires_matching_scope_and_generation() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+
+        assert_eq!(
+            cursor.report_partition_checkpoint(CursorPartitionCheckpoint {
+                partition: 25,
+                lease_generation: cursor.current_lease().lease_generation,
+                ack_floor: 0,
+                delivered_through: 0,
+                pending_count: 0,
+                consumer_count: 2,
+            }),
+            Err(
+                ConsumerCursorError::PartitionCheckpointRequiresDelegatedLease {
+                    partition: 25,
+                    current_scope: CursorLeaseScope::ControlCapsule,
+                }
+            )
+        );
+
+        let relay = NodeId::new("relay-fenced");
+        delegate_partition_to_holder(
+            &mut cursor,
+            25,
+            CursorLeaseHolder::Relay(relay),
+            obligation(186),
+        );
+
+        let current_generation = cursor.current_lease().lease_generation;
+        assert_eq!(
+            cursor.report_partition_checkpoint(CursorPartitionCheckpoint {
+                partition: 25,
+                lease_generation: current_generation.saturating_sub(1),
+                ack_floor: 0,
+                delivered_through: 0,
+                pending_count: 0,
+                consumer_count: 2,
+            }),
+            Err(ConsumerCursorError::StaleCursorPartitionCheckpoint {
+                partition: 25,
+                report_generation: current_generation.saturating_sub(1),
+                current_generation,
+            })
+        );
+        assert_eq!(
+            cursor.report_partition_checkpoint(CursorPartitionCheckpoint {
+                partition: 25,
+                lease_generation: current_generation,
+                ack_floor: 0,
+                delivered_through: 0,
+                pending_count: 0,
+                consumer_count: 1,
+            }),
+            Err(
+                ConsumerCursorError::PartitionCheckpointConsumerCountMismatch {
+                    partition: 25,
+                    reported_consumer_count: 1,
+                    assigned_consumer_count: 2,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn replacing_partition_assignment_invalidates_stale_summary() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+
+        delegate_partition_to_holder(
+            &mut cursor,
+            26,
+            CursorLeaseHolder::Relay(NodeId::new("relay-a")),
+            obligation(187),
+        );
+        cursor
+            .report_partition_checkpoint(CursorPartitionCheckpoint {
+                partition: 26,
+                lease_generation: cursor.current_lease().lease_generation,
+                ack_floor: 200,
+                delivered_through: 208,
+                pending_count: 4,
+                consumer_count: 2,
+            })
+            .expect("checkpoint");
+        assert!(cursor.partition_summary(26).is_some());
+
+        cursor
+            .assign_partition(partition_assignment(
+                26,
+                CursorPartitionSelector::SubjectSubRange {
+                    start: "orders.n".to_owned(),
+                    end: "orders.z".to_owned(),
+                },
+            ))
+            .expect("replace assignment");
+
+        assert_eq!(
+            cursor
+                .partition_assignment(26)
+                .map(|assignment| &assignment.selector),
+            Some(&CursorPartitionSelector::SubjectSubRange {
+                start: "orders.n".to_owned(),
+                end: "orders.z".to_owned(),
+            })
+        );
+        assert_eq!(cursor.partition_summary(26), None);
+    }
+
+    #[test]
+    fn partition_rebalance_updates_assignment_and_invalidates_stale_summary() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+        let relay_a = NodeId::new("relay-a");
+        let relay_b = NodeId::new("relay-b");
+
+        delegate_partition_to_holder(
+            &mut cursor,
+            26,
+            CursorLeaseHolder::Relay(relay_a.clone()),
+            obligation(187),
+        );
+        cursor
+            .report_partition_checkpoint(CursorPartitionCheckpoint {
+                partition: 26,
+                lease_generation: cursor.current_lease().lease_generation,
+                ack_floor: 200,
+                delivered_through: 208,
+                pending_count: 4,
+                consumer_count: 2,
+            })
+            .expect("checkpoint");
+
+        let stale_generation = cursor.current_lease().lease_generation.saturating_sub(1);
+        assert_eq!(
+            cursor
+                .rebalance_partition(
+                    26,
+                    CursorLeaseHolder::Relay(relay_b.clone()),
+                    stale_generation,
+                    obligation(188),
+                )
+                .expect("stale rebalance result"),
+            ContestedTransferResolution::StaleNoOp {
+                current_lease: cursor.current_lease().clone(),
+            }
+        );
+
+        let accepted = cursor
+            .rebalance_partition(
+                26,
+                CursorLeaseHolder::Relay(relay_b.clone()),
+                cursor.current_lease().lease_generation,
+                obligation(189),
+            )
+            .expect("rebalance");
+        assert!(matches!(
+            accepted,
+            ContestedTransferResolution::Accepted { .. }
+        ));
+        assert_eq!(
+            cursor
+                .partition_assignment(26)
+                .map(|assignment| &assignment.leader),
+            Some(&CursorLeaseHolder::Relay(relay_b.clone()))
+        );
+        assert_eq!(cursor.partition_summary(26), None);
+        let checkpoint = cursor
+            .report_partition_checkpoint(CursorPartitionCheckpoint {
+                partition: 26,
+                lease_generation: cursor.current_lease().lease_generation,
+                ack_floor: 209,
+                delivered_through: 214,
+                pending_count: 1,
+                consumer_count: 2,
+            })
+            .expect("post-rebalance checkpoint");
+        assert_eq!(checkpoint.leader, CursorLeaseHolder::Relay(relay_b));
     }
 
     #[test]
@@ -3010,23 +3808,26 @@ mod tests {
         let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
         let current_generation = cursor.current_lease().lease_generation;
 
-        let resolution = cursor.resolve_contested_transfer(&[
-            CursorTransferProposal {
-                proposed_holder: CursorLeaseHolder::Steward(NodeId::new("node-c")),
-                expected_generation: current_generation,
-                transfer_obligation: obligation(20),
-            },
-            CursorTransferProposal {
-                proposed_holder: CursorLeaseHolder::Steward(NodeId::new("node-b")),
-                expected_generation: current_generation,
-                transfer_obligation: obligation(21),
-            },
-            CursorTransferProposal {
-                proposed_holder: CursorLeaseHolder::Relay(NodeId::new("relay-2")),
-                expected_generation: current_generation.saturating_sub(1),
-                transfer_obligation: obligation(22),
-            },
-        ]);
+        let resolution = cursor
+            .resolve_contested_transfer(&[
+                CursorTransferProposal::control_capsule(
+                    CursorLeaseHolder::Steward(NodeId::new("node-c")),
+                    current_generation,
+                    obligation(20),
+                ),
+                CursorTransferProposal::control_capsule(
+                    CursorLeaseHolder::Steward(NodeId::new("node-b")),
+                    current_generation,
+                    obligation(21),
+                ),
+                CursorTransferProposal::delegated_partition(
+                    CursorLeaseHolder::Relay(NodeId::new("relay-2")),
+                    27,
+                    current_generation.saturating_sub(1),
+                    obligation(22),
+                ),
+            ])
+            .expect("resolve contested transfer");
 
         assert_eq!(
             resolution,
@@ -3265,13 +4066,12 @@ mod tests {
         let window = SequenceWindow::new(1, 2).expect("window");
         let capsule = RecoverableCapsule::default().with_window(relay.clone(), window);
 
-        let transfer = consumer
-            .cursor
-            .resolve_contested_transfer(&[CursorTransferProposal {
-                proposed_holder: CursorLeaseHolder::Relay(relay.clone()),
-                expected_generation: consumer.current_lease().lease_generation,
-                transfer_obligation: ObligationId::new_for_test(88, 0),
-            }]);
+        let transfer = delegate_partition_to_holder(
+            &mut consumer.cursor,
+            28,
+            CursorLeaseHolder::Relay(relay.clone()),
+            ObligationId::new_for_test(88, 0),
+        );
         assert!(matches!(
             transfer,
             ContestedTransferResolution::Accepted { .. }
@@ -3330,13 +4130,12 @@ mod tests {
         let window = SequenceWindow::new(1, 1).expect("window");
         let capsule = RecoverableCapsule::default().with_window(wrong_relay.clone(), window);
 
-        let transfer = consumer
-            .cursor
-            .resolve_contested_transfer(&[CursorTransferProposal {
-                proposed_holder: CursorLeaseHolder::Relay(wrong_relay.clone()),
-                expected_generation: consumer.current_lease().lease_generation,
-                transfer_obligation: ObligationId::new_for_test(89, 0),
-            }]);
+        let transfer = delegate_partition_to_holder(
+            &mut consumer.cursor,
+            29,
+            CursorLeaseHolder::Relay(wrong_relay.clone()),
+            ObligationId::new_for_test(89, 0),
+        );
         assert!(matches!(
             transfer,
             ContestedTransferResolution::Accepted { .. }

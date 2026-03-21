@@ -1,8 +1,12 @@
 //! Federation-role definitions for FABRIC interconnects.
 
+use super::control::{ControlBudget, SystemSubjectFamily};
 use super::morphism::{FabricCapability, Morphism, MorphismClass, MorphismValidationError};
+use super::subject::SubjectPattern;
+use crate::distributed::{RegionBridge, RegionSnapshot, SnapshotError};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
+use std::mem;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -354,6 +358,237 @@ pub enum FederationBridgeState {
     Closed,
 }
 
+/// Direction of travel across a federation boundary.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FederationDirection {
+    /// Traffic is leaving the local fabric for the remote side.
+    #[default]
+    LocalToRemote,
+    /// Traffic is entering the local fabric from the remote side.
+    RemoteToLocal,
+}
+
+/// Route record retained while a leaf bridge is disconnected or degraded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferedLeafRoute {
+    /// Direction that the route was attempting to travel.
+    pub direction: FederationDirection,
+    /// Subject pattern being routed across the leaf boundary.
+    pub subject: SubjectPattern,
+    /// Effective fanout requested by the route.
+    pub fanout: u16,
+}
+
+/// Outcome of attempting to route traffic through a leaf bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LeafRouteDisposition {
+    /// The route was forwarded immediately because the bridge was active.
+    Forwarded {
+        /// Route record that was forwarded.
+        route: BufferedLeafRoute,
+    },
+    /// The route was buffered for later replay.
+    Buffered {
+        /// Route record retained for later replay.
+        route: BufferedLeafRoute,
+        /// Current number of buffered entries after insertion.
+        buffered_entries: usize,
+        /// Number of oldest entries dropped to stay within the configured bound.
+        dropped_entries: u64,
+    },
+}
+
+/// Result of draining a disconnected leaf bridge's offline buffer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeafBufferDrain {
+    /// Buffered routes ready to forward after reconnection.
+    pub routes: Vec<BufferedLeafRoute>,
+    /// Number of older buffered entries that were dropped while disconnected.
+    pub dropped_entries: u64,
+}
+
+/// Interest propagation plan emitted by a gateway bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayInterestPlan {
+    /// Control-plane family carrying the propagated interest.
+    pub family: SystemSubjectFamily,
+    /// Subject pattern being advertised across the gateway.
+    pub pattern: SubjectPattern,
+    /// Requested amplification for this propagation step.
+    pub requested_amplification: u16,
+    /// Amplification admitted after applying the configured and budget limits.
+    pub admitted_amplification: u16,
+    /// Reserved control-plane budget used for the propagation decision.
+    pub budget: ControlBudget,
+    /// Policy selected for this gateway role.
+    pub policy: InterestPropagationPolicy,
+}
+
+/// Advisory record forwarded across a gateway bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayAdvisoryRecord {
+    /// Advisory family being forwarded.
+    pub family: SystemSubjectFamily,
+    /// Subject pattern attached to the advisory.
+    pub pattern: SubjectPattern,
+    /// Reserved control-plane budget for the forwarding action.
+    pub budget: ControlBudget,
+}
+
+/// Result of a bounded gateway convergence attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayConvergenceRecord {
+    /// Wall-clock budget spent converging interests and advisories.
+    pub elapsed: Duration,
+    /// Whether the convergence attempt exceeded the configured timeout.
+    pub timed_out: bool,
+    /// Number of propagated interests considered during convergence.
+    pub propagated_interest_count: usize,
+    /// Number of advisories included in the bounded convergence pass.
+    pub forwarded_advisory_count: usize,
+}
+
+/// Snapshot-bearing transfer exported by a replication bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicationTransfer {
+    /// Snapshot sequence exported from the distributed bridge.
+    pub sequence: u64,
+    /// Ordering guarantee promised by the replication role.
+    pub ordering_guarantee: OrderingGuarantee,
+    /// Deterministic content hash of the exported snapshot.
+    pub snapshot_hash: u64,
+    /// Deterministic binary snapshot payload.
+    pub snapshot_bytes: Vec<u8>,
+}
+
+/// Action required to bring a lagging replication peer back into convergence.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicationCatchUpAction {
+    /// Local and remote sequences already agree.
+    #[default]
+    AlreadyConverged,
+    /// Ship a fresh snapshot before any delta replay.
+    Snapshot,
+    /// Ship a fresh snapshot and then resume log replay.
+    SnapshotThenDelta,
+    /// Rely on retained deltas only.
+    DeltaOnly,
+}
+
+/// Plan describing how a lagging replication peer should catch up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicationCatchUpPlan {
+    /// Configured catch-up policy that produced this plan.
+    pub policy: CatchUpPolicy,
+    /// Selected recovery action for the current lag.
+    pub action: ReplicationCatchUpAction,
+    /// Local sequence observed at plan time.
+    pub local_sequence: u64,
+    /// Remote sequence observed at plan time.
+    pub remote_sequence: u64,
+    /// Monotonic lag between local and remote.
+    pub lag: u64,
+}
+
+/// Replay artifact retained for delayed forensic shipping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayArtifactRecord {
+    /// Stable artifact identifier used for acknowledgement and deduplication.
+    pub artifact_id: String,
+    /// Control-plane family that produced the artifact.
+    pub family: SystemSubjectFamily,
+    /// Logical capture timestamp relative to the local bridge lifecycle.
+    pub captured_at: Duration,
+    /// Monotonic sequence attached to the artifact.
+    pub sequence: u64,
+    /// Size of the retained artifact payload in bytes.
+    pub bytes: usize,
+}
+
+/// Shipping plan emitted by an edge replay bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayShippingPlan {
+    /// Shipping policy that selected the current batch.
+    pub policy: EvidenceShippingPolicy,
+    /// Retained artifacts to ship in this batch.
+    pub artifacts: Vec<ReplayArtifactRecord>,
+}
+
+/// Inspectable role-specific runtime state for a federation bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FederationBridgeRuntime {
+    /// Offline buffering state for a leaf bridge.
+    Leaf(LeafBridgeRuntime),
+    /// Interest propagation and advisory state for a gateway bridge.
+    Gateway(GatewayBridgeRuntime),
+    /// Replication snapshot state for a replication bridge.
+    Replication(ReplicationBridgeRuntime),
+    /// Retained forensic artifact state for an edge replay bridge.
+    EdgeReplay(EdgeReplayBridgeRuntime),
+}
+
+impl FederationBridgeRuntime {
+    fn for_role(role: &FederationRole) -> Self {
+        match role {
+            FederationRole::LeafFabric(_) => Self::Leaf(LeafBridgeRuntime::default()),
+            FederationRole::GatewayFabric(_) => Self::Gateway(GatewayBridgeRuntime::default()),
+            FederationRole::ReplicationLink(_) => {
+                Self::Replication(ReplicationBridgeRuntime::default())
+            }
+            FederationRole::EdgeReplayLink(_) => {
+                Self::EdgeReplay(EdgeReplayBridgeRuntime::default())
+            }
+        }
+    }
+}
+
+/// Runtime state for a leaf federation bridge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeafBridgeRuntime {
+    /// Buffered routes retained while the remote leaf is unavailable.
+    pub buffered_routes: VecDeque<BufferedLeafRoute>,
+    /// Number of oldest routes dropped to stay within the configured limit.
+    pub dropped_routes: u64,
+}
+
+/// Runtime state for a gateway federation bridge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GatewayBridgeRuntime {
+    /// Subject patterns currently propagated to remote fabrics.
+    pub propagated_interests: BTreeSet<SubjectPattern>,
+    /// Advisory records forwarded by the gateway bridge.
+    pub forwarded_advisories: Vec<GatewayAdvisoryRecord>,
+    /// Most recent bounded convergence attempt.
+    pub last_convergence: Option<GatewayConvergenceRecord>,
+}
+
+/// Runtime state for a replication federation bridge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplicationBridgeRuntime {
+    /// Most recent sequence exported into a replication transfer.
+    pub last_exported_sequence: Option<u64>,
+    /// Most recent sequence applied from a replication transfer.
+    pub last_applied_sequence: Option<u64>,
+    /// Most recent catch-up plan issued by the bridge.
+    pub last_catch_up: Option<ReplicationCatchUpPlan>,
+}
+
+/// Runtime state for an edge replay federation bridge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EdgeReplayBridgeRuntime {
+    /// Replay artifacts retained for delayed shipping.
+    pub retained_artifacts: Vec<ReplayArtifactRecord>,
+    /// Number of non-empty shipping batches emitted so far.
+    pub shipped_batches: u64,
+}
+
 /// A configured federation bridge between the local fabric and a remote boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FederationBridge {
@@ -367,6 +602,9 @@ pub struct FederationBridge {
     pub capability_scope: BTreeSet<FabricCapability>,
     /// Current lifecycle state for the bridge.
     pub state: FederationBridgeState,
+    /// Ephemeral role-specific runtime state kept out of serialized configs.
+    #[serde(skip, default)]
+    runtime: Option<FederationBridgeRuntime>,
 }
 
 impl FederationBridge {
@@ -383,6 +621,7 @@ impl FederationBridge {
         role.validate()?;
 
         let capability_scope = capability_scope.into_iter().collect::<BTreeSet<_>>();
+        let runtime = FederationBridgeRuntime::for_role(&role);
         if capability_scope.is_empty() {
             return Err(FederationError::EmptyCapabilityScope);
         }
@@ -425,6 +664,7 @@ impl FederationBridge {
             remote_morphisms,
             capability_scope,
             state: FederationBridgeState::Provisioning,
+            runtime: Some(runtime),
         })
     }
 
@@ -449,6 +689,501 @@ impl FederationBridge {
     /// Close the bridge and prevent further activation.
     pub fn close(&mut self) {
         self.state = FederationBridgeState::Closed;
+    }
+
+    /// Returns a snapshot of the role-specific bridge runtime state.
+    #[must_use]
+    pub fn runtime(&self) -> FederationBridgeRuntime {
+        self.runtime
+            .clone()
+            .unwrap_or_else(|| FederationBridgeRuntime::for_role(&self.role))
+    }
+
+    /// Route traffic across a leaf bridge, buffering when the link is not active.
+    pub fn queue_leaf_route(
+        &mut self,
+        direction: FederationDirection,
+        subject: SubjectPattern,
+        fanout: u16,
+    ) -> Result<LeafRouteDisposition, FederationError> {
+        let config = self.leaf_config("queue_leaf_route")?.clone();
+        self.ensure_not_closed("queue_leaf_route")?;
+
+        if fanout > config.morphism_constraints.max_fanout {
+            return Err(FederationError::LeafFanoutExceeded {
+                actual: fanout,
+                max: config.morphism_constraints.max_fanout,
+            });
+        }
+
+        let route = BufferedLeafRoute {
+            direction,
+            subject,
+            fanout,
+        };
+
+        if self.state == FederationBridgeState::Active {
+            return Ok(LeafRouteDisposition::Forwarded { route });
+        }
+
+        let buffer_limit = usize::try_from(config.offline_buffer_limit).unwrap_or(usize::MAX);
+        let runtime = self.leaf_runtime_mut("queue_leaf_route")?;
+        if runtime.buffered_routes.len() == buffer_limit {
+            runtime.buffered_routes.pop_front();
+            runtime.dropped_routes = runtime.dropped_routes.saturating_add(1);
+        }
+        runtime.buffered_routes.push_back(route.clone());
+
+        Ok(LeafRouteDisposition::Buffered {
+            route,
+            buffered_entries: runtime.buffered_routes.len(),
+            dropped_entries: runtime.dropped_routes,
+        })
+    }
+
+    /// Drain buffered leaf traffic after the bridge has re-entered active service.
+    pub fn drain_leaf_buffer(&mut self) -> Result<LeafBufferDrain, FederationError> {
+        self.leaf_config("drain_leaf_buffer")?;
+        self.ensure_active_state("drain_leaf_buffer")?;
+
+        let runtime = self.leaf_runtime_mut("drain_leaf_buffer")?;
+        let routes = mem::take(&mut runtime.buffered_routes)
+            .into_iter()
+            .collect();
+        let dropped_entries = mem::take(&mut runtime.dropped_routes);
+
+        Ok(LeafBufferDrain {
+            routes,
+            dropped_entries,
+        })
+    }
+
+    /// Plan an interest propagation step for a gateway bridge with explicit admission control.
+    pub fn plan_gateway_interest(
+        &mut self,
+        family: SystemSubjectFamily,
+        pattern: SubjectPattern,
+        requested_amplification: u16,
+        budget: ControlBudget,
+    ) -> Result<GatewayInterestPlan, FederationError> {
+        let config = self.gateway_config("plan_gateway_interest")?.clone();
+        self.ensure_operational_state("plan_gateway_interest")?;
+
+        let budget_limit = u16::try_from(budget.poll_quota).unwrap_or(u16::MAX);
+        let effective_limit = config.amplification_limit.min(budget_limit);
+        if requested_amplification > effective_limit {
+            return Err(FederationError::GatewayAmplificationExceeded {
+                actual: requested_amplification,
+                max: effective_limit,
+            });
+        }
+
+        let plan = GatewayInterestPlan {
+            family,
+            pattern: pattern.clone(),
+            requested_amplification,
+            admitted_amplification: requested_amplification,
+            budget,
+            policy: config.interest_propagation_policy,
+        };
+
+        self.gateway_runtime_mut("plan_gateway_interest")?
+            .propagated_interests
+            .insert(pattern);
+
+        Ok(plan)
+    }
+
+    /// Forward a bounded control-plane advisory across a gateway bridge.
+    pub fn forward_gateway_advisory(
+        &mut self,
+        family: SystemSubjectFamily,
+        pattern: SubjectPattern,
+        budget: ControlBudget,
+    ) -> Result<GatewayAdvisoryRecord, FederationError> {
+        self.gateway_config("forward_gateway_advisory")?;
+        self.ensure_operational_state("forward_gateway_advisory")?;
+
+        let record = GatewayAdvisoryRecord {
+            family,
+            pattern,
+            budget,
+        };
+
+        self.gateway_runtime_mut("forward_gateway_advisory")?
+            .forwarded_advisories
+            .push(record.clone());
+
+        Ok(record)
+    }
+
+    /// Record the outcome of a bounded gateway convergence attempt.
+    pub fn reconcile_gateway_convergence(
+        &mut self,
+        elapsed: Duration,
+    ) -> Result<GatewayConvergenceRecord, FederationError> {
+        let config = self
+            .gateway_config("reconcile_gateway_convergence")?
+            .clone();
+        self.ensure_operational_state("reconcile_gateway_convergence")?;
+
+        let timed_out = elapsed > config.convergence_timeout;
+        if timed_out {
+            self.mark_degraded()?;
+        }
+
+        let runtime = self.gateway_runtime_mut("reconcile_gateway_convergence")?;
+        let record = GatewayConvergenceRecord {
+            elapsed,
+            timed_out,
+            propagated_interest_count: runtime.propagated_interests.len(),
+            forwarded_advisory_count: runtime.forwarded_advisories.len(),
+        };
+        runtime.last_convergence = Some(record.clone());
+
+        Ok(record)
+    }
+
+    /// Export a deterministic replication transfer from the local distributed bridge.
+    pub fn export_replication_transfer(
+        &mut self,
+        bridge: &mut RegionBridge,
+    ) -> Result<ReplicationTransfer, FederationError> {
+        let config = self
+            .replication_config("export_replication_transfer")?
+            .clone();
+        self.ensure_not_closed("export_replication_transfer")?;
+
+        let snapshot = bridge.create_snapshot();
+        let transfer = ReplicationTransfer {
+            sequence: snapshot.sequence,
+            ordering_guarantee: config.ordering_guarantee,
+            snapshot_hash: snapshot.content_hash(),
+            snapshot_bytes: snapshot.to_bytes(),
+        };
+
+        self.replication_runtime_mut("export_replication_transfer")?
+            .last_exported_sequence = Some(transfer.sequence);
+
+        Ok(transfer)
+    }
+
+    /// Plan how a lagging replication peer should catch up to the current sequence.
+    pub fn plan_replication_catch_up(
+        &mut self,
+        local_sequence: u64,
+        remote_sequence: u64,
+    ) -> Result<ReplicationCatchUpPlan, FederationError> {
+        let config = self
+            .replication_config("plan_replication_catch_up")?
+            .clone();
+        self.ensure_not_closed("plan_replication_catch_up")?;
+
+        let lag = local_sequence.saturating_sub(remote_sequence);
+        let action = if lag == 0 {
+            ReplicationCatchUpAction::AlreadyConverged
+        } else {
+            match config.catch_up_policy {
+                CatchUpPolicy::SnapshotRequired => ReplicationCatchUpAction::Snapshot,
+                CatchUpPolicy::SnapshotThenDelta => {
+                    if remote_sequence == 0 || lag > 1 {
+                        ReplicationCatchUpAction::SnapshotThenDelta
+                    } else {
+                        ReplicationCatchUpAction::DeltaOnly
+                    }
+                }
+                CatchUpPolicy::LogOnly => ReplicationCatchUpAction::DeltaOnly,
+            }
+        };
+
+        let plan = ReplicationCatchUpPlan {
+            policy: config.catch_up_policy,
+            action,
+            local_sequence,
+            remote_sequence,
+            lag,
+        };
+
+        self.replication_runtime_mut("plan_replication_catch_up")?
+            .last_catch_up = Some(plan.clone());
+
+        Ok(plan)
+    }
+
+    /// Apply a replication transfer to an existing distributed bridge.
+    pub fn apply_replication_transfer(
+        &mut self,
+        bridge: &mut RegionBridge,
+        transfer: &ReplicationTransfer,
+    ) -> Result<RegionSnapshot, FederationError> {
+        self.replication_config("apply_replication_transfer")?;
+        self.ensure_not_closed("apply_replication_transfer")?;
+
+        let snapshot = RegionSnapshot::from_bytes(&transfer.snapshot_bytes)?;
+        bridge.apply_snapshot(&snapshot).map_err(|error| {
+            FederationError::DistributedBridgeOperationFailed {
+                operation: "apply_snapshot".to_owned(),
+                message: error.to_string(),
+            }
+        })?;
+
+        self.replication_runtime_mut("apply_replication_transfer")?
+            .last_applied_sequence = Some(snapshot.sequence);
+
+        Ok(snapshot)
+    }
+
+    /// Retain a replay artifact for later forensic shipping.
+    pub fn retain_replay_artifact(
+        &mut self,
+        artifact: ReplayArtifactRecord,
+    ) -> Result<(), FederationError> {
+        let config = self.edge_replay_config("retain_replay_artifact")?.clone();
+        self.ensure_not_closed("retain_replay_artifact")?;
+
+        let runtime = self.edge_replay_runtime_mut("retain_replay_artifact")?;
+        runtime.retained_artifacts.push(artifact);
+        trim_replay_artifacts(runtime, &config);
+
+        Ok(())
+    }
+
+    /// Acknowledge receipt of an edge replay artifact when using ack-based retention.
+    pub fn acknowledge_replay_artifact(
+        &mut self,
+        artifact_id: &str,
+    ) -> Result<bool, FederationError> {
+        let config = self
+            .edge_replay_config("acknowledge_replay_artifact")?
+            .clone();
+        self.ensure_not_closed("acknowledge_replay_artifact")?;
+
+        if !matches!(config.trace_retention, TraceRetention::UntilAcknowledged) {
+            return Ok(false);
+        }
+
+        let runtime = self.edge_replay_runtime_mut("acknowledge_replay_artifact")?;
+        let before = runtime.retained_artifacts.len();
+        runtime
+            .retained_artifacts
+            .retain(|artifact| artifact.artifact_id != artifact_id);
+
+        Ok(runtime.retained_artifacts.len() != before)
+    }
+
+    /// Plan a replay/evidence shipping batch for the current bridge state.
+    pub fn plan_replay_shipping(&mut self) -> Result<ReplayShippingPlan, FederationError> {
+        let config = self.edge_replay_config("plan_replay_shipping")?.clone();
+        self.ensure_not_closed("plan_replay_shipping")?;
+
+        let state = self.state;
+        let runtime = self.edge_replay_runtime_mut("plan_replay_shipping")?;
+        let artifacts = match config.evidence_shipping_policy {
+            EvidenceShippingPolicy::OnReconnect => {
+                if state == FederationBridgeState::Active {
+                    runtime.retained_artifacts.clone()
+                } else {
+                    Vec::new()
+                }
+            }
+            EvidenceShippingPolicy::PeriodicBatch => {
+                let batch_size = usize::min(runtime.retained_artifacts.len(), 32);
+                runtime.retained_artifacts
+                    [runtime.retained_artifacts.len().saturating_sub(batch_size)..]
+                    .to_vec()
+            }
+            EvidenceShippingPolicy::ContinuousMirror => runtime
+                .retained_artifacts
+                .last()
+                .cloned()
+                .into_iter()
+                .collect(),
+        };
+
+        if !artifacts.is_empty() {
+            runtime.shipped_batches = runtime.shipped_batches.saturating_add(1);
+        }
+
+        Ok(ReplayShippingPlan {
+            policy: config.evidence_shipping_policy,
+            artifacts,
+        })
+    }
+
+    fn ensure_not_closed(&self, operation: &'static str) -> Result<(), FederationError> {
+        if self.state == FederationBridgeState::Closed {
+            return Err(FederationError::BridgeNotOperational {
+                operation,
+                state: self.state,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_operational_state(&self, operation: &'static str) -> Result<(), FederationError> {
+        match self.state {
+            FederationBridgeState::Active | FederationBridgeState::Degraded => Ok(()),
+            state => Err(FederationError::BridgeNotOperational { operation, state }),
+        }
+    }
+
+    fn ensure_active_state(&self, operation: &'static str) -> Result<(), FederationError> {
+        if self.state != FederationBridgeState::Active {
+            return Err(FederationError::BridgeNotOperational {
+                operation,
+                state: self.state,
+            });
+        }
+        Ok(())
+    }
+
+    fn runtime_mut(&mut self) -> &mut FederationBridgeRuntime {
+        if self.runtime.is_none() {
+            self.runtime = Some(FederationBridgeRuntime::for_role(&self.role));
+        }
+        self.runtime
+            .as_mut()
+            .expect("runtime must exist after lazy initialization")
+    }
+
+    fn leaf_config(&self, operation: &'static str) -> Result<&LeafConfig, FederationError> {
+        match &self.role {
+            FederationRole::LeafFabric(config) => Ok(config),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "leaf_fabric",
+                actual: self.role.name(),
+            }),
+        }
+    }
+
+    fn gateway_config(&self, operation: &'static str) -> Result<&GatewayConfig, FederationError> {
+        match &self.role {
+            FederationRole::GatewayFabric(config) => Ok(config),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "gateway_fabric",
+                actual: self.role.name(),
+            }),
+        }
+    }
+
+    fn replication_config(
+        &self,
+        operation: &'static str,
+    ) -> Result<&ReplicationConfig, FederationError> {
+        match &self.role {
+            FederationRole::ReplicationLink(config) => Ok(config),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "replication_link",
+                actual: self.role.name(),
+            }),
+        }
+    }
+
+    fn edge_replay_config(
+        &self,
+        operation: &'static str,
+    ) -> Result<&EdgeReplayConfig, FederationError> {
+        match &self.role {
+            FederationRole::EdgeReplayLink(config) => Ok(config),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "edge_replay_link",
+                actual: self.role.name(),
+            }),
+        }
+    }
+
+    fn leaf_runtime_mut(
+        &mut self,
+        operation: &'static str,
+    ) -> Result<&mut LeafBridgeRuntime, FederationError> {
+        let actual = self.role.name();
+        match self.runtime_mut() {
+            FederationBridgeRuntime::Leaf(runtime) => Ok(runtime),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "leaf_fabric",
+                actual,
+            }),
+        }
+    }
+
+    fn gateway_runtime_mut(
+        &mut self,
+        operation: &'static str,
+    ) -> Result<&mut GatewayBridgeRuntime, FederationError> {
+        let actual = self.role.name();
+        match self.runtime_mut() {
+            FederationBridgeRuntime::Gateway(runtime) => Ok(runtime),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "gateway_fabric",
+                actual,
+            }),
+        }
+    }
+
+    fn replication_runtime_mut(
+        &mut self,
+        operation: &'static str,
+    ) -> Result<&mut ReplicationBridgeRuntime, FederationError> {
+        let actual = self.role.name();
+        match self.runtime_mut() {
+            FederationBridgeRuntime::Replication(runtime) => Ok(runtime),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "replication_link",
+                actual,
+            }),
+        }
+    }
+
+    fn edge_replay_runtime_mut(
+        &mut self,
+        operation: &'static str,
+    ) -> Result<&mut EdgeReplayBridgeRuntime, FederationError> {
+        let actual = self.role.name();
+        match self.runtime_mut() {
+            FederationBridgeRuntime::EdgeReplay(runtime) => Ok(runtime),
+            _ => Err(FederationError::RoleOperationMismatch {
+                operation,
+                expected: "edge_replay_link",
+                actual,
+            }),
+        }
+    }
+}
+
+fn trim_replay_artifacts(runtime: &mut EdgeReplayBridgeRuntime, config: &EdgeReplayConfig) {
+    match &config.trace_retention {
+        TraceRetention::LatestArtifacts { max_artifacts } => {
+            let keep = usize::try_from(*max_artifacts).unwrap_or(usize::MAX);
+            if runtime.retained_artifacts.len() > keep {
+                let drop_count = runtime.retained_artifacts.len() - keep;
+                runtime.retained_artifacts.drain(..drop_count);
+            }
+        }
+        TraceRetention::DurationWindow { retention } => {
+            if let Some(latest) = runtime
+                .retained_artifacts
+                .last()
+                .map(|artifact| artifact.captured_at)
+            {
+                runtime
+                    .retained_artifacts
+                    .retain(|artifact| latest.saturating_sub(artifact.captured_at) <= *retention);
+            }
+        }
+        TraceRetention::UntilAcknowledged => {}
+    }
+
+    let depth_limit = usize::try_from(config.reconnection_replay_depth).unwrap_or(usize::MAX);
+    if runtime.retained_artifacts.len() > depth_limit {
+        let drop_count = runtime.retained_artifacts.len() - depth_limit;
+        runtime.retained_artifacts.drain(..drop_count);
     }
 }
 
@@ -538,6 +1273,24 @@ pub enum FederationError {
         /// Gateway amplification limit.
         max: u16,
     },
+    /// A bridge operation was attempted against the wrong federation role.
+    #[error("operation `{operation}` requires role `{expected}`, but bridge role is `{actual}`")]
+    RoleOperationMismatch {
+        /// Operation being attempted.
+        operation: &'static str,
+        /// Role required by the operation.
+        expected: &'static str,
+        /// Actual configured role for the bridge.
+        actual: &'static str,
+    },
+    /// Some bridge operations require an active or degraded bridge rather than provisioning/closed.
+    #[error("operation `{operation}` is not available while bridge state is `{state:?}`")]
+    BridgeNotOperational {
+        /// Operation being attempted.
+        operation: &'static str,
+        /// Current bridge state.
+        state: FederationBridgeState,
+    },
     /// Replay bridges require evidence-observation capability.
     #[error("edge replay links require observe-evidence capability in scope")]
     EdgeReplayRequiresObserveEvidence,
@@ -547,6 +1300,17 @@ pub enum FederationError {
     /// Closed bridges cannot re-enter degraded service.
     #[error("cannot degrade a closed federation bridge")]
     CannotDegradeClosedBridge,
+    /// Replication transfer payloads must decode into valid region snapshots.
+    #[error(transparent)]
+    SnapshotDecode(#[from] SnapshotError),
+    /// Distributed bridge integration failed while applying a recovered snapshot.
+    #[error("distributed bridge operation `{operation}` failed: {message}")]
+    DistributedBridgeOperationFailed {
+        /// Underlying distributed bridge operation.
+        operation: String,
+        /// Stringified error from the distributed bridge surface.
+        message: String,
+    },
     /// Underlying morphism validation failed.
     #[error(transparent)]
     MorphismValidation(#[from] MorphismValidationError),
@@ -556,6 +1320,8 @@ pub enum FederationError {
 mod tests {
     use super::super::morphism::{ResponsePolicy, ReversibilityRequirement, SharingPolicy};
     use super::*;
+    use crate::types::{Budget, RegionId, TaskId};
+    use crate::util::ArenaIndex;
 
     fn derived_view_morphism() -> Morphism {
         Morphism::default()
@@ -568,6 +1334,29 @@ mod tests {
             capability_requirements: vec![FabricCapability::CarryAuthority],
             response_policy: ResponsePolicy::ReplyAuthoritative,
             ..Morphism::default()
+        }
+    }
+
+    fn region_id(n: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    fn task_id(n: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    fn replay_artifact(
+        artifact_id: &str,
+        family: SystemSubjectFamily,
+        captured_secs: u64,
+        sequence: u64,
+    ) -> ReplayArtifactRecord {
+        ReplayArtifactRecord {
+            artifact_id: artifact_id.to_owned(),
+            family,
+            captured_at: Duration::from_secs(captured_secs),
+            sequence,
+            bytes: 256,
         }
     }
 
@@ -1253,6 +2042,280 @@ mod tests {
         )
         .expect("leaf should accept egress morphisms");
         assert_eq!(bridge.role.name(), "leaf_fabric");
+    }
+
+    // -- Role-specific bridge operations ------------------------------------
+
+    #[test]
+    fn leaf_bridge_buffers_routes_until_reactivation() {
+        let mut bridge = FederationBridge::new(
+            FederationRole::LeafFabric(LeafConfig {
+                offline_buffer_limit: 2,
+                ..LeafConfig::default()
+            }),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        bridge.mark_degraded().unwrap();
+
+        let first = bridge
+            .queue_leaf_route(
+                FederationDirection::LocalToRemote,
+                SubjectPattern::new("tenant.alpha.>"),
+                1,
+            )
+            .unwrap();
+        let second = bridge
+            .queue_leaf_route(
+                FederationDirection::LocalToRemote,
+                SubjectPattern::new("tenant.beta.>"),
+                1,
+            )
+            .unwrap();
+        let third = bridge
+            .queue_leaf_route(
+                FederationDirection::RemoteToLocal,
+                SubjectPattern::new("tenant.gamma.>"),
+                1,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            first,
+            LeafRouteDisposition::Buffered {
+                buffered_entries: 1,
+                dropped_entries: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            second,
+            LeafRouteDisposition::Buffered {
+                buffered_entries: 2,
+                dropped_entries: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            third,
+            LeafRouteDisposition::Buffered {
+                buffered_entries: 2,
+                dropped_entries: 1,
+                ..
+            }
+        ));
+
+        bridge.activate().unwrap();
+        let drain = bridge.drain_leaf_buffer().unwrap();
+        let drained_subjects: Vec<&str> = drain
+            .routes
+            .iter()
+            .map(|route| route.subject.as_str())
+            .collect();
+        assert_eq!(drain.dropped_entries, 1);
+        assert_eq!(drained_subjects, vec!["tenant.beta.>", "tenant.gamma.>"]);
+    }
+
+    #[test]
+    fn gateway_bridge_applies_budgeted_interest_and_convergence() {
+        let mut bridge = FederationBridge::new(
+            FederationRole::GatewayFabric(GatewayConfig {
+                amplification_limit: 4,
+                convergence_timeout: Duration::from_secs(5),
+                ..GatewayConfig::default()
+            }),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        bridge.activate().unwrap();
+
+        let err = bridge
+            .plan_gateway_interest(
+                SystemSubjectFamily::Route,
+                SubjectPattern::new("tenant.route.>"),
+                5,
+                ControlBudget {
+                    poll_quota: 3,
+                    ..ControlBudget::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FederationError::GatewayAmplificationExceeded { actual: 5, max: 3 }
+        );
+
+        let plan = bridge
+            .plan_gateway_interest(
+                SystemSubjectFamily::Route,
+                SubjectPattern::new("tenant.route.>"),
+                2,
+                ControlBudget {
+                    poll_quota: 3,
+                    ..ControlBudget::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(plan.admitted_amplification, 2);
+
+        let advisory = bridge
+            .forward_gateway_advisory(
+                SystemSubjectFamily::Replay,
+                SubjectPattern::new("$SYS.FABRIC.REPLAY.>"),
+                ControlBudget::default(),
+            )
+            .unwrap();
+        assert_eq!(advisory.family, SystemSubjectFamily::Replay);
+
+        let convergence = bridge
+            .reconcile_gateway_convergence(Duration::from_secs(6))
+            .unwrap();
+        assert!(convergence.timed_out);
+        assert_eq!(bridge.state, FederationBridgeState::Degraded);
+
+        match bridge.runtime() {
+            FederationBridgeRuntime::Gateway(runtime) => {
+                assert!(
+                    runtime
+                        .propagated_interests
+                        .contains(&SubjectPattern::new("tenant.route.>"))
+                );
+                assert_eq!(runtime.forwarded_advisories.len(), 1);
+            }
+            other => panic!("expected gateway runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replication_bridge_exports_and_applies_region_snapshots() {
+        let mut federation = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+
+        let region = region_id(10);
+        let mut source = RegionBridge::new_local(region, None, Budget::new());
+        source.add_task(task_id(11)).unwrap();
+        source.add_child(region_id(12)).unwrap();
+
+        let transfer = federation.export_replication_transfer(&mut source).unwrap();
+        assert_eq!(transfer.sequence, 1);
+
+        let mut target = RegionBridge::new_local(region, None, Budget::new());
+        let applied = federation
+            .apply_replication_transfer(&mut target, &transfer)
+            .unwrap();
+        assert_eq!(applied.sequence, 1);
+        assert_eq!(target.local().task_ids(), vec![task_id(11)]);
+        assert_eq!(target.local().child_ids(), vec![region_id(12)]);
+
+        match federation.runtime() {
+            FederationBridgeRuntime::Replication(runtime) => {
+                assert_eq!(runtime.last_exported_sequence, Some(1));
+                assert_eq!(runtime.last_applied_sequence, Some(1));
+            }
+            other => panic!("expected replication runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replication_bridge_catch_up_plan_respects_policy() {
+        let mut log_only = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig {
+                catch_up_policy: CatchUpPolicy::LogOnly,
+                ..ReplicationConfig::default()
+            }),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        let mut snapshot_required = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig {
+                catch_up_policy: CatchUpPolicy::SnapshotRequired,
+                ..ReplicationConfig::default()
+            }),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+
+        let log_plan = log_only.plan_replication_catch_up(10, 4).unwrap();
+        let snapshot_plan = snapshot_required.plan_replication_catch_up(10, 4).unwrap();
+
+        assert_eq!(log_plan.action, ReplicationCatchUpAction::DeltaOnly);
+        assert_eq!(snapshot_plan.action, ReplicationCatchUpAction::Snapshot);
+    }
+
+    #[test]
+    fn edge_replay_bridge_retains_latest_artifacts_and_ships_on_reconnect() {
+        let mut bridge = FederationBridge::new(
+            FederationRole::EdgeReplayLink(EdgeReplayConfig {
+                trace_retention: TraceRetention::LatestArtifacts { max_artifacts: 2 },
+                evidence_shipping_policy: EvidenceShippingPolicy::OnReconnect,
+                reconnection_replay_depth: 2,
+            }),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [
+                FabricCapability::RewriteNamespace,
+                FabricCapability::ObserveEvidence,
+            ],
+        )
+        .unwrap();
+
+        bridge
+            .retain_replay_artifact(replay_artifact(
+                "artifact-a",
+                SystemSubjectFamily::Replay,
+                1,
+                1,
+            ))
+            .unwrap();
+        bridge
+            .retain_replay_artifact(replay_artifact(
+                "artifact-b",
+                SystemSubjectFamily::Replay,
+                2,
+                2,
+            ))
+            .unwrap();
+        bridge
+            .retain_replay_artifact(replay_artifact(
+                "artifact-c",
+                SystemSubjectFamily::Replay,
+                3,
+                3,
+            ))
+            .unwrap();
+
+        let before_reconnect = bridge.plan_replay_shipping().unwrap();
+        assert!(before_reconnect.artifacts.is_empty());
+
+        bridge.activate().unwrap();
+        let shipping = bridge.plan_replay_shipping().unwrap();
+        let shipped_ids: Vec<&str> = shipping
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_id.as_str())
+            .collect();
+        assert_eq!(shipped_ids, vec!["artifact-b", "artifact-c"]);
+
+        match bridge.runtime() {
+            FederationBridgeRuntime::EdgeReplay(runtime) => {
+                assert_eq!(runtime.retained_artifacts.len(), 2);
+                assert_eq!(runtime.shipped_batches, 1);
+            }
+            other => panic!("expected edge replay runtime, got {other:?}"),
+        }
     }
 
     // -- Default enum values -------------------------------------------------

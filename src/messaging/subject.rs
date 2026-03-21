@@ -546,8 +546,8 @@ impl SublistLinkCache {
                 return;
             }
             Entry::Vacant(v) => {
-                self.order.push_back(subject);
                 v.insert(entry);
+                self.order.push_back(subject);
             }
         }
 
@@ -1321,6 +1321,251 @@ fn specificity_score(pattern: &SubjectPattern) -> (usize, usize) {
 fn registry_patterns_conflict(left: &RegistryEntry, right: &RegistryEntry) -> bool {
     left.pattern.overlaps(&right.pattern)
         && specificity_score(&left.pattern) == specificity_score(&right.pattern)
+}
+
+/// Errors returned by the explicit multi-tenant namespace kernel.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum NamespaceKernelError {
+    /// The requested namespace component does not form a valid literal segment.
+    #[error("namespace component `{component}` is invalid: {source}")]
+    InvalidComponent {
+        /// Raw component supplied by the caller.
+        component: String,
+        /// Underlying subject parser failure.
+        source: SubjectPatternError,
+    },
+    /// Namespace components must stay within one literal subject segment.
+    #[error("namespace component `{component}` must contain exactly one literal segment")]
+    MultiSegmentComponent {
+        /// Canonicalized component that spanned multiple segments.
+        component: String,
+    },
+}
+
+/// One validated literal namespace segment.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NamespaceComponent {
+    raw: String,
+}
+
+impl NamespaceComponent {
+    /// Parse one namespace component and reject wildcards or multi-segment input.
+    pub fn parse(raw: impl AsRef<str>) -> Result<Self, NamespaceKernelError> {
+        let raw = raw.as_ref();
+        let subject =
+            Subject::parse(raw).map_err(|source| NamespaceKernelError::InvalidComponent {
+                component: raw.trim().to_owned(),
+                source,
+            })?;
+        if subject.tokens().len() != 1 {
+            return Err(NamespaceKernelError::MultiSegmentComponent {
+                component: subject.as_str().to_owned(),
+            });
+        }
+        Ok(Self {
+            raw: subject.as_str().to_owned(),
+        })
+    }
+
+    /// Return the canonical literal segment.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+}
+
+impl fmt::Display for NamespaceComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Canonical subject-space kernel for one tenant/service pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceKernel {
+    tenant: NamespaceComponent,
+    service: NamespaceComponent,
+}
+
+impl NamespaceKernel {
+    /// Create a new namespace kernel for one tenant/service pair.
+    pub fn new(
+        tenant: impl AsRef<str>,
+        service: impl AsRef<str>,
+    ) -> Result<Self, NamespaceKernelError> {
+        Ok(Self {
+            tenant: NamespaceComponent::parse(tenant)?,
+            service: NamespaceComponent::parse(service)?,
+        })
+    }
+
+    /// Return the tenant identifier.
+    #[must_use]
+    pub fn tenant(&self) -> &NamespaceComponent {
+        &self.tenant
+    }
+
+    /// Return the service identifier.
+    #[must_use]
+    pub fn service(&self) -> &NamespaceComponent {
+        &self.service
+    }
+
+    /// Return the tenant-wide subject space.
+    #[must_use]
+    pub fn tenant_pattern(&self) -> SubjectPattern {
+        SubjectPattern::new(format!("tenant.{}.>", self.tenant))
+    }
+
+    /// Return the canonical trust-boundary/service-space subject pattern.
+    #[must_use]
+    pub fn service_pattern(&self) -> SubjectPattern {
+        SubjectPattern::new(format!("tenant.{}.service.{}.>", self.tenant, self.service))
+    }
+
+    /// Return the process-mailbox subject pattern for this namespace.
+    #[must_use]
+    pub fn mailbox_pattern(&self) -> SubjectPattern {
+        SubjectPattern::new(format!(
+            "tenant.{}.service.{}.mailbox.>",
+            self.tenant, self.service
+        ))
+    }
+
+    /// Return a concrete process-mailbox subject.
+    pub fn mailbox_subject(
+        &self,
+        mailbox: impl AsRef<str>,
+    ) -> Result<Subject, NamespaceKernelError> {
+        let mailbox = NamespaceComponent::parse(mailbox)?;
+        Ok(Subject::new(format!(
+            "tenant.{}.service.{}.mailbox.{}",
+            self.tenant, self.service, mailbox
+        )))
+    }
+
+    /// Return the tenant/service-local control channel pattern.
+    #[must_use]
+    pub fn control_channel_pattern(&self) -> SubjectPattern {
+        SubjectPattern::new(format!(
+            "tenant.{}.service.{}.control.>",
+            self.tenant, self.service
+        ))
+    }
+
+    /// Return the service-discovery subject for this namespace.
+    #[must_use]
+    pub fn service_discovery_subject(&self) -> Subject {
+        Subject::new(format!(
+            "tenant.{}.service.{}.discover",
+            self.tenant, self.service
+        ))
+    }
+
+    /// Return the tenant/service-local control channel subject.
+    pub fn control_channel_subject(
+        &self,
+        channel: impl AsRef<str>,
+    ) -> Result<Subject, NamespaceKernelError> {
+        let channel = NamespaceComponent::parse(channel)?;
+        Ok(Subject::new(format!(
+            "tenant.{}.service.{}.control.{}",
+            self.tenant, self.service, channel
+        )))
+    }
+
+    /// Return the durable stream-capture selector for this namespace.
+    #[must_use]
+    pub fn durable_capture_pattern(&self) -> SubjectPattern {
+        SubjectPattern::new(format!("tenant.{}.capture.{}.>", self.tenant, self.service))
+    }
+
+    /// Return the namespace observability pattern.
+    #[must_use]
+    pub fn observability_pattern(&self) -> SubjectPattern {
+        SubjectPattern::new(format!(
+            "tenant.{}.service.{}.telemetry.>",
+            self.tenant, self.service
+        ))
+    }
+
+    /// Return one observability feed subject.
+    pub fn observability_subject(
+        &self,
+        feed: impl AsRef<str>,
+    ) -> Result<Subject, NamespaceKernelError> {
+        let feed = NamespaceComponent::parse(feed)?;
+        Ok(Subject::new(format!(
+            "tenant.{}.service.{}.telemetry.{}",
+            self.tenant, self.service, feed
+        )))
+    }
+
+    /// Return the trust-boundary pattern used for import/export control.
+    #[must_use]
+    pub fn trust_boundary_pattern(&self) -> SubjectPattern {
+        self.service_pattern()
+    }
+
+    /// Return true when this namespace owns the supplied subject.
+    #[must_use]
+    pub fn owns_subject(&self, subject: &Subject) -> bool {
+        self.trust_boundary_pattern().matches(subject)
+            || self.durable_capture_pattern().matches(subject)
+    }
+
+    /// Return true when both kernels belong to the same tenant boundary.
+    #[must_use]
+    pub fn same_tenant(&self, other: &Self) -> bool {
+        self.tenant == other.tenant
+    }
+
+    /// Return canonical registry entries for the namespace kernel surface.
+    #[must_use]
+    pub fn registry_entries(&self) -> Vec<RegistryEntry> {
+        vec![
+            RegistryEntry {
+                pattern: self.mailbox_pattern(),
+                family: RegistryFamily::Command,
+                description: format!(
+                    "process mailboxes for tenant `{}` service `{}`",
+                    self.tenant, self.service
+                ),
+            },
+            RegistryEntry {
+                pattern: SubjectPattern::from(&self.service_discovery_subject()),
+                family: RegistryFamily::DerivedView,
+                description: format!(
+                    "service discovery endpoint for tenant `{}` service `{}`",
+                    self.tenant, self.service
+                ),
+            },
+            RegistryEntry {
+                pattern: self.control_channel_pattern(),
+                family: RegistryFamily::Command,
+                description: format!(
+                    "namespace-local control channels for tenant `{}` service `{}`",
+                    self.tenant, self.service
+                ),
+            },
+            RegistryEntry {
+                pattern: self.observability_pattern(),
+                family: RegistryFamily::Event,
+                description: format!(
+                    "observability feeds for tenant `{}` service `{}`",
+                    self.tenant, self.service
+                ),
+            },
+            RegistryEntry {
+                pattern: self.durable_capture_pattern(),
+                family: RegistryFamily::CaptureSelector,
+                description: format!(
+                    "durable stream capture rules for tenant `{}` service `{}`",
+                    self.tenant, self.service
+                ),
+            },
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -2359,5 +2604,84 @@ mod tests {
         for handle in handles {
             handle.join().expect("thread panicked");
         }
+    }
+
+    #[test]
+    fn namespace_kernel_registers_mailbox_discovery_control_capture_and_telemetry() {
+        let kernel = NamespaceKernel::new("acme", "orders").expect("namespace kernel");
+        let reg = SubjectRegistry::new();
+        for entry in kernel.registry_entries() {
+            reg.register(entry)
+                .expect("namespace entry should register");
+        }
+
+        assert_eq!(
+            reg.lookup(&kernel.mailbox_subject("worker-1").expect("mailbox"))
+                .expect("mailbox entry")
+                .family,
+            RegistryFamily::Command
+        );
+        assert_eq!(
+            reg.lookup(&kernel.service_discovery_subject())
+                .expect("service discovery entry")
+                .family,
+            RegistryFamily::DerivedView
+        );
+        assert_eq!(
+            reg.lookup(
+                &kernel
+                    .control_channel_subject("rebalance")
+                    .expect("control subject"),
+            )
+            .expect("control entry")
+            .family,
+            RegistryFamily::Command
+        );
+        assert_eq!(
+            reg.lookup(
+                &kernel
+                    .observability_subject("errors")
+                    .expect("observability feed"),
+            )
+            .expect("observability entry")
+            .family,
+            RegistryFamily::Event
+        );
+        assert_eq!(
+            reg.lookup(&Subject::new("tenant.acme.capture.orders.snapshot.chunk"))
+                .expect("capture selector entry")
+                .family,
+            RegistryFamily::CaptureSelector
+        );
+    }
+
+    #[test]
+    fn namespace_kernel_separates_tenants_and_trust_boundaries() {
+        let acme_orders = NamespaceKernel::new("acme", "orders").expect("acme orders");
+        let acme_payments = NamespaceKernel::new("acme", "payments").expect("acme payments");
+        let bravo_orders = NamespaceKernel::new("bravo", "orders").expect("bravo orders");
+
+        let owned = acme_orders
+            .mailbox_subject("worker-1")
+            .expect("owned mailbox");
+        let owned_capture = Subject::new("tenant.acme.capture.orders.snapshot.chunk");
+        let foreign = bravo_orders
+            .mailbox_subject("worker-1")
+            .expect("foreign mailbox");
+        let foreign_capture = Subject::new("tenant.bravo.capture.orders.snapshot.chunk");
+
+        assert!(acme_orders.owns_subject(&owned));
+        assert!(acme_orders.owns_subject(&owned_capture));
+        assert!(!acme_orders.owns_subject(&foreign));
+        assert!(!acme_orders.owns_subject(&foreign_capture));
+        assert!(acme_orders.same_tenant(&acme_payments));
+        assert!(!acme_orders.same_tenant(&bravo_orders));
+        assert_eq!(
+            acme_orders
+                .control_channel_subject("rebalance")
+                .expect("control channel")
+                .as_str(),
+            "tenant.acme.service.orders.control.rebalance"
+        );
     }
 }

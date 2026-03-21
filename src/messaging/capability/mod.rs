@@ -1,6 +1,6 @@
 //! Static capability-layer building blocks for FABRIC.
 
-use super::subject::{SubjectPattern, SubjectToken};
+use super::subject::{NamespaceKernel, SubjectPattern, SubjectToken};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -375,6 +375,102 @@ fn pattern_covers_segments(granted: &[SubjectToken], requested: &[SubjectToken])
     }
 }
 
+/// Capability envelope for one tenant/service namespace kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceCapabilityEnvelope {
+    namespace: NamespaceKernel,
+}
+
+impl NamespaceCapabilityEnvelope {
+    /// Build a capability envelope for one namespace kernel.
+    #[must_use]
+    pub fn new(namespace: NamespaceKernel) -> Self {
+        Self { namespace }
+    }
+
+    /// Return the underlying namespace kernel.
+    #[must_use]
+    pub fn namespace(&self) -> &NamespaceKernel {
+        &self.namespace
+    }
+
+    /// Publish authority for the namespace trust boundary.
+    #[must_use]
+    pub fn publish_capability(&self) -> FabricCapability {
+        FabricCapability::Publish {
+            subject: self.namespace.trust_boundary_pattern(),
+        }
+    }
+
+    /// Subscribe authority for the namespace trust boundary.
+    #[must_use]
+    pub fn subscribe_capability(&self) -> FabricCapability {
+        FabricCapability::Subscribe {
+            subject: self.namespace.trust_boundary_pattern(),
+        }
+    }
+
+    /// Stream-capture authority for the namespace's durable capture selector.
+    #[must_use]
+    pub fn capture_capability(&self) -> FabricCapability {
+        FabricCapability::CreateStream {
+            subject: self.namespace.durable_capture_pattern(),
+        }
+    }
+
+    /// Namespace-transform authority for import/export trust-boundary rewrites.
+    #[must_use]
+    pub fn transform_capability(&self) -> FabricCapability {
+        FabricCapability::TransformSpace {
+            subject: self.namespace.trust_boundary_pattern(),
+        }
+    }
+
+    /// Build an explicit trust-boundary relation to another namespace.
+    #[must_use]
+    pub fn trust_boundary(&self, destination: NamespaceKernel) -> NamespaceTrustBoundary {
+        NamespaceTrustBoundary {
+            source: self.namespace.clone(),
+            destination,
+        }
+    }
+}
+
+/// Explicit boundary between two tenant/service namespaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceTrustBoundary {
+    source: NamespaceKernel,
+    destination: NamespaceKernel,
+}
+
+impl NamespaceTrustBoundary {
+    /// Return the source namespace.
+    #[must_use]
+    pub fn source(&self) -> &NamespaceKernel {
+        &self.source
+    }
+
+    /// Return the destination namespace.
+    #[must_use]
+    pub fn destination(&self) -> &NamespaceKernel {
+        &self.destination
+    }
+
+    /// Return true when the boundary crosses tenant trust domains.
+    #[must_use]
+    pub fn crosses_tenant_boundary(&self) -> bool {
+        !self.source.same_tenant(&self.destination)
+    }
+
+    /// Return the capability required to rewrite across this boundary.
+    #[must_use]
+    pub fn required_transform_capability(&self) -> FabricCapability {
+        FabricCapability::TransformSpace {
+            subject: self.source.trust_boundary_pattern(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +537,68 @@ mod tests {
             1
         );
         assert!(!registry.check(&FabricCapability::AdminControl));
+    }
+
+    #[test]
+    fn namespace_capability_envelope_fails_closed_across_tenants() {
+        let registry = FabricCapabilityRegistry::default();
+        let acme_orders = NamespaceCapabilityEnvelope::new(
+            NamespaceKernel::new("acme", "orders").expect("acme orders namespace"),
+        );
+        let bravo_orders = NamespaceKernel::new("bravo", "orders").expect("bravo orders namespace");
+
+        registry
+            .grant(acme_orders.publish_capability())
+            .expect("publish capability");
+        registry
+            .grant(acme_orders.capture_capability())
+            .expect("capture capability");
+
+        assert!(
+            registry.check(&FabricCapability::Publish {
+                subject: SubjectPattern::from(
+                    &acme_orders
+                        .namespace()
+                        .mailbox_subject("worker-1")
+                        .expect("acme mailbox"),
+                ),
+            })
+        );
+        assert!(
+            !registry.check(&FabricCapability::Publish {
+                subject: SubjectPattern::from(
+                    &bravo_orders
+                        .mailbox_subject("worker-1")
+                        .expect("bravo mailbox"),
+                ),
+            })
+        );
+        assert!(registry.check(&FabricCapability::CreateStream {
+            subject: acme_orders.namespace().durable_capture_pattern(),
+        }));
+        assert!(!registry.check(&FabricCapability::CreateStream {
+            subject: bravo_orders.durable_capture_pattern(),
+        }));
+    }
+
+    #[test]
+    fn namespace_trust_boundary_marks_cross_tenant_rewrites() {
+        let acme_orders = NamespaceCapabilityEnvelope::new(
+            NamespaceKernel::new("acme", "orders").expect("acme orders namespace"),
+        );
+        let acme_payments = NamespaceKernel::new("acme", "payments").expect("acme payments");
+        let bravo_orders = NamespaceKernel::new("bravo", "orders").expect("bravo orders");
+
+        let local = acme_orders.trust_boundary(acme_payments);
+        let foreign = acme_orders.trust_boundary(bravo_orders);
+
+        assert!(!local.crosses_tenant_boundary());
+        assert!(foreign.crosses_tenant_boundary());
+        assert_eq!(
+            foreign.required_transform_capability(),
+            FabricCapability::TransformSpace {
+                subject: acme_orders.namespace().trust_boundary_pattern(),
+            }
+        );
     }
 }

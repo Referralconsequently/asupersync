@@ -129,10 +129,14 @@ pub use cut::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use federation::{
-    CatchUpPolicy, EdgeReplayConfig, EvidenceShippingPolicy, FederationBridge,
-    FederationBridgeState, FederationError, FederationRole, GatewayConfig,
-    InterestPropagationPolicy, LeafConfig, MorphismConstraints, OrderingGuarantee,
-    ReplicationConfig, TraceRetention,
+    BufferedLeafRoute, CatchUpPolicy, EdgeReplayBridgeRuntime, EdgeReplayConfig,
+    EvidenceShippingPolicy, FederationBridge, FederationBridgeRuntime, FederationBridgeState,
+    FederationDirection, FederationError, FederationRole, GatewayAdvisoryRecord,
+    GatewayBridgeRuntime, GatewayConfig, GatewayConvergenceRecord, GatewayInterestPlan,
+    InterestPropagationPolicy, LeafBridgeRuntime, LeafBufferDrain, LeafConfig,
+    LeafRouteDisposition, MorphismConstraints, OrderingGuarantee, ReplayArtifactRecord,
+    ReplayShippingPlan, ReplicationBridgeRuntime, ReplicationCatchUpAction, ReplicationCatchUpPlan,
+    ReplicationConfig, ReplicationTransfer, TraceRetention,
 };
 pub use jetstream::{
     AckPolicy, Consumer, ConsumerConfig, DeliverPolicy, DiscardPolicy, JetStreamContext, JsError,
