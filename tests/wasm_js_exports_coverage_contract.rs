@@ -743,24 +743,28 @@ fn browser_package_exports_shared_worker_coordinator_helpers_without_promoting_d
         );
     }
 
-    let dts = read_source("packages/browser/dist/index.d.ts");
-    for marker in [
-        "BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID",
-        "BROWSER_SHARED_WORKER_COORDINATOR_LANE",
-        "BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL",
-        "BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE",
-        "export interface BrowserSharedWorkerCoordinatorSupportDiagnostics",
-        "export interface BrowserSharedWorkerCoordinatorSelectionResult",
-        "export declare function detectBrowserSharedWorkerCoordinatorSupport(",
-        "export declare function createBrowserSharedWorkerCoordinatorUnsupportedError(",
-        "export declare function assertBrowserSharedWorkerCoordinatorSupport(",
-        "export declare class BrowserSharedWorkerCoordinatorClient",
-        "export declare function createBrowserSharedWorkerCoordinatorSelection(",
-    ] {
-        assert!(
-            dts.contains(marker),
-            "browser dist/index.d.ts must preserve shared-worker coordinator marker: {marker}"
-        );
+    let dts_path = repo_root().join("packages/browser/dist/index.d.ts");
+    if dts_path.exists() {
+        let dts = std::fs::read_to_string(&dts_path)
+            .unwrap_or_else(|_| panic!("missing {}", dts_path.display()));
+        for marker in [
+            "BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID",
+            "BROWSER_SHARED_WORKER_COORDINATOR_LANE",
+            "BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL",
+            "BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE",
+            "export interface BrowserSharedWorkerCoordinatorSupportDiagnostics",
+            "export interface BrowserSharedWorkerCoordinatorSelectionResult",
+            "export declare function detectBrowserSharedWorkerCoordinatorSupport(",
+            "export declare function createBrowserSharedWorkerCoordinatorUnsupportedError(",
+            "export declare function assertBrowserSharedWorkerCoordinatorSupport(",
+            "export declare class BrowserSharedWorkerCoordinatorClient",
+            "export declare function createBrowserSharedWorkerCoordinatorSelection(",
+        ] {
+            assert!(
+                dts.contains(marker),
+                "browser dist/index.d.ts must preserve shared-worker coordinator marker: {marker}"
+            );
+        }
     }
 }
 

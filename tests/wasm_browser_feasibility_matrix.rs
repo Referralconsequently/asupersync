@@ -946,11 +946,17 @@ fn known_contradictions_are_tracked() {
         "IndexedDB BrowserStorage surface should now be shipped"
     );
 
-    // Boundary 2: MessagePort and BroadcastChannel remain intentionally
-    // outside the public browser SDK even though the substrate exists.
+    // Boundary 2: the public SDK still must not turn generic browser-native
+    // messaging into a broad surface area, but the bounded SharedWorker
+    // coordinator lane is now allowed to name MessagePort explicitly.
     assert!(
-        !browser_src.contains("MessagePort") && !browser_src.contains("BroadcastChannel"),
-        "public browser SDK must not silently export MessagePort/BroadcastChannel"
+        !browser_src.contains("BroadcastChannel"),
+        "public browser SDK must not silently export BroadcastChannel"
+    );
+    assert!(
+        browser_src.contains("BrowserSharedWorkerCoordinatorClient")
+            && browser_src.contains("MessagePort"),
+        "bounded shared-worker coordinator scaffolding may now name MessagePort explicitly"
     );
 
     // Resolved contradiction 3: localStorage host backend is now elevated
@@ -972,10 +978,13 @@ fn known_contradictions_are_tracked() {
 fn messaging_surfaces_remain_public_sdk_unshipped_but_explicitly_documented() {
     let browser_src = read_file("packages/browser/src/index.ts");
     assert!(
-        !browser_src.contains("MessageChannel")
-            && !browser_src.contains("MessagePort")
-            && !browser_src.contains("BroadcastChannel"),
-        "browser SDK must not silently export browser-native messaging APIs"
+        !browser_src.contains("MessageChannel") && !browser_src.contains("BroadcastChannel"),
+        "browser SDK must not silently export generic browser-native messaging APIs"
+    );
+    assert!(
+        browser_src.contains("createBrowserSharedWorkerCoordinatorSelection(")
+            && browser_src.contains("MessagePort"),
+        "the bounded shared-worker coordinator helper may use MessagePort explicitly"
     );
 
     let wasm_doc = read_file("docs/WASM.md");
