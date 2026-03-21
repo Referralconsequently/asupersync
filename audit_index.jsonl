@@ -506,3 +506,4 @@
 {"file":"src/channel/clock_skew.rs","lines":842,"batch":406,"date":"2026-03-21","agent":"SwiftLake","verdict":"FIXED","bugs":2,"notes":"logged non-jump skew evidence; fixed 1ns jitter collapsing to zero"}
 {"file":"src/transport/mock.rs","lines":1357,"batch":406,"date":"2026-03-21","agent":"SwiftLake","verdict":"FIXED","bugs":1,"notes":"corrupted symbols no longer preserve verified auth state"}
 {"file":"src/messaging/consumer.rs","lines":4746,"batch":406,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of consumer cursor lease state machine. 40 tests. Lease fencing, ack floor gap prevention, obligation lifecycle all correct."}
+{"file":"src/messaging/control.rs","lines":3895,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of control advisory system. 89 tests. CRDT propagation, anti-entropy, membership, advisory damping all correct."}
