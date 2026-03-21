@@ -694,6 +694,28 @@ impl StreamStore {
             if !self.is_client && !is_client_stream {
                 return Err(H2Error::protocol("invalid stream ID parity"));
             }
+
+            // RFC 7540 Section 5.1.2: reject incoming streams that exceed our
+            // advertised max_concurrent_streams.  We amortize the O(N) active
+            // count by first checking the total tracked stream count (which
+            // includes closed streams kept for GOAWAY bookkeeping).
+            if self.streams.len() >= self.max_concurrent_streams as usize {
+                let active = self
+                    .streams
+                    .values()
+                    .filter(|s| s.state.is_active())
+                    .count();
+                // Prune closed streams while we're scanning.
+                self.streams.retain(|_, s| !s.state.is_closed());
+                if active >= self.max_concurrent_streams as usize {
+                    return Err(H2Error::stream(
+                        id,
+                        ErrorCode::RefusedStream,
+                        "max concurrent streams exceeded",
+                    ));
+                }
+            }
+
             if self.is_client && !is_client_stream {
                 // Server-initiated stream received by client
                 if id < self.next_server_stream_id {

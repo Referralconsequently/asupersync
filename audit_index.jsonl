@@ -426,3 +426,35 @@
 "SOUND"
 0
 "Race semantics correct, pre-check for already-shutdown, proper grace period with timeout"
+"src/http/h2/connection.rs"
+3405
+405
+"2026-03-21"
+"SapphireHill"
+"FIXED"
+1
+"1 MEDIUM: missing max_concurrent_streams enforcement for incoming streams in get_or_create"
+"src/http/h2/stream.rs"
+1940
+405
+"2026-03-21"
+"SapphireHill"
+"FIXED"
+1
+"1 MEDIUM: get_or_create now enforces max_concurrent_streams with REFUSED_STREAM"
+"src/transport/aggregator.rs"
+3782
+405
+"2026-03-21"
+"SapphireHill"
+"FIXED"
+1
+"1 MEDIUM: symbol permanently lost when reorder buffer full + dedup marks seen (bead filed)"
+"src/gen_server.rs"
+6443
+405
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Thorough lifecycle, obligation tracking, cancel-correctness, drain semantics all correct"
