@@ -36,7 +36,7 @@ impl FuzzConfig {
             max_steps: 100_000,
             worker_count: 1,
             minimize: true,
-            minimize_attempts: 64,
+            minimize_attempts: 96,
         }
     }
 
@@ -285,18 +285,27 @@ impl FuzzHarness {
                     *violation_counts.entry(key).or_insert(0) += 1;
                 }
 
-                let minimized_seed = if self.config.minimize {
+                let minimized = if self.config.minimize {
                     self.minimize_seed(seed, &test)
                 } else {
                     None
+                };
+
+                let (minimized_seed, certificate_hash, trace_fingerprint) = match minimized {
+                    Some((min_seed, ref min_res)) => (
+                        Some(min_seed),
+                        min_res.certificate_hash,
+                        min_res.trace_fingerprint,
+                    ),
+                    None => (None, result.certificate_hash, result.trace_fingerprint),
                 };
 
                 findings.push(FuzzFinding {
                     seed,
                     steps: result.steps,
                     violations: result.violations,
-                    certificate_hash: result.certificate_hash,
-                    trace_fingerprint: result.trace_fingerprint,
+                    certificate_hash,
+                    trace_fingerprint,
                     minimized_seed,
                 });
             }
@@ -340,8 +349,8 @@ impl FuzzHarness {
     /// Attempt to minimize a failing seed.
     ///
     /// Tries nearby seeds (bit-flips and offsets) to find the smallest
-    /// seed that still reproduces the same category of violation.
-    fn minimize_seed<F>(&self, original_seed: u64, test: &F) -> Option<u64>
+    /// seed that still reproduces the same violation-category set.
+    fn minimize_seed<F>(&self, original_seed: u64, test: &F) -> Option<(u64, SingleRunResult)>
     where
         F: Fn(&mut LabRuntime),
     {
@@ -349,9 +358,10 @@ impl FuzzHarness {
         if original_result.violations.is_empty() {
             return None;
         }
-        let target_category = violation_category(&original_result.violations[0]);
+        let target_categories = sorted_violation_categories(&original_result.violations);
 
         let mut best_seed = original_seed;
+        let mut best_result = None;
 
         // Try smaller seeds first (simple reduction).
         for attempt in 0..self.config.minimize_attempts {
@@ -373,16 +383,17 @@ impl FuzzHarness {
                 continue;
             }
 
-            let cat = violation_category(&result.violations[0]);
-            if cat == target_category && candidate < best_seed {
+            let categories = sorted_violation_categories(&result.violations);
+            if categories == target_categories && candidate < best_seed {
                 best_seed = candidate;
+                best_result = Some(result);
             }
         }
 
         if best_seed == original_seed {
             None
         } else {
-            Some(best_seed)
+            Some((best_seed, best_result.unwrap()))
         }
     }
 }
@@ -531,7 +542,7 @@ mod tests {
         assert_eq!(cfg.max_steps, 100_000);
         assert_eq!(cfg.worker_count, 1);
         assert!(cfg.minimize);
-        assert_eq!(cfg.minimize_attempts, 64);
+        assert_eq!(cfg.minimize_attempts, 96);
         let cloned = cfg.clone();
         assert_eq!(cloned.base_seed, cfg.base_seed);
         assert_eq!(cloned.iterations, cfg.iterations);
@@ -682,6 +693,50 @@ mod tests {
                 second_replay.trace_fingerprint
             );
         }
+    }
+
+    #[test]
+    fn minimize_seed_requires_full_violation_category_match() {
+        let harness = FuzzHarness::new(FuzzConfig::new(20, 1));
+        let scenario = |runtime: &mut LabRuntime| {
+            let seed = runtime.config().seed;
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+
+            // Always leave one task unscheduled so every failing seed reports task_leak.
+            let _leaked = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create leaked task");
+
+            // Only seeds >= 20 also force-close the region while the leaked
+            // task is still live, adding quiescence_violation to the baseline
+            // task_leak category.
+            if seed >= 20 {
+                runtime
+                    .state
+                    .region(region)
+                    .expect("region exists")
+                    .set_state(crate::record::region::RegionState::Closed);
+            }
+        };
+
+        let original = harness.run_single(20, &scenario);
+        assert_eq!(
+            sorted_violation_categories(&original.violations),
+            vec!["quiescence_violation", "task_leak"]
+        );
+
+        let smaller = harness.run_single(19, &scenario);
+        assert_eq!(
+            sorted_violation_categories(&smaller.violations),
+            vec!["task_leak"]
+        );
+
+        let minimized = harness.minimize_seed(20, &scenario);
+        assert_eq!(
+            minimized, None,
+            "smaller seeds do not preserve the original full violation category set"
+        );
     }
 
     #[test]

@@ -32,6 +32,7 @@
 //! - Flanagan & Godefroid, "Dynamic partial-order reduction" (POPL 2005)
 //! - Abdulla et al., "Optimal dynamic partial order reduction" (POPL 2014)
 
+use crate::trace::canonicalize::trace_event_key;
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use crate::trace::independence::{Resource, accesses_conflict, independent, resource_footprint};
 use crate::types::TaskId;
@@ -500,11 +501,12 @@ pub fn trace_coverage_analysis(events: &[TraceEvent]) -> TraceCoverageAnalysis {
 
 /// Sleep set for DPOR exploration.
 ///
-/// Tracks which (event-index, alternative-task) pairs have already been
-/// explored, preventing re-exploration of equivalent schedules. This is
-/// an approximation of the full DPOR sleep set: we hash the combination
-/// of divergence index and the tasks involved in the race to create a
-/// deduplication key.
+/// Tracks which backtrack points have already been explored, preventing
+/// re-exploration of equivalent schedules. This is an approximation of the
+/// full DPOR sleep set: we hash the divergence point together with the
+/// semantic identity of the raced endpoints so structurally similar traces on
+/// different tasks/resources do not alias, while the same race encountered in
+/// reverse order still deduplicates.
 #[derive(Debug, Clone, Default)]
 pub struct SleepSet {
     /// Explored (divergence_index, race_hash) pairs.
@@ -543,20 +545,28 @@ impl SleepSet {
 
     /// Compute a deduplication key for a backtrack point.
     ///
-    /// Hashes the divergence index together with the event kinds at the
-    /// race endpoints to create a stable identifier for "we already tried
-    /// reversing this specific race".
+    /// Hashes the divergence index together with an order-insensitive pair of
+    /// semantic event keys at the race endpoints to create a stable identifier
+    /// for "we already tried reversing this specific race".
     fn bp_key(bp: &BacktrackPoint, events: &[TraceEvent]) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = crate::util::DetHasher::default();
         bp.divergence_index.hash(&mut hasher);
         bp.race.earlier.hash(&mut hasher);
         bp.race.later.hash(&mut hasher);
-        if let Some(e) = events.get(bp.race.earlier) {
-            std::mem::discriminant(&e.kind).hash(&mut hasher);
-        }
-        if let Some(e) = events.get(bp.race.later) {
-            std::mem::discriminant(&e.kind).hash(&mut hasher);
+        let earlier_key = events.get(bp.race.earlier).map(trace_event_key);
+        let later_key = events.get(bp.race.later).map(trace_event_key);
+        match (earlier_key, later_key) {
+            (Some(a), Some(b)) => {
+                let a_ord = (a.kind, a.primary, a.secondary, a.tertiary);
+                let b_ord = (b.kind, b.primary, b.secondary, b.tertiary);
+                let (first, second) = if a_ord <= b_ord { (a, b) } else { (b, a) };
+                first.hash(&mut hasher);
+                second.hash(&mut hasher);
+            }
+            (Some(a), None) => a.hash(&mut hasher),
+            (None, Some(b)) => b.hash(&mut hasher),
+            (None, None) => {}
         }
         hasher.finish()
     }
@@ -779,6 +789,61 @@ mod tests {
         sleep.insert(&bp, &events);
         assert!(sleep.contains(&bp, &events));
         assert_eq!(sleep.len(), 1);
+    }
+
+    #[test]
+    fn sleep_set_distinguishes_same_shape_races_on_different_tasks() {
+        let left_events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let right_events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(2), rid(1)),
+        ];
+        let bp = BacktrackPoint {
+            race: Race {
+                earlier: 0,
+                later: 1,
+            },
+            divergence_index: 0,
+        };
+
+        let mut sleep = SleepSet::new();
+        sleep.insert(&bp, &left_events);
+
+        assert!(
+            !sleep.contains(&bp, &right_events),
+            "sleep-set key must include semantic endpoint identity, not just kind/index shape"
+        );
+    }
+
+    #[test]
+    fn sleep_set_deduplicates_same_race_when_trace_order_is_reversed() {
+        let reason = CancelReason::user("test");
+        let left_events = [
+            TraceEvent::cancel_request(1, Time::ZERO, tid(1), rid(1), reason.clone()),
+            TraceEvent::cancel_request(2, Time::ZERO, tid(2), rid(1), reason.clone()),
+        ];
+        let right_events = [
+            TraceEvent::cancel_request(1, Time::ZERO, tid(2), rid(1), reason.clone()),
+            TraceEvent::cancel_request(2, Time::ZERO, tid(1), rid(1), reason),
+        ];
+        let bp = BacktrackPoint {
+            race: Race {
+                earlier: 0,
+                later: 1,
+            },
+            divergence_index: 0,
+        };
+
+        let mut sleep = SleepSet::new();
+        sleep.insert(&bp, &left_events);
+
+        assert!(
+            sleep.contains(&bp, &right_events),
+            "sleep-set key should treat the same race as explored even when the endpoints swap order"
+        );
     }
 
     #[test]

@@ -660,6 +660,8 @@ pub struct DporExplorer {
     config: ExplorerConfig,
     /// Seeds pending exploration (derived from backtrack points).
     work_queue: VecDeque<u64>,
+    /// Seeds already queued for exploration.
+    pending_seeds: BTreeSet<u64>,
     /// Explored seeds.
     explored_seeds: BTreeSet<u64>,
     /// Known equivalence classes (fingerprint → monoid element).
@@ -676,7 +678,8 @@ pub struct DporExplorer {
     total_hb_races: usize,
     /// Backtrack points generated.
     total_backtrack_points: usize,
-    /// Backtrack points pruned by equivalence class deduplication.
+    /// Backtrack points pruned because their derived seed was already explored
+    /// or already pending in the queue.
     pruned_backtrack_points: usize,
     /// Backtrack points pruned by sleep set.
     sleep_pruned: usize,
@@ -697,7 +700,8 @@ pub struct DporCoverageMetrics {
     pub total_hb_races: usize,
     /// Total backtrack points generated.
     pub total_backtrack_points: usize,
-    /// Backtrack points pruned by equivalence deduplication.
+    /// Backtrack points pruned because their derived seed was already explored
+    /// or already pending in the queue.
     pub pruned_backtrack_points: usize,
     /// Backtrack points pruned by sleep set.
     pub sleep_pruned: usize,
@@ -713,9 +717,12 @@ impl DporExplorer {
     pub fn new(config: ExplorerConfig) -> Self {
         let mut work_queue = VecDeque::new();
         work_queue.push_back(config.base_seed);
+        let mut pending_seeds = BTreeSet::new();
+        pending_seeds.insert(config.base_seed);
         Self {
             config,
             work_queue,
+            pending_seeds,
             explored_seeds: BTreeSet::new(),
             known_classes: BTreeMap::new(),
             class_counts: BTreeMap::new(),
@@ -740,10 +747,11 @@ impl DporExplorer {
     where
         F: Fn(&mut LabRuntime),
     {
-        while let Some(seed) = self.work_queue.pop_front() {
-            if self.results.len() >= self.config.max_runs {
+        while self.results.len() < self.config.max_runs {
+            let Some(seed) = self.work_queue.pop_front() else {
                 break;
-            }
+            };
+            self.pending_seeds.remove(&seed);
             if !self.explored_seeds.insert(seed) {
                 continue;
             }
@@ -767,9 +775,9 @@ impl DporExplorer {
                 self.per_run_estimated_classes.push(est);
 
                 // For each backtrack point, derive a new seed.
-                // We use a deterministic derivation: seed XOR hash of the
-                // divergence index. This ensures the same backtrack point
-                // always generates the same seed.
+                // The derivation hashes the parent seed plus the race location
+                // so the same race in the same run always maps to the same
+                // follow-up seed.
                 for bp in &analysis.backtrack_points {
                     // Sleep set optimization: skip backtrack points we've
                     // already explored (same race structure at same position).
@@ -779,13 +787,12 @@ impl DporExplorer {
                     }
                     self.sleep_set.insert(bp, &trace_events);
 
-                    let derived_seed =
-                        seed ^ (bp.divergence_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-
-                    if self.explored_seeds.contains(&derived_seed) {
-                        self.pruned_backtrack_points += 1;
-                        continue;
-                    }
+                    let mut hasher = crate::util::DetHasher::default();
+                    seed.hash(&mut hasher);
+                    bp.divergence_index.hash(&mut hasher);
+                    bp.race.earlier.hash(&mut hasher);
+                    bp.race.later.hash(&mut hasher);
+                    let derived_seed = hasher.finish();
 
                     // Check if the derived seed would likely produce a known
                     // equivalence class by checking the monoid fingerprint of
@@ -795,10 +802,10 @@ impl DporExplorer {
                     if self.known_classes.contains_key(&prefix_fp) && prefix.len() > 1 {
                         // Prefix already explored; the full trace might still
                         // be different, but we deprioritize it.
-                        self.work_queue.push_back(derived_seed);
+                        self.enqueue_seed_back(derived_seed);
                     } else {
                         // Unknown prefix — high priority.
-                        self.work_queue.push_front(derived_seed);
+                        self.enqueue_seed_front(derived_seed);
                     }
                 }
             }
@@ -860,6 +867,35 @@ impl DporExplorer {
         };
 
         (trace_events, result)
+    }
+
+    fn enqueue_seed_front(&mut self, seed: u64) -> bool {
+        if self.explored_seeds.contains(&seed) {
+            self.pruned_backtrack_points += 1;
+            return false;
+        }
+        if self.pending_seeds.insert(seed) {
+            self.work_queue.push_front(seed);
+            return true;
+        }
+        if let Some(position) = self.work_queue.iter().position(|queued| *queued == seed)
+            && position > 0
+        {
+            self.work_queue.remove(position);
+            self.work_queue.push_front(seed);
+            return true;
+        }
+        self.pruned_backtrack_points += 1;
+        false
+    }
+
+    fn enqueue_seed_back(&mut self, seed: u64) -> bool {
+        if self.explored_seeds.contains(&seed) || !self.pending_seeds.insert(seed) {
+            self.pruned_backtrack_points += 1;
+            return false;
+        }
+        self.work_queue.push_back(seed);
+        true
     }
 
     fn build_report(&self) -> ExplorationReport {
@@ -947,6 +983,8 @@ pub struct TopologyExplorer {
     config: ExplorerConfig,
     /// Priority queue: (score, seed). Highest score popped first.
     frontier: BinaryHeap<(TopologicalScore, u64)>,
+    /// Best known score for each seed still queued in the frontier.
+    pending_frontier: BTreeMap<u64, TopologicalScore>,
     /// Explored seeds.
     explored_seeds: BTreeSet<u64>,
     /// Known equivalence classes (fingerprint → run count).
@@ -968,15 +1006,18 @@ impl TopologyExplorer {
     #[must_use]
     pub fn new(config: ExplorerConfig) -> Self {
         let mut frontier = BinaryHeap::new();
+        let mut pending_frontier = BTreeMap::new();
         // Seed the frontier with initial seeds, all scored at zero.
         for i in 0..config.max_runs {
             let seed = config.base_seed.wrapping_add(i as u64);
-            let fp = seed_fingerprint(seed);
-            frontier.push((TopologicalScore::zero(fp), seed));
+            let score = TopologicalScore::zero(seed_fingerprint(seed));
+            frontier.push((score, seed));
+            pending_frontier.insert(seed, score);
         }
         Self {
             config,
             frontier,
+            pending_frontier,
             explored_seeds: BTreeSet::new(),
             known_fingerprints: BTreeSet::new(),
             class_counts: BTreeMap::new(),
@@ -995,10 +1036,17 @@ impl TopologyExplorer {
     where
         F: Fn(&mut LabRuntime),
     {
-        while let Some((_score, seed)) = self.frontier.pop() {
-            if self.results.len() >= self.config.max_runs {
+        while self.results.len() < self.config.max_runs {
+            let Some((score, seed)) = self.frontier.pop() else {
                 break;
+            };
+            let Some(pending_score) = self.pending_frontier.get(&seed).copied() else {
+                continue;
+            };
+            if pending_score != score {
+                continue;
             }
+            self.pending_frontier.remove(&seed);
             if !self.explored_seeds.insert(seed) {
                 continue;
             }
@@ -1102,14 +1150,31 @@ impl TopologyExplorer {
                 break;
             }
             let derived_seed = derive_seed(seed, entry.class, idx as u64);
-            if self.explored_seeds.contains(&derived_seed) {
-                continue;
-            }
             let mut score = ledger.score;
             score.fingerprint = seed_fingerprint(derived_seed);
-            self.frontier.push((score, derived_seed));
-            pushed += 1;
+            if self.push_frontier_seed(derived_seed, score) {
+                pushed += 1;
+            }
         }
+    }
+
+    fn push_frontier_seed(&mut self, seed: u64, score: TopologicalScore) -> bool {
+        if self.explored_seeds.contains(&seed) {
+            return false;
+        }
+        match self.pending_frontier.get_mut(&seed) {
+            Some(existing) => {
+                if *existing >= score {
+                    return false;
+                }
+                *existing = score;
+            }
+            None => {
+                self.pending_frontier.insert(seed, score);
+            }
+        }
+        self.frontier.push((score, seed));
+        true
     }
 
     fn build_report(&self) -> ExplorationReport {
@@ -1162,18 +1227,17 @@ impl TopologyExplorer {
     }
 
     fn top_unexplored(&self, limit: usize) -> Vec<UnexploredSeed> {
-        let mut heap = self.frontier.clone();
-        let mut out = Vec::new();
-        while out.len() < limit {
-            let Some((score, seed)) = heap.pop() else {
-                break;
-            };
-            out.push(UnexploredSeed {
+        let mut ranked: Vec<_> = self
+            .pending_frontier
+            .iter()
+            .map(|(&seed, &score)| UnexploredSeed {
                 seed,
                 score: Some(score),
-            });
-        }
-        out
+            })
+            .collect();
+        ranked.sort_unstable_by(|left, right| right.score.cmp(&left.score));
+        ranked.truncate(limit);
+        ranked
     }
 }
 
@@ -1405,6 +1469,46 @@ mod tests {
         assert!(report.total_runs <= 3);
     }
 
+    #[test]
+    fn dpor_queue_promotes_pending_seed_to_front() {
+        let mut explorer = DporExplorer::new(ExplorerConfig::new(0, 4));
+
+        assert!(explorer.enqueue_seed_back(99));
+        assert!(explorer.enqueue_seed_front(99));
+        assert_eq!(
+            explorer
+                .work_queue
+                .iter()
+                .copied()
+                .filter(|seed| *seed == 99)
+                .count(),
+            1
+        );
+        assert_eq!(explorer.work_queue.front().copied(), Some(99));
+        assert!(explorer.pending_seeds.contains(&99));
+    }
+
+    #[test]
+    fn dpor_report_keeps_unexplored_seed_when_run_budget_is_exhausted() {
+        let mut explorer = DporExplorer::new(ExplorerConfig::new(0, 1));
+        assert!(explorer.enqueue_seed_back(99));
+
+        let report = explorer.explore(|runtime| {
+            let _region = runtime.state.create_root_region(Budget::INFINITE);
+            runtime.run_until_quiescent();
+        });
+
+        assert_eq!(report.total_runs, 1);
+        assert_eq!(
+            report
+                .top_unexplored
+                .iter()
+                .map(|entry| entry.seed)
+                .collect::<Vec<_>>(),
+            vec![99]
+        );
+    }
+
     // ── Certificate integration tests ───────────────────────────────────
 
     #[test]
@@ -1592,6 +1696,63 @@ mod tests {
 
         assert_eq!(report.runs.len(), report.total_runs);
         assert!(!report.runs.is_empty());
+    }
+
+    #[test]
+    fn topology_frontier_upgrades_pending_seed_score() {
+        let mut explorer = TopologyExplorer::new(ExplorerConfig::new(10, 2));
+        let low_score = TopologicalScore {
+            novelty: 1,
+            persistence_sum: 2,
+            fingerprint: seed_fingerprint(99),
+        };
+        let high_score = TopologicalScore {
+            novelty: 2,
+            persistence_sum: 5,
+            fingerprint: seed_fingerprint(99),
+        };
+
+        assert!(explorer.push_frontier_seed(99, low_score));
+        assert!(explorer.push_frontier_seed(99, high_score));
+        assert_eq!(
+            explorer.pending_frontier.get(&99).copied(),
+            Some(high_score)
+        );
+        assert_eq!(
+            explorer
+                .top_unexplored(2)
+                .into_iter()
+                .find(|entry| entry.seed == 99)
+                .and_then(|entry| entry.score),
+            Some(high_score)
+        );
+        assert!(!explorer.push_frontier_seed(99, low_score));
+    }
+
+    #[test]
+    fn topology_report_keeps_unexplored_seed_when_run_budget_is_exhausted() {
+        let mut explorer = TopologyExplorer::new(ExplorerConfig::new(10, 1));
+        let score = TopologicalScore {
+            novelty: 1,
+            persistence_sum: 2,
+            fingerprint: seed_fingerprint(99),
+        };
+        assert!(explorer.push_frontier_seed(99, score));
+
+        let report = explorer.explore(|runtime| {
+            let _region = runtime.state.create_root_region(Budget::INFINITE);
+            runtime.run_until_quiescent();
+        });
+
+        assert_eq!(report.total_runs, 1);
+        assert_eq!(
+            report
+                .top_unexplored
+                .iter()
+                .map(|entry| entry.seed)
+                .collect::<Vec<_>>(),
+            vec![99]
+        );
     }
 
     #[test]
