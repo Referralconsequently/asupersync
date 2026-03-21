@@ -409,15 +409,20 @@ impl LoadBalancer {
                 };
             }
 
-            let fallback_start = counter as usize % len;
-            for offset in 0..len {
-                let idx = (fallback_start + offset) % len;
-                if selected_indices.contains(&idx) {
-                    continue;
-                }
-                selected.push(available[idx]);
-                if selected.len() == n {
-                    break;
+            // Fallback: if the weighted walk didn't fill n slots (more
+            // endpoints requested than distinct weights), top up from
+            // unselected endpoints in round-robin order.
+            if selected.len() < n {
+                let fallback_start = counter as usize % len;
+                for offset in 0..len {
+                    let idx = (fallback_start + offset) % len;
+                    if selected_indices.contains(&idx) {
+                        continue;
+                    }
+                    selected.push(available[idx]);
+                    if selected.len() >= n {
+                        break;
+                    }
                 }
             }
 
@@ -1099,12 +1104,21 @@ impl RoutingTable {
         None
     }
 
-    /// Prunes expired routes.
+    /// Prunes expired routes, including the default route.
     pub fn prune_expired(&self, now: Time) -> usize {
         let mut routes = self.routes.write();
         let before = routes.len();
         routes.retain(|_, entry| !entry.is_expired(now));
-        before - routes.len()
+        let mut pruned = before - routes.len();
+        drop(routes);
+
+        let mut default = self.default_route.write();
+        if default.as_ref().is_some_and(|entry| entry.is_expired(now)) {
+            *default = None;
+            pruned += 1;
+        }
+
+        pruned
     }
 
     /// Returns all endpoints that can currently receive traffic in stable ID order.
@@ -2462,6 +2476,23 @@ mod tests {
         let pruned = table.prune_expired(Time::from_secs(50));
         assert_eq!(pruned, 1);
         assert_eq!(table.route_count(), 1);
+    }
+
+    #[test]
+    fn test_routing_table_prune_includes_default_route() {
+        let table = RoutingTable::new();
+        let e1 = table.register_endpoint(test_endpoint(1));
+
+        // Add a default route with a short TTL.
+        let default_entry =
+            RoutingEntry::new(vec![e1], Time::from_secs(0)).with_ttl(Time::from_secs(10));
+        table.add_route(RouteKey::Default, default_entry);
+        assert_eq!(table.route_count(), 1);
+
+        // Prune at time 50 — the expired default route must be removed.
+        let pruned = table.prune_expired(Time::from_secs(50));
+        assert_eq!(pruned, 1);
+        assert_eq!(table.route_count(), 0);
     }
 
     // Test 10: SymbolRouter basic routing
