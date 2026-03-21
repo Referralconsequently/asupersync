@@ -507,3 +507,13 @@
 {"file":"src/transport/mock.rs","lines":1357,"batch":406,"date":"2026-03-21","agent":"SwiftLake","verdict":"FIXED","bugs":1,"notes":"corrupted symbols no longer preserve verified auth state"}
 {"file":"src/messaging/consumer.rs","lines":4746,"batch":406,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of consumer cursor lease state machine. 40 tests. Lease fencing, ack floor gap prevention, obligation lifecycle all correct."}
 {"file":"src/messaging/control.rs","lines":3895,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit of control advisory system. 89 tests. CRDT propagation, anti-entropy, membership, advisory damping all correct."}
+{"file":"src/messaging/compiler.rs","lines":1246,"batch":408,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"FABRIC validation compiler. 6 tests. Cross-reference checks, fail-closed validation. Clean."}
+{"file":"src/messaging/federation.rs","lines":2584,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/morphism.rs","lines":2162,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/class.rs","lines":495,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/subject.rs","lines":2687,"batch":409,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Full audit. Clean."}
+{"file":"src/messaging/capability/mod.rs","lines":604,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/capability/routing.rs","lines":796,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/session/contract.rs","lines":1257,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
+{"file":"src/messaging/session/synthesis.rs","lines":1459,"batch":410,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit. No exploitable bugs. All noted issues mitigated by validation."}
