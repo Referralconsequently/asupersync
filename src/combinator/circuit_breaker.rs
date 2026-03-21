@@ -626,9 +626,6 @@ impl CircuitBreaker {
                                     Ok(_) => {
                                         self.current_failure_streak.store(0, Ordering::Relaxed);
                                         self.times_closed.fetch_add(1, Ordering::Relaxed);
-                                        if let Some(ref w) = self.sliding_window {
-                                            w.write().reset();
-                                        }
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
                                         if self.policy.on_state_change.is_some() {

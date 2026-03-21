@@ -44,13 +44,13 @@ use parking_lot::{Mutex, MutexGuard};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 #[cfg(target_arch = "wasm32")]
 use web_sys::{BroadcastChannel, EventTarget, MessageEvent, MessagePort};
 
@@ -906,9 +906,11 @@ mod tests {
             "wake must not mark readiness pending without host events"
         );
 
-        assert!(reactor
-            .notify_ready(Token::new(1), Interest::READABLE)
-            .unwrap());
+        assert!(
+            reactor
+                .notify_ready(Token::new(1), Interest::READABLE)
+                .unwrap()
+        );
         assert!(
             reactor.wake_pending(),
             "host readiness should mark wake_pending"
@@ -1005,12 +1007,16 @@ mod tests {
             .register(&source, Token::new(2), Interest::READABLE)
             .unwrap();
 
-        assert!(reactor
-            .notify_ready(Token::new(1), Interest::READABLE)
-            .unwrap());
-        assert!(reactor
-            .notify_ready(Token::new(2), Interest::READABLE)
-            .unwrap());
+        assert!(
+            reactor
+                .notify_ready(Token::new(1), Interest::READABLE)
+                .unwrap()
+        );
+        assert!(
+            reactor
+                .notify_ready(Token::new(2), Interest::READABLE)
+                .unwrap()
+        );
         let mut events = Events::with_capacity(4);
         let first = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         assert_eq!(first, 1);
