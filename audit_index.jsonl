@@ -581,3 +581,11 @@
 "SOUND"
 0
 "Cancel drains instead of drops in Polling state, attempt counting correct, clean state machine"
+"src/http/h1/server.rs"
+1488
+408
+"2026-03-21"
+"SapphireHill"
+"FIXED"
+1
+"1 LOW: HEAD response overwrites handler Content-Length, violating RFC 9110 §9.3.2"
