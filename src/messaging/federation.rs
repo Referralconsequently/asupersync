@@ -623,7 +623,6 @@ impl PartialEq for FederationBridge {
             && self.remote_morphisms == other.remote_morphisms
             && self.capability_scope == other.capability_scope
             && self.state == other.state
-            && self.runtime() == other.runtime()
     }
 }
 
@@ -2039,6 +2038,7 @@ mod tests {
             FederationBridgeRuntime::Leaf(LeafBridgeRuntime::default())
         );
         assert_ne!(bridge.runtime(), roundtrip.runtime());
+        assert_eq!(bridge, roundtrip);
     }
 
     #[test]

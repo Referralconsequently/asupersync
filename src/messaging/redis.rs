@@ -136,16 +136,19 @@ fn u64_decimal_bytes(mut n: u64, tmp: &mut [u8; 20]) -> &[u8] {
     &tmp[i..]
 }
 
-fn ttl_millis(ttl: Duration) -> Result<u64, RedisError> {
+fn ttl_millis_rounded_up(ttl: Duration) -> u64 {
+    let millis = ttl.as_nanos().div_ceil(1_000_000);
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn positive_ttl_millis(ttl: Duration) -> Result<u64, RedisError> {
     if ttl.is_zero() {
         return Err(RedisError::Protocol(
             "ttl must be greater than zero".to_string(),
         ));
     }
 
-    let millis = ttl.as_nanos().div_ceil(1_000_000);
-    let millis = u64::try_from(millis).unwrap_or(u64::MAX);
-    Ok(millis)
+    Ok(ttl_millis_rounded_up(ttl))
 }
 
 fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
@@ -859,7 +862,7 @@ impl RedisClient {
     ) -> Result<(), RedisError> {
         if let Some(ttl) = ttl {
             let mut tmp = [0u8; 20];
-            let millis = u64_decimal_bytes(ttl_millis(ttl)?, &mut tmp);
+            let millis = u64_decimal_bytes(positive_ttl_millis(ttl)?, &mut tmp);
             let resp = self
                 .cmd_bytes(cx, &[b"SET", key.as_bytes(), value, b"PX", millis])
                 .await?;
@@ -910,10 +913,12 @@ impl RedisClient {
 
     /// Set the key TTL using Redis millisecond precision.
     ///
+    /// `Duration::ZERO` maps to Redis's immediate-expiry semantics.
+    ///
     /// Returns true if the timeout was set, false if the key does not exist.
     pub async fn expire(&self, cx: &Cx, key: &str, ttl: Duration) -> Result<bool, RedisError> {
         let mut tmp = [0u8; 20];
-        let millis = u64_decimal_bytes(ttl_millis(ttl)?, &mut tmp);
+        let millis = u64_decimal_bytes(ttl_millis_rounded_up(ttl), &mut tmp);
         let resp = self
             .cmd_bytes(cx, &[b"PEXPIRE", key.as_bytes(), millis])
             .await?;
@@ -2126,33 +2131,41 @@ mod tests {
         // Verify that sub-second TTLs don't truncate to zero by using PX
         let ttl = Duration::from_millis(500);
         let mut tmp = [0u8; 20];
-        let millis = u64_decimal_bytes(ttl_millis(ttl).expect("positive ttl"), &mut tmp);
+        let millis = u64_decimal_bytes(positive_ttl_millis(ttl).expect("positive ttl"), &mut tmp);
         assert_eq!(millis, b"500");
     }
 
     #[test]
     fn positive_submillisecond_ttl_rounds_up_to_one_millisecond() {
-        assert_eq!(ttl_millis(Duration::from_nanos(1)).unwrap(), 1);
-        assert_eq!(ttl_millis(Duration::from_micros(999)).unwrap(), 1);
+        assert_eq!(positive_ttl_millis(Duration::from_nanos(1)).unwrap(), 1);
+        assert_eq!(positive_ttl_millis(Duration::from_micros(999)).unwrap(), 1);
     }
 
     #[test]
     fn positive_fractional_millisecond_ttl_rounds_up() {
         assert_eq!(
-            ttl_millis(Duration::from_millis(1) + Duration::from_nanos(1)).unwrap(),
+            positive_ttl_millis(Duration::from_millis(1) + Duration::from_nanos(1)).unwrap(),
             2
         );
-        assert_eq!(ttl_millis(Duration::from_micros(1_001)).unwrap(), 2);
+        assert_eq!(
+            positive_ttl_millis(Duration::from_micros(1_001)).unwrap(),
+            2
+        );
     }
 
     #[test]
     fn large_ttl_saturates_at_u64_max_milliseconds() {
-        assert_eq!(ttl_millis(Duration::MAX).unwrap(), u64::MAX);
+        assert_eq!(ttl_millis_rounded_up(Duration::MAX), u64::MAX);
     }
 
     #[test]
-    fn zero_ttl_is_rejected() {
-        let err = ttl_millis(Duration::ZERO).expect_err("zero ttl must be rejected");
+    fn zero_ttl_is_rejected_for_set_px() {
+        let err = positive_ttl_millis(Duration::ZERO).expect_err("zero ttl must be rejected");
         assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("greater than zero")));
+    }
+
+    #[test]
+    fn zero_ttl_is_allowed_for_pexpire() {
+        assert_eq!(ttl_millis_rounded_up(Duration::ZERO), 0);
     }
 }
