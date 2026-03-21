@@ -1048,7 +1048,7 @@ fn fs_verify_029_buf_writer_large_bypass() {
 
 /// FS-VERIFY-030: BufReader with_capacity
 ///
-/// Verifies BufReader respects custom capacity settings.
+/// Verifies BufReader respects custom capacity settings on the wrapper itself.
 #[test]
 fn fs_verify_030_buf_reader_with_capacity() {
     init_test("fs_verify_030_buf_reader_with_capacity");
@@ -1062,14 +1062,13 @@ fn fs_verify_030_buf_reader_with_capacity() {
         fs::write(&path, &data).await?;
 
         let file = File::open(&path).await?;
-        let reader = BufReader::with_capacity(32, file);
+        let mut reader = BufReader::with_capacity(32, file);
 
-        // Read through the reader
-        let inner = reader.into_inner();
-        let mut inner_file = inner;
+        assert_eq!(reader.capacity(), 32);
+
         let mut contents = String::new();
-        inner_file.read_to_string(&mut contents).await?;
-        assert_eq!(contents.len(), 1000);
+        reader.read_to_string(&mut contents).await?;
+        assert_eq!(contents, data);
 
         Ok::<_, io::Error>(())
     });
