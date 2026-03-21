@@ -10484,3 +10484,43 @@
 {"file":"src/messaging/ir.rs","lines":3225,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/subject.rs","lines":2688,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trie routing, wildcards, sharding, cache — all correct. Minor: SublistCache never evicts stale entries."}
 {"file":"src/messaging/morphism.rs","lines":2163,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Subject transforms, cycle detection, deterministic bucketing — all correct."}
+"src/net/websocket/split.rs"
+1181
+403
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Write permit + mutex dual-lock scheme correct, pong encoding serialized, waker dedup correct"
+"src/net/unix/listener.rs"
+758
+403
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Inode-based cleanup prevents replacement deletion, lazy registration with fallback, comprehensive tests"
+"src/channel/watch.rs"
+1718
+403
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Waker dedup via Arc<AtomicBool>, version check+recheck closes race window, Acquire/Release ordering correct"
+"src/sync/barrier.rs"
+776
+403
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Clean state machine, O(1) slot fast paths, correct cancellation cleanup, generation fencing"
+"src/runtime/region_table.rs"
+473
+403
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Arena generation prevents ABA, parent-child rollback correct, lock ordering respected"
