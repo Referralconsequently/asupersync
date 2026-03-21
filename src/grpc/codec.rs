@@ -285,6 +285,21 @@ impl<C: Codec> FramedCodec<C> {
         }
     }
 
+    /// Set optional frame-level compressor and decompressor hooks.
+    #[must_use]
+    pub fn with_frame_hooks(
+        mut self,
+        compressor: Option<FrameCompressor>,
+        decompressor: Option<FrameDecompressor>,
+    ) -> Self {
+        if compressor.is_some() || decompressor.is_some() {
+            self.use_compression = true;
+        }
+        self.compressor = compressor;
+        self.decompressor = decompressor;
+        self
+    }
+
     /// Enable compression.
     #[must_use]
     pub fn with_compression(mut self) -> Self {
