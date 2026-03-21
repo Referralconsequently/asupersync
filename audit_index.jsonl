@@ -10482,3 +10482,5 @@
 {"file":"src/messaging/explain.rs","lines":1945,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/cut.rs","lines":3207,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/messaging/ir.rs","lines":3225,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/subject.rs","lines":2688,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trie routing, wildcards, sharding, cache — all correct. Minor: SublistCache never evicts stale entries."}
+{"file":"src/messaging/morphism.rs","lines":2163,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Subject transforms, cycle detection, deterministic bucketing — all correct."}
