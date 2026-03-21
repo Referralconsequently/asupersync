@@ -846,7 +846,11 @@ fn suppress_response_body_for_head(resp: &mut Response) {
     let had_transfer_encoding = remove_header(resp, "transfer-encoding");
     let _ = remove_header(resp, "trailer");
 
-    if body_len != 0 || (!has_content_length && had_transfer_encoding) {
+    // RFC 9110 §9.3.2: a HEAD response MUST contain the same Content-Length
+    // that would appear in the equivalent GET response.  Only synthesize the
+    // header when the handler did not already declare one; when the handler
+    // set Content-Length explicitly, trust it as the authoritative GET length.
+    if !has_content_length && (body_len != 0 || had_transfer_encoding) {
         replace_or_insert_header(resp, "Content-Length", body_len.to_string());
     }
 
@@ -1240,14 +1244,18 @@ mod tests {
     }
 
     #[test]
-    fn suppress_response_body_for_head_normalizes_stale_content_length() {
+    fn suppress_response_body_for_head_preserves_handler_content_length() {
+        // RFC 9110 §9.3.2: HEAD response MUST carry the same Content-Length
+        // as the equivalent GET response.  When the handler explicitly sets
+        // Content-Length (even if it differs from the sentinel body), trust
+        // it as the authoritative GET length.
         let mut resp =
             Response::new(200, "OK", b"hello".to_vec()).with_header("Content-Length", "999");
 
         suppress_response_body_for_head(&mut resp);
 
         assert!(resp.body.is_empty());
-        assert_eq!(resp.header_value("content-length"), Some("5"));
+        assert_eq!(resp.header_value("content-length"), Some("999"));
     }
 
     #[test]
