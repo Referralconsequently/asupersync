@@ -376,3 +376,5 @@
 {"file":"src/database/transaction.rs","lines":866,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Savepoint name validation, retry with delay, cancel-aware. Clean."}
 {"file":"src/service/retry.rs","lines":924,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Retry policy, cooperative budget, cancel-safe state machine. Clean."}
 {"file":"src/service/buffer.rs","lines":895,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"MEDIUM: pending slot leak on panic during WaitingForReady->Active transition (fixed with temp state restore). LOW: waker vec growth under alternating contention (noted)."}
+{"file":"src/service/discover.rs","lines":1242,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS discovery, generation-based staleness, symmetric diff changes. Clean."}
+{"file":"src/service/steer.rs","lines":727,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request routing, fail-closed index validation, cancel-safe state machine. Clean."}
