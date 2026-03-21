@@ -3599,6 +3599,70 @@ mod tests {
     }
 
     #[test]
+    fn saga_drop_during_unwind_skips_compensation_side_effects() {
+        use std::panic::{self, AssertUnwindSafe};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let compensated = Arc::new(AtomicBool::new(false));
+        let compensation_ran = Arc::clone(&compensated);
+
+        let unwind = panic::catch_unwind(AssertUnwindSafe(move || {
+            let mut saga = Saga::new();
+            saga.step(
+                "step-0",
+                || Ok(()),
+                move || {
+                    compensation_ran.store(true, Ordering::SeqCst);
+                    "comp-0".to_string()
+                },
+            )
+            .unwrap();
+
+            panic!("outer panic");
+        }));
+
+        assert!(unwind.is_err());
+        assert!(
+            !compensated.load(Ordering::SeqCst),
+            "drop during unwind must not run compensation closures"
+        );
+    }
+
+    #[test]
+    fn saga_drop_during_unwind_with_panicking_compensation_preserves_process() {
+        const CHILD_ENV: &str = "ASUPERSYNC_SAGA_UNWIND_CHILD";
+        const TEST_NAME: &str =
+            "remote::tests::saga_drop_during_unwind_with_panicking_compensation_preserves_process";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let mut saga = Saga::new();
+            saga.step(
+                "step-0",
+                || Ok(()),
+                || -> String { panic!("compensation panic during unwind") },
+            )
+            .unwrap();
+
+            panic!("outer panic");
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn child test binary");
+
+        assert_eq!(
+            status.code(),
+            Some(101),
+            "child should fail from the original panic without aborting the process: {status:?}"
+        );
+    }
+
+    #[test]
     fn saga_state_display() {
         assert_eq!(format!("{}", SagaState::Running), "Running");
         assert_eq!(format!("{}", SagaState::Completed), "Completed");
