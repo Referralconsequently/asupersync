@@ -372,3 +372,5 @@
 {"file":"src/messaging/capability/tokens.rs","lines":718,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear tokens, session advance, cursor authority lease. Clean."}
 {"file":"src/messaging/capability/routing.rs","lines":796,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Routing programs, subject rewriting, capability authorization. Clean."}
 {"file":"src/service/load_balance.rs","lines":1920,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"In-flight RAII tracking, SWRR strategy, PowerOf2Choices, RoundRobin, discover reconciliation. Clean."}
+{"file":"src/database/sqlite.rs","lines":1645,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deferred-rollback pattern, cancel-correctness, parameterized queries. Clean."}
+{"file":"src/database/transaction.rs","lines":866,"batch":405,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Savepoint name validation, retry with delay, cancel-aware. Clean."}
