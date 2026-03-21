@@ -315,7 +315,7 @@ impl SlidingWindow {
     }
 
     fn failure_rate(&self) -> f64 {
-        let total = self.success_count + self.failure_count;
+        let total = self.success_count.saturating_add(self.failure_count);
         if total == 0 {
             return 0.0;
         }
@@ -323,7 +323,7 @@ impl SlidingWindow {
     }
 
     fn should_open(&self) -> bool {
-        let total = self.success_count + self.failure_count;
+        let total = self.success_count.saturating_add(self.failure_count);
         if total < self.config.minimum_calls {
             return false;
         }

@@ -458,3 +458,12 @@
 "SOUND"
 0
 "Thorough lifecycle, obligation tracking, cancel-correctness, drain semantics all correct"
+{"file":"src/trace/file.rs","lines":1984,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"3 MEDIUM: usize as u32 truncation on meta_len, event_len, chunk_len. Fixed with u32::try_from."}
+{"file":"src/http/h2/frame.rs","lines":1625,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":7,"notes":"7 MEDIUM: usize as u32 in frame encode could silently truncate to corrupt 24-bit length field. Fixed with frame_length() helper that clamps to MAX_FRAME_SIZE + debug_assert in write()."}
+{"file":"src/http/h2/hpack.rs","lines":2471,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 LOW: size -= evicted.size() could underflow if invariant broken. Fixed with saturating_sub."}
+{"file":"src/combinator/circuit_breaker.rs","lines":1950,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"2 LOW: success_count + failure_count u32 overflow in failure_rate/should_open. Fixed with saturating_add."}
+{"file":"src/cancel/progress_certificate.rs","lines":1500,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Drain phase classification, Azuma/Freedman bounds, stall detection. Correct math."}
+{"file":"src/obligation/marking.rs","lines":1000,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Marking analyzer, obligation lifecycle counting. Clean."}
+{"file":"src/obligation/saga.rs","lines":1200,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Saga compensation, unwind guard. Drop-safe. Clean."}
+{"file":"src/obligation/separation_logic.rs","lines":1500,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Separation logic verifier, double-resolve detection, region close leak check. Correct."}
+{"file":"src/obligation/leak_check.rs","lines":1200,"batch":407,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"VarState join lattice, obligation leak detection. Correct scope exit analysis."}

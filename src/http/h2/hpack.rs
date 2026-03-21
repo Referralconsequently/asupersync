@@ -194,7 +194,7 @@ impl DynamicTable {
         // Evict oldest entries (at back) to make room
         while self.size + entry_size > self.max_size && !self.entries.is_empty() {
             if let Some(evicted) = self.entries.pop_back() {
-                self.size -= evicted.size();
+                self.size = self.size.saturating_sub(evicted.size());
             }
         }
 
@@ -241,7 +241,7 @@ impl DynamicTable {
     fn evict(&mut self) {
         while self.size > self.max_size && !self.entries.is_empty() {
             if let Some(evicted) = self.entries.pop_back() {
-                self.size -= evicted.size();
+                self.size = self.size.saturating_sub(evicted.size());
             }
         }
     }

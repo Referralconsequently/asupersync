@@ -623,7 +623,15 @@ impl TraceWriter {
         self.write_bytes(&[self.config.compression.to_byte()])?; // compression byte
 
         // Write metadata length and data
-        let meta_len = meta_bytes.len() as u32;
+        let meta_len = u32::try_from(meta_bytes.len()).map_err(|_| {
+            TraceFileError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "metadata too large for trace format: {} bytes exceeds u32::MAX",
+                    meta_bytes.len()
+                ),
+            ))
+        })?;
         self.write_bytes(&meta_len.to_le_bytes())?;
         self.write_bytes(&meta_bytes)?;
 
@@ -670,7 +678,15 @@ impl TraceWriter {
 
         // Serialize event with length prefix
         let event_bytes = rmp_serde::to_vec(event)?;
-        let len = event_bytes.len() as u32;
+        let len = u32::try_from(event_bytes.len()).map_err(|_| {
+            TraceFileError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "serialized event too large for trace format: {} bytes exceeds u32::MAX",
+                    event_bytes.len()
+                ),
+            ))
+        })?;
         let estimated_bytes = 4u64 + event_bytes.len() as u64;
         let pending_bytes = self.bytes_written.saturating_add(self.buffered_bytes);
 
@@ -723,7 +739,15 @@ impl TraceWriter {
         let compressed = lz4_flex::compress_prepend_size(&self.event_buffer);
 
         // Write chunk: compressed_len (u32) + compressed_data
-        let chunk_len = compressed.len() as u32;
+        let chunk_len = u32::try_from(compressed.len()).map_err(|_| {
+            TraceFileError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "compressed chunk too large for trace format: {} bytes exceeds u32::MAX",
+                    compressed.len()
+                ),
+            ))
+        })?;
         self.write_bytes(&chunk_len.to_le_bytes())?;
         self.write_bytes(&compressed)?;
 

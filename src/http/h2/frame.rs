@@ -143,8 +143,18 @@ impl FrameHeader {
     }
 
     /// Write this frame header to a buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `length` exceeds `MAX_FRAME_SIZE` (24-bit limit).
     #[inline]
     pub fn write(&self, dst: &mut BytesMut) {
+        debug_assert!(
+            self.length <= MAX_FRAME_SIZE,
+            "frame length {} exceeds 24-bit max {}",
+            self.length,
+            MAX_FRAME_SIZE,
+        );
         let buf: [u8; FRAME_HEADER_SIZE] = [
             (self.length >> 16) as u8,
             (self.length >> 8) as u8,
@@ -164,6 +174,18 @@ impl FrameHeader {
     pub fn has_flag(&self, flag: u8) -> bool {
         self.flags & flag != 0
     }
+}
+
+/// Safely cast a payload length to the 24-bit H2 frame length field.
+///
+/// Clamps to `MAX_FRAME_SIZE` to prevent silent truncation in the wire
+/// encoding. Callers that need to reject oversized payloads should check
+/// before calling this.
+#[inline]
+fn frame_length(len: usize) -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let clamped = len.min(MAX_FRAME_SIZE as usize) as u32;
+    clamped
 }
 
 /// HTTP/2 frame.
@@ -237,7 +259,7 @@ impl Frame {
                 payload,
             } => {
                 let header = FrameHeader {
-                    length: payload.len() as u32,
+                    length: frame_length(payload.len()),
                     frame_type: *frame_type,
                     flags: 0,
                     stream_id: *stream_id,
@@ -312,7 +334,7 @@ impl DataFrame {
         }
 
         let header = FrameHeader {
-            length: self.data.len() as u32,
+            length: frame_length(self.data.len()),
             frame_type: FrameType::Data as u8,
             flags,
             stream_id: self.stream_id,
@@ -440,7 +462,7 @@ impl HeadersFrame {
         }
 
         let header = FrameHeader {
-            length: payload_len as u32,
+            length: frame_length(payload_len),
             frame_type: FrameType::Headers as u8,
             flags,
             stream_id: self.stream_id,
@@ -685,7 +707,7 @@ impl SettingsFrame {
         }
 
         let header = FrameHeader {
-            length: (self.settings.len() * 6) as u32,
+            length: frame_length(self.settings.len().saturating_mul(6)),
             frame_type: FrameType::Settings as u8,
             flags,
             stream_id: 0,
@@ -835,7 +857,7 @@ impl PushPromiseFrame {
         }
 
         let header = FrameHeader {
-            length: (4 + self.header_block.len()) as u32,
+            length: frame_length(4 + self.header_block.len()),
             frame_type: FrameType::PushPromise as u8,
             flags,
             stream_id: self.stream_id,
@@ -966,7 +988,7 @@ impl GoAwayFrame {
     #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let header = FrameHeader {
-            length: (8 + self.debug_data.len()) as u32,
+            length: frame_length(8 + self.debug_data.len()),
             frame_type: FrameType::GoAway as u8,
             flags: 0,
             stream_id: 0,
@@ -1077,7 +1099,7 @@ impl ContinuationFrame {
         }
 
         let header = FrameHeader {
-            length: self.header_block.len() as u32,
+            length: frame_length(self.header_block.len()),
             frame_type: FrameType::Continuation as u8,
             flags,
             stream_id: self.stream_id,
