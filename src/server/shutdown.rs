@@ -363,6 +363,15 @@ impl ShutdownSignal {
             return;
         }
         let now = self.current_time();
+        run_trigger_immediate_pre_phase_hook();
+        self.state
+            .phase
+            .fetch_max(ShutdownPhase::ForceClosing as u8, Ordering::AcqRel);
+        if self.phase() == ShutdownPhase::Stopped {
+            self.state.controller.shutdown();
+            self.state.phase_notify.notify_waiters();
+            return;
+        }
         self.state
             .drain_deadline
             .store(now.as_nanos(), Ordering::Release);
@@ -373,10 +382,6 @@ impl ShutdownSignal {
                 .store(now.as_nanos(), Ordering::Release);
             self.state.has_drain_start.store(true, Ordering::Release);
         }
-        run_trigger_immediate_pre_phase_hook();
-        self.state
-            .phase
-            .fetch_max(ShutdownPhase::ForceClosing as u8, Ordering::AcqRel);
         self.state.controller.shutdown();
         self.state.phase_notify.notify_waiters();
     }
@@ -727,6 +732,40 @@ mod tests {
         crate::test_complete!(
             "trigger_immediate_preserves_stopped_phase_under_interleaved_mark_stopped"
         );
+    }
+
+    #[test]
+    fn trigger_immediate_overrides_interleaved_begin_drain_metadata() {
+        init_test("trigger_immediate_overrides_interleaved_begin_drain_metadata");
+        set_test_time(123);
+        let signal = ShutdownSignal::with_time_getter(test_time);
+        let hook_signal = signal.clone();
+        set_trigger_immediate_pre_phase_hook(Some(Box::new(move || {
+            let began = hook_signal.begin_drain(Duration::from_secs(30));
+            assert!(began, "hook begin_drain should succeed");
+        })));
+
+        signal.trigger_immediate();
+
+        crate::assert_with_log!(
+            signal.phase() == ShutdownPhase::ForceClosing,
+            "interleaved begin_drain still reaches force-closing",
+            ShutdownPhase::ForceClosing,
+            signal.phase()
+        );
+        crate::assert_with_log!(
+            signal.drain_start() == Some(Time::from_nanos(123)),
+            "original drain start is retained",
+            Some(Time::from_nanos(123)),
+            signal.drain_start()
+        );
+        crate::assert_with_log!(
+            signal.drain_deadline() == Some(Time::from_nanos(123)),
+            "immediate trigger overwrites graceful-drain deadline",
+            Some(Time::from_nanos(123)),
+            signal.drain_deadline()
+        );
+        crate::test_complete!("trigger_immediate_overrides_interleaved_begin_drain_metadata");
     }
 
     #[test]
