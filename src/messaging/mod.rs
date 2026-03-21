@@ -191,9 +191,10 @@ pub use service::{
 };
 #[cfg(feature = "messaging-fabric")]
 pub use session::{
-    CompensationPath, CutoffPath, EvidenceCheckpoint, GlobalSessionType, Label, MessageType,
-    ProtocolContract, ProtocolContractValidationError, RoleName, SessionBranch, SessionPath,
-    SessionType, TimeoutLaw, TimeoutOverride,
+    CompensationPath, CutoffPath, EvidenceCheckpoint, GlobalSessionType, Label, LocalSessionBranch,
+    LocalSessionType, MessageType, ProjectionError, ProtocolContract,
+    ProtocolContractValidationError, RoleName, SessionBranch, SessionPath, SessionType, TimeoutLaw,
+    TimeoutOverride, is_dual, project, project_contract, project_pair,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use snapshot::{

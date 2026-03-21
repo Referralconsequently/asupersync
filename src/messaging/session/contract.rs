@@ -710,6 +710,15 @@ impl ProtocolContract {
         validate_recovery_paths(&self.compensation_paths, &valid_paths)?;
         validate_cutoff_paths(&self.cutoff_paths, &valid_paths)?;
 
+        let (left_local, right_local) = super::projection::project_pair(self)
+            .map_err(|err| ProtocolContractValidationError::ProjectionInvariant(err.to_string()))?;
+        if !super::projection::is_dual(&left_local, &right_local) {
+            return Err(ProtocolContractValidationError::ProjectedRolesNotDual {
+                left: self.roles[0].clone(),
+                right: self.roles[1].clone(),
+            });
+        }
+
         Ok(())
     }
 
@@ -893,6 +902,17 @@ pub enum ProtocolContractValidationError {
     /// Cutoff path names must be unique.
     #[error("duplicate cutoff path `{0}`")]
     DuplicateCutoffPath(String),
+    /// Projection should succeed once the structural contract checks are green.
+    #[error("projection invariant failed: {0}")]
+    ProjectionInvariant(String),
+    /// Both projected local views must be dual for a valid two-party contract.
+    #[error("projected local protocols for `{left}` and `{right}` are not dual")]
+    ProjectedRolesNotDual {
+        /// The first projected role.
+        left: RoleName,
+        /// The second projected role.
+        right: RoleName,
+    },
 }
 
 fn is_symbolic_identifier(value: &str) -> bool {

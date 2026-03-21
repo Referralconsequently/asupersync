@@ -13,5 +13,8 @@ pub use contract::{
     SessionType, TimeoutLaw, TimeoutOverride,
 };
 pub use obligation::DerivedObligationPlaceholder;
-pub use projection::ProjectionPlanPlaceholder;
+pub use projection::{
+    LocalSessionBranch, LocalSessionType, ProjectionError, is_dual, project, project_contract,
+    project_pair,
+};
 pub use synthesis::SynthesizedHandlerPlaceholder;
