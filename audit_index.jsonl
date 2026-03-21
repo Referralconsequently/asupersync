@@ -10466,3 +10466,6 @@
 {"file":"src/obligation/eprocess.rs","lines":658,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"E-process math verified correct"}
 {"file":"src/messaging/service.rs","lines":5654,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"LOW: ChunkedReplyObligation::receive_chunk u32 overflow on unbounded streams, fixed with saturating_add"}
 {"file":"src/messaging/session/synthesis.rs","lines":975,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/transport/sink.rs","lines":1870,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/transport/stream.rs","lines":2233,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/process.rs","lines":2464,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lines 2150-2464 zombie-reap tests audited"}
