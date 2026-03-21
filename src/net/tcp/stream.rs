@@ -106,10 +106,7 @@ where
     /// this may return `io::ErrorKind::Unsupported`.
     #[must_use]
     pub fn keepalive(mut self, keepalive: Option<Duration>) -> Self {
-        self.keepalive = match keepalive {
-            Some(d) => KeepaliveConfig::Enabled(d),
-            None => KeepaliveConfig::Disabled,
-        };
+        self.keepalive = keepalive.map_or(KeepaliveConfig::Disabled, KeepaliveConfig::Enabled);
         self
     }
 

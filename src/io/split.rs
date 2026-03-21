@@ -12,8 +12,10 @@
 //! # Usage Pattern
 //!
 //! This module provides a borrowing split that returns halves which can be used
-//! separately (but not concurrently polled). For concurrent use, the halves
-//! should be used in separate async tasks.
+//! separately (but not concurrently polled). Because they borrow from the local
+//! scope and use `RefCell` (making them `!Send`), they **cannot** be spawned into
+//! separate async tasks. For concurrent use across tasks, use an owned split
+//! provided by the underlying stream (e.g., `TcpStream::into_split()`).
 
 use super::{AsyncRead, AsyncWrite, ReadBuf};
 use std::cell::RefCell;

@@ -211,6 +211,11 @@ impl TokenSlab {
                 index <= 0xFF_FFFF,
                 "TokenSlab capacity exceeded 16.7M entries on 32-bit platform"
             );
+            #[cfg(target_pointer_width = "64")]
+            assert!(
+                self.entries.len() < u32::MAX as usize,
+                "TokenSlab capacity exceeded u32::MAX - 1 (conflicts with FREE_LIST_END)"
+            );
             let generation = 0;
 
             self.entries.push(Entry::Occupied { waker, generation });

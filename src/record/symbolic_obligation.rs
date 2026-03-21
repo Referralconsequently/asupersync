@@ -627,6 +627,7 @@ pub(crate) struct ObligationEntry {
 }
 
 #[derive(Clone)]
+#[allow(clippy::struct_field_names)]
 struct RegistryMirror {
     by_id: Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>,
     by_object: Arc<RwLock<HashMap<ObjectId, Vec<ObligationId>>>>,
@@ -639,11 +640,10 @@ impl RegistryMirror {
         self.by_id.write().remove(&id);
 
         let mut by_object = self.by_object.write();
-        let mut remove_object_entry = false;
-        if let Some(ids) = by_object.get_mut(&object_id) {
+        let remove_object_entry = by_object.get_mut(&object_id).is_some_and(|ids| {
             ids.retain(|current| *current != id);
-            remove_object_entry = ids.is_empty();
-        }
+            ids.is_empty()
+        });
         if remove_object_entry {
             by_object.remove(&object_id);
         }
@@ -658,6 +658,7 @@ type ObligationIds = SmallVec<[ObligationId; 4]>;
 type HolderSlot = SmallVec<[(TaskId, ObligationIds); 1]>;
 type RegionSlot = SmallVec<[(RegionId, ObligationIds); 1]>;
 
+#[allow(clippy::significant_drop_tightening)]
 fn remove_obligation_from_holder_slot(
     by_holder: &Arc<RwLock<Vec<HolderSlot>>>,
     holder: TaskId,
@@ -680,6 +681,7 @@ fn remove_obligation_from_holder_slot(
     }
 }
 
+#[allow(clippy::significant_drop_tightening)]
 fn remove_obligation_from_region_slot(
     by_region: &Arc<RwLock<Vec<RegionSlot>>>,
     region: RegionId,

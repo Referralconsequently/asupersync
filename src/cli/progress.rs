@@ -131,7 +131,12 @@ impl ProgressEvent {
     /// Set elapsed time.
     #[must_use]
     pub const fn elapsed(mut self, duration: Duration) -> Self {
-        self.elapsed_ms = Some(duration.as_millis().min(u128::from(u64::MAX)) as u64);
+        let ms = duration.as_millis();
+        self.elapsed_ms = Some(if ms > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            ms as u64
+        });
         self
     }
 

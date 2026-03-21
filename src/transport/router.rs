@@ -367,7 +367,7 @@ impl LoadBalancer {
     /// entries prevented the weighted wheel from producing enough distinct picks.
     fn select_n_weighted_round_robin<'a>(
         &self,
-        available: Vec<&'a Arc<Endpoint>>,
+        available: &[&'a Arc<Endpoint>],
         n: usize,
     ) -> Vec<&'a Arc<Endpoint>> {
         let len = available.len();
@@ -390,7 +390,7 @@ impl LoadBalancer {
             let mut consumed_slots = 0u64;
 
             while consumed_slots < total_weight {
-                let (idx, block_end) = Self::weighted_endpoint_span_for_slot(&available, slot);
+                let (idx, block_end) = Self::weighted_endpoint_span_for_slot(available, slot);
                 let span = block_end - slot;
                 if !selected_indices.contains(&idx) {
                     selected_indices.push(idx);
@@ -789,7 +789,7 @@ impl LoadBalancer {
                 (0..n).map(|i| available[(start_idx + i) % len]).collect()
             }
             LoadBalanceStrategy::WeightedRoundRobin => {
-                self.select_n_weighted_round_robin(available, n)
+                self.select_n_weighted_round_robin(&available, n)
             }
             LoadBalanceStrategy::FirstAvailable => available.into_iter().take(n).collect(),
         }

@@ -1214,17 +1214,17 @@ mod tests {
         let (task_id, _handle) = state
             .create_task(root, Budget::INFINITE, async {})
             .expect("create task");
-        state.now = Time::from_nanos(5_000_000_000);
+        state.now = Time::from_secs(65);
 
         let inspector = TaskInspector::new(Arc::new(state), None);
         let details = inspector.inspect_task(task_id).expect("task exists");
-        assert_eq!(details.age, Duration::from_secs(5));
+        assert_eq!(details.age, Duration::from_secs(65));
 
         let summary = inspector.summary();
         assert_eq!(summary.stuck_count, 1);
 
         let wire = inspector.wire_snapshot();
-        assert_eq!(wire.generated_at, Time::from_nanos(5_000_000_000));
+        assert_eq!(wire.generated_at, Time::from_secs(65));
     }
 
     #[test]

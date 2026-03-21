@@ -181,12 +181,17 @@ impl BitVec {
     #[must_use]
     pub fn highest_bit(&self) -> Option<usize> {
         for (word_idx, &word) in self.words.iter().enumerate().rev() {
-            if word != 0 {
-                let bit = 63 - word.leading_zeros() as usize;
-                let index = word_idx * 64 + bit;
-                if index < self.len {
-                    return Some(index);
+            let mut w = word;
+            // Mask out bits past `self.len` in the last word
+            if word_idx == self.words.len() - 1 {
+                let rem = self.len % 64;
+                if rem != 0 {
+                    w &= (1u64 << rem) - 1;
                 }
+            }
+            if w != 0 {
+                let bit = 63 - w.leading_zeros() as usize;
+                return Some(word_idx * 64 + bit);
             }
         }
         None

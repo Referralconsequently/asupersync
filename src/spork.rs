@@ -361,8 +361,9 @@ pub mod error {
                 Self::Start(AppStartError::CompileFailed(_)) | Self::Stop(_) | Self::Compile(_) => {
                     SporkSeverity::Permanent
                 }
-                Self::Start(AppStartError::SpawnFailed(error)) => Self::app_spawn_severity(error),
-                Self::Spawn(error) => Self::app_spawn_severity(error),
+                Self::Start(AppStartError::SpawnFailed(error)) | Self::Spawn(error) => {
+                    Self::app_spawn_severity(error)
+                }
                 // Communication errors depend on the variant
                 Self::Call(e) => match e {
                     CallError::ServerStopped | CallError::NoReply | CallError::Cancelled(_) => {
