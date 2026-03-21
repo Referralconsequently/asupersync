@@ -273,6 +273,13 @@ where
                     match inner.poll_ready(cx) {
                         Poll::Ready(Ok(())) => {
                             let req = request.take().unwrap();
+                            // Temporarily restore the state with the shared ref so
+                            // that if `inner.call(req)` panics, the Drop impl can
+                            // still decrement `pending` (the Done state would not).
+                            this.state = BufferFutureState::WaitingForReady {
+                                request: None,
+                                shared: Arc::clone(&shared),
+                            };
                             let future = inner.call(req);
                             drop(inner);
 
