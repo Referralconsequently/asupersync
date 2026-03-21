@@ -126,8 +126,13 @@ impl Diagnostics {
     #[must_use]
     pub fn analyze_structural_health(&self) -> SpectralHealthReport {
         let graph = self.build_task_wait_graph();
+        let adjacency = wait_graph_adjacency(&graph);
         let mut monitor = self.spectral_monitor.lock();
-        monitor.analyze(graph.task_ids.len(), &graph.undirected_edges)
+        monitor.analyze_with_trapped_cycle(
+            graph.task_ids.len(),
+            &graph.undirected_edges,
+            has_trapped_wait_cycle(&adjacency),
+        )
     }
 
     /// Analyze directional deadlock risk from wait-for dependencies.
@@ -138,16 +143,7 @@ impl Diagnostics {
             return DirectionalDeadlockReport::empty();
         }
 
-        let mut adjacency = vec![Vec::new(); graph.task_ids.len()];
-        for &(u, v) in &graph.directed_edges {
-            if u < adjacency.len() && v < adjacency.len() {
-                adjacency[u].push(v);
-            }
-        }
-        for edges in &mut adjacency {
-            edges.sort_unstable();
-            edges.dedup();
-        }
+        let adjacency = wait_graph_adjacency(&graph);
 
         let sccs = strongly_connected_components(&adjacency);
         let mut components = Vec::new();
@@ -485,6 +481,44 @@ struct TaskWaitGraph {
     task_ids: Vec<TaskId>,
     directed_edges: Vec<(usize, usize)>,
     undirected_edges: Vec<(usize, usize)>,
+}
+
+fn wait_graph_adjacency(graph: &TaskWaitGraph) -> Vec<Vec<usize>> {
+    let mut adjacency = vec![Vec::new(); graph.task_ids.len()];
+    for &(u, v) in &graph.directed_edges {
+        if u < adjacency.len() && v < adjacency.len() {
+            adjacency[u].push(v);
+        }
+    }
+    for edges in &mut adjacency {
+        edges.sort_unstable();
+        edges.dedup();
+    }
+    adjacency
+}
+
+fn has_trapped_wait_cycle(adjacency: &[Vec<usize>]) -> bool {
+    for nodes in strongly_connected_components(adjacency) {
+        let has_cycle = if nodes.len() > 1 {
+            true
+        } else {
+            let n0 = nodes[0];
+            adjacency[n0].contains(&n0)
+        };
+        if !has_cycle {
+            continue;
+        }
+
+        let node_set: std::collections::BTreeSet<usize> = nodes.iter().copied().collect();
+        let has_egress = nodes
+            .iter()
+            .any(|&u| adjacency[u].iter().any(|v| !node_set.contains(v)));
+        if !has_egress {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Directional deadlock severity from wait-for graph analysis.
@@ -2506,6 +2540,23 @@ mod tests {
         assert!(report.cycles[0].trapped);
         assert!(report.cycles[0].tasks.contains(&t1));
         assert!(report.cycles[0].tasks.contains(&t2));
+    }
+
+    #[test]
+    fn structural_health_reports_deadlocked_for_trapped_cycle() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let t1 = insert_task(&mut state, root, TaskState::Running);
+        let t2 = insert_task(&mut state, root, TaskState::Running);
+        state.task_mut(t1).expect("t1").waiters.push(t2);
+        state.task_mut(t2).expect("t2").waiters.push(t1);
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let report = diagnostics.analyze_structural_health();
+        assert!(matches!(
+            report.classification,
+            crate::observability::spectral_health::HealthClassification::Deadlocked
+        ));
     }
 
     #[test]

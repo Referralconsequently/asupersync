@@ -2346,8 +2346,12 @@ impl ThreeLaneWorker {
         let lyapunov_suggestion = governor.suggest(&snapshot);
         let mut spectral_report = None;
         if let Some(monitor) = self.spectral_monitor.as_mut() {
-            if wait_graph_nodes > 1 {
-                spectral_report = Some(monitor.analyze(wait_graph_nodes, &wait_graph_edges));
+            if trapped_wait_cycle || wait_graph_nodes > 1 {
+                spectral_report = Some(monitor.analyze_with_trapped_cycle(
+                    wait_graph_nodes,
+                    &wait_graph_edges,
+                    trapped_wait_cycle,
+                ));
             }
         }
 
@@ -2453,6 +2457,9 @@ impl ThreeLaneWorker {
         // actual deadlock forcing.
         if let Some(report) = spectral_report.as_ref() {
             let override_suggestion = match report.classification {
+                crate::observability::spectral_health::HealthClassification::Deadlocked => {
+                    Some(SchedulingSuggestion::DrainObligations)
+                }
                 crate::observability::spectral_health::HealthClassification::Critical {
                     approaching_disconnect: true,
                     ..
@@ -5274,6 +5281,59 @@ mod tests {
             suggestion,
             SchedulingSuggestion::NoPreference,
             "independent live tasks should not be treated as a trapped wait deadlock"
+        );
+    }
+
+    #[test]
+    fn test_governor_single_live_task_without_wait_edges_skips_spectral_monitor() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        let _ = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let suggestion = worker.governor_suggest();
+        assert_eq!(suggestion, SchedulingSuggestion::NoPreference);
+        assert_eq!(
+            worker
+                .spectral_monitor
+                .as_ref()
+                .expect("governor should install spectral monitor")
+                .history_len(),
+            0,
+            "benign singleton live-task states should not feed spectral history"
+        );
+    }
+
+    #[test]
+    fn test_governor_single_task_self_cycle_updates_spectral_monitor() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        let (task_id, _handle) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task");
+        state.task_mut(task_id).expect("task").waiters.push(task_id);
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let suggestion = worker.governor_suggest();
+        assert_eq!(suggestion, SchedulingSuggestion::DrainObligations);
+        assert_eq!(
+            worker
+                .spectral_monitor
+                .as_ref()
+                .expect("governor should install spectral monitor")
+                .history_len(),
+            1,
+            "single-node trapped self-cycles should still update the spectral monitor"
         );
     }
 

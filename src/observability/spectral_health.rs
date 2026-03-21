@@ -14,9 +14,9 @@
 //! - Oscillatory eigenvalue trajectories indicate potential livelock (periodic
 //!   behavior in the dependency structure).
 //!
-//! Zero or disconnected spectral connectivity is a topology signal, not a
-//! proof of trapped wait-cycle deadlock. The runtime uses directional SCC
-//! analysis elsewhere for actual deadlock detection.
+//! Zero or disconnected spectral connectivity is a topology signal, not by
+//! itself a proof of trapped wait-cycle deadlock. Callers that already have
+//! explicit trapped-cycle evidence can surface that separately.
 //!
 //! # Mathematical Foundation
 //!
@@ -538,6 +538,11 @@ fn normalize(v: &mut [f64]) {
 /// Health classification with evidence.
 #[derive(Debug, Clone)]
 pub enum HealthClassification {
+    /// A caller provided explicit trapped wait-cycle evidence.
+    ///
+    /// This is stronger than any spectral/topology inference: the wait graph
+    /// already contains a trapped SCC or self-cycle.
+    Deadlocked,
     /// The dependency graph is well-connected.
     Healthy {
         /// Margin above the degraded threshold (fiedler - degraded_threshold).
@@ -570,6 +575,9 @@ pub enum HealthClassification {
 impl fmt::Display for HealthClassification {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Deadlocked => {
+                write!(f, "Deadlocked")
+            }
             Self::Healthy { margin } => {
                 write!(f, "Healthy (margin={margin:.4})")
             }
@@ -1836,6 +1844,17 @@ impl SpectralHealthMonitor {
     /// undirected pairs `(u, v)` where `u` and `v` are node indices in
     /// `[0, node_count)`.
     pub fn analyze(&mut self, node_count: usize, edges: &[(usize, usize)]) -> SpectralHealthReport {
+        self.analyze_with_trapped_cycle(node_count, edges, false)
+    }
+
+    /// Performs a full spectral health analysis with an explicit trapped-cycle
+    /// hint from a directional wait-for analysis.
+    pub fn analyze_with_trapped_cycle(
+        &mut self,
+        node_count: usize,
+        edges: &[(usize, usize)],
+        trapped_wait_cycle: bool,
+    ) -> SpectralHealthReport {
         let laplacian = DependencyLaplacian::new(node_count, edges);
         let decomposition = compute_spectral_decomposition(&laplacian, &self.thresholds);
 
@@ -1849,12 +1868,16 @@ impl SpectralHealthMonitor {
             .is_some_and(|bw| bw.trend == SpectralTrend::Deteriorating);
 
         // Health classification.
-        let classification = classify_health(
-            &decomposition,
-            &laplacian,
-            &self.thresholds,
-            approaching_disconnect,
-        );
+        let classification = if trapped_wait_cycle {
+            HealthClassification::Deadlocked
+        } else {
+            classify_health(
+                &decomposition,
+                &laplacian,
+                &self.thresholds,
+                approaching_disconnect,
+            )
+        };
 
         // Bottleneck analysis.
         let bottlenecks = analyze_bottlenecks(
@@ -2204,6 +2227,7 @@ mod tests {
     #[test]
     fn health_classification_display_all_variants() {
         let variants: Vec<HealthClassification> = vec![
+            HealthClassification::Deadlocked,
             HealthClassification::Healthy { margin: 0.5 },
             HealthClassification::Degraded {
                 fiedler: 0.05,
@@ -2514,6 +2538,18 @@ mod tests {
                 HealthClassification::Fragmented { components: 2 }
             ),
             "Disconnected graph should be fragmented, got {}",
+            report.classification
+        );
+    }
+
+    #[test]
+    fn monitor_trapped_cycle_hint_reports_deadlocked() {
+        let mut monitor = SpectralHealthMonitor::new(SpectralThresholds::default());
+        let report = monitor.analyze_with_trapped_cycle(2, &[], true);
+
+        assert!(
+            matches!(report.classification, HealthClassification::Deadlocked),
+            "explicit trapped-cycle evidence should classify as deadlocked, got {}",
             report.classification
         );
     }
