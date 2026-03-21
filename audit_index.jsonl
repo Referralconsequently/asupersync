@@ -573,3 +573,11 @@
 "SOUND"
 0
 "Tag-based membership + &mut Arena exclusive access eliminates ABA by construction"
+"src/combinator/retry.rs"
+1251
+407
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Cancel drains instead of drops in Polling state, attempt counting correct, clean state machine"
