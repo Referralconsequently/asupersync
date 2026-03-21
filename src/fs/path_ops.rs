@@ -164,6 +164,11 @@ fn write_atomic_blocking(path: &Path, contents: &[u8]) -> io::Result<()> {
             "atomic write target must include a file name",
         )
     })?;
+    let existing_permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err),
+    };
 
     loop {
         let tmp_path = unique_tmp_path(parent, file_name);
@@ -179,6 +184,11 @@ fn write_atomic_blocking(path: &Path, contents: &[u8]) -> io::Result<()> {
         let mut tmp_guard = TempPathGuard::new(tmp_path.clone());
 
         file.write_all(contents)?;
+        if let Some(permissions) = &existing_permissions {
+            // Preserve the target file's permissions before the replacement rename swaps in the
+            // temp inode.
+            file.set_permissions(permissions.clone())?;
+        }
         file.sync_all()?;
         drop(file);
 
@@ -320,6 +330,8 @@ mod tests {
     use std::fs;
     #[cfg(all(target_os = "linux", feature = "io-uring", unix))]
     use std::os::unix::ffi::OsStringExt;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -609,6 +621,28 @@ mod tests {
             );
         });
         crate::test_complete!("write_atomic_retries_when_stale_temp_name_exists");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_preserves_existing_unix_permissions() {
+        init_test("write_atomic_preserves_existing_unix_permissions");
+        let dir = TempDir::new("write_atomic_permissions").unwrap();
+        let path = dir.path().join("script.sh");
+
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+
+        future::block_on(async {
+            write_atomic(&path, b"new").await.unwrap();
+
+            let bytes = read(&path).await.unwrap();
+            crate::assert_with_log!(bytes == b"new", "new content written", b"new", bytes);
+
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            crate::assert_with_log!(mode == 0o700, "existing permissions preserved", 0o700, mode);
+        });
+        crate::test_complete!("write_atomic_preserves_existing_unix_permissions");
     }
 
     #[cfg(unix)]

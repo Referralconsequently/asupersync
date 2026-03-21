@@ -8,6 +8,10 @@ use crate::runtime::spawn_blocking_io;
 use std::io;
 use std::path::Path;
 
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+// Match std::fs::create_dir / mkdir(2) defaults; the process umask still applies.
+const DEFAULT_CREATE_DIR_MODE: libc::mode_t = 0o777;
+
 /// Creates a new empty directory at the specified path.
 ///
 /// On Linux with `io-uring`, uses `IORING_OP_MKDIRAT`.
@@ -20,7 +24,7 @@ pub async fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        uring_mkdirat(&path, 0o755)
+        uring_mkdirat(&path, DEFAULT_CREATE_DIR_MODE)
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -178,6 +182,19 @@ mod tests {
             err.kind()
         );
         crate::test_complete!("test_path_to_cstring_rejects_nul_bytes");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    #[test]
+    fn test_create_dir_uring_mode_matches_std_semantics() {
+        init_test("test_create_dir_uring_mode_matches_std_semantics");
+        crate::assert_with_log!(
+            DEFAULT_CREATE_DIR_MODE == 0o777,
+            "io_uring create_dir mode matches std::fs::create_dir",
+            0o777,
+            DEFAULT_CREATE_DIR_MODE
+        );
+        crate::test_complete!("test_create_dir_uring_mode_matches_std_semantics");
     }
 
     #[test]
