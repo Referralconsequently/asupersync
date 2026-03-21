@@ -671,15 +671,11 @@ impl TaskInspector {
         self.wire_snapshot().to_pretty_json()
     }
 
-    /// Render task summary to console (if available).
-    pub fn render_summary(&self) -> std::io::Result<()> {
-        let Some(console) = &self.console else {
-            return Ok(());
-        };
-
-        let summary = self.summary();
-        let stuck = self.find_stuck_tasks_default();
-
+    fn format_summary_output(
+        summary: &TaskSummary,
+        stuck: &[TaskDetails],
+        highlight_stuck_tasks: bool,
+    ) -> String {
         let mut output = String::new();
         writeln!(&mut output, "Task Inspector").unwrap();
         writeln!(
@@ -695,18 +691,16 @@ impl TaskInspector {
         output.push_str(&"-".repeat(70));
         output.push('\n');
 
-        // Region breakdown
         output.push_str("By Region:\n");
         for (region_id, count) in &summary.by_region {
             writeln!(&mut output, "  {region_id:?}: {count} tasks").unwrap();
         }
 
-        // Stuck tasks section
-        if !stuck.is_empty() {
+        if highlight_stuck_tasks && !stuck.is_empty() {
             output.push_str(&"-".repeat(70));
             output.push('\n');
             output.push_str("POTENTIAL STUCK TASKS:\n");
-            for stuck_task in &stuck {
+            for stuck_task in stuck {
                 let id = stuck_task.id;
                 let region_id = stuck_task.region_id;
                 let state = stuck_task.state.name();
@@ -719,6 +713,20 @@ impl TaskInspector {
                 .unwrap();
             }
         }
+
+        output
+    }
+
+    /// Render task summary to console (if available).
+    pub fn render_summary(&self) -> std::io::Result<()> {
+        let Some(console) = &self.console else {
+            return Ok(());
+        };
+
+        let summary = self.summary();
+        let stuck = self.find_stuck_tasks_default();
+        let output =
+            Self::format_summary_output(&summary, &stuck, self.config.highlight_stuck_tasks);
 
         console.print(&RawText(&output))
     }
@@ -1135,5 +1143,66 @@ mod tests {
         assert_eq!(wire.obligations[1], ObligationId::new_for_test(3, 0));
         assert_eq!(wire.waiters[0], TaskId::new_for_test(2, 0));
         assert_eq!(wire.waiters[1], TaskId::new_for_test(8, 0));
+    }
+
+    #[test]
+    fn format_summary_output_hides_stuck_section_when_highlight_disabled() {
+        let mut summary = TaskSummary {
+            total_tasks: 1,
+            running: 1,
+            stuck_count: 1,
+            ..TaskSummary::default()
+        };
+        summary.by_region.insert(RegionId::new_for_test(7, 0), 1);
+        let stuck = vec![TaskDetails {
+            id: TaskId::new_for_test(11, 0),
+            region_id: RegionId::new_for_test(7, 0),
+            state: TaskStateInfo::Running,
+            phase: TaskPhase::Running,
+            poll_count: 0,
+            polls_remaining: 10,
+            created_at: Time::ZERO,
+            age: Duration::from_secs(90),
+            time_since_last_poll: None,
+            wake_pending: false,
+            obligations: vec![],
+            waiters: vec![],
+        }];
+        let task_label = format!("{:?}", stuck[0].id);
+
+        let output = TaskInspector::format_summary_output(&summary, &stuck, false);
+        assert!(output.contains("Stuck: 1"));
+        assert!(!output.contains("POTENTIAL STUCK TASKS:"));
+        assert!(!output.contains(&task_label));
+    }
+
+    #[test]
+    fn format_summary_output_shows_stuck_section_when_highlight_enabled() {
+        let mut summary = TaskSummary {
+            total_tasks: 1,
+            running: 1,
+            stuck_count: 1,
+            ..TaskSummary::default()
+        };
+        summary.by_region.insert(RegionId::new_for_test(7, 0), 1);
+        let stuck = vec![TaskDetails {
+            id: TaskId::new_for_test(11, 0),
+            region_id: RegionId::new_for_test(7, 0),
+            state: TaskStateInfo::Running,
+            phase: TaskPhase::Running,
+            poll_count: 0,
+            polls_remaining: 10,
+            created_at: Time::ZERO,
+            age: Duration::from_secs(90),
+            time_since_last_poll: None,
+            wake_pending: false,
+            obligations: vec![],
+            waiters: vec![],
+        }];
+        let task_label = format!("{:?}", stuck[0].id);
+
+        let output = TaskInspector::format_summary_output(&summary, &stuck, true);
+        assert!(output.contains("POTENTIAL STUCK TASKS:"));
+        assert!(output.contains(&task_label));
     }
 }
