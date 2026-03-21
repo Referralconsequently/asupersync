@@ -385,6 +385,15 @@ impl CellEpoch {
             generation,
         }
     }
+
+    /// Advance the per-cell generation while keeping the membership epoch.
+    #[must_use]
+    pub const fn next_generation(self) -> Self {
+        Self {
+            membership_epoch: self.membership_epoch,
+            generation: self.generation + 1,
+        }
+    }
 }
 
 impl SubjectPattern {
@@ -652,6 +661,80 @@ pub struct RebalancePlan {
     pub added_stewards: Vec<NodeId>,
     /// Stewards removed in this incremental rebalance step.
     pub removed_stewards: Vec<NodeId>,
+}
+
+/// Repair-material binding captured for one steward or repair witness while a
+/// rebalance cut is being certified.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RepairSymbolBinding {
+    /// Repair-capable node that collected the material.
+    pub node_id: NodeId,
+    /// Cell epoch the material belongs to.
+    pub cell_epoch: CellEpoch,
+    /// Retention generation the symbols were derived from.
+    pub retention_generation: u64,
+}
+
+impl RepairSymbolBinding {
+    /// Construct a repair-symbol binding for one repair-capable node.
+    #[must_use]
+    pub const fn new(node_id: NodeId, cell_epoch: CellEpoch, retention_generation: u64) -> Self {
+        Self {
+            node_id,
+            cell_epoch,
+            retention_generation,
+        }
+    }
+}
+
+/// Explicit transfer summary that proves a rebalance cut does not strand live
+/// publish, consumer, or reply obligations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebalanceObligationSummary {
+    /// Number of unresolved publish obligations below the cut frontier.
+    pub publish_obligations_below_cut: usize,
+    /// Number of active consumer leases that must move or be reissued.
+    pub active_consumer_leases: usize,
+    /// Number of consumer leases explicitly transferred or reissued.
+    pub transferred_consumer_leases: usize,
+    /// Number of consumers still reporting ambiguous lease ownership.
+    pub ambiguous_consumer_lease_owners: usize,
+    /// Number of active reply rights at the cut frontier.
+    pub active_reply_rights: usize,
+    /// Number of reply rights explicitly reissued onto the next epoch.
+    pub reissued_reply_rights: usize,
+    /// Number of dangling reply rights that would become ownerless.
+    pub dangling_reply_rights: usize,
+}
+
+/// Semantic-cut evidence attached to a steward-set rebalance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebalanceCutEvidence {
+    /// Steward that will hold append and cursor authority after the cut.
+    pub next_sequencer: NodeId,
+    /// Retention generation against which repair material was captured.
+    pub retention_generation: u64,
+    /// Explicit obligation-transfer proof attached to the cut.
+    pub obligation_summary: RebalanceObligationSummary,
+    /// Repair symbol bindings collected by next stewards and witnesses.
+    pub repair_symbols: Vec<RepairSymbolBinding>,
+}
+
+/// Certified outcome of a steward-set self-rebalance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedRebalance {
+    /// Authoritative append proving the cut was decided under the prior epoch.
+    pub control_append: AppendCertificate,
+    /// In-band joint configuration entry fencing the old steward lease.
+    pub joint_config: JointConfigEntry,
+    /// Incremental rebalance plan that was certified.
+    pub plan: RebalancePlan,
+    /// Canonical semantic-cut evidence attached to the certification.
+    pub cut_evidence: RebalanceCutEvidence,
+    /// Removed stewards whose old authority must now drain.
+    pub drained_stewards: Vec<NodeId>,
+    /// Resulting subject cell after the certified cut and epoch advance.
+    pub resulting_cell: SubjectCell,
 }
 
 /// Storage class used during steward negotiation.
@@ -1405,6 +1488,20 @@ impl ControlCapsuleV1 {
         lease
     }
 
+    fn rebind_epoch(&mut self, cell_id: CellId, epoch: CellEpoch) {
+        self.cell_id = cell_id;
+        self.cell_epoch = epoch;
+        self.policy_revision = 1;
+        self.sequencer_lease_generation = self.sequencer_lease_generation.max(epoch.generation);
+        let control_epoch = self.control_epoch();
+        if let Some(cursor_authority) = &mut self.cursor_authority {
+            cursor_authority.control_epoch = control_epoch;
+            cursor_authority.fence_generation = self.sequencer_lease_generation;
+        }
+        self.committed_appends.clear();
+        self.next_sequence = 1;
+    }
+
     fn validate_sequencer_lease(
         &self,
         lease: &SequencerLease,
@@ -1659,6 +1756,21 @@ impl Default for RepairPolicy {
     }
 }
 
+impl RepairPolicy {
+    fn witness_target(&self, temperature: CellTemperature) -> usize {
+        match temperature {
+            CellTemperature::Cold | CellTemperature::Warm => self.cold_witnesses,
+            CellTemperature::Hot => self.hot_witnesses,
+        }
+    }
+
+    fn minimum_repair_holders(&self, temperature: CellTemperature, steward_count: usize) -> usize {
+        steward_count
+            .saturating_add(self.witness_target(temperature))
+            .max(self.recoverability_target as usize)
+    }
+}
+
 /// Smallest sovereign unit of the brokerless subject fabric.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubjectCell {
@@ -1710,6 +1822,192 @@ impl SubjectCell {
             epoch,
         })
     }
+
+    /// Certify an explicit steward-set self-rebalance under the current epoch,
+    /// then advance the cell generation once the cut is fenced.
+    #[allow(clippy::result_large_err)]
+    pub fn certify_self_rebalance(
+        &self,
+        placement_policy: &PlacementPolicy,
+        candidates: &[StewardCandidate],
+        observed_load: ObservedCellLoad,
+        cut_evidence: RebalanceCutEvidence,
+    ) -> Result<CertifiedRebalance, RebalanceError> {
+        let plan = placement_policy.plan_rebalance(
+            &self.subject_partition,
+            candidates,
+            &self.steward_set,
+            self.data_capsule.temperature,
+            observed_load,
+        )?;
+        if plan.next_temperature == self.data_capsule.temperature
+            && plan.next_stewards == self.steward_set
+        {
+            return Err(RebalanceError::NoRebalanceNeeded {
+                cell_id: self.cell_id,
+            });
+        }
+        if !contains_node(&plan.next_stewards, &cut_evidence.next_sequencer) {
+            return Err(RebalanceError::NextSequencerNotInPlan {
+                node: cut_evidence.next_sequencer.clone(),
+            });
+        }
+
+        cut_evidence.obligation_summary.validate()?;
+        let canonical_repair_symbols = validate_repair_bindings(
+            &cut_evidence,
+            candidates,
+            &plan,
+            self.epoch,
+            &self.repair_policy,
+        )?;
+
+        let mut next_control = self.control_capsule.clone();
+        let active_lease = next_control
+            .active_sequencer_lease()
+            .ok_or(ControlCapsuleError::NoActiveSequencer)?;
+        let control_append = next_control.authoritative_append(&active_lease)?;
+        let joint_config = next_control.reconfigure(
+            plan.next_stewards.clone(),
+            cut_evidence.next_sequencer.clone(),
+        )?;
+
+        let next_epoch = self.epoch.next_generation();
+        let next_cell_id = CellId::for_partition(next_epoch, &self.subject_partition);
+        next_control.rebind_epoch(next_cell_id, next_epoch);
+
+        let resulting_cell = Self {
+            cell_id: next_cell_id,
+            subject_partition: self.subject_partition.clone(),
+            steward_set: plan.next_stewards.clone(),
+            control_capsule: next_control,
+            data_capsule: DataCapsule {
+                temperature: plan.next_temperature,
+                retained_message_blocks: self.data_capsule.retained_message_blocks,
+            },
+            repair_policy: self.repair_policy.clone(),
+            epoch: next_epoch,
+        };
+
+        Ok(CertifiedRebalance {
+            control_append,
+            joint_config,
+            plan: plan.clone(),
+            cut_evidence: RebalanceCutEvidence {
+                next_sequencer: cut_evidence.next_sequencer,
+                retention_generation: cut_evidence.retention_generation,
+                obligation_summary: cut_evidence.obligation_summary,
+                repair_symbols: canonical_repair_symbols,
+            },
+            drained_stewards: plan.removed_stewards,
+            resulting_cell,
+        })
+    }
+}
+
+/// Deterministic failures while certifying a self-rebalance.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RebalanceError {
+    /// The sampled load stayed inside the current hysteresis band.
+    #[error("rebalance for `{cell_id}` produced no epoch-changing steward transition")]
+    NoRebalanceNeeded {
+        /// Cell that remained within its current rebalance envelope.
+        cell_id: CellId,
+    },
+    /// The chosen next sequencer is not present in the certified target set.
+    #[error("next sequencer `{node}` is not part of the certified steward set")]
+    NextSequencerNotInPlan {
+        /// Node proposed as the next sequencer.
+        node: NodeId,
+    },
+    /// There are still unresolved publish obligations below the semantic cut.
+    #[error("rebalance cut still has {unresolved} publish obligations below the cut frontier")]
+    PublishFrontierNotDrained {
+        /// Count of unresolved publish obligations.
+        unresolved: usize,
+    },
+    /// Consumer lease ownership was not unique at the cut frontier.
+    #[error("rebalance cut still has {ambiguous} ambiguous consumer lease owners")]
+    AmbiguousConsumerLeaseOwners {
+        /// Count of ambiguous lease owners.
+        ambiguous: usize,
+    },
+    /// Consumer lease transfers or reissues did not cover all live leases.
+    #[error("rebalance cut transferred {transferred} consumer leases but requires {active_leases}")]
+    ConsumerLeaseTransferIncomplete {
+        /// Number of active consumer leases at the cut.
+        active_leases: usize,
+        /// Number of consumer leases explicitly transferred or reissued.
+        transferred: usize,
+    },
+    /// Reply rights were left dangling at the cut frontier.
+    #[error("rebalance cut leaves {dangling} dangling reply rights")]
+    DanglingReplyRights {
+        /// Count of dangling reply rights.
+        dangling: usize,
+    },
+    /// Reply-right reissue proof did not cover all live reply rights.
+    #[error("rebalance cut reissued {reissued} reply rights but requires {active_rights}")]
+    ReplyRightsNotReissued {
+        /// Number of active reply rights at the cut.
+        active_rights: usize,
+        /// Number of reply rights reissued onto the next epoch.
+        reissued: usize,
+    },
+    /// Rebalance evidence carried multiple repair bindings for the same node.
+    #[error("rebalance evidence contains duplicate repair bindings for `{node}`")]
+    DuplicateRepairBinding {
+        /// Node with conflicting duplicate bindings.
+        node: NodeId,
+    },
+    /// Repair material was bound to the wrong epoch.
+    #[error("repair symbol binding for `{node}` uses epoch {actual:?}, expected {expected:?}")]
+    RepairBindingWrongEpoch {
+        /// Repair-capable holder attached to the binding.
+        node: NodeId,
+        /// Cell epoch that should have been used.
+        expected: CellEpoch,
+        /// Epoch carried by the binding.
+        actual: CellEpoch,
+    },
+    /// Repair material was bound to the wrong retention generation.
+    #[error(
+        "repair symbol binding for `{node}` uses retention generation {actual}, expected {expected}"
+    )]
+    RepairBindingWrongRetentionGeneration {
+        /// Repair-capable holder attached to the binding.
+        node: NodeId,
+        /// Retention generation that should have been used.
+        expected: u64,
+        /// Retention generation carried by the binding.
+        actual: u64,
+    },
+    /// Only repair-capable nodes may be credited with repair material.
+    #[error("repair symbol holder `{node}` is not eligible to store repair material")]
+    IneligibleRepairHolder {
+        /// Holder that is not repair-capable in the supplied candidate set.
+        node: NodeId,
+    },
+    /// Every next steward must prove it collected the current repair material.
+    #[error("next steward `{node}` is missing a repair-symbol binding for the rebalance cut")]
+    MissingStewardRepairBinding {
+        /// Steward missing a binding.
+        node: NodeId,
+    },
+    /// The certified cut did not gather enough repair-capable holders.
+    #[error("rebalance collected {actual} repair-capable holders but requires at least {required}")]
+    InsufficientRepairSymbolHolders {
+        /// Required number of repair-capable holders.
+        required: usize,
+        /// Number of unique holders actually proven.
+        actual: usize,
+    },
+    /// Placement planning failed.
+    #[error(transparent)]
+    Placement(#[from] FabricError),
+    /// Control-capsule fencing or reconfiguration failed.
+    #[error(transparent)]
+    Control(#[from] ControlCapsuleError),
 }
 
 /// Errors produced by foundational fabric modeling and placement.
@@ -1747,6 +2045,40 @@ pub enum FabricError {
         /// Canonical subject that repeated while chasing morphisms.
         cycle_point: SubjectPattern,
     },
+}
+
+impl RebalanceObligationSummary {
+    #[allow(clippy::result_large_err)]
+    fn validate(&self) -> Result<(), RebalanceError> {
+        if self.publish_obligations_below_cut != 0 {
+            return Err(RebalanceError::PublishFrontierNotDrained {
+                unresolved: self.publish_obligations_below_cut,
+            });
+        }
+        if self.ambiguous_consumer_lease_owners != 0 {
+            return Err(RebalanceError::AmbiguousConsumerLeaseOwners {
+                ambiguous: self.ambiguous_consumer_lease_owners,
+            });
+        }
+        if self.transferred_consumer_leases < self.active_consumer_leases {
+            return Err(RebalanceError::ConsumerLeaseTransferIncomplete {
+                active_leases: self.active_consumer_leases,
+                transferred: self.transferred_consumer_leases,
+            });
+        }
+        if self.dangling_reply_rights != 0 {
+            return Err(RebalanceError::DanglingReplyRights {
+                dangling: self.dangling_reply_rights,
+            });
+        }
+        if self.reissued_reply_rights < self.active_reply_rights {
+            return Err(RebalanceError::ReplyRightsNotReissued {
+                active_rights: self.active_reply_rights,
+                reissued: self.reissued_reply_rights,
+            });
+        }
+        Ok(())
+    }
 }
 
 fn stable_hash<T: Hash>(value: T) -> u64 {
@@ -1805,6 +2137,70 @@ fn duplicate_node(nodes: &[NodeId]) -> Option<NodeId> {
         }
     }
     None
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_repair_bindings(
+    cut_evidence: &RebalanceCutEvidence,
+    candidates: &[StewardCandidate],
+    plan: &RebalancePlan,
+    current_epoch: CellEpoch,
+    repair_policy: &RepairPolicy,
+) -> Result<Vec<RepairSymbolBinding>, RebalanceError> {
+    let mut by_node = BTreeMap::new();
+    for binding in &cut_evidence.repair_symbols {
+        if binding.cell_epoch != current_epoch {
+            return Err(RebalanceError::RepairBindingWrongEpoch {
+                node: binding.node_id.clone(),
+                expected: current_epoch,
+                actual: binding.cell_epoch,
+            });
+        }
+        if binding.retention_generation != cut_evidence.retention_generation {
+            return Err(RebalanceError::RepairBindingWrongRetentionGeneration {
+                node: binding.node_id.clone(),
+                expected: cut_evidence.retention_generation,
+                actual: binding.retention_generation,
+            });
+        }
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.node_id == binding.node_id);
+        let retained_steward = contains_node(&plan.next_stewards, &binding.node_id);
+        if !candidate.is_some_and(StewardCandidate::can_repair) && !retained_steward {
+            return Err(RebalanceError::IneligibleRepairHolder {
+                node: binding.node_id.clone(),
+            });
+        }
+        if by_node
+            .insert(binding.node_id.clone(), binding.clone())
+            .is_some()
+        {
+            return Err(RebalanceError::DuplicateRepairBinding {
+                node: binding.node_id.clone(),
+            });
+        }
+    }
+
+    for steward in &plan.next_stewards {
+        if !by_node.contains_key(steward) {
+            return Err(RebalanceError::MissingStewardRepairBinding {
+                node: steward.clone(),
+            });
+        }
+    }
+
+    let required_holders =
+        repair_policy.minimum_repair_holders(plan.next_temperature, plan.next_stewards.len());
+    let actual_holders = by_node.len();
+    if actual_holders < required_holders {
+        return Err(RebalanceError::InsufficientRepairSymbolHolders {
+            required: required_holders,
+            actual: actual_holders,
+        });
+    }
+
+    Ok(by_node.into_values().collect())
 }
 
 #[cfg(test)]
@@ -2529,6 +2925,123 @@ mod tests {
         )
     }
 
+    fn rebalance_policy() -> PlacementPolicy {
+        PlacementPolicy {
+            cold_stewards: 1,
+            warm_stewards: 3,
+            hot_stewards: 4,
+            candidate_pool_size: 6,
+            rebalance_budget: RebalanceBudget {
+                max_steward_changes: 3,
+            },
+            ..PlacementPolicy::default()
+        }
+    }
+
+    fn rebalance_candidates() -> Vec<StewardCandidate> {
+        vec![
+            candidate("node-a", "rack-a", StorageClass::Durable, 5),
+            candidate("node-b", "rack-b", StorageClass::Durable, 6),
+            candidate("node-c", "rack-c", StorageClass::Standard, 7),
+            candidate("node-d", "rack-d", StorageClass::Standard, 8),
+            candidate("node-e", "rack-e", StorageClass::Standard, 9),
+            candidate("node-f", "rack-f", StorageClass::Standard, 10),
+        ]
+    }
+
+    fn cold_subject_cell(candidates: &[StewardCandidate], policy: &PlacementPolicy) -> SubjectCell {
+        SubjectCell::new(
+            &SubjectPattern::parse("orders.created").expect("pattern"),
+            CellEpoch::new(11, 2),
+            candidates,
+            policy,
+            RepairPolicy {
+                recoverability_target: 3,
+                cold_witnesses: 1,
+                hot_witnesses: 2,
+            },
+            DataCapsule::default(),
+        )
+        .expect("cold cell")
+    }
+
+    fn warm_subject_cell(candidates: &[StewardCandidate], policy: &PlacementPolicy) -> SubjectCell {
+        SubjectCell::new(
+            &SubjectPattern::parse("orders.created").expect("pattern"),
+            CellEpoch::new(11, 2),
+            candidates,
+            policy,
+            RepairPolicy {
+                recoverability_target: 3,
+                cold_witnesses: 1,
+                hot_witnesses: 2,
+            },
+            DataCapsule {
+                temperature: CellTemperature::Warm,
+                retained_message_blocks: 4,
+            },
+        )
+        .expect("warm cell")
+    }
+
+    fn repair_bindings_for(
+        cell: &SubjectCell,
+        plan: &RebalancePlan,
+        candidates: &[StewardCandidate],
+        retention_generation: u64,
+        required_holders: usize,
+    ) -> Vec<RepairSymbolBinding> {
+        let mut holders = plan.next_stewards.clone();
+        for candidate in candidates {
+            if holders.len() >= required_holders {
+                break;
+            }
+            if contains_node(&holders, &candidate.node_id) || !candidate.can_repair() {
+                continue;
+            }
+            holders.push(candidate.node_id.clone());
+        }
+        holders
+            .into_iter()
+            .map(|node_id| RepairSymbolBinding::new(node_id, cell.epoch, retention_generation))
+            .collect()
+    }
+
+    fn successful_rebalance_evidence(
+        cell: &SubjectCell,
+        plan: &RebalancePlan,
+        candidates: &[StewardCandidate],
+        retention_generation: u64,
+    ) -> RebalanceCutEvidence {
+        let required_holders = cell
+            .repair_policy
+            .minimum_repair_holders(plan.next_temperature, plan.next_stewards.len());
+        RebalanceCutEvidence {
+            next_sequencer: plan
+                .added_stewards
+                .first()
+                .cloned()
+                .unwrap_or_else(|| plan.next_stewards[0].clone()),
+            retention_generation,
+            obligation_summary: RebalanceObligationSummary {
+                publish_obligations_below_cut: 0,
+                active_consumer_leases: 2,
+                transferred_consumer_leases: 2,
+                ambiguous_consumer_lease_owners: 0,
+                active_reply_rights: 1,
+                reissued_reply_rights: 1,
+                dangling_reply_rights: 0,
+            },
+            repair_symbols: repair_bindings_for(
+                cell,
+                plan,
+                candidates,
+                retention_generation,
+                required_holders,
+            ),
+        }
+    }
+
     #[test]
     fn control_capsule_v1_fences_stale_sequencer_leases() {
         let mut capsule = control_capsule();
@@ -2740,6 +3253,350 @@ mod tests {
         );
         assert_eq!(capsule.cursor_authority_lease(), Some(&original));
         assert_eq!(capsule.sequencer_lease_generation, original_generation);
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_advances_epoch_and_fences_old_sequencer() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let original = cell
+            .control_capsule
+            .active_sequencer_lease()
+            .expect("original sequencer lease");
+        let evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 7);
+        let next_sequencer = evidence.next_sequencer.clone();
+
+        let certified = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect("certified rebalance");
+
+        assert_eq!(certified.plan, plan);
+        assert_eq!(certified.control_append.identity.cell_id, cell.cell_id);
+        assert_eq!(certified.control_append.identity.epoch, cell.epoch);
+        assert_eq!(
+            certified.resulting_cell.epoch,
+            CellEpoch::new(cell.epoch.membership_epoch, cell.epoch.generation + 1)
+        );
+        assert_eq!(certified.resulting_cell.steward_set, plan.next_stewards);
+        assert_eq!(
+            certified.resulting_cell.data_capsule.temperature,
+            CellTemperature::Warm
+        );
+        assert_eq!(
+            certified
+                .resulting_cell
+                .control_capsule
+                .active_sequencer_holder(),
+            Some(&next_sequencer)
+        );
+        assert_eq!(
+            certified
+                .resulting_cell
+                .control_capsule
+                .cursor_authority_lease()
+                .map(|lease| &lease.holder),
+            Some(&next_sequencer)
+        );
+
+        let stale = certified
+            .resulting_cell
+            .control_capsule
+            .authoritative_append(&original)
+            .expect_err("pre-cut sequencer lease must be fenced");
+        assert!(matches!(
+            stale,
+            ControlCapsuleError::StaleSequencerLease {
+                current_holder,
+                current_fence_generation,
+                ..
+            } if current_holder == next_sequencer
+                && current_fence_generation == certified.resulting_cell.epoch.generation
+        ));
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_requires_consumer_lease_transfer() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 9);
+        evidence.obligation_summary.transferred_consumer_leases = 1;
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("consumer lease transfer gaps must fail closed");
+        assert_eq!(
+            err,
+            RebalanceError::ConsumerLeaseTransferIncomplete {
+                active_leases: 2,
+                transferred: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_requires_reply_right_reissue() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 10);
+        evidence.obligation_summary.active_reply_rights = 2;
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("reply rights must be reissued onto the next epoch");
+        assert_eq!(
+            err,
+            RebalanceError::ReplyRightsNotReissued {
+                active_rights: 2,
+                reissued: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_honors_hysteresis_band() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        let err = cell
+            .certify_self_rebalance(
+                &policy,
+                &candidates,
+                ObservedCellLoad::new(512),
+                RebalanceCutEvidence {
+                    next_sequencer: cell.steward_set[0].clone(),
+                    retention_generation: 4,
+                    obligation_summary: RebalanceObligationSummary {
+                        publish_obligations_below_cut: 0,
+                        active_consumer_leases: 0,
+                        transferred_consumer_leases: 0,
+                        ambiguous_consumer_lease_owners: 0,
+                        active_reply_rights: 0,
+                        reissued_reply_rights: 0,
+                        dangling_reply_rights: 0,
+                    },
+                    repair_symbols: Vec::new(),
+                },
+            )
+            .expect_err("in-band load should not force an epoch change");
+        assert_eq!(
+            err,
+            RebalanceError::NoRebalanceNeeded {
+                cell_id: cell.cell_id,
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_requires_hot_repair_spread() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = warm_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(2_048);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 11);
+        evidence.repair_symbols =
+            repair_bindings_for(&cell, &plan, &candidates, 11, plan.next_stewards.len());
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("hot rebalance must prove wider repair spread");
+        assert_eq!(
+            err,
+            RebalanceError::InsufficientRepairSymbolHolders {
+                required: 6,
+                actual: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_rejects_wrong_symbol_epoch_binding() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 12);
+        evidence.repair_symbols[0].cell_epoch = cell.epoch.next_generation();
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("repair symbols must be bound to the certified source epoch");
+        assert_eq!(
+            err,
+            RebalanceError::RepairBindingWrongEpoch {
+                node: plan.next_stewards[0].clone(),
+                expected: cell.epoch,
+                actual: cell.epoch.next_generation(),
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_allows_retained_steward_binding_after_candidate_drop() {
+        let policy = PlacementPolicy {
+            cold_stewards: 1,
+            warm_stewards: 3,
+            hot_stewards: 3,
+            candidate_pool_size: 3,
+            rebalance_budget: RebalanceBudget {
+                max_steward_changes: 1,
+            },
+            ..PlacementPolicy::default()
+        };
+        let all_candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&all_candidates, &policy);
+        let current_steward = cell.steward_set[0].clone();
+        let reduced_candidates: Vec<_> = all_candidates
+            .into_iter()
+            .filter(|candidate| candidate.node_id != current_steward)
+            .collect();
+        let observed_load = ObservedCellLoad::new(2_048);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &reduced_candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        assert!(
+            contains_node(&plan.next_stewards, &current_steward),
+            "budgeted rebalance should retain the current steward for one step"
+        );
+
+        let evidence = RebalanceCutEvidence {
+            next_sequencer: plan
+                .added_stewards
+                .first()
+                .cloned()
+                .expect("one added steward"),
+            retention_generation: 13,
+            obligation_summary: RebalanceObligationSummary {
+                publish_obligations_below_cut: 0,
+                active_consumer_leases: 0,
+                transferred_consumer_leases: 0,
+                ambiguous_consumer_lease_owners: 0,
+                active_reply_rights: 0,
+                reissued_reply_rights: 0,
+                dangling_reply_rights: 0,
+            },
+            repair_symbols: vec![
+                RepairSymbolBinding::new(current_steward.clone(), cell.epoch, 13),
+                RepairSymbolBinding::new(plan.next_stewards[1].clone(), cell.epoch, 13),
+                RepairSymbolBinding::new(reduced_candidates[1].node_id.clone(), cell.epoch, 13),
+                RepairSymbolBinding::new(reduced_candidates[2].node_id.clone(), cell.epoch, 13),
+            ],
+        };
+
+        let certified = cell
+            .certify_self_rebalance(&policy, &reduced_candidates, observed_load, evidence)
+            .expect("retained stewards remain lawful repair holders during budgeted churn");
+        assert!(contains_node(
+            &certified.resulting_cell.steward_set,
+            &current_steward
+        ));
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_preserves_monotonic_fence_generation_across_epochs() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let mut cell = warm_subject_cell(&candidates, &policy);
+        let second_steward = cell.steward_set[1].clone();
+        let original_steward = cell.steward_set[0].clone();
+
+        cell.control_capsule
+            .fence_sequencer(second_steward)
+            .expect("first fence");
+        cell.control_capsule
+            .fence_sequencer(original_steward)
+            .expect("second fence");
+        let pre_cut_generation = cell.control_capsule.sequencer_lease_generation;
+        assert!(
+            pre_cut_generation > cell.epoch.generation,
+            "test setup must lift fence generation above the cell epoch generation"
+        );
+
+        let observed_load = ObservedCellLoad::new(2_048);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 14);
+
+        let certified = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect("certified rebalance");
+        assert_eq!(
+            certified
+                .resulting_cell
+                .control_capsule
+                .sequencer_lease_generation,
+            pre_cut_generation + 1
+        );
+        assert!(
+            certified
+                .resulting_cell
+                .control_capsule
+                .sequencer_lease_generation
+                > certified.resulting_cell.epoch.generation
+        );
     }
 
     #[test]
