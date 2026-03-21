@@ -2040,9 +2040,9 @@ mod tests {
     }
 
     #[test]
-    fn half_open_to_closed_resets_sliding_window_preventing_immediate_reopen() {
-        // Use minimum_calls: 3 so that the sliding window doesn't trip on
-        // fewer than 3 observations, letting us control when the window fires.
+    fn opening_circuit_clears_sliding_window_before_half_open_recovery() {
+        // Opening the breaker is what clears stale failures from the rate
+        // window. Half-open recovery should not need a second reset on close.
         let policy = CircuitBreakerPolicy {
             failure_threshold: 2,
             success_threshold: 1,
@@ -2063,6 +2063,11 @@ mod tests {
         let p = cb.should_allow(now).expect("closed after 1");
         cb.record_failure(p, "err", now);
         assert!(cb.should_allow(now).is_err(), "should be open");
+        assert_eq!(
+            cb.metrics().sliding_window_failure_rate,
+            Some(0.0),
+            "opening the breaker should clear stale failure history from the sliding window"
+        );
 
         // Wait for open duration, get a probe.
         let later = Time::from_millis(1_200);
@@ -2071,15 +2076,18 @@ mod tests {
 
         // Successful probe closes the circuit.
         cb.record_success(probe, later);
+        assert_eq!(
+            cb.state(),
+            State::Closed { failures: 0 },
+            "single successful probe should close the circuit when success_threshold=1"
+        );
 
-        // The circuit must stay closed. Without the sliding window reset,
-        // the window still contains 2 failures + 1 success = 3 calls
-        // (>= minimum_calls=3) with 66% failure rate (> 50% threshold),
-        // which would immediately reopen the circuit.
+        // The circuit must stay closed because the stale failures were already
+        // cleared when the breaker opened.
         let post = cb.should_allow(later);
         assert!(
             post.is_ok(),
-            "circuit should stay closed after window reset, got {post:?}"
+            "circuit should stay closed after half-open recovery when open already cleared the window, got {post:?}"
         );
     }
 }
