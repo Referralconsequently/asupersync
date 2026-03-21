@@ -106,9 +106,10 @@ Cargo-heavy validation and replay commands must use `rch`:
 
 - `rch exec -- cargo ...`
 
-Primary replay anchor:
+Primary replay anchors:
 
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture`
+- `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture`
 
 ## Closure Readiness Contract
 
@@ -122,7 +123,7 @@ Current dependency set in the artifact:
 3. `asupersync-n5fk6` (F7 final closure evidence in G3 cards) must be `closed`
 4. `asupersync-2zu9p` (F8 implementation + closure evidence) must be `closed`
 
-Current closure-readiness status (2026-03-05 refresh):
+Current closure-readiness status (2026-03-21 refresh):
 
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`
@@ -131,6 +132,21 @@ Current closure-readiness status (2026-03-05 refresh):
 
 `ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
 `closed`.
+
+The E5 dependency is intentionally modeled as a two-part evidence contract:
+
+- `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` remains the narrowed
+  negative guardrail for the current not-ready state.
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` remains the
+  broader short-window directional refresh and is still not closure-grade.
+
+In invariant-test terms, the current E5 evidence posture is
+`confidence_contract = short_window_directional_not_closure_grade`: the
+directional refresh is informative for rollout posture, but it is not sufficient
+to close the dependency on its own.
+
+That means Track-G still needs raw-sample or longer-window broader E5 evidence
+before G7 can truthfully flip `ready_to_close` to `true`.
 
 Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `residual_risk_register`, `go_no_go_decision`) are now attached in

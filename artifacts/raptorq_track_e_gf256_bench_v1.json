@@ -223,6 +223,8 @@
       }
     ],
     "decision": {
+      "decision_artifact_id": "simd_policy_ablation_2026_03_02",
+      "decision_evidence_status": "historical-reference",
       "selected_profile_defaults": "retain current x86 defaults",
       "rationale": "Neither tested override produced material, reliable uplift on the primary 16KiB+16KiB dual-lane scenario.",
       "supersession": {
@@ -305,7 +307,9 @@
       }
     ],
     "decision": {
+      "decision_artifact_id": "simd_policy_ablation_2026_03_04",
       "decision_role": "canonical_current_x86_default_contract",
+      "decision_evidence_status": "canonical",
       "supersedes": [
         "simd_policy_ablation_2026_03_02"
       ],

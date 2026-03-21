@@ -148,7 +148,7 @@ rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy
 
 Probe log schema:
 
-- `schema_version = raptorq-track-e-dual-policy-probe-v4`
+- `schema_version = raptorq-track-e-dual-policy-probe-v5`
 - `manifest_schema_version`, `profile_schema_version`
 - `scenario_id`, `seed`
 - `kernel`, `architecture_class`, `active_profile_architecture_class`
@@ -171,6 +171,7 @@ Probe log schema:
 - `mul_decision`, `mul_decision_reason`
 - `addmul_decision`, `addmul_decision_reason`
 - `decision_artifact_id`, `decision_role`
+- `decision_evidence_status`
 - `selected_candidate_summary`, `rejected_candidate_set_summary`
 - `selected_mul_delta_vs_baseline_pct`
 - `selected_addmul_delta_vs_baseline_pct`
@@ -183,9 +184,11 @@ Override truthfulness rule:
 - override runs therefore scrub canonical selection provenance to `selected_tuning_candidate_id = manual-env-override-unbacked`,
   `decision_role = runtime_override_not_canonical_profile_selection`,
   `decision_artifact_id = manual_env_override_unbacked`,
+  `decision_evidence_status = runtime-override-unbacked`,
   `replay_pointer = replay:rq-e-gf256-profile-pack-env-override-v1`
-  and an override-specific `command_bundle = rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives`
-  placeholder that tells operators to replay from the emitted override fields
+  and an override-specific `command_bundle` placeholder:
+  `rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives`
+  that tells operators to replay from the emitted override fields
 
 Coverage intent:
 
@@ -200,16 +203,22 @@ Command-surface split:
 - Probe-specific bundle: the dual-policy log `repro_command` remains anchored to
   `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`.
 
-Current default policy note (profile-pack schema v4):
+Current default policy note (profile-pack schema v5):
 
 - `x86-avx2-balanced-v1` is split-biased for `mul_slices2` (`mul_window_min > mul_window_max`), so auto mode keeps dual-mul on the sequential path by default.
 - `addmul_slices2` uses the bounded fused window (`24576..32768`, lane floor `8192`) from the 2026-03-04 deterministic corpus refresh, preserving balanced-lane gains while filtering asymmetric/small-lane regressions.
-- Schema v4 is additive over v3: the profile-pack and dual-policy log surfaces now carry decision-metadata fields, while the replay pointer remains `replay:rq-e-gf256-profile-pack-v3` because the tuned window/corpus contract itself did not change.
+- Schema v5 is additive over v4: the profile-pack and dual-policy log surfaces now carry explicit `decision_evidence_status`, while the replay pointer remains `replay:rq-e-gf256-profile-pack-v3` because the tuned window/corpus contract itself did not change.
 - The live manifest/log surface now carries the same decision anchor as the checked-in Track-E artifact:
   `decision_artifact_id = simd_policy_ablation_2026_03_04`,
   `decision_role = canonical_current_x86_default_contract`,
+  `decision_evidence_status = canonical`,
   selected-candidate summary `material addmul auto uplift on balanced large-lane scenarios while mul auto remained near neutral`,
   and rejected-candidate-set summary `candidate mul windows improved addmul but regressed mul auto, so default rollout keeps mul auto disabled`.
+- `aarch64-neon-balanced-v1` is intentionally surfaced as provisional rather than silently peer-equivalent to the x86 contract:
+  `decision_artifact_id = pending_same_target_profile_ablation`,
+  `decision_role = catalog_bootstrap_pending_same_target_ablation`,
+  and `decision_evidence_status = pending-same-target-ablation`
+  until same-target NEON ablation evidence lands.
 
 ### E5 Profile-Pack Capture (`asupersync-36m6p.1`, 2026-02-22)
 
@@ -280,6 +289,8 @@ Recorded in `artifacts/raptorq_track_e_gf256_bench_v1.json` under `simd_policy_a
 
 This 2026-03-02 packet is now explicitly a historical comparator, not the
 current default contract. The artifact marks that machine-checkably via
+`simd_policy_ablation_2026_03_02.decision.decision_artifact_id = simd_policy_ablation_2026_03_02`,
+`simd_policy_ablation_2026_03_02.decision.decision_evidence_status = historical-reference`,
 `simd_policy_ablation_2026_03_02.decision.supersession.status = superseded`
 and
 `simd_policy_ablation_2026_03_02.decision.supersession.superseded_by = simd_policy_ablation_2026_03_04`.
@@ -291,8 +302,10 @@ This default-selection result is recorded in
 `simd_policy_ablation_2026_03_04.decision` and is the canonical E5 artifact for
 the current x86 auto-window contract.
 
-The artifact now also pins that role directly:
+The artifact now also pins the decision identity and maturity directly:
+`simd_policy_ablation_2026_03_04.decision.decision_artifact_id = simd_policy_ablation_2026_03_04`,
 `simd_policy_ablation_2026_03_04.decision.decision_role = canonical_current_x86_default_contract`
+`simd_policy_ablation_2026_03_04.decision.decision_evidence_status = canonical`
 and
 `simd_policy_ablation_2026_03_04.decision.supersedes = ["simd_policy_ablation_2026_03_02"]`.
 

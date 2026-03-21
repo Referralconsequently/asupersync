@@ -2322,6 +2322,16 @@ fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
         "E5 artifact must keep the current x86-default contract role explicit"
     );
     assert_eq!(
+        decision["decision_artifact_id"].as_str(),
+        Some("simd_policy_ablation_2026_03_04"),
+        "E5 artifact must keep the current x86-default contract artifact id explicit"
+    );
+    assert_eq!(
+        decision["decision_evidence_status"].as_str(),
+        Some("canonical"),
+        "E5 artifact must keep the current x86-default evidence maturity explicit"
+    );
+    assert_eq!(
         x86.architecture_class.as_str(),
         "x86-avx2",
         "live x86 profile-pack metadata must stay architecture-specific"
@@ -2419,6 +2429,7 @@ fn e5_bench_policy_logs_emit_decision_metadata_fields() {
     for required in [
         "decision_artifact_id",
         "decision_role",
+        "decision_evidence_status",
         "selected_candidate_summary",
         "rejected_candidate_set_summary",
         "selected_mul_delta_vs_baseline_pct",
@@ -2449,6 +2460,16 @@ fn e5_simd_ablation_artifact_makes_decision_chronology_explicit() {
         "historical same-session result must keep the retained-defaults outcome"
     );
     assert_eq!(
+        historical["decision_artifact_id"].as_str(),
+        Some("simd_policy_ablation_2026_03_02"),
+        "historical same-session result must keep its own artifact id explicit"
+    );
+    assert_eq!(
+        historical["decision_evidence_status"].as_str(),
+        Some("historical-reference"),
+        "historical same-session result must stay tagged as historical reference evidence"
+    );
+    assert_eq!(
         historical["supersession"]["status"].as_str(),
         Some("superseded"),
         "historical same-session result must be marked superseded"
@@ -2471,6 +2492,16 @@ fn e5_simd_ablation_artifact_makes_decision_chronology_explicit() {
         canonical["decision_role"].as_str(),
         Some("canonical_current_x86_default_contract"),
         "broader 2026-03-04 corpus must be pinned as the canonical x86 default contract"
+    );
+    assert_eq!(
+        canonical["decision_artifact_id"].as_str(),
+        Some("simd_policy_ablation_2026_03_04"),
+        "broader 2026-03-04 corpus must keep the canonical artifact id explicit"
+    );
+    assert_eq!(
+        canonical["decision_evidence_status"].as_str(),
+        Some("canonical"),
+        "broader 2026-03-04 corpus must stay tagged as canonical evidence"
     );
     let supersedes = canonical["supersedes"]
         .as_array()
@@ -3030,11 +3061,12 @@ fn e5_profile_pack_doc_mentions_current_x86_default_contract() {
     for required in [
         "artifacts/raptorq_track_e_gf256_bench_v1.json",
         "simd_policy_ablation_2026_03_04",
-        "raptorq-track-e-dual-policy-probe-v4",
-        "profile-pack schema v4",
+        "raptorq-track-e-dual-policy-probe-v5",
+        "profile-pack schema v5",
         "replay:rq-e-gf256-profile-pack-v3",
         "decision_artifact_id = simd_policy_ablation_2026_03_04",
         "decision_role = canonical_current_x86_default_contract",
+        "decision_evidence_status = canonical",
         "`target_arch`, `target_os`, `target_env`, `target_endian`, `target_pointer_width_bits`",
         "addmul_slices2_c1_auto",
         "addmul_slices2_c1_sequential",
@@ -3116,9 +3148,13 @@ fn e5_profile_pack_doc_explains_override_truthfulness_rule() {
 fn e5_profile_pack_doc_explains_ablation_decision_chronology() {
     for required in [
         "historical comparator",
+        "simd_policy_ablation_2026_03_02.decision.decision_artifact_id = simd_policy_ablation_2026_03_02",
+        "simd_policy_ablation_2026_03_02.decision.decision_evidence_status = historical-reference",
         "simd_policy_ablation_2026_03_02.decision.supersession.status = superseded",
         "simd_policy_ablation_2026_03_02.decision.supersession.superseded_by = simd_policy_ablation_2026_03_04",
+        "simd_policy_ablation_2026_03_04.decision.decision_artifact_id = simd_policy_ablation_2026_03_04",
         "simd_policy_ablation_2026_03_04.decision.decision_role = canonical_current_x86_default_contract",
+        "simd_policy_ablation_2026_03_04.decision.decision_evidence_status = canonical",
         "simd_policy_ablation_2026_03_04.decision.supersedes = [\"simd_policy_ablation_2026_03_02\"]",
     ] {
         assert!(

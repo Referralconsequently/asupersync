@@ -10,23 +10,23 @@
 #![allow(missing_docs)]
 #![recursion_limit = "512"]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    Gf256, Gf256ProfileFallbackReason, Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot,
     dual_addmul_kernel_decision_detail, dual_mul_kernel_decision_detail, gf256_add_slice,
     gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice,
-    gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
+    gf256_mul_slices2, gf256_profile_pack_manifest_snapshot, Gf256, Gf256ProfileFallbackReason,
+    Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot,
 };
-use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
+use asupersync::raptorq::linalg::{row_scale_add, row_xor, DenseRow, GaussianSolver};
 use asupersync::raptorq::systematic::SystematicEncoder;
 
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
 const TRACK_E_REPRO_CMD: &str =
     "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
-const TRACK_E_POLICY_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-v4";
-const TRACK_E_POLICY_PROBE_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-probe-v4";
+const TRACK_E_POLICY_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-v5";
+const TRACK_E_POLICY_PROBE_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-probe-v5";
 const TRACK_E_POLICY_PROBE_REPRO_CMD: &str =
     "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy";
 const TRACK_E_CRITERION_SAMPLE_SIZE: usize = 10;
@@ -123,6 +123,7 @@ fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
         "command_bundle": policy.command_bundle,
         "decision_artifact_id": active_profile.decision_artifact_id,
         "decision_role": active_profile.decision_role,
+        "decision_evidence_status": active_profile.decision_evidence_status.as_str(),
         "selected_candidate_summary": active_profile.selected_candidate_summary,
         "rejected_candidate_set_summary": active_profile.rejected_candidate_set_summary,
         "selected_mul_delta_vs_baseline_pct": active_profile.selected_mul_delta_vs_baseline_pct,
@@ -217,6 +218,7 @@ fn emit_track_e_policy_probe_log(
         "command_bundle": policy.command_bundle,
         "decision_artifact_id": active_profile.decision_artifact_id,
         "decision_role": active_profile.decision_role,
+        "decision_evidence_status": active_profile.decision_evidence_status.as_str(),
         "selected_candidate_summary": active_profile.selected_candidate_summary,
         "rejected_candidate_set_summary": active_profile.rejected_candidate_set_summary,
         "selected_mul_delta_vs_baseline_pct": active_profile.selected_mul_delta_vs_baseline_pct,
