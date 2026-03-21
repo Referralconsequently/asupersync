@@ -220,6 +220,8 @@ struct Tag {
 pub struct ORSet<V: Ord + Clone> {
     /// Maps each value to the set of tags that added it.
     entries: BTreeMap<V, BTreeSet<Tag>>,
+    /// Set of tags that have been observed and removed.
+    tombstones: BTreeSet<Tag>,
     /// Per-node sequence counter for generating unique tags.
     sequences: BTreeMap<NodeId, u64>,
 }
@@ -230,6 +232,7 @@ impl<V: Ord + Clone> ORSet<V> {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            tombstones: BTreeSet::new(),
             sequences: BTreeMap::new(),
         }
     }
@@ -250,11 +253,15 @@ impl<V: Ord + Clone> ORSet<V> {
         self.entries.entry(value).or_default().insert(tag);
     }
 
-    /// Removes a value by clearing all currently observed tags.
+    /// Removes a value by moving all currently observed tags to tombstones.
     ///
     /// Concurrent adds (with tags not yet observed) will survive.
     pub fn remove(&mut self, value: &V) {
-        self.entries.remove(value);
+        if let Some(tags) = self.entries.remove(value) {
+            for tag in tags {
+                self.tombstones.insert(tag);
+            }
+        }
     }
 
     /// Returns `true` if the value is present (has at least one live tag).
@@ -295,12 +302,25 @@ impl<V: Ord + Clone> Default for ORSet<V> {
 
 impl<V: Ord + Clone> Merge for ORSet<V> {
     fn merge(&mut self, other: &Self) {
+        // Merge tombstones.
+        for tag in &other.tombstones {
+            self.tombstones.insert(tag.clone());
+        }
+
         for (value, other_tags) in &other.entries {
             let tags = self.entries.entry(value.clone()).or_default();
             for tag in other_tags {
-                tags.insert(tag.clone());
+                if !self.tombstones.contains(tag) {
+                    tags.insert(tag.clone());
+                }
             }
         }
+
+        // Clean up our own entries that are in the merged tombstones
+        for tags in self.entries.values_mut() {
+            tags.retain(|tag| !self.tombstones.contains(tag));
+        }
+
         // Merge sequence counters (take max per node).
         for (node, &seq) in &other.sequences {
             if let Some(v) = self.sequences.get_mut(node) {
