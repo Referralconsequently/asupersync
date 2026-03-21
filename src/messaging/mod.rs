@@ -176,9 +176,11 @@ pub use redis::{RedisClient, RedisConfig, RedisError};
 pub use service::{
     BudgetSemantics, CallerOptions, CancellationObligations, CaptureRules, ChunkedReplyObligation,
     CompensationSemantics, EvidenceLevel, MobilityConstraint, MonitoringPolicy, OverloadPolicy,
-    PayloadShape, ProviderTerms, QuantitativeContract, QuantitativeContractError, ReplyCertificate,
-    ReplyShape, RequestCertificate, RetryLaw, ServiceContractError, ServiceContractSchema,
-    ServiceRegistration, ValidatedServiceRequest,
+    PayloadShape, ProviderTerms, QuantitativeContract, QuantitativeContractError,
+    QuantitativeContractEvaluation, QuantitativeContractMonitor, QuantitativeContractState,
+    QuantitativeMonitorAlertState, QuantitativeMonitorEvidence, QuantitativePolicyRecommendation,
+    ReplyCertificate, ReplyShape, RequestCertificate, RetryLaw, ServiceContractError,
+    ServiceContractSchema, ServiceRegistration, ValidatedServiceRequest,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use session::{

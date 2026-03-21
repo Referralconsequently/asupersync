@@ -5,6 +5,7 @@ use super::service::{CancellationObligations, CleanupUrgency};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::time::Duration;
+use thiserror::Error;
 
 /// Operator-visible workload classes used when overload decisions are driven by
 /// semantic damage rather than raw queue depth alone.
@@ -391,6 +392,544 @@ fn sort_candidates(candidates: &mut [Candidate]) {
     );
 }
 
+/// Envelope constraining adaptive reliability tuning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SafetyEnvelope {
+    /// Minimum steward quorum size the controller may choose.
+    pub min_stewards: usize,
+    /// Maximum steward quorum size the controller may choose.
+    pub max_stewards: usize,
+    /// Minimum repair-symbol depth allowed by policy.
+    pub min_repair_depth: u16,
+    /// Maximum repair-symbol depth allowed by policy.
+    pub max_repair_depth: u16,
+    /// Minimum relay-placement budget.
+    pub min_relay_budget: u16,
+    /// Maximum relay-placement budget.
+    pub max_relay_budget: u16,
+    /// Weakest delivery class the controller may select.
+    pub min_delivery_class: DeliveryClass,
+    /// Strongest delivery class the controller may select.
+    pub max_delivery_class: DeliveryClass,
+    /// Minimum redelivery-attempt budget.
+    pub min_redelivery_attempts: u16,
+    /// Maximum redelivery-attempt budget.
+    pub max_redelivery_attempts: u16,
+    /// Minimum replay-buffer allocation.
+    pub min_replay_buffer_events: u32,
+    /// Maximum replay-buffer allocation.
+    pub max_replay_buffer_events: u32,
+    /// Minimum evidence/confidence required before shifting policy.
+    pub evidence_threshold: f64,
+    /// Violation rate that forces rollback to the last stable policy.
+    pub rollback_violation_threshold: f64,
+}
+
+impl Default for SafetyEnvelope {
+    fn default() -> Self {
+        Self {
+            min_stewards: 1,
+            max_stewards: 5,
+            min_repair_depth: 0,
+            max_repair_depth: 8,
+            min_relay_budget: 0,
+            max_relay_budget: 4,
+            min_delivery_class: DeliveryClass::EphemeralInteractive,
+            max_delivery_class: DeliveryClass::MobilitySafe,
+            min_redelivery_attempts: 1,
+            max_redelivery_attempts: 6,
+            min_replay_buffer_events: 32,
+            max_replay_buffer_events: 2048,
+            evidence_threshold: 0.8,
+            rollback_violation_threshold: 0.25,
+        }
+    }
+}
+
+impl SafetyEnvelope {
+    /// Validate that the envelope is well formed.
+    pub fn validate(&self) -> Result<(), ReliabilityControlError> {
+        validate_probability("evidence_threshold", self.evidence_threshold)?;
+        validate_probability(
+            "rollback_violation_threshold",
+            self.rollback_violation_threshold,
+        )?;
+        validate_envelope_range("stewards", self.min_stewards, self.max_stewards, true)?;
+        validate_envelope_range(
+            "repair_depth",
+            self.min_repair_depth,
+            self.max_repair_depth,
+            false,
+        )?;
+        validate_envelope_range(
+            "relay_budget",
+            self.min_relay_budget,
+            self.max_relay_budget,
+            false,
+        )?;
+        validate_envelope_range(
+            "redelivery_attempts",
+            self.min_redelivery_attempts,
+            self.max_redelivery_attempts,
+            true,
+        )?;
+        validate_envelope_range(
+            "replay_buffer_events",
+            self.min_replay_buffer_events,
+            self.max_replay_buffer_events,
+            true,
+        )?;
+        if self.min_delivery_class > self.max_delivery_class {
+            return Err(ReliabilityControlError::InvalidEnvelopeRange {
+                field: "delivery_class",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Concrete reliability settings chosen inside one safety envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReliabilitySettings {
+    /// Active steward quorum size.
+    pub steward_count: usize,
+    /// Repair-symbol depth or equivalent redundancy budget.
+    pub repair_depth: u16,
+    /// Relay-placement budget for delegated serving.
+    pub relay_budget: u16,
+    /// Delivery class currently selected for this workload.
+    pub delivery_class: DeliveryClass,
+    /// Maximum redelivery attempts before dead-lettering or escalation.
+    pub redelivery_attempts: u16,
+    /// Replay-buffer capacity reserved for this lane.
+    pub replay_buffer_events: u32,
+}
+
+impl Default for ReliabilitySettings {
+    fn default() -> Self {
+        Self {
+            steward_count: 1,
+            repair_depth: 0,
+            relay_budget: 0,
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            redelivery_attempts: 1,
+            replay_buffer_events: 64,
+        }
+    }
+}
+
+impl ReliabilitySettings {
+    /// Validate that the settings stay inside the envelope.
+    pub fn validate_within(
+        &self,
+        envelope: &SafetyEnvelope,
+    ) -> Result<(), ReliabilityControlError> {
+        envelope.validate()?;
+        validate_setting_range(
+            "steward_count",
+            self.steward_count,
+            envelope.min_stewards,
+            envelope.max_stewards,
+        )?;
+        validate_setting_range(
+            "repair_depth",
+            self.repair_depth,
+            envelope.min_repair_depth,
+            envelope.max_repair_depth,
+        )?;
+        validate_setting_range(
+            "relay_budget",
+            self.relay_budget,
+            envelope.min_relay_budget,
+            envelope.max_relay_budget,
+        )?;
+        validate_setting_range(
+            "redelivery_attempts",
+            self.redelivery_attempts,
+            envelope.min_redelivery_attempts,
+            envelope.max_redelivery_attempts,
+        )?;
+        validate_setting_range(
+            "replay_buffer_events",
+            self.replay_buffer_events,
+            envelope.min_replay_buffer_events,
+            envelope.max_replay_buffer_events,
+        )?;
+        if self.delivery_class < envelope.min_delivery_class
+            || self.delivery_class > envelope.max_delivery_class
+        {
+            return Err(ReliabilityControlError::SettingOutsideEnvelope {
+                field: "delivery_class",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Evidence snapshot that justifies an adaptive reliability decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReliabilityEvidence {
+    /// Aggregate evidence score synthesized from replay, telemetry, and audits.
+    pub evidence_score: f64,
+    /// Confidence attached to the evidence packet.
+    pub confidence: f64,
+    /// Fraction of requests missing their declared SLO in the current window.
+    pub latency_violation_rate: f64,
+    /// Pressure coming from repair/backfill debt.
+    pub repair_pressure: f64,
+    /// Pressure indicating delegated relay serving is saturated or beneficial.
+    pub relay_pressure: f64,
+    /// Pressure indicating replay buffers are under stress.
+    pub replay_pressure: f64,
+    /// Number of observations contributing to the packet.
+    pub observation_window: u32,
+}
+
+impl ReliabilityEvidence {
+    /// Validate the evidence packet.
+    pub fn validate(&self) -> Result<(), ReliabilityControlError> {
+        validate_probability("evidence_score", self.evidence_score)?;
+        validate_probability("confidence", self.confidence)?;
+        validate_probability("latency_violation_rate", self.latency_violation_rate)?;
+        validate_probability("repair_pressure", self.repair_pressure)?;
+        validate_probability("relay_pressure", self.relay_pressure)?;
+        validate_probability("replay_pressure", self.replay_pressure)?;
+        if self.observation_window == 0 {
+            return Err(ReliabilityControlError::ZeroObservationWindow);
+        }
+        Ok(())
+    }
+
+    fn supports_shift(&self, threshold: f64) -> bool {
+        self.evidence_score >= threshold && self.confidence >= threshold
+    }
+}
+
+/// One operator-auditable policy change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReliabilityDecision {
+    /// Material action taken by the controller.
+    pub action: ReliabilityAction,
+    /// Settings before the decision.
+    pub previous: ReliabilitySettings,
+    /// Settings after the decision.
+    pub next: ReliabilitySettings,
+    /// Evidence packet that justified the decision.
+    pub evidence: ReliabilityEvidence,
+    /// Human-readable explanation for operators and replay logs.
+    pub reason: String,
+    /// Rollback target retained after a forward shift.
+    pub rollback_target: Option<ReliabilitySettings>,
+}
+
+impl ReliabilityDecision {
+    /// Returns true when the decision materially changes settings.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.previous != self.next
+    }
+}
+
+/// Controller action chosen for one evidence packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReliabilityAction {
+    /// Keep the current policy unchanged.
+    Hold,
+    /// Tighten reliability inside the envelope.
+    Tighten,
+    /// Relax reliability overhead inside the envelope.
+    Relax,
+    /// Roll back to the previous stable policy.
+    Rollback,
+}
+
+/// Stateful bounded-regret controller for FABRIC reliability knobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundedRegretReliabilityController {
+    /// Safety envelope constraining all adaptation.
+    pub envelope: SafetyEnvelope,
+    /// Current selected settings.
+    pub current: ReliabilitySettings,
+    rollback_target: Option<ReliabilitySettings>,
+}
+
+impl BoundedRegretReliabilityController {
+    /// Build a new controller from one envelope and initial settings.
+    pub fn new(
+        envelope: SafetyEnvelope,
+        current: ReliabilitySettings,
+    ) -> Result<Self, ReliabilityControlError> {
+        current.validate_within(&envelope)?;
+        Ok(Self {
+            envelope,
+            current,
+            rollback_target: None,
+        })
+    }
+
+    /// Inspect the currently retained rollback target, if any.
+    #[must_use]
+    pub fn rollback_target(&self) -> Option<&ReliabilitySettings> {
+        self.rollback_target.as_ref()
+    }
+
+    /// Apply one evidence packet and return the resulting operator-visible decision.
+    pub fn apply(
+        &mut self,
+        evidence: ReliabilityEvidence,
+    ) -> Result<ReliabilityDecision, ReliabilityControlError> {
+        evidence.validate()?;
+
+        if evidence.latency_violation_rate >= self.envelope.rollback_violation_threshold
+            && let Some(rollback_target) = self.rollback_target.take()
+        {
+            let previous = self.current.clone();
+            let reason = format!(
+                "rollback triggered by violation rate {:.3} crossing threshold {:.3}",
+                evidence.latency_violation_rate, self.envelope.rollback_violation_threshold
+            );
+            self.current = rollback_target.clone();
+            return Ok(ReliabilityDecision {
+                action: ReliabilityAction::Rollback,
+                previous,
+                next: rollback_target,
+                evidence,
+                reason,
+                rollback_target: None,
+            });
+        }
+
+        if !evidence.supports_shift(self.envelope.evidence_threshold) {
+            let reason = format!(
+                "hold: evidence {:.3} / confidence {:.3} below threshold {:.3}",
+                evidence.evidence_score, evidence.confidence, self.envelope.evidence_threshold
+            );
+            return Ok(ReliabilityDecision {
+                action: ReliabilityAction::Hold,
+                previous: self.current.clone(),
+                next: self.current.clone(),
+                evidence,
+                reason,
+                rollback_target: self.rollback_target.clone(),
+            });
+        }
+
+        let previous = self.current.clone();
+        let mut next = previous.clone();
+        let action = if evidence.latency_violation_rate > 0.0
+            || evidence.repair_pressure >= 0.5
+            || evidence.relay_pressure >= 0.6
+            || evidence.replay_pressure >= 0.6
+        {
+            tighten_reliability(&mut next, &self.envelope, &evidence);
+            if next == previous {
+                ReliabilityAction::Hold
+            } else {
+                ReliabilityAction::Tighten
+            }
+        } else {
+            relax_reliability(&mut next, &self.envelope);
+            if next == previous {
+                ReliabilityAction::Hold
+            } else {
+                ReliabilityAction::Relax
+            }
+        };
+
+        if action == ReliabilityAction::Hold {
+            return Ok(ReliabilityDecision {
+                action,
+                previous: previous.clone(),
+                next: previous,
+                evidence,
+                reason: "hold: settings already at the relevant envelope boundary".to_owned(),
+                rollback_target: self.rollback_target.clone(),
+            });
+        }
+
+        self.rollback_target = Some(previous.clone());
+        self.current = next.clone();
+        Ok(ReliabilityDecision {
+            action,
+            previous,
+            next,
+            evidence,
+            reason: match action {
+                ReliabilityAction::Tighten => {
+                    "tighten reliability within envelope using evidence-backed pressure signals"
+                        .to_owned()
+                }
+                ReliabilityAction::Relax => {
+                    "relax reliability overhead within envelope after stable low-pressure evidence"
+                        .to_owned()
+                }
+                ReliabilityAction::Hold | ReliabilityAction::Rollback => unreachable!(),
+            },
+            rollback_target: self.rollback_target.clone(),
+        })
+    }
+}
+
+/// Validation failures for bounded-regret reliability control.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum ReliabilityControlError {
+    /// A probability-like field must stay inside `[0.0, 1.0]`.
+    #[error("field `{field}` must be finite and in [0.0, 1.0], got {value}")]
+    InvalidProbability {
+        /// Field that failed validation.
+        field: &'static str,
+        /// Rejected value.
+        value: f64,
+    },
+    /// An envelope range is inverted or uses an invalid positive minimum.
+    #[error("safety envelope range for `{field}` is invalid")]
+    InvalidEnvelopeRange {
+        /// Field whose range is invalid.
+        field: &'static str,
+    },
+    /// A concrete setting is outside the declared safety envelope.
+    #[error("setting `{field}` is outside the declared safety envelope")]
+    SettingOutsideEnvelope {
+        /// Setting that violated the envelope.
+        field: &'static str,
+    },
+    /// Evidence packets must represent at least one observation.
+    #[error("observation_window must be greater than zero")]
+    ZeroObservationWindow,
+}
+
+fn validate_probability(field: &'static str, value: f64) -> Result<(), ReliabilityControlError> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(ReliabilityControlError::InvalidProbability { field, value })
+    }
+}
+
+fn validate_envelope_range<T>(
+    field: &'static str,
+    min: T,
+    max: T,
+    strictly_positive_min: bool,
+) -> Result<(), ReliabilityControlError>
+where
+    T: Copy + Ord + Default,
+{
+    if min > max || (strictly_positive_min && min == T::default()) {
+        Err(ReliabilityControlError::InvalidEnvelopeRange { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_setting_range<T>(
+    field: &'static str,
+    value: T,
+    min: T,
+    max: T,
+) -> Result<(), ReliabilityControlError>
+where
+    T: Copy + Ord,
+{
+    if value < min || value > max {
+        Err(ReliabilityControlError::SettingOutsideEnvelope { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn tighten_reliability(
+    next: &mut ReliabilitySettings,
+    envelope: &SafetyEnvelope,
+    evidence: &ReliabilityEvidence,
+) {
+    if evidence.latency_violation_rate > 0.0 {
+        next.steward_count = next
+            .steward_count
+            .saturating_add(1)
+            .min(envelope.max_stewards);
+        next.redelivery_attempts = next
+            .redelivery_attempts
+            .saturating_add(1)
+            .min(envelope.max_redelivery_attempts);
+        next.delivery_class =
+            promote_delivery_class(next.delivery_class, envelope.max_delivery_class);
+    }
+    if evidence.repair_pressure >= 0.5 {
+        next.repair_depth = next
+            .repair_depth
+            .saturating_add(1)
+            .min(envelope.max_repair_depth);
+    }
+    if evidence.relay_pressure >= 0.6 {
+        next.relay_budget = next
+            .relay_budget
+            .saturating_add(1)
+            .min(envelope.max_relay_budget);
+    }
+    if evidence.replay_pressure >= 0.6 {
+        next.replay_buffer_events = next
+            .replay_buffer_events
+            .saturating_add(128)
+            .min(envelope.max_replay_buffer_events);
+    }
+}
+
+fn relax_reliability(next: &mut ReliabilitySettings, envelope: &SafetyEnvelope) {
+    next.steward_count = next
+        .steward_count
+        .saturating_sub(1)
+        .max(envelope.min_stewards);
+    next.repair_depth = next
+        .repair_depth
+        .saturating_sub(1)
+        .max(envelope.min_repair_depth);
+    next.relay_budget = next
+        .relay_budget
+        .saturating_sub(1)
+        .max(envelope.min_relay_budget);
+    next.redelivery_attempts = next
+        .redelivery_attempts
+        .saturating_sub(1)
+        .max(envelope.min_redelivery_attempts);
+    next.replay_buffer_events = next
+        .replay_buffer_events
+        .saturating_sub(128)
+        .max(envelope.min_replay_buffer_events);
+    next.delivery_class = demote_delivery_class(next.delivery_class, envelope.min_delivery_class);
+}
+
+fn promote_delivery_class(current: DeliveryClass, max: DeliveryClass) -> DeliveryClass {
+    let index = DeliveryClass::ALL
+        .iter()
+        .position(|class| *class == current)
+        .expect("current delivery class must be canonical");
+    let mut promoted = current;
+    for class in DeliveryClass::ALL.iter().skip(index + 1) {
+        if *class <= max {
+            promoted = *class;
+            break;
+        }
+    }
+    promoted
+}
+
+fn demote_delivery_class(current: DeliveryClass, min: DeliveryClass) -> DeliveryClass {
+    let index = DeliveryClass::ALL
+        .iter()
+        .position(|class| *class == current)
+        .expect("current delivery class must be canonical");
+    let mut demoted = current;
+    for class in DeliveryClass::ALL[..index].iter().rev() {
+        if *class >= min {
+            demoted = *class;
+            break;
+        }
+    }
+    demoted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,5 +1128,138 @@ mod tests {
             plan.degraded[0].disposition,
             DegradationDisposition::ReduceFanout
         );
+    }
+
+    #[test]
+    fn safety_envelope_rejects_invalid_ranges() {
+        let invalid = SafetyEnvelope {
+            min_stewards: 3,
+            max_stewards: 2,
+            ..SafetyEnvelope::default()
+        };
+
+        assert!(matches!(
+            invalid.validate(),
+            Err(ReliabilityControlError::InvalidEnvelopeRange { field: "stewards" })
+        ));
+    }
+
+    #[test]
+    fn reliability_controller_requires_strong_evidence_before_shifting() {
+        let envelope = SafetyEnvelope::default();
+        let current = ReliabilitySettings::default();
+        let mut controller =
+            BoundedRegretReliabilityController::new(envelope, current.clone()).expect("controller");
+
+        let decision = controller
+            .apply(ReliabilityEvidence {
+                evidence_score: 0.6,
+                confidence: 0.7,
+                latency_violation_rate: 0.2,
+                repair_pressure: 0.8,
+                relay_pressure: 0.7,
+                replay_pressure: 0.9,
+                observation_window: 32,
+            })
+            .expect("decision");
+
+        assert_eq!(decision.action, ReliabilityAction::Hold);
+        assert_eq!(decision.previous, current);
+        assert_eq!(decision.next, current);
+        assert!(controller.rollback_target().is_none());
+    }
+
+    #[test]
+    fn reliability_controller_tightens_within_envelope_and_records_rollback() {
+        let envelope = SafetyEnvelope {
+            max_stewards: 3,
+            max_repair_depth: 2,
+            max_relay_budget: 1,
+            max_delivery_class: DeliveryClass::ObligationBacked,
+            max_redelivery_attempts: 3,
+            max_replay_buffer_events: 256,
+            ..SafetyEnvelope::default()
+        };
+        let current = ReliabilitySettings {
+            steward_count: 2,
+            repair_depth: 1,
+            relay_budget: 0,
+            delivery_class: DeliveryClass::DurableOrdered,
+            redelivery_attempts: 2,
+            replay_buffer_events: 128,
+        };
+        let mut controller =
+            BoundedRegretReliabilityController::new(envelope, current.clone()).expect("controller");
+
+        let decision = controller
+            .apply(ReliabilityEvidence {
+                evidence_score: 0.95,
+                confidence: 0.97,
+                latency_violation_rate: 0.12,
+                repair_pressure: 0.9,
+                relay_pressure: 0.8,
+                replay_pressure: 0.85,
+                observation_window: 64,
+            })
+            .expect("decision");
+
+        assert_eq!(decision.action, ReliabilityAction::Tighten);
+        assert_eq!(decision.previous, current);
+        assert_eq!(
+            decision.next,
+            ReliabilitySettings {
+                steward_count: 3,
+                repair_depth: 2,
+                relay_budget: 1,
+                delivery_class: DeliveryClass::ObligationBacked,
+                redelivery_attempts: 3,
+                replay_buffer_events: 256,
+            }
+        );
+        assert_eq!(decision.rollback_target, Some(current));
+        assert_eq!(controller.current, decision.next);
+        assert_eq!(controller.rollback_target(), Some(&decision.previous));
+    }
+
+    #[test]
+    fn reliability_controller_rolls_back_after_violation_spike() {
+        let envelope = SafetyEnvelope {
+            rollback_violation_threshold: 0.2,
+            ..SafetyEnvelope::default()
+        };
+        let baseline = ReliabilitySettings::default();
+        let mut controller = BoundedRegretReliabilityController::new(envelope, baseline.clone())
+            .expect("controller");
+
+        let tighten = controller
+            .apply(ReliabilityEvidence {
+                evidence_score: 0.95,
+                confidence: 0.95,
+                latency_violation_rate: 0.08,
+                repair_pressure: 0.6,
+                relay_pressure: 0.0,
+                replay_pressure: 0.0,
+                observation_window: 32,
+            })
+            .expect("tighten");
+        assert_eq!(tighten.action, ReliabilityAction::Tighten);
+        assert_ne!(controller.current, baseline);
+
+        let rollback = controller
+            .apply(ReliabilityEvidence {
+                evidence_score: 0.99,
+                confidence: 0.99,
+                latency_violation_rate: 0.4,
+                repair_pressure: 0.9,
+                relay_pressure: 0.9,
+                replay_pressure: 0.9,
+                observation_window: 32,
+            })
+            .expect("rollback");
+
+        assert_eq!(rollback.action, ReliabilityAction::Rollback);
+        assert_eq!(rollback.next, baseline);
+        assert_eq!(controller.current, baseline);
+        assert!(controller.rollback_target().is_none());
     }
 }

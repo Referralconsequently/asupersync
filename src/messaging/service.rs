@@ -1,10 +1,15 @@
 //! Contract-carrying service schemas for the FABRIC lane.
 
 use super::class::{AckKind, DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError};
+use crate::lab::conformal::{HealthThresholdCalibrator, HealthThresholdConfig, ThresholdMode};
+use crate::obligation::eprocess::{
+    AlertState as EProcessAlertState, LeakMonitor, MonitorConfig as LeakMonitorConfig,
+};
 use crate::obligation::ledger::{ObligationLedger, ObligationToken};
 use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
 use std::panic::Location;
 use std::time::Duration;
@@ -1530,6 +1535,455 @@ impl QuantitativeContract {
     pub fn latency_satisfies(&self, measured: Duration) -> bool {
         measured <= self.target_latency
     }
+}
+
+/// Current health of a quantitative obligation contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantitativeContractState {
+    /// The observed service remains within the declared envelope.
+    #[default]
+    Healthy,
+    /// Early warning indicates the service is drifting toward violation.
+    AtRisk,
+    /// The observed service has violated the declared contract.
+    Violated,
+}
+
+impl fmt::Display for QuantitativeContractState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Healthy => "healthy",
+            Self::AtRisk => "at_risk",
+            Self::Violated => "violated",
+        };
+        write!(f, "{name}")
+    }
+}
+
+/// Recommended action after evaluating a quantitative contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantitativePolicyRecommendation {
+    /// The current policy remains inside the declared envelope.
+    #[default]
+    KeepCurrent,
+    /// Apply the contract's retry law before escalating further.
+    ApplyRetryLaw,
+    /// Escalate to an operator-visible policy change or degradation path.
+    Escalate,
+}
+
+impl fmt::Display for QuantitativePolicyRecommendation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::KeepCurrent => "keep_current",
+            Self::ApplyRetryLaw => "apply_retry_law",
+            Self::Escalate => "escalate",
+        };
+        write!(f, "{name}")
+    }
+}
+
+/// Alert state surfaced from the quantitative contract's e-process monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantitativeMonitorAlertState {
+    /// No active alert.
+    Clear,
+    /// Evidence is accumulating but has not crossed the alert threshold.
+    Watching,
+    /// The anytime-valid monitor crossed its threshold.
+    Alert,
+}
+
+impl From<EProcessAlertState> for QuantitativeMonitorAlertState {
+    fn from(value: EProcessAlertState) -> Self {
+        match value {
+            EProcessAlertState::Clear => Self::Clear,
+            EProcessAlertState::Watching => Self::Watching,
+            EProcessAlertState::Alert => Self::Alert,
+        }
+    }
+}
+
+/// Monitor-specific evidence attached to a quantitative contract evaluation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuantitativeMonitorEvidence {
+    /// Passive monitoring uses only observed success probability.
+    Passive,
+    /// Sampled monitoring tracks a rolling sampled window.
+    Sampled {
+        /// Deterministic sampling ratio applied to observations.
+        sampling_ratio: f64,
+        /// Total sampled observations since monitor creation.
+        sampled_observations: u64,
+        /// Rolling window size used for drift checks.
+        window_size: u32,
+        /// Fraction of sampled observations that met the target latency.
+        window_hit_rate: f64,
+    },
+    /// E-process monitoring with anytime-valid evidence.
+    EProcess {
+        /// Confidence level configured for the monitor.
+        confidence: f64,
+        /// Current e-value after processing the latest sample.
+        e_value: f64,
+        /// Rejection threshold (Ville bound) for the e-process.
+        threshold: f64,
+        /// Maximum evidence level before the monitor auto-resets.
+        max_evidence: f64,
+        /// Whether the reported evidence hit the configured cap.
+        capped: bool,
+        /// Current alert state of the e-process.
+        alert_state: QuantitativeMonitorAlertState,
+    },
+    /// Conformal calibration evidence for latency drift detection.
+    Conformal {
+        /// Target conformal coverage probability.
+        target_coverage: f64,
+        /// Calibration-set size required before anomaly checks begin.
+        calibration_size: u32,
+        /// Current number of calibration samples recorded for this contract.
+        calibration_samples: usize,
+        /// Current conformal latency threshold, once calibrated.
+        threshold_latency: Option<Duration>,
+        /// Observed coverage rate since tracking began, if available.
+        coverage: Option<f64>,
+        /// Whether the latest observation was conforming, if a check ran.
+        latest_conforming: Option<bool>,
+    },
+}
+
+/// Structured evaluation of one quantitative contract observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuantitativeContractEvaluation {
+    /// Contract name being evaluated.
+    pub contract_name: String,
+    /// Delivery class bound to the contract.
+    pub delivery_class: DeliveryClass,
+    /// Latest observed latency.
+    pub latest_latency: Duration,
+    /// Latency target encoded in the contract.
+    pub target_latency: Duration,
+    /// Total observations processed by the monitor.
+    pub observations: u64,
+    /// Number of observations that met `target_latency`.
+    pub hit_count: u64,
+    /// Observed success probability so far.
+    pub observed_probability: f64,
+    /// Required success probability from the contract.
+    pub target_probability: f64,
+    /// Current contract state after the latest observation.
+    pub state: QuantitativeContractState,
+    /// Recommended next action for the control surface.
+    pub recommendation: QuantitativePolicyRecommendation,
+    /// Monitor-specific supporting evidence.
+    pub evidence: QuantitativeMonitorEvidence,
+}
+
+/// Stateful runtime monitor for quantitative contract drift detection.
+#[derive(Debug)]
+pub struct QuantitativeContractMonitor {
+    contract: QuantitativeContract,
+    observations: u64,
+    hit_count: u64,
+    sampled_window: VecDeque<bool>,
+    sampled_observations: u64,
+    eprocess: Option<LeakMonitor>,
+    conformal: Option<HealthThresholdCalibrator>,
+    last_evaluation: Option<QuantitativeContractEvaluation>,
+}
+
+impl QuantitativeContractMonitor {
+    /// Create a new monitor for the given contract.
+    pub fn new(contract: QuantitativeContract) -> Result<Self, QuantitativeContractError> {
+        contract.validate()?;
+        let eprocess = match contract.monitoring_policy {
+            MonitoringPolicy::EProcess {
+                confidence,
+                max_evidence: _,
+            } => Some(new_quantitative_eprocess(
+                contract.target_latency,
+                confidence,
+            )),
+            _ => None,
+        };
+        let conformal = match contract.monitoring_policy {
+            MonitoringPolicy::Conformal {
+                target_coverage,
+                calibration_size,
+            } => Some(HealthThresholdCalibrator::new(
+                HealthThresholdConfig::new(1.0 - target_coverage, ThresholdMode::Upper)
+                    .min_samples(usize::try_from(calibration_size).expect("u32 fits usize")),
+            )),
+            _ => None,
+        };
+
+        Ok(Self {
+            contract,
+            observations: 0,
+            hit_count: 0,
+            sampled_window: VecDeque::new(),
+            sampled_observations: 0,
+            eprocess,
+            conformal,
+            last_evaluation: None,
+        })
+    }
+
+    /// Return the underlying contract.
+    #[must_use]
+    pub fn contract(&self) -> &QuantitativeContract {
+        &self.contract
+    }
+
+    /// Return the aggregate probability of meeting the target latency.
+    #[must_use]
+    pub fn observed_probability(&self) -> f64 {
+        ratio(self.hit_count, self.observations)
+    }
+
+    /// Return the most recent quantitative evaluation, if one exists.
+    #[must_use]
+    pub fn last_evaluation(&self) -> Option<&QuantitativeContractEvaluation> {
+        self.last_evaluation.as_ref()
+    }
+
+    /// Return the latest policy-change evidence when recording is enabled.
+    #[must_use]
+    pub fn policy_change_evidence(&self) -> Option<QuantitativeContractEvaluation> {
+        let evaluation = self.last_evaluation.as_ref()?;
+        if self.contract.record_violations && evaluation.state != QuantitativeContractState::Healthy
+        {
+            Some(evaluation.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Observe one completed service latency and evaluate the contract.
+    pub fn observe_latency(&mut self, latency: Duration) -> QuantitativeContractEvaluation {
+        self.observations = self.observations.saturating_add(1);
+        let hit = self.contract.latency_satisfies(latency);
+        if hit {
+            self.hit_count = self.hit_count.saturating_add(1);
+        }
+
+        let observed_probability = self.observed_probability();
+        let mut state = self.baseline_state(hit, observed_probability);
+        let evidence = match &self.contract.monitoring_policy {
+            MonitoringPolicy::Passive => QuantitativeMonitorEvidence::Passive,
+            MonitoringPolicy::Sampled {
+                sampling_ratio,
+                window_size,
+            } => {
+                let window_size_usize = usize::try_from(*window_size).expect("u32 fits usize");
+                if should_sample_observation(self.observations, *sampling_ratio) {
+                    self.sampled_observations = self.sampled_observations.saturating_add(1);
+                    self.sampled_window.push_back(hit);
+                    while self.sampled_window.len() > window_size_usize {
+                        self.sampled_window.pop_front();
+                    }
+                }
+
+                let window_hit_rate = bool_ratio(&self.sampled_window);
+                if self.sampled_window.len() >= window_size_usize
+                    && window_hit_rate < self.contract.target_probability
+                {
+                    state = state.max(QuantitativeContractState::Violated);
+                }
+
+                QuantitativeMonitorEvidence::Sampled {
+                    sampling_ratio: *sampling_ratio,
+                    sampled_observations: self.sampled_observations,
+                    window_size: *window_size,
+                    window_hit_rate,
+                }
+            }
+            MonitoringPolicy::EProcess {
+                confidence,
+                max_evidence,
+            } => {
+                let (reported_e_value, threshold, capped, alert_state) = {
+                    let Some(monitor) = self.eprocess.as_mut() else {
+                        unreachable!("e-process monitor must exist for e-process policies");
+                    };
+                    monitor.observe(duration_to_monitor_nanos(latency));
+
+                    let raw_e_value = monitor.e_value();
+                    let capped = raw_e_value >= *max_evidence;
+                    (
+                        raw_e_value.min(*max_evidence),
+                        monitor.threshold(),
+                        capped,
+                        QuantitativeMonitorAlertState::from(monitor.alert_state()),
+                    )
+                };
+                state = match alert_state {
+                    QuantitativeMonitorAlertState::Clear => state,
+                    QuantitativeMonitorAlertState::Watching => {
+                        state.max(QuantitativeContractState::AtRisk)
+                    }
+                    QuantitativeMonitorAlertState::Alert => QuantitativeContractState::Violated,
+                };
+
+                if capped {
+                    self.eprocess = Some(new_quantitative_eprocess(
+                        self.contract.target_latency,
+                        *confidence,
+                    ));
+                }
+
+                QuantitativeMonitorEvidence::EProcess {
+                    confidence: *confidence,
+                    e_value: reported_e_value,
+                    threshold,
+                    max_evidence: *max_evidence,
+                    capped,
+                    alert_state,
+                }
+            }
+            MonitoringPolicy::Conformal {
+                target_coverage,
+                calibration_size,
+            } => {
+                let Some(calibrator) = self.conformal.as_mut() else {
+                    unreachable!("conformal monitor must exist for conformal policies");
+                };
+                let metric = self.contract.name.as_str();
+                let latency_ms = duration_to_millis(latency);
+
+                let (threshold_latency, coverage, latest_conforming) = if calibrator
+                    .is_metric_calibrated(metric)
+                {
+                    let Some(check) = calibrator.check_and_track(metric, latency_ms) else {
+                        unreachable!("calibrated conformal monitor must return a check");
+                    };
+                    let coverage = calibrator.coverage_rates().get(metric).copied();
+                    if !check.conforming || coverage.is_some_and(|value| value < *target_coverage) {
+                        state = state.max(QuantitativeContractState::AtRisk);
+                    }
+
+                    (
+                        Some(duration_from_millis(check.threshold)),
+                        coverage,
+                        Some(check.conforming),
+                    )
+                } else {
+                    calibrator.calibrate(metric, latency_ms);
+                    (
+                        calibrator.threshold(metric).map(duration_from_millis),
+                        None,
+                        None,
+                    )
+                };
+
+                let calibration_samples =
+                    calibrator.metric_counts().get(metric).copied().unwrap_or(0);
+
+                QuantitativeMonitorEvidence::Conformal {
+                    target_coverage: *target_coverage,
+                    calibration_size: *calibration_size,
+                    calibration_samples,
+                    threshold_latency,
+                    coverage,
+                    latest_conforming,
+                }
+            }
+        };
+
+        let recommendation = match state {
+            QuantitativeContractState::Healthy => QuantitativePolicyRecommendation::KeepCurrent,
+            QuantitativeContractState::AtRisk => {
+                if matches!(self.contract.retry_law, RetryLaw::None) {
+                    QuantitativePolicyRecommendation::Escalate
+                } else {
+                    QuantitativePolicyRecommendation::ApplyRetryLaw
+                }
+            }
+            QuantitativeContractState::Violated => QuantitativePolicyRecommendation::Escalate,
+        };
+
+        let evaluation = QuantitativeContractEvaluation {
+            contract_name: self.contract.name.clone(),
+            delivery_class: self.contract.delivery_class,
+            latest_latency: latency,
+            target_latency: self.contract.target_latency,
+            observations: self.observations,
+            hit_count: self.hit_count,
+            observed_probability,
+            target_probability: self.contract.target_probability,
+            state,
+            recommendation,
+            evidence,
+        };
+        self.last_evaluation = Some(evaluation.clone());
+        evaluation
+    }
+
+    fn baseline_state(&self, hit: bool, observed_probability: f64) -> QuantitativeContractState {
+        if self.observations >= 3 && observed_probability < self.contract.target_probability {
+            QuantitativeContractState::Violated
+        } else if !hit || observed_probability < self.contract.target_probability {
+            QuantitativeContractState::AtRisk
+        } else {
+            QuantitativeContractState::Healthy
+        }
+    }
+}
+
+fn new_quantitative_eprocess(target_latency: Duration, confidence: f64) -> LeakMonitor {
+    let alpha = (1.0 - confidence).clamp(f64::EPSILON, 1.0 - f64::EPSILON);
+    LeakMonitor::new(LeakMonitorConfig {
+        alpha,
+        expected_lifetime_ns: duration_to_monitor_nanos(target_latency),
+        min_observations: 3,
+    })
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn duration_to_monitor_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn duration_to_millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn duration_from_millis(millis: f64) -> Duration {
+    if !millis.is_finite() || millis <= 0.0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs_f64(millis / 1000.0)
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        1.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn bool_ratio(values: &VecDeque<bool>) -> f64 {
+    let hits =
+        u64::try_from(values.iter().filter(|value| **value).count()).expect("usize fits u64");
+    let len = u64::try_from(values.len()).expect("usize fits u64");
+    ratio(hits, len)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn should_sample_observation(index: u64, sampling_ratio: f64) -> bool {
+    if sampling_ratio >= 1.0 {
+        return true;
+    }
+    let previous_bucket = ((index - 1) as f64 * sampling_ratio).floor();
+    let current_bucket = (index as f64 * sampling_ratio).floor();
+    current_bucket > previous_bucket
 }
 
 fn is_finite_positive(value: f64) -> bool {
@@ -3827,5 +4281,191 @@ mod tests {
         let json = serde_json::to_string(&contract).expect("serialize");
         let deserialized: QuantitativeContract = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(contract, deserialized);
+    }
+
+    #[test]
+    fn quantitative_monitor_passive_records_policy_change_evidence() {
+        let contract = QuantitativeContract {
+            name: "passive-evidence".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            target_latency: Duration::from_millis(50),
+            target_probability: 0.90,
+            retry_law: RetryLaw::Fixed {
+                interval: Duration::from_millis(10),
+                max_attempts: 2,
+            },
+            monitoring_policy: MonitoringPolicy::Passive,
+            record_violations: true,
+        };
+        let mut monitor = QuantitativeContractMonitor::new(contract).expect("valid monitor");
+        monitor.observe_latency(Duration::from_millis(20));
+        monitor.observe_latency(Duration::from_millis(70));
+        let evaluation = monitor.observe_latency(Duration::from_millis(80));
+
+        assert_eq!(evaluation.state, QuantitativeContractState::Violated);
+        assert_eq!(
+            evaluation.recommendation,
+            QuantitativePolicyRecommendation::Escalate
+        );
+        let evidence = monitor
+            .policy_change_evidence()
+            .expect("violations should produce evidence");
+        assert_eq!(evidence.contract_name, "passive-evidence");
+        assert_eq!(evidence.hit_count, 1);
+        assert_eq!(evidence.observations, 3);
+    }
+
+    #[test]
+    fn quantitative_monitor_sampled_window_detects_violation() {
+        let contract = QuantitativeContract {
+            name: "sampled-window".into(),
+            delivery_class: DeliveryClass::DurableOrdered,
+            target_latency: Duration::from_millis(40),
+            target_probability: 0.75,
+            retry_law: RetryLaw::BudgetBounded {
+                interval: Duration::from_millis(15),
+            },
+            monitoring_policy: MonitoringPolicy::Sampled {
+                sampling_ratio: 1.0,
+                window_size: 4,
+            },
+            record_violations: true,
+        };
+        let mut monitor = QuantitativeContractMonitor::new(contract).expect("valid monitor");
+        monitor.observe_latency(Duration::from_millis(10));
+        monitor.observe_latency(Duration::from_millis(20));
+        monitor.observe_latency(Duration::from_millis(60));
+        let evaluation = monitor.observe_latency(Duration::from_millis(70));
+
+        assert_eq!(evaluation.state, QuantitativeContractState::Violated);
+        assert_eq!(
+            evaluation.recommendation,
+            QuantitativePolicyRecommendation::Escalate
+        );
+        let QuantitativeMonitorEvidence::Sampled {
+            sampled_observations,
+            window_hit_rate,
+            ..
+        } = evaluation.evidence
+        else {
+            panic!("expected sampled monitoring evidence");
+        };
+        assert_eq!(sampled_observations, 4);
+        assert!((window_hit_rate - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quantitative_monitor_eprocess_alerts_and_auto_resets() {
+        let contract = QuantitativeContract {
+            name: "eprocess-slo".into(),
+            delivery_class: DeliveryClass::ObligationBacked,
+            target_latency: Duration::from_millis(10),
+            target_probability: 0.95,
+            retry_law: RetryLaw::Fixed {
+                interval: Duration::from_millis(5),
+                max_attempts: 3,
+            },
+            monitoring_policy: MonitoringPolicy::EProcess {
+                confidence: 0.80,
+                max_evidence: 2.0,
+            },
+            record_violations: true,
+        };
+        let mut monitor = QuantitativeContractMonitor::new(contract).expect("valid monitor");
+        monitor.observe_latency(Duration::from_millis(100));
+        monitor.observe_latency(Duration::from_millis(120));
+        let evaluation = monitor.observe_latency(Duration::from_millis(150));
+
+        assert_eq!(evaluation.state, QuantitativeContractState::Violated);
+        let QuantitativeMonitorEvidence::EProcess {
+            capped,
+            alert_state,
+            ..
+        } = evaluation.evidence
+        else {
+            panic!("expected e-process evidence");
+        };
+        assert!(capped, "e-value should cap and reset");
+        assert_eq!(alert_state, QuantitativeMonitorAlertState::Alert);
+
+        let after_reset = monitor.observe_latency(Duration::from_millis(5));
+        let QuantitativeMonitorEvidence::EProcess { e_value, .. } = after_reset.evidence else {
+            panic!("expected e-process evidence after reset");
+        };
+        assert!(
+            e_value <= 1.0,
+            "fresh monitor should restart from a low evidence level"
+        );
+    }
+
+    #[test]
+    fn quantitative_monitor_conformal_reports_drift() {
+        let contract = QuantitativeContract {
+            name: "conformal-slo".into(),
+            delivery_class: DeliveryClass::ForensicReplayable,
+            target_latency: Duration::from_millis(50),
+            target_probability: 0.80,
+            retry_law: RetryLaw::BudgetBounded {
+                interval: Duration::from_millis(10),
+            },
+            monitoring_policy: MonitoringPolicy::Conformal {
+                target_coverage: 0.80,
+                calibration_size: 4,
+            },
+            record_violations: true,
+        };
+        let mut monitor = QuantitativeContractMonitor::new(contract).expect("valid monitor");
+        for sample in [20_u64, 22, 24, 26] {
+            let evaluation = monitor.observe_latency(Duration::from_millis(sample));
+            assert_eq!(
+                evaluation.state,
+                QuantitativeContractState::Healthy,
+                "calibration samples should not trigger drift by themselves"
+            );
+        }
+        let evaluation = monitor.observe_latency(Duration::from_millis(200));
+
+        assert_eq!(evaluation.state, QuantitativeContractState::AtRisk);
+        assert_eq!(
+            evaluation.recommendation,
+            QuantitativePolicyRecommendation::ApplyRetryLaw
+        );
+        let QuantitativeMonitorEvidence::Conformal {
+            calibration_samples,
+            latest_conforming,
+            threshold_latency,
+            ..
+        } = evaluation.evidence
+        else {
+            panic!("expected conformal evidence");
+        };
+        assert_eq!(calibration_samples, 4);
+        assert_eq!(latest_conforming, Some(false));
+        assert!(
+            threshold_latency.is_some(),
+            "conformal evaluation should expose the calibrated threshold"
+        );
+        assert!(
+            monitor.policy_change_evidence().is_some(),
+            "non-healthy conformal result should emit evidence when recording is enabled"
+        );
+    }
+
+    #[test]
+    fn quantitative_monitor_suppresses_policy_change_evidence_when_disabled() {
+        let contract = QuantitativeContract {
+            name: "no-evidence".into(),
+            delivery_class: DeliveryClass::EphemeralInteractive,
+            target_latency: Duration::from_millis(30),
+            target_probability: 0.99,
+            retry_law: RetryLaw::None,
+            monitoring_policy: MonitoringPolicy::Passive,
+            record_violations: false,
+        };
+        let mut monitor = QuantitativeContractMonitor::new(contract).expect("valid monitor");
+        monitor.observe_latency(Duration::from_millis(100));
+        monitor.observe_latency(Duration::from_millis(110));
+        monitor.observe_latency(Duration::from_millis(120));
+        assert!(monitor.policy_change_evidence().is_none());
     }
 }
