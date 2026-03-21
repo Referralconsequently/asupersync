@@ -492,7 +492,7 @@ impl ReadDelegationTicket {
         relay: &NodeId,
         window: SequenceWindow,
         current_tick: u64,
-        revoked_tickets: &BTreeSet<ReadDelegationRevocationHandle>,
+        revoked_tickets: &BTreeMap<ReadDelegationRevocationHandle, u64>,
     ) -> Result<(), ConsumerCursorError> {
         if self.cell_id != lease.cell_id || self.epoch != lease.epoch {
             return Err(ConsumerCursorError::StaleReadDelegationEpoch {
@@ -503,7 +503,7 @@ impl ReadDelegationTicket {
                 current_epoch: lease.epoch,
             });
         }
-        if revoked_tickets.contains(&self.revocation_handle) {
+        if revoked_tickets.contains_key(&self.revocation_handle) {
             return Err(ConsumerCursorError::RevokedReadDelegationTicket {
                 relay: relay.clone(),
                 revocation_handle: self.revocation_handle,
@@ -748,7 +748,8 @@ pub struct FabricConsumerCursor {
     partition_summaries: BTreeMap<u16, CursorPartitionSummary>,
     ticket_clock: u64,
     next_revocation_handle: u64,
-    revoked_tickets: BTreeSet<ReadDelegationRevocationHandle>,
+    /// Revoked ticket handles mapped to their `not_after_tick` for pruning.
+    revoked_tickets: BTreeMap<ReadDelegationRevocationHandle, u64>,
 }
 
 impl FabricConsumerCursor {
@@ -761,7 +762,7 @@ impl FabricConsumerCursor {
             partition_summaries: BTreeMap::new(),
             ticket_clock: 0,
             next_revocation_handle: 1,
-            revoked_tickets: BTreeSet::new(),
+            revoked_tickets: BTreeMap::new(),
         })
     }
 
@@ -860,8 +861,27 @@ impl FabricConsumerCursor {
     }
 
     /// Revoke a previously issued ticket by handle.
-    pub fn revoke_read_ticket(&mut self, handle: ReadDelegationRevocationHandle) {
-        self.revoked_tickets.insert(handle);
+    ///
+    /// The `not_after_tick` from the ticket's expiry is stored alongside the
+    /// handle so that stale revocations can be pruned once the ticket clock
+    /// advances past them (see [`prune_expired_revocations`]).
+    pub fn revoke_read_ticket(
+        &mut self,
+        handle: ReadDelegationRevocationHandle,
+        not_after_tick: u64,
+    ) {
+        self.revoked_tickets.insert(handle, not_after_tick);
+    }
+
+    /// Remove revocation entries whose tickets have already expired.
+    ///
+    /// After the ticket clock advances past a ticket's `not_after_tick`, the
+    /// ticket is already rejected by the expiry check in [`validate_ticket`],
+    /// so the revocation entry is redundant and can be safely pruned.
+    pub fn prune_expired_revocations(&mut self) {
+        let clock = self.ticket_clock;
+        self.revoked_tickets
+            .retain(|_, &mut expiry| clock <= expiry);
     }
 
     /// Choose the concrete serving path for the current lease.
@@ -1413,9 +1433,10 @@ impl FabricConsumerState {
             .map(|p| p.window.start())
             .min()
             .unwrap_or(u64::MAX);
-        // Only advance as far as the lowest pending window allows.
+        // Only advance as far as the lowest pending window allows,
+        // and do not advance past the sequence we are actually acknowledging.
         // Everything below `min_pending_start` has been acked.
-        let safe_floor = min_pending_start.saturating_sub(1);
+        let safe_floor = candidate.min(min_pending_start.saturating_sub(1));
         self.ack_floor = self.ack_floor.max(safe_floor);
     }
 }
@@ -3419,7 +3440,7 @@ mod tests {
                 CacheabilityRule::Shared { max_age_ticks: 1 },
             )
             .expect("ticket");
-        cursor.revoke_read_ticket(ticket.revocation_handle);
+        cursor.revoke_read_ticket(ticket.revocation_handle, ticket.expiry.not_after_tick);
 
         let capsule = RecoverableCapsule::default().with_window(relay.clone(), window);
 
@@ -3429,6 +3450,45 @@ mod tests {
                 relay,
                 revocation_handle: ticket.revocation_handle,
             })
+        );
+    }
+
+    #[test]
+    fn prune_expired_revocations_removes_stale_entries() {
+        let cell = test_cell();
+        let mut cursor = FabricConsumerCursor::new(&cell).expect("cursor");
+        let window = SequenceWindow::new(50, 55).expect("window");
+        let relay = NodeId::new("relay-prune");
+
+        delegate_partition_to_holder(
+            &mut cursor,
+            10,
+            CursorLeaseHolder::Relay(relay.clone()),
+            obligation(30),
+        );
+
+        let ticket = cursor
+            .grant_read_ticket(
+                relay,
+                window,
+                5, // TTL = 5 ticks
+                CacheabilityRule::Private { max_age_ticks: 1 },
+            )
+            .expect("ticket");
+
+        // Revoke the ticket (not_after_tick = issued_at + 5 = 0 + 5 = 5).
+        cursor.revoke_read_ticket(ticket.revocation_handle, ticket.expiry.not_after_tick);
+        assert_eq!(cursor.revoked_tickets.len(), 1);
+
+        // Advance clock past the ticket's expiry.
+        cursor.ticket_clock = 6;
+        cursor.prune_expired_revocations();
+
+        // The revocation entry should be pruned since the ticket has expired.
+        assert_eq!(
+            cursor.revoked_tickets.len(),
+            0,
+            "expired revocation entries must be pruned"
         );
     }
 
