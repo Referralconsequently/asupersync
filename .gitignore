@@ -141,6 +141,25 @@ output.txt
 # Cargo expand output
 /expanded.rs
 
+# Ephemeral analysis / audit scratch files
+/all_files.txt
+/audited_files.txt
+/audited_unique.txt
+/newly_audited*.json
+/ubs_src.json
+/append_audit.sh
+
+# Stray numbered files (agent scratch)
+/19
+
+# Ephemeral patch and test-wheel scratch dirs/files
+/patch_virtual_time_wheel.rs
+/test_wheel
+/test_wheel2
+
+# Beads recovery directories (auto-generated crash recovery)
+.beads/recovery*/
+
 # Root-level scratch test files and their compiled binaries
 /test_*.rs
 /test_debug.rs
@@ -231,8 +250,8 @@ franken_kernel/false/
 # Beads bad-import backups
 **/.beads/*.bad_*
 
-# Remote compilation helper workspace
-.rch-target-workspace-libtests/
+# Remote compilation helper workspaces
+.rch-target-*/
 
 # Asset generation scripts (one-off, not shipped)
 assets/gen_og_image.py
@@ -261,6 +280,7 @@ src/channel/mpsc_lost_wakeup_test.rs
 
 # Root-level compiled test binaries (catch-all for names without extension)
 /test_aggregator_wrapping
+/test_heap
 /test_flate
 /test_flate2
 /test_min
