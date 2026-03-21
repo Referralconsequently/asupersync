@@ -1091,8 +1091,25 @@ where
                 let decision = supervisor.on_failure(task_id, region_id, None, &outcome, now);
 
                 match decision {
-                    SupervisionDecision::Restart { .. } => {
+                    SupervisionDecision::Restart { delay, .. } => {
                         cx.trace("supervised_actor::restart");
+
+                        // Reset actor state so the restarted actor enters
+                        // Running instead of staying in Stopping (which
+                        // would cause it to exit immediately on empty
+                        // mailbox).
+                        cell.state.store(ActorState::Created);
+
+                        // Apply backoff delay if the supervisor computed one.
+                        if let Some(backoff) = delay {
+                            if !backoff.is_zero() {
+                                let now = cx
+                                    .timer_driver()
+                                    .map_or_else(crate::time::wall_now, |td| td.now());
+                                crate::time::sleep(now, backoff).await;
+                            }
+                        }
+
                         current_actor = factory();
                     }
                     SupervisionDecision::Stop { .. } => {
