@@ -63,15 +63,15 @@ use core::arch::aarch64::{
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86"))]
 use core::arch::x86::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
 };
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.
@@ -255,8 +255,8 @@ struct Gf256Dispatch {
 
 static DISPATCH: std::sync::OnceLock<Gf256Dispatch> = std::sync::OnceLock::new();
 static DUAL_POLICY: std::sync::OnceLock<DualKernelPolicy> = std::sync::OnceLock::new();
-const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v4";
-const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-manifest-v4";
+const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v5";
+const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-manifest-v5";
 const GF256_PROFILE_PACK_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-v3";
 // Keep manifest-level profile-pack command bundles on the broader comparator
 // surface; dual-policy probe logs emit their own narrower repro command.
@@ -534,6 +534,32 @@ pub enum Gf256ProfileFallbackReason {
     UnsupportedProfileForHost,
 }
 
+/// Maturity of the evidence backing a profile-pack decision contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gf256ProfileEvidenceStatus {
+    /// Canonical same-target evidence packet backs the current contract.
+    Canonical,
+    /// Historical-only reference kept for provenance, not current rollout policy.
+    HistoricalReference,
+    /// Contract is provisional until same-target ablation evidence lands.
+    PendingSameTargetAblation,
+    /// Live contract was mutated by runtime overrides and is not catalog-backed.
+    RuntimeOverrideUnbacked,
+}
+
+impl Gf256ProfileEvidenceStatus {
+    /// Stable machine-readable identifier for structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::HistoricalReference => "historical-reference",
+            Self::PendingSameTargetAblation => "pending-same-target-ablation",
+            Self::RuntimeOverrideUnbacked => "runtime-override-unbacked",
+        }
+    }
+}
+
 /// Bitmask reporting which dual-policy fields were overridden by environment variables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DualKernelOverrideMask(u8);
@@ -701,6 +727,8 @@ pub struct Gf256ProfilePackMetadata {
     pub decision_artifact_id: &'static str,
     /// Stable role label for the decision artifact.
     pub decision_role: &'static str,
+    /// Maturity of the evidence backing this decision contract.
+    pub decision_evidence_status: Gf256ProfileEvidenceStatus,
     /// Selected-candidate rationale carried into runtime/bench forensics.
     pub selected_candidate_summary: &'static str,
     /// Rejected-candidate-set rationale carried into runtime/bench forensics.
@@ -738,14 +766,20 @@ const AARCH64_SELECTED_TUNING_CANDIDATE: &str = "aarch64-neon-t32-u2-pf32-fused-
 
 const SCALAR_DECISION_ARTIFACT_ID: &str = "policy_snapshot_rq_e_gf256_005";
 const SCALAR_DECISION_ROLE: &str = "historical_pre_refresh_scalar_policy_wiring_reference";
+const SCALAR_DECISION_EVIDENCE_STATUS: Gf256ProfileEvidenceStatus =
+    Gf256ProfileEvidenceStatus::HistoricalReference;
 const SCALAR_SELECTED_CANDIDATE_SUMMARY: &str =
     "pre-refresh scalar wiring reference retained for provenance only";
 const SCALAR_REJECTED_CANDIDATE_SET_SUMMARY: &str =
     "generic-scalar host class rejects SIMD profile-pack defaults";
 const PENDING_PROFILE_DECISION_ARTIFACT_ID: &str = "pending_same_target_profile_ablation";
 const PENDING_PROFILE_DECISION_ROLE: &str = "catalog_bootstrap_pending_same_target_ablation";
+const PENDING_PROFILE_DECISION_EVIDENCE_STATUS: Gf256ProfileEvidenceStatus =
+    Gf256ProfileEvidenceStatus::PendingSameTargetAblation;
 const X86_DECISION_ARTIFACT_ID: &str = "simd_policy_ablation_2026_03_04";
 const X86_DECISION_ROLE: &str = "canonical_current_x86_default_contract";
+const X86_DECISION_EVIDENCE_STATUS: Gf256ProfileEvidenceStatus =
+    Gf256ProfileEvidenceStatus::Canonical;
 const X86_SELECTED_CANDIDATE_SUMMARY: &str = "material addmul auto uplift on balanced large-lane scenarios while mul auto remained near neutral";
 const X86_REJECTED_CANDIDATE_SET_SUMMARY: &str = "candidate mul windows improved addmul but regressed mul auto, so default rollout keeps mul auto disabled";
 const X86_SELECTED_MUL_DELTA_VS_BASELINE_PCT: &str = "0.3048";
@@ -755,6 +789,8 @@ const NA_PROFILE_DELTA_PCT: &str = "n/a";
 const MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE: &str = "manual-env-override-unbacked";
 const MANUAL_OVERRIDE_DECISION_ARTIFACT_ID: &str = "manual_env_override_unbacked";
 const MANUAL_OVERRIDE_DECISION_ROLE: &str = "runtime_override_not_canonical_profile_selection";
+const MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS: Gf256ProfileEvidenceStatus =
+    Gf256ProfileEvidenceStatus::RuntimeOverrideUnbacked;
 const MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY: &str = "runtime override changed the effective dual-policy contract; canonical selected candidate suppressed";
 const MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY: &str = "override run is not a catalog-backed offline selection result; use emitted override fields to reproduce";
 const MANUAL_OVERRIDE_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-env-override-v1";
@@ -801,6 +837,7 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
         decision_artifact_id: SCALAR_DECISION_ARTIFACT_ID,
         decision_role: SCALAR_DECISION_ROLE,
+        decision_evidence_status: SCALAR_DECISION_EVIDENCE_STATUS,
         selected_candidate_summary: SCALAR_SELECTED_CANDIDATE_SUMMARY,
         rejected_candidate_set_summary: SCALAR_REJECTED_CANDIDATE_SET_SUMMARY,
         selected_mul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
@@ -829,6 +866,7 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
         decision_artifact_id: X86_DECISION_ARTIFACT_ID,
         decision_role: X86_DECISION_ROLE,
+        decision_evidence_status: X86_DECISION_EVIDENCE_STATUS,
         selected_candidate_summary: X86_SELECTED_CANDIDATE_SUMMARY,
         rejected_candidate_set_summary: X86_REJECTED_CANDIDATE_SET_SUMMARY,
         selected_mul_delta_vs_baseline_pct: X86_SELECTED_MUL_DELTA_VS_BASELINE_PCT,
@@ -856,8 +894,11 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
         decision_artifact_id: PENDING_PROFILE_DECISION_ARTIFACT_ID,
         decision_role: PENDING_PROFILE_DECISION_ROLE,
-        selected_candidate_summary: "catalog default retained pending same-target aarch64 ablation evidence",
-        rejected_candidate_set_summary: "nonselected aarch64 tuning candidates remain historical offline-tuning rejects",
+        decision_evidence_status: PENDING_PROFILE_DECISION_EVIDENCE_STATUS,
+        selected_candidate_summary:
+            "catalog default retained pending same-target aarch64 ablation evidence",
+        rejected_candidate_set_summary:
+            "nonselected aarch64 tuning candidates remain historical offline-tuning rejects",
         selected_mul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
         selected_addmul_delta_vs_baseline_pct: NA_PROFILE_DELTA_PCT,
         selected_targeted_addmul_average_delta_pct: NA_PROFILE_DELTA_PCT,
@@ -1242,6 +1283,7 @@ fn effective_profile_pack_metadata(policy: &DualKernelPolicy) -> Gf256ProfilePac
     if !policy_uses_canonical_selection_contract(policy) {
         metadata.decision_artifact_id = MANUAL_OVERRIDE_DECISION_ARTIFACT_ID;
         metadata.decision_role = MANUAL_OVERRIDE_DECISION_ROLE;
+        metadata.decision_evidence_status = MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS;
         metadata.selected_candidate_summary = MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY;
         metadata.rejected_candidate_set_summary = MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY;
         metadata.selected_mul_delta_vs_baseline_pct = NA_PROFILE_DELTA_PCT;
@@ -4414,6 +4456,7 @@ mod tests {
             assert!(metadata.command_bundle.contains("rch exec --"));
             assert!(!metadata.decision_artifact_id.is_empty());
             assert!(!metadata.decision_role.is_empty());
+            assert!(!metadata.decision_evidence_status.as_str().is_empty());
             assert!(!metadata.selected_candidate_summary.is_empty());
             assert!(!metadata.rejected_candidate_set_summary.is_empty());
         }
@@ -4555,6 +4598,10 @@ mod tests {
             MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
         );
         assert_eq!(metadata.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
+        assert_eq!(
+            metadata.decision_evidence_status,
+            MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
+        );
         assert_eq!(metadata.addmul_min_total, 16 * 1024);
         assert_eq!(
             metadata.selected_mul_delta_vs_baseline_pct,
@@ -4596,6 +4643,10 @@ mod tests {
             MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
         );
         assert_eq!(metadata.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
+        assert_eq!(
+            metadata.decision_evidence_status,
+            MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
+        );
     }
 
     #[test]
@@ -4694,12 +4745,10 @@ mod tests {
             manifest.active_profile_metadata.addmul_min_lane,
             policy.addmul_min_lane
         );
-        assert!(
-            manifest
-                .profile_pack_catalog
-                .iter()
-                .any(|metadata| metadata.profile_pack == policy.profile_pack)
-        );
+        assert!(manifest
+            .profile_pack_catalog
+            .iter()
+            .any(|metadata| metadata.profile_pack == policy.profile_pack));
         let catalog_profile = profile_pack_metadata(policy.profile_pack);
         assert_eq!(
             manifest.active_profile_metadata.architecture_class,
@@ -4715,6 +4764,10 @@ mod tests {
                 manifest.active_profile_metadata.decision_artifact_id,
                 catalog_profile.decision_artifact_id
             );
+            assert_eq!(
+                manifest.active_profile_metadata.decision_evidence_status,
+                catalog_profile.decision_evidence_status
+            );
         } else {
             assert_eq!(manifest.active_selected_tuning_candidate, None);
             assert_eq!(
@@ -4724,6 +4777,10 @@ mod tests {
             assert_eq!(
                 manifest.active_profile_metadata.decision_artifact_id,
                 MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
+            );
+            assert_eq!(
+                manifest.active_profile_metadata.decision_evidence_status,
+                MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
             );
         }
         assert_eq!(
@@ -4775,6 +4832,29 @@ mod tests {
         assert_eq!(
             x86.selected_targeted_addmul_average_delta_pct,
             X86_SELECTED_TARGETED_ADDMUL_AVERAGE_DELTA_PCT
+        );
+        assert_eq!(x86.decision_evidence_status, X86_DECISION_EVIDENCE_STATUS);
+    }
+
+    #[test]
+    fn aarch64_profile_pack_decision_metadata_is_explicitly_pending() {
+        let neon = gf256_profile_pack_catalog()
+            .iter()
+            .find(|metadata| metadata.profile_pack == Gf256ProfilePackId::Aarch64NeonBalancedV1)
+            .expect("aarch64 profile-pack metadata must exist");
+
+        assert_eq!(
+            neon.decision_artifact_id,
+            PENDING_PROFILE_DECISION_ARTIFACT_ID
+        );
+        assert_eq!(neon.decision_role, PENDING_PROFILE_DECISION_ROLE);
+        assert_eq!(
+            neon.decision_evidence_status,
+            PENDING_PROFILE_DECISION_EVIDENCE_STATUS
+        );
+        assert_eq!(
+            neon.decision_evidence_status.as_str(),
+            "pending-same-target-ablation"
         );
     }
 
