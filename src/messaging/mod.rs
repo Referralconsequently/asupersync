@@ -133,8 +133,8 @@ pub use federation::{
     EvidenceShippingPolicy, FederationBridge, FederationBridgeRuntime, FederationBridgeState,
     FederationDirection, FederationError, FederationRole, GatewayAdvisoryRecord,
     GatewayBridgeRuntime, GatewayConfig, GatewayConvergenceRecord, GatewayInterestPlan,
-    InterestPropagationPolicy, LeafBridgeRuntime, LeafBufferDrain, LeafConfig,
-    LeafRouteDisposition, MorphismConstraints, OrderingGuarantee, ReplayArtifactRecord,
+    GatewayInterestRecord, InterestPropagationPolicy, LeafBridgeRuntime, LeafBufferDrain,
+    LeafConfig, LeafRouteDisposition, MorphismConstraints, OrderingGuarantee, ReplayArtifactRecord,
     ReplayShippingPlan, ReplicationBridgeRuntime, ReplicationCatchUpAction, ReplicationCatchUpPlan,
     ReplicationConfig, ReplicationTransfer, TraceRetention,
 };

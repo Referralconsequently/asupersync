@@ -428,6 +428,15 @@ pub struct GatewayInterestPlan {
     pub policy: InterestPropagationPolicy,
 }
 
+/// Canonical gateway interest key retained in runtime state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GatewayInterestRecord {
+    /// Control-plane family carrying the propagated interest.
+    pub family: SystemSubjectFamily,
+    /// Subject pattern being advertised across the gateway.
+    pub pattern: SubjectPattern,
+}
+
 /// Advisory record forwarded across a gateway bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayAdvisoryRecord {
@@ -561,8 +570,8 @@ pub struct LeafBridgeRuntime {
 /// Runtime state for a gateway federation bridge.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GatewayBridgeRuntime {
-    /// Subject patterns currently propagated to remote fabrics.
-    pub propagated_interests: BTreeSet<SubjectPattern>,
+    /// Canonical interest keys currently propagated to remote fabrics.
+    pub propagated_interests: BTreeSet<GatewayInterestRecord>,
     /// Advisory records forwarded by the gateway bridge.
     pub forwarded_advisories: Vec<GatewayAdvisoryRecord>,
     /// Most recent bounded convergence attempt.
@@ -590,7 +599,7 @@ pub struct EdgeReplayBridgeRuntime {
 }
 
 /// A configured federation bridge between the local fabric and a remote boundary.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FederationBridge {
     /// Role and role-specific configuration for the bridge.
     pub role: FederationRole,
@@ -605,6 +614,16 @@ pub struct FederationBridge {
     /// Ephemeral role-specific runtime state kept out of serialized configs.
     #[serde(skip, default)]
     runtime: Option<FederationBridgeRuntime>,
+}
+
+impl PartialEq for FederationBridge {
+    fn eq(&self, other: &Self) -> bool {
+        self.role == other.role
+            && self.local_morphisms == other.local_morphisms
+            && self.remote_morphisms == other.remote_morphisms
+            && self.capability_scope == other.capability_scope
+            && self.state == other.state
+    }
 }
 
 impl FederationBridge {
@@ -789,7 +808,7 @@ impl FederationBridge {
 
         self.gateway_runtime_mut("plan_gateway_interest")?
             .propagated_interests
-            .insert(pattern);
+            .insert(GatewayInterestRecord { family, pattern });
 
         Ok(plan)
     }
@@ -920,6 +939,19 @@ impl FederationBridge {
         self.ensure_not_closed("apply_replication_transfer")?;
 
         let snapshot = RegionSnapshot::from_bytes(&transfer.snapshot_bytes)?;
+        if snapshot.sequence != transfer.sequence {
+            return Err(FederationError::ReplicationTransferSequenceMismatch {
+                expected: transfer.sequence,
+                actual: snapshot.sequence,
+            });
+        }
+        let actual_hash = snapshot.content_hash();
+        if actual_hash != transfer.snapshot_hash {
+            return Err(FederationError::ReplicationTransferHashMismatch {
+                expected: transfer.snapshot_hash,
+                actual: actual_hash,
+            });
+        }
         bridge.apply_snapshot(&snapshot).map_err(|error| {
             FederationError::DistributedBridgeOperationFailed {
                 operation: "apply_snapshot".to_owned(),
@@ -1310,6 +1342,22 @@ pub enum FederationError {
         operation: String,
         /// Stringified error from the distributed bridge surface.
         message: String,
+    },
+    /// Replication transfer metadata must match the decoded snapshot payload.
+    #[error("replication transfer sequence mismatch: expected {expected}, got {actual}")]
+    ReplicationTransferSequenceMismatch {
+        /// Sequence number advertised by the transfer envelope.
+        expected: u64,
+        /// Sequence number decoded from the snapshot payload.
+        actual: u64,
+    },
+    /// Replication transfer content hash must match the decoded snapshot payload.
+    #[error("replication transfer hash mismatch: expected {expected}, got {actual}")]
+    ReplicationTransferHashMismatch {
+        /// Hash advertised by the transfer envelope.
+        expected: u64,
+        /// Hash recomputed from the decoded snapshot payload.
+        actual: u64,
     },
     /// Underlying morphism validation failed.
     #[error(transparent)]
@@ -1943,6 +1991,29 @@ mod tests {
     }
 
     #[test]
+    fn federation_bridge_json_round_trip_ignores_ephemeral_runtime() {
+        let mut bridge = FederationBridge::new(
+            FederationRole::LeafFabric(LeafConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        bridge.mark_degraded().unwrap();
+        let _ = bridge
+            .queue_leaf_route(
+                FederationDirection::LocalToRemote,
+                SubjectPattern::new("tenant.audit.>"),
+                1,
+            )
+            .unwrap();
+
+        let json = serde_json::to_string(&bridge).expect("serialize bridge");
+        let roundtrip: FederationBridge = serde_json::from_str(&json).expect("deserialize bridge");
+        assert_eq!(bridge, roundtrip);
+    }
+
+    #[test]
     fn interest_propagation_all_variants_json_round_trip() {
         for policy in [
             InterestPropagationPolicy::ExplicitSubscriptions,
@@ -2182,9 +2253,48 @@ mod tests {
                 assert!(
                     runtime
                         .propagated_interests
-                        .contains(&SubjectPattern::new("tenant.route.>"))
+                        .contains(&GatewayInterestRecord {
+                            family: SystemSubjectFamily::Route,
+                            pattern: SubjectPattern::new("tenant.route.>"),
+                        })
                 );
                 assert_eq!(runtime.forwarded_advisories.len(), 1);
+            }
+            other => panic!("expected gateway runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gateway_runtime_distinguishes_interest_family_from_pattern() {
+        let mut bridge = FederationBridge::new(
+            FederationRole::GatewayFabric(GatewayConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+        bridge.activate().unwrap();
+
+        bridge
+            .plan_gateway_interest(
+                SystemSubjectFamily::Route,
+                SubjectPattern::new("tenant.shared.>"),
+                1,
+                ControlBudget::default(),
+            )
+            .unwrap();
+        bridge
+            .plan_gateway_interest(
+                SystemSubjectFamily::Replay,
+                SubjectPattern::new("tenant.shared.>"),
+                1,
+                ControlBudget::default(),
+            )
+            .unwrap();
+
+        match bridge.runtime() {
+            FederationBridgeRuntime::Gateway(runtime) => {
+                assert_eq!(runtime.propagated_interests.len(), 2);
             }
             other => panic!("expected gateway runtime, got {other:?}"),
         }
@@ -2253,6 +2363,36 @@ mod tests {
 
         assert_eq!(log_plan.action, ReplicationCatchUpAction::DeltaOnly);
         assert_eq!(snapshot_plan.action, ReplicationCatchUpAction::Snapshot);
+    }
+
+    #[test]
+    fn replication_bridge_rejects_mismatched_transfer_metadata() {
+        let mut federation = FederationBridge::new(
+            FederationRole::ReplicationLink(ReplicationConfig::default()),
+            vec![derived_view_morphism()],
+            Vec::new(),
+            [FabricCapability::RewriteNamespace],
+        )
+        .unwrap();
+
+        let region = region_id(20);
+        let mut source = RegionBridge::new_local(region, None, Budget::new());
+        source.add_task(task_id(21)).unwrap();
+
+        let mut transfer = federation.export_replication_transfer(&mut source).unwrap();
+        transfer.sequence += 1;
+
+        let mut target = RegionBridge::new_local(region, None, Budget::new());
+        let err = federation
+            .apply_replication_transfer(&mut target, &transfer)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FederationError::ReplicationTransferSequenceMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
     }
 
     #[test]
