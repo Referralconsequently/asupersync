@@ -131,7 +131,7 @@ impl ProgressEvent {
     /// Set elapsed time.
     #[must_use]
     pub const fn elapsed(mut self, duration: Duration) -> Self {
-        self.elapsed_ms = Some(duration.as_millis() as u64);
+        self.elapsed_ms = Some(duration.as_millis().min(u128::from(u64::MAX)) as u64);
         self
     }
 
@@ -214,7 +214,12 @@ impl ProgressReporter {
         }
 
         // Add elapsed time
-        event.elapsed_ms = Some(self.start_time.elapsed().as_millis() as u64);
+        event.elapsed_ms = Some(
+            self.start_time
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        );
 
         match self.format {
             OutputFormat::Human => self.report_human(&event),

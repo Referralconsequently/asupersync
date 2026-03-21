@@ -673,7 +673,11 @@ impl TaskRecord {
                 Outcome::Cancelled(_) => "Cancelled",
                 Outcome::Panicked(_) => "Panicked",
             };
-            let duration_us = self.created_instant.elapsed().as_micros() as u64;
+            let duration_us = self
+                .created_instant
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64;
             let total_polls = self.total_polls;
             crate::tracing_compat::debug!(
                 task_id = ?self.id,
@@ -810,7 +814,11 @@ impl TaskRecord {
         let budget = *cleanup_budget;
         #[cfg(feature = "tracing-integration")]
         {
-            let duration_us = self.created_instant.elapsed().as_micros() as u64;
+            let duration_us = self
+                .created_instant
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64;
             let total_polls = self.total_polls;
             crate::tracing_compat::debug!(
                 task_id = ?self.id,

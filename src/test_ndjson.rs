@@ -120,7 +120,7 @@ impl NdjsonEvent {
 
         Self {
             v: NDJSON_SCHEMA_VERSION,
-            ts_us: record.elapsed.as_micros() as u64,
+            ts_us: u64::try_from(record.elapsed.as_micros()).unwrap_or(u64::MAX),
             level: record.event.level().name(),
             category: record.event.category(),
             event: event_type_name(&record.event),

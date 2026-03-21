@@ -321,7 +321,7 @@ impl TraceMinimizer {
                 0.0
             },
             replay_attempts: replays,
-            wall_time_ms: start.elapsed().as_millis() as u64,
+            wall_time_ms: start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             is_minimal,
             steps,
         }
@@ -353,7 +353,7 @@ fn top_down_prune(
         let t = Instant::now();
         *replays += 1;
         let ok = checker(&subset);
-        let ms = t.elapsed().as_millis() as u64;
+        let ms = t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         if ok {
             steps.push(MinimizationStep {
                 kind: StepKind::TopDownPrune,
@@ -419,7 +419,7 @@ fn ddmin(
             let t = Instant::now();
             *replays += 1;
             let ok = checker(&subset);
-            let ms = t.elapsed().as_millis() as u64;
+            let ms = t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             steps.push(MinimizationStep {
                 kind: StepKind::BottomUpRemove,
                 events_remaining: complement.len(),
@@ -466,7 +466,7 @@ fn verify_minimality(
         let t = Instant::now();
         *replays += 1;
         let ok = checker(&without);
-        let ms = t.elapsed().as_millis() as u64;
+        let ms = t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         steps.push(MinimizationStep {
             kind: StepKind::MinimalityCheck,
             events_remaining: without.len(),
