@@ -626,6 +626,9 @@ impl CircuitBreaker {
                                     Ok(_) => {
                                         self.current_failure_streak.store(0, Ordering::Relaxed);
                                         self.times_closed.fetch_add(1, Ordering::Relaxed);
+                                        if let Some(ref w) = self.sliding_window {
+                                            w.write().reset();
+                                        }
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
                                         if self.policy.on_state_change.is_some() {
@@ -1961,5 +1964,122 @@ mod tests {
         let cloned = p;
         assert_eq!(copied, cloned);
         assert_ne!(p, Permit::Probe { epoch: 999 });
+    }
+
+    #[test]
+    fn half_open_to_closed_preserves_probe_success_history_in_sliding_window() {
+        // Opening the breaker already resets the sliding window. Closing after
+        // multiple successful probes must preserve those successes so the next
+        // ordinary failure is evaluated against the full recovery sample.
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 2,
+            success_threshold: 2,
+            open_duration: Duration::from_millis(100),
+            sliding_window: Some(SlidingWindowConfig {
+                window_duration: Duration::from_secs(60),
+                minimum_calls: 2,
+                failure_rate_threshold: 0.5,
+            }),
+            ..CircuitBreakerPolicy::default()
+        };
+        let cb = CircuitBreaker::new(policy);
+        let now = Time::from_millis(1_000);
+
+        // Trip the circuit via consecutive failures.
+        let permit = cb.should_allow(now).expect("closed");
+        cb.record_failure(permit, "fail-1", now);
+        let permit = cb.should_allow(now).expect("closed after 1 failure");
+        cb.record_failure(permit, "fail-2", now);
+        assert!(
+            cb.should_allow(now).is_err(),
+            "circuit should be open after 2 failures"
+        );
+
+        // Wait for the open duration to expire.
+        let after_open = Time::from_millis(1_200);
+        let probe1 = cb
+            .should_allow(after_open)
+            .expect("first half-open probe should be allowed");
+        assert!(matches!(probe1, Permit::Probe { .. }));
+        cb.record_success(probe1, after_open);
+
+        let second_probe_time = Time::from_millis(1_201);
+        let probe2 = cb
+            .should_allow(second_probe_time)
+            .expect("second half-open probe should be allowed");
+        assert!(matches!(probe2, Permit::Probe { .. }));
+        cb.record_success(probe2, second_probe_time);
+
+        let post_close = cb.should_allow(second_probe_time);
+        assert!(
+            post_close.is_ok(),
+            "circuit should close after the required half-open successes, got {post_close:?}"
+        );
+
+        let post_recovery_failure_time = Time::from_millis(1_202);
+        let permit = cb
+            .should_allow(post_recovery_failure_time)
+            .expect("closed breaker should allow a normal call after recovery");
+        cb.record_failure(
+            permit,
+            "single post-recovery failure",
+            post_recovery_failure_time,
+        );
+
+        let state = cb.state();
+        assert_eq!(
+            state,
+            State::Closed { failures: 1 },
+            "one post-recovery failure should not reopen the breaker when the successful probe history is preserved"
+        );
+        let after_failure = cb.should_allow(post_recovery_failure_time);
+        assert!(
+            after_failure.is_ok(),
+            "preserving the successful probe history keeps the breaker closed after one ordinary failure, got {after_failure:?}"
+        );
+    }
+
+    #[test]
+    fn half_open_to_closed_resets_sliding_window_preventing_immediate_reopen() {
+        // Use minimum_calls: 3 so that the sliding window doesn't trip on
+        // fewer than 3 observations, letting us control when the window fires.
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 2,
+            success_threshold: 1,
+            open_duration: Duration::from_millis(100),
+            sliding_window: Some(SlidingWindowConfig {
+                window_duration: Duration::from_secs(60),
+                minimum_calls: 3,
+                failure_rate_threshold: 0.5,
+            }),
+            ..CircuitBreakerPolicy::default()
+        };
+        let cb = CircuitBreaker::new(policy);
+        let now = Time::from_millis(1_000);
+
+        // Trip via consecutive failures (threshold = 2).
+        let p = cb.should_allow(now).expect("closed");
+        cb.record_failure(p, "err", now);
+        let p = cb.should_allow(now).expect("closed after 1");
+        cb.record_failure(p, "err", now);
+        assert!(cb.should_allow(now).is_err(), "should be open");
+
+        // Wait for open duration, get a probe.
+        let later = Time::from_millis(1_200);
+        let probe = cb.should_allow(later).expect("half-open probe");
+        assert!(matches!(probe, Permit::Probe { .. }));
+
+        // Successful probe closes the circuit.
+        cb.record_success(probe, later);
+
+        // The circuit must stay closed. Without the sliding window reset,
+        // the window still contains 2 failures + 1 success = 3 calls
+        // (>= minimum_calls=3) with 66% failure rate (> 50% threshold),
+        // which would immediately reopen the circuit.
+        let post = cb.should_allow(later);
+        assert!(
+            post.is_ok(),
+            "circuit should stay closed after window reset, got {post:?}"
+        );
     }
 }
