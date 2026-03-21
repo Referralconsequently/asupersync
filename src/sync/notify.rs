@@ -417,19 +417,9 @@ impl Notified<'_> {
             };
 
             if is_gen_changed {
-                let should_pass_notify_one_baton = if index < waiters.entries.len() {
-                    let entry = &waiters.entries[index];
-                    entry.notified && entry.generation == self.initial_generation
-                } else {
-                    false
-                };
                 waiters.remove(index);
                 self.waiter_index = None;
-                if should_pass_notify_one_baton {
-                    Notify::pass_baton_if_waiter_exists(waiters);
-                } else {
-                    drop(waiters);
-                }
+                drop(waiters);
 
                 return self.mark_done();
             }
@@ -686,15 +676,15 @@ mod tests {
         // broadcast wakes B.
         notify.notify_waiters();
 
-        // C starts waiting after the broadcast and should inherit the
-        // original notify_one baton when A consumes readiness.
+        // C starts waiting after the broadcast and should NOT inherit the
+        // original notify_one baton when A consumes readiness via poll.
         let mut waiter_c = notify.notified();
         assert!(poll_once(&mut waiter_c).is_pending());
 
         assert!(poll_once(&mut waiter_a).is_ready());
         assert!(
-            poll_once(&mut waiter_c).is_ready(),
-            "Waiter C should be woken by the passed baton after A is polled"
+            poll_once(&mut waiter_c).is_pending(),
+            "Waiter C should remain pending after A consumes readiness"
         );
 
         crate::test_complete!("notify_one_lost_if_followed_by_broadcast_and_poll");
