@@ -4892,7 +4892,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
     for required in [
         "validate_dual_policy_probe_contract",
         "bench-smoke-gf256-dual-policy-contract",
-        "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v4\"",
+        "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v5\"",
         ".manifest_schema_version | type == \"string\" and length > 0",
         ".profile_schema_version | type == \"string\" and length > 0",
         ".kernel | type == \"string\" and length > 0",

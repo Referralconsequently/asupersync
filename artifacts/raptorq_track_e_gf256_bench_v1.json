@@ -140,6 +140,19 @@
       },
       "comparison_strategy": "same remote session, same target dir, sequential A/B execution to reduce cross-worker variance"
     },
+    "environment_metadata": {
+      "target_arch": "x86_64",
+      "target_os": "linux",
+      "target_env": "unknown",
+      "target_endian": "little",
+      "target_pointer_width_bits": 64
+    },
+    "selection_contract": {
+      "profile_pack_env": "auto",
+      "dual_policy_env": "auto",
+      "expected_architecture_class": "x86-avx2",
+      "expected_profile_pack": "x86-avx2-balanced-v1"
+    },
     "command_bundles": [
       {
         "id": "current_vs_candidate_large_balanced_addmul_window",
@@ -261,6 +274,19 @@
       },
       "comparison_strategy": "same target dir comparator corpus; baseline then candidate overrides"
     },
+    "environment_metadata": {
+      "target_arch": "x86_64",
+      "target_os": "linux",
+      "target_env": "unknown",
+      "target_endian": "little",
+      "target_pointer_width_bits": 64
+    },
+    "selection_contract": {
+      "profile_pack_env": "auto",
+      "dual_policy_env": "auto",
+      "expected_architecture_class": "x86-avx2",
+      "expected_profile_pack": "x86-avx2-balanced-v1"
+    },
     "command_bundles": [
       {
         "id": "baseline_auto_defaults",
@@ -347,6 +373,7 @@
     "This comparator capture uses short Criterion windows for fast rehearsal and should be treated as directional evidence.",
     "Observed throughput variance indicates a full p95/p99 corpus is still required for final E5 closure.",
     "The 2026-03-02 same-session RQ-E-GF256-DUAL-006 retention result is preserved as historical comparator evidence only and is explicitly superseded for default selection by simd_policy_ablation_2026_03_04.",
-    "2026-03-04 corpus added broad RQ-E-GF256-DUAL-* coverage and selected a new x86 addmul auto window default (24576..32768, min lane 8192)."
+    "2026-03-04 corpus added broad RQ-E-GF256-DUAL-* coverage and selected a new x86 addmul auto window default (24576..32768, min lane 8192).",
+    "2026-03-21 metadata refresh: both canonical simd_policy_ablation packets now carry explicit target environment metadata and auto-selection contract fields alongside their replayable command bundles."
   ]
 }
