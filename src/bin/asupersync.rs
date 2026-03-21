@@ -3762,7 +3762,7 @@ enum LabDifferentialExpectation {
     Pass,
     Divergence {
         provisional: &'static str,
-        final_policy: DifferentialPolicyClass,
+        final_policy: Option<DifferentialPolicyClass>,
     },
 }
 
@@ -3872,15 +3872,32 @@ impl Outputtable for LabDifferentialOutput {
         lines.push(format!("Artifacts: {}", self.runner_summary_path));
         for scenario in &self.scenarios {
             lines.push(format!(
-                "- {} {} [{}] -> {}",
+                "- {} {} [{}] provisional={} final={} summary={}",
                 scenario.status.as_str(),
                 scenario.scenario_id,
                 scenario.seed_lineage_id,
+                scenario.observed_provisional_class,
+                display_final_policy_class(scenario),
                 scenario.summary_path
             ));
         }
         lines.join("\n")
     }
+}
+
+fn display_final_policy_class(scenario: &LabDifferentialScenarioReport) -> &str {
+    scenario
+        .observed_final_policy_class
+        .as_deref()
+        .unwrap_or_else(|| {
+            if scenario.status == LabDifferentialScenarioStatus::Pass
+                || scenario.observed_provisional_class == "pass"
+            {
+                "not_applicable"
+            } else {
+                "pending"
+            }
+        })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4279,6 +4296,14 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
             execute: run_phase1_channel_commit_scenario,
         },
         LabDifferentialScenarioDefinition {
+            id: "phase1.channel.reserve_send.abort_visible",
+            surface_id: "channel.reserve_send",
+            surface_contract_version: "channel.reserve_send.v1",
+            description: "Cancelled reservation aborts cleanly without surfacing a phantom commit.",
+            expectation: LabDifferentialExpectation::Pass,
+            execute: run_phase1_channel_abort_scenario,
+        },
+        LabDifferentialScenarioDefinition {
             id: "phase1.region.close.quiescent",
             surface_id: "region.close",
             surface_contract_version: "region.close.v1",
@@ -4293,9 +4318,31 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
             description: "Intentional live-side cleanup gap to prove classifier and report flow.",
             expectation: LabDifferentialExpectation::Divergence {
                 provisional: "hard_contract_break",
-                final_policy: DifferentialPolicyClass::RuntimeSemanticBug,
+                final_policy: Some(DifferentialPolicyClass::RuntimeSemanticBug),
             },
             execute: run_calibration_cleanup_missing_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "calibration.comparator.resource_counter_mismatch",
+            surface_id: "resource.surface",
+            surface_contract_version: "resource.surface.v1",
+            description: "Intentional admitted-surface resource counter drift to prove comparator detection and report quality.",
+            expectation: LabDifferentialExpectation::Divergence {
+                provisional: "semantic_mismatch_admitted_surface",
+                final_policy: None,
+            },
+            execute: run_calibration_resource_counter_mismatch_scenario,
+        },
+        LabDifferentialScenarioDefinition {
+            id: "calibration.channel.commit_visibility_mismatch",
+            surface_id: "channel.reserve_send",
+            surface_contract_version: "channel.reserve_send.v1",
+            description: "Intentional committed-vs-aborted visibility drift to prove channel mismatches stay loud.",
+            expectation: LabDifferentialExpectation::Divergence {
+                provisional: "semantic_mismatch_admitted_surface",
+                final_policy: None,
+            },
+            execute: run_calibration_channel_commit_visibility_mismatch_scenario,
         },
         LabDifferentialScenarioDefinition {
             id: "calibration.obligation.leak_detected",
@@ -4304,7 +4351,7 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
             description: "Intentional live-side obligation leak to prove artifact retention.",
             expectation: LabDifferentialExpectation::Divergence {
                 provisional: "hard_contract_break",
-                final_policy: DifferentialPolicyClass::RuntimeSemanticBug,
+                final_policy: Some(DifferentialPolicyClass::RuntimeSemanticBug),
             },
             execute: run_calibration_obligation_leak_scenario,
         },
@@ -4327,12 +4374,15 @@ fn profile_includes_lab_differential_scenario(
             "phase1.cancel.protocol.drain_finalize"
                 | "phase1.combinator.race.one_loser"
                 | "phase1.channel.reserve_send.commit"
+                | "phase1.channel.reserve_send.abort_visible"
                 | "phase1.region.close.quiescent"
         ),
         LabDifferentialProfile::Calibration => matches!(
             scenario_id,
             "phase1.cancel.protocol.drain_finalize"
                 | "calibration.cancellation.cleanup_missing"
+                | "calibration.comparator.resource_counter_mismatch"
+                | "calibration.channel.commit_visibility_mismatch"
                 | "calibration.obligation.leak_detected"
         ),
     }
@@ -4365,18 +4415,17 @@ fn evaluate_lab_differential_expectation(
                 return (
                     LabDifferentialScenarioStatus::MissingExpectedDivergence,
                     Some(provisional.to_string()),
-                    Some(final_policy),
+                    final_policy,
                 );
             }
 
-            let status = if observed_provisional == provisional
-                && observed_final_policy == Some(final_policy)
-            {
-                LabDifferentialScenarioStatus::ExpectedDivergence
-            } else {
-                LabDifferentialScenarioStatus::UnexpectedDivergence
-            };
-            (status, Some(provisional.to_string()), Some(final_policy))
+            let status =
+                if observed_provisional == provisional && observed_final_policy == final_policy {
+                    LabDifferentialScenarioStatus::ExpectedDivergence
+                } else {
+                    LabDifferentialScenarioStatus::UnexpectedDivergence
+                };
+            (status, Some(provisional.to_string()), final_policy)
         }
     }
 }
@@ -4675,6 +4724,43 @@ fn run_phase1_channel_commit_scenario(canonical_seed: u64) -> asupersync::lab::D
     )
 }
 
+fn run_phase1_channel_abort_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
+    let cancellation = capture_cancellation(true, true, true, true, Some(true));
+    let obligation = capture_obligation_balance(1, 0, 1);
+    let region = capture_region_close(true, true);
+    let lab_semantics = make_normalized_semantics(
+        "channel.reserve_send",
+        TerminalOutcome::cancelled("reservation_aborted"),
+        cancellation.clone(),
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        obligation.clone(),
+        &[
+            ("committed_messages", 0),
+            ("aborted_reservations", 1),
+            ("receiver_observed_messages", 0),
+        ],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "phase1.channel.reserve_send.abort_visible",
+        "channel.reserve_send",
+        "channel.reserve_send.v1",
+        "Cancelled reservation aborts cleanly without surfacing a phantom commit.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::cancelled("reservation_aborted"));
+            witness.set_cancellation(cancellation);
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("committed_messages", 0);
+            witness.record_counter("aborted_reservations", 1);
+            witness.record_counter("receiver_observed_messages", 0);
+        },
+    )
+}
+
 fn run_phase1_region_close_scenario(canonical_seed: u64) -> asupersync::lab::DualRunResult {
     let region = capture_region_close(true, true);
     let obligation = capture_obligation_balance(2, 1, 1);
@@ -4732,6 +4818,78 @@ fn run_calibration_cleanup_missing_scenario(canonical_seed: u64) -> asupersync::
             witness.set_region_close(region);
             witness.set_obligation_balance(obligation);
             witness.record_counter("cleanup_steps", 1);
+        },
+    )
+}
+
+fn run_calibration_resource_counter_mismatch_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    let region = capture_region_close(true, true);
+    let obligation = ObligationBalanceRecord::zero();
+    let lab_semantics = make_normalized_semantics(
+        "resource.surface",
+        TerminalOutcome::ok(),
+        CancellationRecord::none(),
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        obligation.clone(),
+        &[("delivered_messages", 1), ("retained_artifacts", 1)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "calibration.comparator.resource_counter_mismatch",
+        "resource.surface",
+        "resource.surface.v1",
+        "Intentional admitted-surface resource counter drift to prove comparator detection and report quality.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_region_close(region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("delivered_messages", 2);
+            witness.record_counter("retained_artifacts", 1);
+        },
+    )
+}
+
+fn run_calibration_channel_commit_visibility_mismatch_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    let cancellation = capture_cancellation(true, true, true, true, Some(true));
+    let lab_obligation = capture_obligation_balance(1, 0, 1);
+    let live_obligation = capture_obligation_balance(1, 1, 0);
+    let region = capture_region_close(true, true);
+    let lab_semantics = make_normalized_semantics(
+        "channel.reserve_send",
+        TerminalOutcome::cancelled("reservation_aborted"),
+        cancellation.clone(),
+        LoserDrainRecord::not_applicable(),
+        region.clone(),
+        lab_obligation,
+        &[
+            ("committed_messages", 0),
+            ("aborted_reservations", 1),
+            ("receiver_observed_messages", 0),
+        ],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "calibration.channel.commit_visibility_mismatch",
+        "channel.reserve_send",
+        "channel.reserve_send.v1",
+        "Intentional committed-vs-aborted visibility drift to prove channel mismatches stay loud.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::cancelled("reservation_aborted"));
+            witness.set_cancellation(cancellation);
+            witness.set_region_close(region);
+            witness.set_obligation_balance(live_obligation);
+            witness.record_counter("committed_messages", 1);
+            witness.record_counter("aborted_reservations", 0);
+            witness.record_counter("receiver_observed_messages", 1);
         },
     )
 }
@@ -5953,6 +6111,53 @@ mod tests {
         assert!(Path::new(&scenario.live_normalized_path).exists());
         assert!(Path::new(&report.runner_summary_path).exists());
         assert!(Path::new(&report.aggregate_event_log_path).exists());
+        let human = report.human_format();
+        assert!(human.contains("final=not_applicable"));
+        assert!(!human.contains("final=pending"));
+    }
+
+    #[test]
+    fn lab_differential_phase1_core_profile_covers_channel_abort_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Phase1Core,
+            scenarios: vec!["phase1.channel.reserve_send.abort_visible".to_string()],
+            seed: 144,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run channel abort profile");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 1);
+        assert_eq!(report.pass_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(scenario.status, LabDifferentialScenarioStatus::Pass);
+        let lab_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.lab_normalized_path).expect("read lab normalized"),
+        )
+        .expect("parse lab normalized");
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            lab_normalized["semantics"]["resource_surface"]["counters"]["committed_messages"],
+            0
+        );
+        assert_eq!(
+            lab_normalized["semantics"]["resource_surface"]["counters"]["aborted_reservations"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["receiver_observed_messages"],
+            0
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["aborted"],
+            1
+        );
     }
 
     #[test]
@@ -6008,6 +6213,146 @@ mod tests {
             )
             .exists()
         );
+    }
+
+    #[test]
+    fn lab_differential_calibration_profile_covers_comparator_mismatch_and_report_fields() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: vec!["calibration.comparator.resource_counter_mismatch".to_string()],
+            seed: 8080,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run comparator calibration profile");
+        assert!(report.success);
+        assert_eq!(report.expected_divergence_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(
+            scenario.status,
+            LabDifferentialScenarioStatus::ExpectedDivergence
+        );
+        assert_eq!(
+            scenario.observed_provisional_class,
+            "semantic_mismatch_admitted_surface"
+        );
+        assert_eq!(scenario.observed_final_policy_class, None);
+        assert_eq!(
+            scenario.expected_provisional_class.as_deref(),
+            Some("semantic_mismatch_admitted_surface")
+        );
+        assert_eq!(scenario.expected_final_policy_class, None);
+        assert_eq!(scenario.failures_path, None);
+        assert_eq!(scenario.deviations_path, None);
+        assert_eq!(scenario.repro_manifest_path, None);
+
+        let summary = fs::read_to_string(&scenario.summary_path).expect("read comparator summary");
+        assert!(summary.contains("\"description\":"));
+        assert!(summary.contains("\"status\": \"expected_divergence\""));
+        assert!(
+            summary
+                .contains("\"expected_provisional_class\": \"semantic_mismatch_admitted_surface\"")
+        );
+        assert!(summary.contains("\"expected_final_policy_class\": null"));
+
+        let event_log =
+            fs::read_to_string(&scenario.event_log_path).expect("read comparator event log");
+        assert!(event_log.contains("\"provisional_class\":\"semantic_mismatch_admitted_surface\""));
+        assert!(event_log.contains("\"final_policy_class\":null"));
+
+        let human = report.human_format();
+        assert!(human.contains("provisional=semantic_mismatch_admitted_surface"));
+        assert!(human.contains("final=pending"));
+        assert!(human.contains("summary="));
+    }
+
+    #[test]
+    fn lab_differential_calibration_profile_covers_channel_visibility_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: vec!["calibration.channel.commit_visibility_mismatch".to_string()],
+            seed: 9090,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run channel calibration profile");
+        assert!(report.success);
+        assert_eq!(report.expected_divergence_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(
+            scenario.status,
+            LabDifferentialScenarioStatus::ExpectedDivergence
+        );
+        assert_eq!(
+            scenario.observed_provisional_class,
+            "semantic_mismatch_admitted_surface"
+        );
+        assert_eq!(scenario.observed_final_policy_class, None);
+
+        let lab_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.lab_normalized_path).expect("read lab normalized"),
+        )
+        .expect("parse lab normalized");
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            lab_normalized["semantics"]["resource_surface"]["counters"]["committed_messages"],
+            0
+        );
+        assert_eq!(
+            live_normalized["semantics"]["resource_surface"]["counters"]["committed_messages"],
+            1
+        );
+        assert_eq!(
+            lab_normalized["semantics"]["obligation_balance"]["aborted"],
+            1
+        );
+        assert_eq!(
+            live_normalized["semantics"]["obligation_balance"]["committed"],
+            1
+        );
+    }
+
+    #[test]
+    fn lab_differential_calibration_profile_counts_pass_and_divergence_variants() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: Vec::new(),
+            seed: 6060,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run full calibration profile");
+        assert!(report.success);
+        assert_eq!(report.scenario_count, 5);
+        assert_eq!(report.pass_count, 1);
+        assert_eq!(report.expected_divergence_count, 4);
+        assert_eq!(report.unexpected_divergence_count, 0);
+        assert_eq!(report.missing_expected_divergence_count, 0);
+        assert!(report.scenarios.iter().any(|scenario| {
+            scenario.scenario_id == "calibration.comparator.resource_counter_mismatch"
+                && scenario.observed_provisional_class == "semantic_mismatch_admitted_surface"
+                && scenario.observed_final_policy_class.is_none()
+        }));
+        assert!(report.scenarios.iter().any(|scenario| {
+            scenario.scenario_id == "calibration.channel.commit_visibility_mismatch"
+                && scenario.observed_provisional_class == "semantic_mismatch_admitted_surface"
+                && scenario.observed_final_policy_class.is_none()
+        }));
+        assert!(report.scenarios.iter().any(|scenario| {
+            scenario.scenario_id == "calibration.cancellation.cleanup_missing"
+                && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
+        }));
     }
 
     #[test]

@@ -280,6 +280,50 @@ Interpretation rules for the refinement matrix:
 - `asupersync-2a6k9.6.6` should be treated as the checklist upgrade that future
   `2a6k9.6.*` implementation beads must point at when they claim closure
 
+### Current Executable Anchor Inventory
+
+The refinement matrix above is intentionally policy-shaped. This section turns
+it into a concrete implementation inventory by naming the current runner
+surfaces, profile lanes, calibration anchors, and the nearest stable test files
+that already exercise the same semantic claims.
+
+This inventory is the part future pilot beads should update when they add or
+replace executable coverage. If a later bead lands new scenario IDs or retires
+an old one, it must update this table and the companion contract test instead
+of relying on tribal memory.
+
+#### Current differential runner profiles
+
+The current CLI-owned inventory lives in `src/bin/asupersync.rs` and is exposed
+through three stable profile lanes:
+
+| Runner profile | Current scenario IDs | Why the profile exists |
+|---|---|---|
+| `Smoke` | `phase1.cancel.protocol.drain_finalize`, `phase1.combinator.race.one_loser`, `phase1.channel.reserve_send.commit` | the fastest shared pass/fail lane for the initial semantic core |
+| `Phase1Core` | `phase1.cancel.protocol.drain_finalize`, `phase1.combinator.race.one_loser`, `phase1.channel.reserve_send.commit`, `phase1.channel.reserve_send.abort_visible`, `phase1.region.close.quiescent` | the full admitted `Phase 1` executable floor, including the cancel-before-commit channel path |
+| `Calibration` | `phase1.cancel.protocol.drain_finalize`, `calibration.cancellation.cleanup_missing`, `calibration.comparator.resource_counter_mismatch`, `calibration.channel.commit_visibility_mismatch`, `calibration.obligation.leak_detected` | prove the classifier, artifact bundle, and failure-retention paths with intentional divergences |
+
+#### Surface-to-inventory map
+
+| Surface | Current shared differential anchors | Current local unit/e2e anchors | Current calibration / negative-control anchors | Required invariant-log focus |
+|---|---|---|---|---|
+| `cancellation` | `phase1.cancel.protocol.drain_finalize` in `src/bin/asupersync.rs`; shared contract lane in `tests/lab_live_scenario_adapter_contract.rs` | `tests/lab_live_scenario_adapter_contract.rs`, `tests/cancel_obligation_invariants.rs`, `src/lab/oracle/cancellation_protocol.rs` | `calibration.cancellation.cleanup_missing` | `cancellation.requested`, `cancellation.acknowledged`, `cancellation.finalized`, `terminal_outcome`, `repro_command` |
+| `combinators` | `phase1.combinator.race.one_loser` in `src/bin/asupersync.rs` | `tests/e2e/combinator/cancel_correctness/async_loser_drain.rs`, `tests/phase0_verification.rs`, `src/lab/oracle/loser_drain.rs`, `src/combinator/race.rs` | current dedicated differential `T4` anchor is still missing; until a pilot bead lands it, local loser-drain oracle failures are the nearest negative-control evidence | `loser_drain`, `terminal_outcome`, `policy_class`, `artifact_bundle`, `normalized_record_path` |
+| `channels` | `phase1.channel.reserve_send.commit` and `phase1.channel.reserve_send.abort_visible` in `src/bin/asupersync.rs` | `tests/e2e_channel_patterns.rs`, `src/channel/mpsc.rs`, `src/channel/oneshot.rs`, `src/channel/broadcast.rs`, `src/channel/watch.rs` | `calibration.channel.commit_visibility_mismatch` proves committed/aborted visibility failures stay loud through the shared runner | `resource_surface`, `obligation_balance`, `terminal_outcome`, `artifact_bundle`, `repro_command` |
+| `obligations` | currently piggybacks on `phase1.cancel.protocol.drain_finalize`, `phase1.channel.reserve_send.commit`, and `phase1.region.close.quiescent` because each emits `obligation_balance` in the normalized record | `tests/obligation_lifecycle_e2e.rs`, `tests/cancel_obligation_invariants.rs`, `src/lab/oracle/obligation_leak.rs`, `src/runtime/obligation_table.rs` | `calibration.obligation.leak_detected` | `obligation_balance`, `policy_class`, `normalized_record_path`, `artifact_bundle`, `repro_command` |
+| `region_close` / `quiescence` | `phase1.region.close.quiescent` in `src/bin/asupersync.rs` | `tests/close_quiescence_regression.rs`, `tests/semantic_adr_regression.rs`, `tests/region_lifecycle_conformance.rs`, `src/lab/oracle/quiescence.rs`, `src/lab/oracle/finalizer.rs` | current dedicated differential `T4` anchor is still missing; later pilot beads must add an explicit non-quiescent close witness | `region_close`, `terminal_outcome`, `artifact_bundle`, `normalized_record_path`, `repro_command` |
+
+Interpretation rules for the executable inventory:
+
+- `current dedicated differential T4 anchor is still missing` is an explicit
+  backlog statement, not permission to skip the future adversarial witness
+- a bead may cite file-level anchors from this table only if its retained bundle
+  also points at the exact scenario ID or test it exercised
+- when obligation evidence is piggybacked through another surface, the bundle
+  must still expose `obligation_balance` as a first-class discoverable field
+- if a new runner profile is added, it must be described here with the exact
+  scenario IDs it admits and the reason that profile exists
+
 ## Structured Logging Standard
 
 Every executable differential bead must emit structured logs or records with a

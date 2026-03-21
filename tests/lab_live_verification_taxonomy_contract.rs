@@ -143,6 +143,40 @@ fn doc_refines_phase1_matrix_for_core_pilot_bead() -> std::io::Result<()> {
 }
 
 #[test]
+fn doc_pins_current_executable_anchor_inventory() -> std::io::Result<()> {
+    let doc = load_doc()?;
+    for token in [
+        "Current Executable Anchor Inventory",
+        "Current differential runner profiles",
+        "Smoke",
+        "Phase1Core",
+        "Calibration",
+        "phase1.cancel.protocol.drain_finalize",
+        "phase1.combinator.race.one_loser",
+        "phase1.channel.reserve_send.commit",
+        "phase1.channel.reserve_send.abort_visible",
+        "phase1.region.close.quiescent",
+        "calibration.cancellation.cleanup_missing",
+        "calibration.comparator.resource_counter_mismatch",
+        "calibration.channel.commit_visibility_mismatch",
+        "calibration.obligation.leak_detected",
+        "tests/lab_live_scenario_adapter_contract.rs",
+        "tests/e2e/combinator/cancel_correctness/async_loser_drain.rs",
+        "tests/e2e_channel_patterns.rs",
+        "tests/obligation_lifecycle_e2e.rs",
+        "tests/close_quiescence_regression.rs",
+        "current dedicated differential `T4` anchor is still missing",
+        "currently piggybacks on `phase1.cancel.protocol.drain_finalize`, `phase1.channel.reserve_send.commit`, and `phase1.region.close.quiescent`",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing executable inventory token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn doc_defines_external_surface_gate_requirements() -> std::io::Result<()> {
     let doc = load_doc()?;
     for token in [
@@ -319,7 +353,9 @@ fn cli_source_defines_differential_runner_surface() -> std::io::Result<()> {
         "differential_event_log.jsonl",
         "runner_summary.json",
         "calibration.cancellation.cleanup_missing",
+        "calibration.comparator.resource_counter_mismatch",
         "calibration.obligation.leak_detected",
+        "semantic_mismatch_admitted_surface",
     ] {
         assert!(
             src.contains(token),
