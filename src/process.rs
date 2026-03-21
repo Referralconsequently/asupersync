@@ -1133,15 +1133,53 @@ impl Child {
     }
 }
 
+fn should_background_reap_kill_on_drop() -> bool {
+    Cx::current().is_some() || crate::runtime::Runtime::current_handle().is_some()
+}
+
+fn reap_kill_on_drop_child(child: std_process::Child) {
+    if !should_background_reap_kill_on_drop() {
+        let mut child = child;
+        let _ = child.wait();
+        return;
+    }
+
+    let shared_child = std::sync::Arc::new(parking_lot::Mutex::new(Some(child)));
+    let thread_child = std::sync::Arc::clone(&shared_child);
+
+    // ubs:ignore - intentional detach by dropping JoinHandle in Drop to avoid blocking runtime
+    if std::thread::Builder::new()
+        .name("asupersync-process-reaper".to_owned())
+        .spawn(move || {
+            let mut child_slot = thread_child.lock();
+            if let Some(mut child) = child_slot.take() {
+                let _ = child.wait();
+            }
+        })
+        .is_ok()
+    {
+        return;
+    }
+
+    let mut shared_child = shared_child.lock();
+    if let Some(mut child) = shared_child.take() {
+        let _ = child.wait();
+    }
+}
+
 impl Drop for Child {
     fn drop(&mut self) {
-        if self.kill_on_drop {
-            if let Some(ref mut child) = self.inner {
-                let _ = child.kill();
-                // Best-effort reap to avoid leaving a zombie process.
-                // try_wait is non-blocking so it is safe in Drop.
-                let _ = child.try_wait();
-            }
+        if !self.kill_on_drop {
+            return;
+        }
+
+        drop(self.stdin.take());
+
+        if let Some(mut child) = self.inner.take() {
+            let _ = child.kill();
+            // Preserve the no-zombie guarantee from kill_on_drop, but do not
+            // surprise a runtime worker thread with a blocking OS wait in Drop.
+            reap_kill_on_drop_child(child);
         }
     }
 }
@@ -1595,6 +1633,7 @@ impl std::fmt::Display for ExitStatus {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use crate::types::{Budget, RegionId, TaskId};
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -2127,6 +2166,127 @@ mod tests {
         // Process should no longer exist (we can't easily check this portably,
         // but we can verify the test runs to completion)
         crate::test_complete!("test_command_kill_on_drop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_kill_on_drop_reaps_process() {
+        init_test("test_command_kill_on_drop_reaps_process");
+
+        let pid = {
+            let child = Command::new("sleep")
+                .arg("100")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn failed");
+            child.id().expect("no pid")
+        };
+
+        #[allow(clippy::cast_possible_wrap)]
+        let pid = pid as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited == -1 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                crate::assert_with_log!(
+                    err.raw_os_error() == Some(libc::ECHILD),
+                    "kill_on_drop reaps child",
+                    libc::ECHILD,
+                    err.raw_os_error().unwrap_or_default()
+                );
+                break;
+            }
+            if waited == pid {
+                panic!("kill_on_drop should reap the child before drop returns");
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("kill_on_drop should reap the child before timeout");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        crate::test_complete!("test_command_kill_on_drop_reaps_process");
+    }
+
+    #[test]
+    fn test_kill_on_drop_background_reap_branch_tracks_ambient_cx() {
+        init_test("test_kill_on_drop_background_reap_branch_tracks_ambient_cx");
+
+        crate::assert_with_log!(
+            !should_background_reap_kill_on_drop(),
+            "no ambient cx uses direct reap",
+            false,
+            should_background_reap_kill_on_drop()
+        );
+
+        let cx = Cx::new(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        crate::assert_with_log!(
+            should_background_reap_kill_on_drop(),
+            "ambient cx enables background reap",
+            true,
+            should_background_reap_kill_on_drop()
+        );
+
+        crate::test_complete!("test_kill_on_drop_background_reap_branch_tracks_ambient_cx");
+    }
+
+    #[test]
+    fn test_kill_on_drop_background_reap_branch_detects_runtime_worker_without_cx() {
+        use std::sync::mpsc;
+
+        init_test("test_kill_on_drop_background_reap_branch_detects_runtime_worker_without_cx");
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(1)
+            .on_thread_start(move || {
+                let _ = tx.send((
+                    crate::runtime::Runtime::current_handle().is_some(),
+                    Cx::current().is_some(),
+                    should_background_reap_kill_on_drop(),
+                ));
+            })
+            .build()
+            .expect("runtime build");
+
+        let (has_runtime_handle, has_ambient_cx, should_background_reap) = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("worker startup callback should report runtime context");
+
+        crate::assert_with_log!(
+            has_runtime_handle,
+            "worker thread exposes runtime handle before first task poll",
+            true,
+            has_runtime_handle
+        );
+        crate::assert_with_log!(
+            !has_ambient_cx,
+            "worker startup callback runs outside task poll cx",
+            false,
+            has_ambient_cx
+        );
+        crate::assert_with_log!(
+            should_background_reap,
+            "runtime worker without task cx should still background reap kill_on_drop",
+            true,
+            should_background_reap
+        );
+
+        drop(runtime);
+        crate::test_complete!(
+            "test_kill_on_drop_background_reap_branch_detects_runtime_worker_without_cx"
+        );
     }
 
     #[test]
