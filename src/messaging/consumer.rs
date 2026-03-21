@@ -1590,6 +1590,9 @@ pub struct FabricConsumer {
     state: FabricConsumerState,
     pending_ack_tokens: BTreeMap<ObligationId, ObligationToken>,
     decision_log: Vec<ConsumerDecisionRecord>,
+    /// Maximum number of decision log entries retained.  Oldest entries are
+    /// evicted when the cap is reached.
+    decision_log_capacity: usize,
     next_event_nanos: u64,
     next_pull_enqueue_order: u64,
     waiting_pull_requests: Vec<QueuedPullRequest>,
@@ -1620,6 +1623,7 @@ impl FabricConsumer {
             state: FabricConsumerState::default(),
             pending_ack_tokens: BTreeMap::new(),
             decision_log: Vec::new(),
+            decision_log_capacity: 4096,
             next_event_nanos: 0,
             next_pull_enqueue_order: 0,
             waiting_pull_requests: Vec::new(),
@@ -1660,6 +1664,15 @@ impl FabricConsumer {
     #[must_use]
     pub fn decision_log(&self) -> &[ConsumerDecisionRecord] {
         &self.decision_log
+    }
+
+    /// Append a decision record, evicting the oldest entry when the log is
+    /// at capacity.
+    fn push_decision(&mut self, record: ConsumerDecisionRecord) {
+        if self.decision_log.len() >= self.decision_log_capacity {
+            self.decision_log.remove(0);
+        }
+        self.decision_log.push(record);
     }
 
     /// Return the number of queued pull requests still waiting for service.
@@ -1904,7 +1917,7 @@ impl FabricConsumer {
         let (redelivery_action, decision_record) =
             self.decide_redelivery_action(&pending, attempt.obligation_id);
         if let Some(record) = decision_record {
-            self.decision_log.push(record);
+            self.push_decision(record);
         }
         match redelivery_action {
             ConsumerRedeliveryAction::RetryNow => {}
@@ -2071,7 +2084,7 @@ impl FabricConsumer {
                 snapshot.ci_width(),
             );
             let outcome = evaluate(&contract, &posterior, &ctx);
-            self.decision_log.push(ConsumerDecisionRecord {
+            self.push_decision(ConsumerDecisionRecord {
                 kind: ConsumerDecisionKind::Overflow,
                 action_name: outcome.action_name,
                 demand_class: Some(request.demand_class),
@@ -2278,7 +2291,7 @@ impl FabricConsumer {
         if let ScheduledConsumerRequest::Pull(pull_request) = &request
             && let Some(record) = self.make_pull_decision_record(pull_request, &plan, obligation_id)
         {
-            self.decision_log.push(record);
+            self.push_decision(record);
         }
 
         Ok(ScheduledConsumerDelivery {
