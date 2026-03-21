@@ -281,6 +281,7 @@ pub mod prelude {
 pub mod error {
     use crate::app::{AppCompileError, AppSpawnError, AppStartError, AppStopError};
     use crate::gen_server::{CallError, CastError, InfoError};
+    use crate::runtime::{RegionCreateError, SpawnError};
     use crate::supervision::{SupervisorCompileError, SupervisorSpawnError};
 
     /// Severity classification for SPORK errors.
@@ -315,16 +316,53 @@ pub mod error {
     }
 
     impl SporkError {
+        fn region_create_severity(error: &RegionCreateError) -> SporkSeverity {
+            match error {
+                RegionCreateError::ParentAtCapacity { .. } => SporkSeverity::Transient,
+                RegionCreateError::ParentNotFound(_) | RegionCreateError::ParentClosed(_) => {
+                    SporkSeverity::Permanent
+                }
+            }
+        }
+
+        fn runtime_spawn_severity(error: &SpawnError) -> SporkSeverity {
+            match error {
+                SpawnError::RegionAtCapacity { .. } => SporkSeverity::Transient,
+                SpawnError::RuntimeUnavailable
+                | SpawnError::RegionNotFound(_)
+                | SpawnError::RegionClosed(_)
+                | SpawnError::LocalSchedulerUnavailable
+                | SpawnError::NameRegistrationFailed { .. } => SporkSeverity::Permanent,
+            }
+        }
+
+        fn supervisor_spawn_severity(error: &SupervisorSpawnError) -> SporkSeverity {
+            match error {
+                SupervisorSpawnError::RegionCreate(error) => Self::region_create_severity(error),
+                SupervisorSpawnError::ChildStartFailed { err, .. } => {
+                    Self::runtime_spawn_severity(err)
+                }
+            }
+        }
+
+        fn app_spawn_severity(error: &AppSpawnError) -> SporkSeverity {
+            match error {
+                AppSpawnError::RegionCreate(error) => Self::region_create_severity(error),
+                AppSpawnError::SpawnFailed(error) => Self::supervisor_spawn_severity(error),
+            }
+        }
+
         /// Classify the severity of this error.
         ///
         /// Severity is monotone: permanent errors remain permanent.
         #[must_use]
         pub fn severity(&self) -> SporkSeverity {
             match self {
-                // Lifecycle errors are permanent (topology or region failures)
-                Self::Start(_) | Self::Stop(_) | Self::Compile(_) | Self::Spawn(_) => {
+                Self::Start(AppStartError::CompileFailed(_)) | Self::Stop(_) | Self::Compile(_) => {
                     SporkSeverity::Permanent
                 }
+                Self::Start(AppStartError::SpawnFailed(error)) => Self::app_spawn_severity(error),
+                Self::Spawn(error) => Self::app_spawn_severity(error),
                 // Communication errors depend on the variant
                 Self::Call(e) => match e {
                     CallError::ServerStopped | CallError::NoReply | CallError::Cancelled(_) => {
@@ -587,15 +625,32 @@ mod tests {
     // =====================================================================
 
     mod error_taxonomy {
-        use crate::app::{AppCompileError, AppStartError, AppStopError};
+        use crate::app::{AppCompileError, AppSpawnError, AppStartError, AppStopError};
         use crate::gen_server::{CallError, CastError, InfoError};
+        use crate::runtime::{RegionCreateError, SpawnError};
         use crate::spork::error::{SporkError, SporkSeverity};
-        use crate::supervision::SupervisorCompileError;
+        use crate::supervision::{SupervisorCompileError, SupervisorSpawnError};
         use crate::types::RegionId;
         use crate::util::arena::ArenaIndex;
 
         fn dummy_region_id() -> RegionId {
             RegionId::from_arena(ArenaIndex::new(0, 0))
+        }
+
+        fn parent_capacity_error(region: RegionId) -> RegionCreateError {
+            RegionCreateError::ParentAtCapacity {
+                region,
+                limit: 1,
+                live: 1,
+            }
+        }
+
+        fn region_task_capacity_error(region: RegionId) -> SpawnError {
+            SpawnError::RegionAtCapacity {
+                region,
+                limit: 1,
+                live: 1,
+            }
         }
 
         fn init_test(name: &str) {
@@ -723,6 +778,44 @@ mod tests {
             let e = SporkError::Cast(CastError::ServerStopped);
             assert_eq!(e.severity(), SporkSeverity::Permanent);
             crate::test_complete!("severity_permanent_cast_stopped");
+        }
+
+        #[test]
+        fn severity_transient_spawn_parent_capacity() {
+            init_test("severity_transient_spawn_parent_capacity");
+            let region = dummy_region_id();
+            let e = SporkError::Spawn(AppSpawnError::RegionCreate(parent_capacity_error(region)));
+            assert_eq!(e.severity(), SporkSeverity::Transient);
+            assert!(e.is_transient());
+            crate::test_complete!("severity_transient_spawn_parent_capacity");
+        }
+
+        #[test]
+        fn severity_transient_start_parent_capacity() {
+            init_test("severity_transient_start_parent_capacity");
+            let region = dummy_region_id();
+            let e = SporkError::Start(AppStartError::SpawnFailed(AppSpawnError::RegionCreate(
+                parent_capacity_error(region),
+            )));
+            assert_eq!(e.severity(), SporkSeverity::Transient);
+            assert!(e.is_transient());
+            crate::test_complete!("severity_transient_start_parent_capacity");
+        }
+
+        #[test]
+        fn severity_transient_spawn_child_start_region_capacity() {
+            init_test("severity_transient_spawn_child_start_region_capacity");
+            let region = dummy_region_id();
+            let e = SporkError::Spawn(AppSpawnError::SpawnFailed(
+                SupervisorSpawnError::ChildStartFailed {
+                    child: "worker".into(),
+                    err: region_task_capacity_error(region),
+                    region,
+                },
+            ));
+            assert_eq!(e.severity(), SporkSeverity::Transient);
+            assert!(e.is_transient());
+            crate::test_complete!("severity_transient_spawn_child_start_region_capacity");
         }
 
         // -- Domain tags --
