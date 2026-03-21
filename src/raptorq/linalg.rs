@@ -270,13 +270,13 @@ impl SparseRow {
     #[inline]
     #[must_use]
     pub fn singleton(index: usize, value: Gf256, len: usize) -> Self {
+        assert!(
+            index < len,
+            "sparse row index out of range: {index} >= {len}"
+        );
         if value.is_zero() {
             Self::zeros(len)
         } else {
-            assert!(
-                index < len,
-                "sparse row index out of range: {index} >= {len}"
-            );
             Self {
                 entries: vec![(index, value)],
                 len,
@@ -1207,6 +1207,12 @@ mod tests {
     #[should_panic(expected = "sparse row index out of range")]
     fn sparse_row_singleton_rejects_out_of_range_indices() {
         let _ = SparseRow::singleton(4, Gf256::new(1), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "sparse row index out of range")]
+    fn sparse_row_singleton_zero_value_still_rejects_out_of_range_indices() {
+        let _ = SparseRow::singleton(4, Gf256::ZERO, 4);
     }
 
     // -- Slice operations --

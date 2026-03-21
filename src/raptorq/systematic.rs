@@ -870,7 +870,7 @@ impl SystematicEncoder {
             symbol_size,
             seed,
             repair_symbols_generated: 0,
-            degree_min: usize::MAX,
+            degree_min: 0,
             degree_max: 0,
             degree_sum: 0,
             degree_count: 0,
@@ -1010,7 +1010,11 @@ impl SystematicEncoder {
 
             // Update stats
             self.stats.repair_symbols_generated += 1;
-            self.stats.degree_min = self.stats.degree_min.min(degree);
+            if self.stats.degree_count == 0 {
+                self.stats.degree_min = degree;
+            } else {
+                self.stats.degree_min = self.stats.degree_min.min(degree);
+            }
             self.stats.degree_max = self.stats.degree_max.max(degree);
             self.stats.degree_sum += degree;
             self.stats.degree_count += 1;
@@ -1650,6 +1654,10 @@ mod tests {
         assert_eq!(stats.ldpc_symbol_count, enc.params().s);
         assert_eq!(stats.hdpc_symbol_count, enc.params().h);
         assert_eq!(stats.repair_symbols_generated, 0);
+        assert_eq!(stats.degree_min, 0);
+        assert_eq!(stats.degree_max, 0);
+        assert_eq!(stats.degree_sum, 0);
+        assert_eq!(stats.degree_count, 0);
     }
 
     #[test]
