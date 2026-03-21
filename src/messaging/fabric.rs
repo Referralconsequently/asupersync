@@ -1266,6 +1266,12 @@ pub enum ControlCapsuleError {
     /// Joint consensus requires an overlap set between old and new stewards.
     #[error("joint configuration must retain at least one steward across the transition")]
     JointConfigRequiresOverlap,
+    /// Joint consensus steward sets must contain distinct members.
+    #[error("joint configuration contains duplicate steward `{node}`")]
+    DuplicateSteward {
+        /// Duplicate steward discovered in the proposed steward set.
+        node: NodeId,
+    },
     /// Shared control shards must admit at least one slot.
     #[error("shared control shard cardinality limit must be at least 1")]
     InvalidSharedShardLimit,
@@ -1519,6 +1525,9 @@ impl ControlCapsuleV1 {
         new_stewards: Vec<NodeId>,
         next_sequencer: NodeId,
     ) -> Result<JointConfigEntry, ControlCapsuleError> {
+        if let Some(node) = duplicate_node(&new_stewards) {
+            return Err(ControlCapsuleError::DuplicateSteward { node });
+        }
         if !new_stewards
             .iter()
             .any(|candidate| contains_node(&self.steward_pool, candidate))
@@ -1550,9 +1559,15 @@ impl ControlCapsuleV1 {
     }
 
     /// Fence and transfer cursor-control authority to a new holder.
-    pub fn transfer_cursor_authority(&mut self, next_holder: NodeId) -> CursorAuthorityLease {
+    pub fn transfer_cursor_authority(
+        &mut self,
+        next_holder: NodeId,
+    ) -> Result<CursorAuthorityLease, ControlCapsuleError> {
+        if !contains_node(&self.steward_pool, &next_holder) {
+            return Err(ControlCapsuleError::UnknownSteward { node: next_holder });
+        }
         self.advance_control_fence();
-        self.install_cursor_authority(next_holder)
+        Ok(self.install_cursor_authority(next_holder))
     }
 
     /// Validate that a caller still holds the current fenced cursor-authority
@@ -1780,6 +1795,16 @@ fn candidate_score(candidate: &StewardCandidate, temperature: CellTemperature) -
 
 fn contains_node(nodes: &[NodeId], candidate: &NodeId) -> bool {
     nodes.iter().any(|node| node == candidate)
+}
+
+fn duplicate_node(nodes: &[NodeId]) -> Option<NodeId> {
+    let mut seen = BTreeSet::new();
+    for node in nodes {
+        if !seen.insert(node.clone()) {
+            return Some(node.clone());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -2601,6 +2626,33 @@ mod tests {
     }
 
     #[test]
+    fn control_capsule_v1_reconfiguration_rejects_duplicate_stewards_without_mutation() {
+        let mut capsule = control_capsule();
+
+        let err = capsule
+            .reconfigure(
+                vec![NodeId::new("node-a"), NodeId::new("node-a")],
+                NodeId::new("node-a"),
+            )
+            .expect_err("duplicate steward sets must fail closed");
+        assert_eq!(
+            err,
+            ControlCapsuleError::DuplicateSteward {
+                node: NodeId::new("node-a")
+            }
+        );
+        assert_eq!(
+            capsule.steward_pool,
+            vec![NodeId::new("node-a"), NodeId::new("node-b")]
+        );
+        assert_eq!(capsule.policy_revision, 1);
+        assert_eq!(
+            capsule.active_sequencer_holder().map(NodeId::as_str),
+            Some("node-a")
+        );
+    }
+
+    #[test]
     fn control_capsule_v1_replicated_append_is_idempotent_or_stale() {
         let mut capsule = control_capsule();
         let lease = capsule
@@ -2647,7 +2699,9 @@ mod tests {
             .cloned()
             .expect("initial cursor-authority lease");
 
-        let transferred = capsule.transfer_cursor_authority(NodeId::new("consumer-a"));
+        let transferred = capsule
+            .transfer_cursor_authority(NodeId::new("node-b"))
+            .expect("steward transfer should succeed");
 
         capsule
             .validate_cursor_authority(&transferred)
@@ -2661,9 +2715,31 @@ mod tests {
                 current_holder,
                 current_fence_generation,
                 ..
-            } if current_holder == NodeId::new("consumer-a")
+            } if current_holder == NodeId::new("node-b")
                 && current_fence_generation == capsule.sequencer_lease_generation
         ));
+    }
+
+    #[test]
+    fn control_capsule_v1_cursor_authority_transfer_rejects_foreign_holder_without_mutation() {
+        let mut capsule = control_capsule();
+        let original = capsule
+            .cursor_authority_lease()
+            .cloned()
+            .expect("initial cursor-authority lease");
+        let original_generation = capsule.sequencer_lease_generation;
+
+        let err = capsule
+            .transfer_cursor_authority(NodeId::new("consumer-a"))
+            .expect_err("foreign holders must be rejected");
+        assert_eq!(
+            err,
+            ControlCapsuleError::UnknownSteward {
+                node: NodeId::new("consumer-a")
+            }
+        );
+        assert_eq!(capsule.cursor_authority_lease(), Some(&original));
+        assert_eq!(capsule.sequencer_lease_generation, original_generation);
     }
 
     #[test]

@@ -1395,6 +1395,16 @@ impl CutLatticeIndex {
             }
         }
 
+        // Evict extremely old compacted entries entirely to prevent unbounded memory growth.
+        // We use 2x max_age_nanos as the threshold for complete deletion.
+        self.entries.retain(|e| {
+            let age_nanos = current_time
+                .as_nanos()
+                .saturating_sub(e.indexed_at.as_nanos());
+            !(e.materialization == MaterializationState::Compacted
+                && age_nanos > self.retention.max_age_nanos.saturating_mul(2))
+        });
+
         compacted
     }
 

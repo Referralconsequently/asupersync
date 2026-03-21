@@ -847,7 +847,7 @@ impl RedisClient {
     ) -> Result<(), RedisError> {
         if let Some(ttl) = ttl {
             let mut tmp = [0u8; 20];
-            let millis = u64_decimal_bytes(ttl.as_millis() as u64, &mut tmp);
+            let millis = u64_decimal_bytes(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX), &mut tmp);
             let resp = self
                 .cmd_bytes(cx, &[b"SET", key.as_bytes(), value, b"PX", millis])
                 .await?;
@@ -2114,7 +2114,7 @@ mod tests {
         // Verify that sub-second TTLs don't truncate to zero by using PX
         let ttl = Duration::from_millis(500);
         let mut tmp = [0u8; 20];
-        let millis = u64_decimal_bytes(ttl.as_millis() as u64, &mut tmp);
+        let millis = u64_decimal_bytes(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX), &mut tmp);
         assert_eq!(millis, b"500");
     }
 }
