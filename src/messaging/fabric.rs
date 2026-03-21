@@ -3277,7 +3277,7 @@ mod tests {
         let evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 7);
         let next_sequencer = evidence.next_sequencer.clone();
 
-        let certified = cell
+        let mut certified = cell
             .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
             .expect("certified rebalance");
 
@@ -3515,6 +3515,18 @@ mod tests {
             "budgeted rebalance should retain the current steward for one step"
         );
 
+        let required_holders = cell
+            .repair_policy
+            .minimum_repair_holders(plan.next_temperature, plan.next_stewards.len());
+        let repair_symbols =
+            repair_bindings_for(&cell, &plan, &reduced_candidates, 13, required_holders);
+        assert!(
+            repair_symbols
+                .iter()
+                .any(|binding| binding.node_id == current_steward),
+            "retained steward should remain eligible as a repair holder"
+        );
+
         let evidence = RebalanceCutEvidence {
             next_sequencer: plan
                 .added_stewards
@@ -3531,12 +3543,7 @@ mod tests {
                 reissued_reply_rights: 0,
                 dangling_reply_rights: 0,
             },
-            repair_symbols: vec![
-                RepairSymbolBinding::new(current_steward.clone(), cell.epoch, 13),
-                RepairSymbolBinding::new(plan.next_stewards[1].clone(), cell.epoch, 13),
-                RepairSymbolBinding::new(reduced_candidates[1].node_id.clone(), cell.epoch, 13),
-                RepairSymbolBinding::new(reduced_candidates[2].node_id.clone(), cell.epoch, 13),
-            ],
+            repair_symbols,
         };
 
         let certified = cell

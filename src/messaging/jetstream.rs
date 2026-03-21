@@ -1111,25 +1111,42 @@ fn json_escape(s: &str) -> String {
 fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
     let pattern = format!("\"{key}\":\"");
     let start = json.find(&pattern)? + pattern.len();
-    // Walk forward, respecting backslash escapes
+    // Walk forward, respecting backslash escapes and building unescaped string
     let slice = &json[start..];
     let mut chars = slice.char_indices();
+    let mut result = String::new();
     loop {
         match chars.next()? {
-            (i, '"') => return Some(json[start..start + i].to_string()),
+            (_, '"') => return Some(result),
             (_, '\\') => {
-                // Skip the escaped character.  For \uXXXX sequences we
-                // must consume the 'u' plus all 4 hex digits so that a
-                // hex digit that happens to be '"' (impossible, but
-                // being defensive) doesn't terminate the string early.
                 let (_, esc) = chars.next()?;
-                if esc == 'u' {
-                    for _ in 0..4 {
-                        chars.next()?;
+                match esc {
+                    '"' | '\\' | '/' => result.push(esc),
+                    'b' => result.push('\x08'),
+                    'f' => result.push('\x0C'),
+                    'n' => result.push('\n'),
+                    'r' => result.push('\r'),
+                    't' => result.push('\t'),
+                    'u' => {
+                        let mut hex = String::with_capacity(4);
+                        for _ in 0..4 {
+                            let (_, h) = chars.next()?;
+                            hex.push(h);
+                        }
+                        if let Ok(val) = u32::from_str_radix(&hex, 16) {
+                            if let Some(c) = std::char::from_u32(val) {
+                                result.push(c);
+                            } else {
+                                result.push(std::char::REPLACEMENT_CHARACTER);
+                            }
+                        } else {
+                            result.push(std::char::REPLACEMENT_CHARACTER);
+                        }
                     }
+                    _ => result.push(esc),
                 }
             }
-            _ => {}
+            (_, c) => result.push(c),
         }
     }
 }
@@ -1705,14 +1722,14 @@ mod tests {
     }
 
     #[test]
-    fn extract_json_string_handles_unicode_escape() {
+    fn test_extract_json_string_handles_unicode_escape() {
         // BUG-7 regression: \uXXXX should not truncate the extracted string
         let json = r#"{"name":"hello\u0020world","other":"val"}"#;
         let result = extract_json_string_simple(json, "name");
         assert_eq!(
             result,
-            Some(r"hello\u0020world".to_string()),
-            "unicode escape should not truncate"
+            Some("hello world".to_string()),
+            "unicode escape should be correctly parsed"
         );
     }
 }
