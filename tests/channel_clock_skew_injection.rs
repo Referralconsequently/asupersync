@@ -182,12 +182,25 @@ fn jitter_stays_within_bounds() {
         let t = skewed.now();
         let diff = t.as_nanos().abs_diff(Time::from_secs(1000).as_nanos());
         assert!(
-            diff < max_jitter,
+            diff <= max_jitter,
             "Jitter {diff}ns exceeds max {max_jitter}ns"
         );
     }
 
     assert_eq!(skewed.stats().jitter_count, 200);
+}
+
+#[test]
+fn one_nanosecond_jitter_produces_real_skew() {
+    let base = make_base();
+    let (_, sink) = make_sink();
+    let config = ClockSkewConfig::new(42).with_jitter(1.0, 1);
+    let skewed = SkewClock::new(base.clone() as Arc<dyn TimeSource>, config, sink);
+
+    base.set(Time::from_secs(1000));
+    let t = skewed.now();
+    let diff = t.as_nanos().abs_diff(Time::from_secs(1000).as_nanos());
+    assert_eq!(diff, 1, "1ns jitter should not collapse to zero");
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +358,23 @@ fn evidence_logged_for_clock_jump() {
         .find(|e| e.action.contains("clock_jump"))
         .expect("Expected clock_jump evidence entry");
     assert_eq!(jump_entry.component, "clock_skew_injector");
+}
+
+#[test]
+fn evidence_logged_for_static_offset_reads() {
+    let base = make_base();
+    let (collector, sink) = make_sink();
+    let config = ClockSkewConfig::new(1).with_static_offset_ms(25);
+    let skewed = SkewClock::new(base.clone() as Arc<dyn TimeSource>, config, sink);
+
+    base.set(Time::from_secs(2));
+    let _ = skewed.now();
+
+    let entries = collector.entries();
+    assert!(
+        entries.iter().any(|e| e.action == "inject_clock_skew"),
+        "Expected generic clock skew evidence entry"
+    );
 }
 
 // ---------------------------------------------------------------------------

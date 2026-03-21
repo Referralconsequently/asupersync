@@ -55,6 +55,13 @@ use franken_evidence::EvidenceLedger;
 /// Positive values move the clock ahead; negative move it behind.
 type SkewNanos = i64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ComputedSkew {
+    total_skew: SkewNanos,
+    jitter_applied: bool,
+    jump_fired_now: bool,
+}
+
 /// Configuration for clock skew fault injection.
 #[derive(Debug, Clone)]
 pub struct ClockSkewConfig {
@@ -299,8 +306,10 @@ impl SkewClock {
     }
 
     /// Compute the skew offset for a given base time.
-    fn compute_skew(&self, base_nanos: u64) -> SkewNanos {
+    fn compute_skew(&self, base_nanos: u64) -> ComputedSkew {
         let mut total_skew: SkewNanos = self.config.static_offset_ns;
+        let mut jump_fired_now = false;
+        let mut jitter_applied = false;
 
         // Drift: proportional to elapsed base time.
         if self.config.drift_rate_ns_per_sec != 0 {
@@ -317,13 +326,7 @@ impl SkewClock {
                     .is_ok()
             {
                 self.stats.record_jump();
-                emit_skew_evidence(
-                    &self.evidence_sink,
-                    Time::from_nanos(base_nanos).as_millis(),
-                    "clock_jump",
-                    base_nanos,
-                    jump_offset,
-                );
+                jump_fired_now = true;
             }
             if self.jump_fired.load(Ordering::Relaxed) > 0 {
                 total_skew = total_skew.saturating_add(jump_offset);
@@ -335,7 +338,7 @@ impl SkewClock {
             let (should, magnitude, direction) = {
                 let mut rng = self.rng.lock();
                 let should = rng.should_inject(self.config.jitter_probability);
-                let mag = rng.next_u64() % self.config.jitter_max_ns;
+                let mag = (rng.next_u64() % self.config.jitter_max_ns).saturating_add(1);
                 let dir = rng.next_u64().is_multiple_of(2);
                 drop(rng);
                 (should, mag, dir)
@@ -345,11 +348,16 @@ impl SkewClock {
                 #[allow(clippy::cast_possible_wrap)]
                 let jitter = sign * (magnitude as SkewNanos);
                 total_skew = total_skew.saturating_add(jitter);
+                jitter_applied = true;
                 self.stats.record_jitter();
             }
         }
 
-        total_skew
+        ComputedSkew {
+            total_skew,
+            jitter_applied,
+            jump_fired_now,
+        }
     }
 
     /// Apply a signed offset to a base time, saturating at bounds.
@@ -367,9 +375,25 @@ impl TimeSource for SkewClock {
         let base = self.base.now();
         let base_nanos = base.as_nanos();
         let skew = self.compute_skew(base_nanos);
-        let skewed_nanos = Self::apply_offset(base_nanos, skew);
+        let skewed_nanos = Self::apply_offset(base_nanos, skew.total_skew);
 
-        self.stats.record_read(skew.unsigned_abs());
+        self.stats.record_read(skew.total_skew.unsigned_abs());
+        if skew.total_skew != 0 {
+            let action = if skew.jump_fired_now {
+                "clock_jump"
+            } else if skew.jitter_applied {
+                "clock_jitter"
+            } else {
+                "clock_skew"
+            };
+            emit_skew_evidence(
+                &self.evidence_sink,
+                base.as_millis(),
+                action,
+                base_nanos,
+                skew.total_skew,
+            );
+        }
 
         Time::from_nanos(skewed_nanos)
     }
@@ -489,6 +513,22 @@ mod tests {
         let entries = collector.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "inject_clock_jump");
+        assert_eq!(entries[0].ts_unix_ms, 1_000);
+    }
+
+    #[test]
+    fn static_offset_emits_skew_evidence() {
+        let base = make_base_clock();
+        let (collector, sink) = make_sink();
+        let config = ClockSkewConfig::new(42).with_static_offset_ms(25);
+        let skewed = SkewClock::new(base.clone() as Arc<dyn TimeSource>, config, sink);
+
+        base.advance(1_000_000_000);
+        let _ = skewed.now();
+
+        let entries = collector.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "inject_clock_skew");
         assert_eq!(entries[0].ts_unix_ms, 1_000);
     }
 
@@ -617,6 +657,27 @@ mod tests {
             times1, times2,
             "Same seed must produce same jitter sequence"
         );
+    }
+
+    #[test]
+    fn one_nanosecond_jitter_does_not_collapse_to_zero() {
+        let base = make_base_clock();
+        let (collector, sink) = make_sink();
+        let config = ClockSkewConfig::new(7).with_jitter(1.0, 1);
+        let skewed = SkewClock::new(base.clone() as Arc<dyn TimeSource>, config, sink);
+
+        base.set(Time::from_secs(3));
+        let observed = skewed.now();
+        let diff = observed.as_nanos().abs_diff(Time::from_secs(3).as_nanos());
+
+        assert_eq!(diff, 1);
+        let stats = skewed.stats();
+        assert_eq!(stats.jitter_count, 1);
+        assert_eq!(stats.skewed_reads, 1);
+
+        let entries = collector.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "inject_clock_jitter");
     }
 
     #[test]
