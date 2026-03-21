@@ -809,7 +809,6 @@ fn sample_latency(config: &SimTransportConfig, rng: &mut DetRng) -> Duration {
 
 fn corrupt_symbol(symbol: &AuthenticatedSymbol, rng: &mut DetRng) -> AuthenticatedSymbol {
     let tag = *symbol.tag();
-    let verified = symbol.is_verified();
     let original = symbol.symbol().clone();
     let mut data = original.data().to_vec();
     if data.is_empty() {
@@ -819,11 +818,9 @@ fn corrupt_symbol(symbol: &AuthenticatedSymbol, rng: &mut DetRng) -> Authenticat
         data[idx] ^= 0xFF;
     }
     let corrupted = Symbol::new(original.id(), data, original.kind());
-    if verified {
-        AuthenticatedSymbol::new_verified(corrupted, tag)
-    } else {
-        AuthenticatedSymbol::from_parts(corrupted, tag)
-    }
+    // Corruption invalidates any prior verification; downstream consumers must
+    // re-verify the mutated payload against its tag.
+    AuthenticatedSymbol::from_parts(corrupted, tag)
 }
 
 #[cfg(test)]
@@ -845,6 +842,18 @@ mod tests {
         let symbol = Symbol::new(id, vec![i as u8], SymbolKind::Source);
         let tag = AuthenticationTag::zero();
         AuthenticatedSymbol::new_verified(symbol, tag)
+    }
+
+    #[test]
+    fn corrupted_symbol_is_no_longer_marked_verified() {
+        let original = create_symbol(7);
+        let mut rng = DetRng::new(123);
+
+        let corrupted = corrupt_symbol(&original, &mut rng);
+
+        assert!(!corrupted.is_verified());
+        assert_eq!(corrupted.tag(), original.tag());
+        assert_ne!(corrupted.symbol().data(), original.symbol().data());
     }
 
     struct NoopWake;

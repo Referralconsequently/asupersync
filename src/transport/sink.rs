@@ -85,6 +85,7 @@ pub trait SymbolSinkExt: SymbolSink {
             buffered: None,
             count: 0,
             completed: false,
+            iter_exhausted: false,
         }
     }
 
@@ -186,6 +187,7 @@ pub struct SendAllFuture<'a, S: ?Sized, I> {
     buffered: Option<AuthenticatedSymbol>,
     count: usize,
     completed: bool,
+    iter_exhausted: bool,
 }
 
 impl<S, I> Future for SendAllFuture<'_, S, I>
@@ -235,22 +237,26 @@ where
                 }
             }
 
+            if self.iter_exhausted {
+                // Flush
+                match Pin::new(&mut *self.sink).poll_flush(cx) {
+                    Poll::Ready(Ok(())) => {
+                        self.completed = true;
+                        return Poll::Ready(Ok(self.count));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.completed = true;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
             // Get next
             match self.iter.next() {
                 Some(symbol) => self.buffered = Some(symbol),
                 None => {
-                    // Flush
-                    match Pin::new(&mut *self.sink).poll_flush(cx) {
-                        Poll::Ready(Ok(())) => {
-                            self.completed = true;
-                            return Poll::Ready(Ok(self.count));
-                        }
-                        Poll::Ready(Err(e)) => {
-                            self.completed = true;
-                            return Poll::Ready(Err(e));
-                        }
-                        Poll::Pending => return Poll::Pending,
-                    }
+                    self.iter_exhausted = true;
                 }
             }
         }

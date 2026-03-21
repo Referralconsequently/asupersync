@@ -503,15 +503,13 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
 
     /// Add a backend service.
     pub fn push(&self, service: S) {
-        let index = {
-            let mut backends = self.backends.lock();
-            let index = backends.len();
-            backends.push(Arc::new(Backend {
-                service: Mutex::new(service),
-                load: Arc::new(LoadMetric::new()),
-            }));
-            index
-        };
+        let mut backends = self.backends.lock();
+        let index = backends.len();
+        backends.push(Arc::new(Backend {
+            service: Mutex::new(service),
+            load: Arc::new(LoadMetric::new()),
+        }));
+        drop(backends);
         self.strategy.on_backend_inserted(index);
     }
     /// Get the number of backends.
