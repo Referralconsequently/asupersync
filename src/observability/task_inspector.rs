@@ -109,7 +109,7 @@ pub struct TaskDetails {
     pub time_since_last_poll: Option<Duration>,
     /// Whether a wake is pending.
     pub wake_pending: bool,
-    /// Obligations held by this task.
+    /// Pending obligations still held by this task.
     pub obligations: Vec<ObligationId>,
     /// Tasks waiting for this one to complete.
     pub waiters: Vec<TaskId>,
@@ -447,11 +447,16 @@ impl TaskInspector {
         }
     }
 
-    /// Get the current time from the timer driver, or ZERO if unavailable.
+    /// Get the current runtime time for observability.
+    ///
+    /// Live runtimes advance time through the timer driver, while timerless
+    /// runtimes and many direct tests only move `RuntimeState::now`.
+    /// Prefer the timer driver when present and fall back to the logical state
+    /// clock otherwise so task ages remain meaningful in both modes.
     fn current_time(&self) -> Time {
         self.state
             .timer_driver()
-            .map_or(Time::ZERO, TimerDriverHandle::now)
+            .map_or(self.state.now, TimerDriverHandle::now)
     }
 
     /// Get detailed information about a specific task.
@@ -468,14 +473,8 @@ impl TaskInspector {
         let obligations: Vec<ObligationId> = if self.config.show_obligations {
             self.state
                 .obligations
-                .iter()
-                .filter_map(|(_, record)| {
-                    if record.holder == task_id {
-                        Some(record.id)
-                    } else {
-                        None
-                    }
-                })
+                .sorted_pending_ids_for_holder(task_id)
+                .into_iter()
                 .collect()
         } else {
             Vec::new()
@@ -794,6 +793,8 @@ impl crate::console::Render for RawText<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Budget;
+    use crate::time::{TimerDriverHandle, VirtualClock};
 
     #[test]
     fn test_task_state_info_name() {
@@ -1204,5 +1205,67 @@ mod tests {
         let output = TaskInspector::format_summary_output(&summary, &stuck, true);
         assert!(output.contains("POTENTIAL STUCK TASKS:"));
         assert!(output.contains(&task_label));
+    }
+
+    #[test]
+    fn inspector_uses_runtime_logical_time_without_timer_driver() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        state.now = Time::from_nanos(5_000_000_000);
+
+        let inspector = TaskInspector::new(Arc::new(state), None);
+        let details = inspector.inspect_task(task_id).expect("task exists");
+        assert_eq!(details.age, Duration::from_secs(5));
+
+        let summary = inspector.summary();
+        assert_eq!(summary.stuck_count, 1);
+
+        let wire = inspector.wire_snapshot();
+        assert_eq!(wire.generated_at, Time::from_nanos(5_000_000_000));
+    }
+
+    #[test]
+    fn inspector_prefers_timer_driver_when_available() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        state.now = Time::from_secs(5);
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
+            VirtualClock::starting_at(Time::from_secs(8)),
+        )));
+
+        let inspector = TaskInspector::new(Arc::new(state), None);
+        let details = inspector.inspect_task(task_id).expect("task exists");
+        assert_eq!(details.age, Duration::from_secs(8));
+
+        let wire = inspector.wire_snapshot();
+        assert_eq!(wire.generated_at, Time::from_secs(8));
+    }
+
+    #[test]
+    fn inspector_only_reports_pending_obligations() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let pending = state
+            .create_obligation(crate::record::ObligationKind::IoOp, task_id, root, None)
+            .expect("create pending obligation");
+        let committed = state
+            .create_obligation(crate::record::ObligationKind::Ack, task_id, root, None)
+            .expect("create committed obligation");
+        state
+            .commit_obligation(committed)
+            .expect("commit obligation");
+
+        let inspector = TaskInspector::new(Arc::new(state), None);
+        let details = inspector.inspect_task(task_id).expect("task exists");
+        assert_eq!(details.obligations, vec![pending]);
     }
 }
