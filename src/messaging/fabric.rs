@@ -25,10 +25,12 @@ fn fabric_input_error(message: impl Into<String>) -> AsupersyncError {
     AsupersyncError::new(ErrorKind::User).with_message(message)
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_subject(raw: impl AsRef<str>) -> Result<Subject, AsupersyncError> {
     Subject::parse(raw.as_ref()).map_err(|error| fabric_input_error(error.to_string()))
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_subject_pattern(raw: impl AsRef<str>) -> Result<SubjectPattern, AsupersyncError> {
     SubjectPattern::parse(raw.as_ref()).map_err(|error| fabric_input_error(error.to_string()))
 }
@@ -142,6 +144,7 @@ impl Default for FabricStreamConfig {
 }
 
 impl FabricStreamConfig {
+    #[allow(clippy::result_large_err)]
     fn validate(&self) -> Result<(), AsupersyncError> {
         if self.subjects.is_empty() {
             return Err(AsupersyncError::new(ErrorKind::ConfigError)
@@ -210,9 +213,11 @@ impl FabricSubscription {
             let message = published[self.next_index].clone();
             self.next_index += 1;
             if self.pattern.matches(&message.subject) {
+                drop(state);
                 return Some(message);
             }
         }
+        drop(state);
 
         None
     }
@@ -1444,8 +1449,7 @@ impl ControlCapsuleV1 {
     #[must_use]
     pub fn active_sequencer_lease(&self) -> Option<SequencerLease> {
         self.active_sequencer
-            .as_ref()
-            .cloned()
+            .clone()
             .map(|holder| SequencerLease {
                 holder,
                 control_epoch: self.control_epoch(),
@@ -1638,7 +1642,7 @@ impl ControlCapsuleV1 {
         }
 
         let old_stewards = self.steward_pool.clone();
-        self.steward_pool = new_stewards.clone();
+        self.steward_pool.clone_from(&new_stewards);
         self.policy_revision += 1;
         self.advance_control_fence();
         self.install_sequencer(next_sequencer.clone());
@@ -1849,7 +1853,7 @@ impl SubjectCell {
         }
         if !contains_node(&plan.next_stewards, &cut_evidence.next_sequencer) {
             return Err(RebalanceError::NextSequencerNotInPlan {
-                node: cut_evidence.next_sequencer.clone(),
+                node: cut_evidence.next_sequencer,
             });
         }
 

@@ -582,7 +582,7 @@ impl ConsistencyChecker {
         for (route_id, entries) in groups {
             let signatures = entries
                 .iter()
-                .map(|entry| reply_space_signature(&entry.fact.reply_space))
+                .map(|entry| reply_space_signature(entry.fact.reply_space.as_ref()))
                 .collect::<BTreeSet<_>>();
             let missing_required = entries
                 .iter()
@@ -810,6 +810,7 @@ impl ConsistencyChecker {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn glue_witness_placements(&self, report: &mut ConsistencyReport) {
         let mut groups: BTreeMap<String, Vec<EmittedFact<WitnessPlacementFact>>> = BTreeMap::new();
 
@@ -1128,7 +1129,7 @@ impl MorphismCandidate {
     }
 }
 
-fn reply_space_signature(rule: &Option<ReplySpaceRule>) -> String {
+fn reply_space_signature(rule: Option<&ReplySpaceRule>) -> String {
     match rule {
         None => "none".to_owned(),
         Some(ReplySpaceRule::CallerInbox) => "caller_inbox".to_owned(),

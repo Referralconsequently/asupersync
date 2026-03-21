@@ -634,6 +634,13 @@ pub fn export_metadata_summary(
     summary: &AuthoritativeMetadataSummary,
     disclosure_nonce: u64,
 ) -> Result<ExportedMetadataSummary, PrivacyExportError> {
+    // Differential privacy composition: we release 3 independent noised
+    // quantities (message_count, byte_count, error_count). By basic
+    // composition, the total privacy cost is 3×per-field-epsilon. We
+    // charge the full epsilon from the budget and divide by 3 for each
+    // field so the aggregate cost stays within the charged budget.
+    const NOISED_FIELD_COUNT: f64 = 3.0;
+
     summary.validate()?;
     validate_text("policy_name", &policy.name)?;
 
@@ -643,12 +650,6 @@ pub fn export_metadata_summary(
         });
     }
 
-    // Differential privacy composition: we release 3 independent noised
-    // quantities (message_count, byte_count, error_count). By basic
-    // composition, the total privacy cost is 3×per-field-epsilon. We
-    // charge the full epsilon from the budget and divide by 3 for each
-    // field so the aggregate cost stays within the charged budget.
-    const NOISED_FIELD_COUNT: f64 = 3.0;
     let (per_field_epsilon, privacy_budget_spent) = if let Some(epsilon) = policy.noise_budget {
         ledger.spend(epsilon)?;
         (Some(epsilon / NOISED_FIELD_COUNT), Some(epsilon))
@@ -790,13 +791,14 @@ fn laplace_noise(seed: u64, epsilon: Option<f64>) -> i64 {
     noise.round() as i64
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn unit_interval(seed: u64) -> f64 {
+    const TWO_POW_52_F64: f64 = 4_503_599_627_370_496.0;
     // Generate 52 bits of randomness (range 0 to 2^52 - 1).
     let bits = splitmix64(seed) >> 12;
     // By using 52 bits, `bits + 0.5` strictly fits within the 53-bit mantissa of f64.
     // This avoids the even-rounding that produces exactly 1.0.
     // The result is exactly uniformly distributed in the open interval (0, 1).
-    const TWO_POW_52_F64: f64 = 4_503_599_627_370_496.0;
     (bits as f64 + 0.5) / TWO_POW_52_F64
 }
 

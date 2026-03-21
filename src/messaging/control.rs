@@ -403,7 +403,7 @@ pub enum PropagationMode {
 }
 
 /// Delta envelope exchanged between stewards and relays.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropagationEnvelope<D> {
     steward: NodeId,
     frontier: ReplicaVersionVector,
@@ -635,9 +635,8 @@ where
     }
 
     fn can_send_incremental(&self, digest: &AntiEntropyDigest) -> bool {
-        let (version, _) = match &self.last_local_update {
-            Some(last) => last,
-            None => return false,
+        let Some((version, _)) = &self.last_local_update else {
+            return false;
         };
 
         digest.frontier.version(&self.steward).saturating_add(1) == *version
@@ -1300,6 +1299,7 @@ impl AdvisoryAggregate {
     /// Return the converged per-second rate for `advisory_kind` in
     /// `window_start`.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn rate_per_second(&self, window_start: u64, advisory_kind: &str) -> f64 {
         let count = self.count(window_start, advisory_kind) as f64;
         count * 1000.0 / self.window_width_ms as f64

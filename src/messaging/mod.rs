@@ -181,9 +181,8 @@ pub use service::{
     QuantitativeMonitorAlertState, QuantitativeMonitorEvidence, QuantitativePolicyRecommendation,
     ReplyCertificate, ReplyShape, RequestCertificate, RetryLaw, SagaEvidenceEvent,
     SagaEvidenceRecord, SagaState, ServiceContractError, ServiceContractSchema,
-    ServiceRegistration, ValidatedServiceRequest, WorkflowObligationHandle,
-    WorkflowObligationRole, WorkflowOwedObligation, WorkflowStateError, WorkflowStep,
-    WorkflowStepStatus,
+    ServiceRegistration, ValidatedServiceRequest, WorkflowObligationHandle, WorkflowObligationRole,
+    WorkflowOwedObligation, WorkflowStateError, WorkflowStep, WorkflowStepStatus,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use session::{

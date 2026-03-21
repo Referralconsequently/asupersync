@@ -415,26 +415,34 @@ impl ScaffoldBuilder<'_> {
                 self.push_transition_step(base, "receive", message, next);
             }
             SessionType::Choice { decider, branches } => {
-                self.push_branch_steps(base, decider, branches);
+                self.push_branch_steps(base, "choice", decider, branches);
             }
             SessionType::Branch { offerer, branches } => {
-                self.push_branch_steps(base, offerer, branches);
+                self.push_branch_steps(base, "branch", offerer, branches);
             }
             SessionType::RecursePoint { label, body } => {
                 let path = base.child(format!("recurse-point:{label}"));
                 for role in self.roles {
-                    self.push_step(role, path.clone(), SynthesizedAction::EnterRecursion {
-                        label: label.clone(),
-                    });
+                    self.push_step(
+                        role,
+                        path.clone(),
+                        SynthesizedAction::EnterRecursion {
+                            label: label.clone(),
+                        },
+                    );
                 }
                 self.walk(body, &path);
             }
             SessionType::Recurse { label } => {
                 let path = base.child(format!("recurse:{label}"));
                 for role in self.roles {
-                    self.push_step(role, path.clone(), SynthesizedAction::RepeatRecursion {
-                        label: label.clone(),
-                    });
+                    self.push_step(
+                        role,
+                        path.clone(),
+                        SynthesizedAction::RepeatRecursion {
+                            label: label.clone(),
+                        },
+                    );
                 }
             }
             SessionType::End => {
@@ -493,12 +501,13 @@ impl ScaffoldBuilder<'_> {
     fn push_branch_steps(
         &mut self,
         base: &SessionPath,
+        prefix: &str,
         controller: &RoleName,
         branches: &[super::contract::SessionBranch],
     ) {
         let peer = self.peer(controller);
         for branch in branches {
-            let path = branch_path(base, controller, &branch.label);
+            let path = branch_path(base, prefix, controller, &branch.label);
             let obligation_id = format!("branch:{path}");
             self.scaffold.obligations.push(DerivedSessionObligation {
                 id: obligation_id.clone(),
@@ -620,8 +629,12 @@ impl SynthesisMetadata {
 
     fn error_branches_for(&self, path: &SessionPath) -> Vec<SynthesizedErrorBranch> {
         let mut branches = Vec::new();
-        if !path.ends_with("end")
-            && let Some(timeout) = self.timeout_overrides.get(path).copied().or(self.default_timeout)
+        if !is_end_path(path)
+            && let Some(timeout) = self
+                .timeout_overrides
+                .get(path)
+                .copied()
+                .or(self.default_timeout)
         {
             branches.push(SynthesizedErrorBranch {
                 name: format!("timeout:{path}"),
@@ -638,26 +651,22 @@ impl SynthesisMetadata {
     }
 }
 
+#[derive(Clone, Copy)]
 enum SynthesizedErrorBranchKindBuilder {
     Compensation,
     Cutoff,
 }
 
-fn collect_named_paths<I>(items: I) -> BTreeMap<SessionPath, Vec<String>>
+fn collect_named_paths<'a, I>(items: I) -> BTreeMap<SessionPath, Vec<String>>
 where
-    I: IntoIterator<Item = (SessionPathRef<'static>, String)>,
+    I: IntoIterator<Item = (&'a SessionPath, String)>,
 {
-    let mut by_path = BTreeMap::new();
+    let mut by_path: BTreeMap<SessionPath, Vec<String>> = BTreeMap::new();
     for (path, name) in items {
-        by_path
-            .entry(path.to_owned())
-            .or_insert_with(Vec::new)
-            .push(name);
+        by_path.entry(path.to_owned()).or_default().push(name);
     }
     by_path
 }
-
-type SessionPathRef<'a> = &'a SessionPath;
 
 fn collect_recovery_paths<T>(
     paths: &[T],
@@ -674,7 +683,7 @@ where
             path.name(),
             path.recovery_path(),
             RecoveryHookStage::Trigger,
-            &kind_builder,
+            kind_builder,
         );
         for step in path.recovery_path() {
             push_recovery_branch(
@@ -683,7 +692,7 @@ where
                 path.name(),
                 path.recovery_path(),
                 RecoveryHookStage::Step,
-                &kind_builder,
+                kind_builder,
             );
         }
     }
@@ -696,13 +705,15 @@ fn push_recovery_branch(
     name: &str,
     recovery_path: &[SessionPath],
     stage: RecoveryHookStage,
-    builder: &SynthesizedErrorBranchKindBuilder,
+    builder: SynthesizedErrorBranchKindBuilder,
 ) {
     let kind = match builder {
-        SynthesizedErrorBranchKindBuilder::Compensation => SynthesizedErrorBranchKind::Compensation {
-            stage,
-            recovery_path: recovery_path.to_vec(),
-        },
+        SynthesizedErrorBranchKindBuilder::Compensation => {
+            SynthesizedErrorBranchKind::Compensation {
+                stage,
+                recovery_path: recovery_path.to_vec(),
+            }
+        }
         SynthesizedErrorBranchKindBuilder::Cutoff => SynthesizedErrorBranchKind::Cutoff {
             stage,
             recovery_path: recovery_path.to_vec(),
@@ -710,7 +721,7 @@ fn push_recovery_branch(
     };
     by_path
         .entry(path.clone())
-        .or_insert_with(Vec::new)
+        .or_default()
         .push(SynthesizedErrorBranch {
             name: name.to_owned(),
             kind,
@@ -751,16 +762,12 @@ impl RecoveryPathLike for CutoffPath {
     }
 }
 
-fn branch_path(base: &SessionPath, controller: &RoleName, label: &Label) -> SessionPath {
-    let prefix = if base
-        .segments()
-        .last()
-        .is_some_and(|segment| segment.starts_with("send:"))
-    {
-        "branch"
-    } else {
-        "choice"
-    };
+fn branch_path(
+    base: &SessionPath,
+    prefix: &str,
+    controller: &RoleName,
+    label: &Label,
+) -> SessionPath {
     base.child(format!("{prefix}:{controller}:{label}"))
 }
 
@@ -780,11 +787,15 @@ fn compare_session_types(
                 message: next_message,
                 next: next_next,
             },
-        ) => {
-            let path = base.child(format!("send:{}", previous_message.name));
-            compare_messages(previous_message, next_message, &path)?;
-            compare_session_types(previous_next, next_next, &path, adapter)
-        }
+        ) => compare_message_transition(
+            "send",
+            previous_message,
+            previous_next,
+            next_message,
+            next_next,
+            base,
+            adapter,
+        ),
         (
             SessionType::Receive {
                 message: previous_message,
@@ -794,11 +805,15 @@ fn compare_session_types(
                 message: next_message,
                 next: next_next,
             },
-        ) => {
-            let path = base.child(format!("receive:{}", previous_message.name));
-            compare_messages(previous_message, next_message, &path)?;
-            compare_session_types(previous_next, next_next, &path, adapter)
-        }
+        ) => compare_message_transition(
+            "receive",
+            previous_message,
+            previous_next,
+            next_message,
+            next_next,
+            base,
+            adapter,
+        ),
         (
             SessionType::Choice {
                 decider: previous_decider,
@@ -809,6 +824,7 @@ fn compare_session_types(
                 branches: next_branches,
             },
         ) => compare_branch_sets(
+            "choice",
             previous_decider,
             next_decider,
             previous_branches,
@@ -826,6 +842,7 @@ fn compare_session_types(
                 branches: next_branches,
             },
         ) => compare_branch_sets(
+            "branch",
             previous_offerer,
             next_offerer,
             previous_branches,
@@ -838,14 +855,7 @@ fn compare_session_types(
                 label: previous_label,
             },
             SessionType::Recurse { label: next_label },
-        ) => {
-            if previous_label != next_label {
-                return Err(ProtocolEvolutionCompatibilityError::RecursionLabelChanged {
-                    path: base.clone(),
-                });
-            }
-            Ok(())
-        }
+        ) => compare_recursion_label(previous_label, next_label, base),
         (
             SessionType::RecursePoint {
                 label: previous_label,
@@ -855,26 +865,72 @@ fn compare_session_types(
                 label: next_label,
                 body: next_body,
             },
-        ) => {
-            if previous_label != next_label {
-                return Err(ProtocolEvolutionCompatibilityError::RecursionLabelChanged {
-                    path: base.clone(),
-                });
-            }
-            compare_session_types(
-                previous_body,
-                next_body,
-                &base.child(format!("recurse-point:{previous_label}")),
-                adapter,
-            )
-        }
+        ) => compare_recurse_point(
+            previous_label,
+            previous_body,
+            next_label,
+            next_body,
+            base,
+            adapter,
+        ),
         (SessionType::End, SessionType::End) => Ok(()),
-        _ => Err(ProtocolEvolutionCompatibilityError::SessionKindChanged {
-            path: base.clone(),
-            previous: session_kind(previous).to_owned(),
-            next: session_kind(next).to_owned(),
-        }),
+        _ => session_kind_changed(previous, next, base),
     }
+}
+
+fn compare_message_transition(
+    direction: &str,
+    previous_message: &MessageType,
+    previous_next: &SessionType,
+    next_message: &MessageType,
+    next_next: &SessionType,
+    base: &SessionPath,
+    adapter: &mut CompatibleProtocolAdapter,
+) -> Result<(), ProtocolEvolutionCompatibilityError> {
+    let path = base.child(format!("{direction}:{}", previous_message.name));
+    compare_messages(previous_message, next_message, &path)?;
+    compare_session_types(previous_next, next_next, &path, adapter)
+}
+
+fn compare_recursion_label(
+    previous_label: &Label,
+    next_label: &Label,
+    base: &SessionPath,
+) -> Result<(), ProtocolEvolutionCompatibilityError> {
+    if previous_label == next_label {
+        Ok(())
+    } else {
+        Err(ProtocolEvolutionCompatibilityError::RecursionLabelChanged { path: base.clone() })
+    }
+}
+
+fn session_kind_changed(
+    previous: &SessionType,
+    next: &SessionType,
+    base: &SessionPath,
+) -> Result<(), ProtocolEvolutionCompatibilityError> {
+    Err(ProtocolEvolutionCompatibilityError::SessionKindChanged {
+        path: base.clone(),
+        previous: session_kind(previous).to_owned(),
+        next: session_kind(next).to_owned(),
+    })
+}
+
+fn compare_recurse_point(
+    previous_label: &Label,
+    previous_body: &SessionType,
+    next_label: &Label,
+    next_body: &SessionType,
+    base: &SessionPath,
+    adapter: &mut CompatibleProtocolAdapter,
+) -> Result<(), ProtocolEvolutionCompatibilityError> {
+    compare_recursion_label(previous_label, next_label, base)?;
+    compare_session_types(
+        previous_body,
+        next_body,
+        &base.child(format!("recurse-point:{previous_label}")),
+        adapter,
+    )
 }
 
 fn compare_messages(
@@ -890,6 +946,7 @@ fn compare_messages(
 }
 
 fn compare_branch_sets(
+    prefix: &str,
     previous_controller: &RoleName,
     next_controller: &RoleName,
     previous_branches: &[super::contract::SessionBranch],
@@ -898,9 +955,9 @@ fn compare_branch_sets(
     adapter: &mut CompatibleProtocolAdapter,
 ) -> Result<(), ProtocolEvolutionCompatibilityError> {
     if previous_controller != next_controller {
-        return Err(ProtocolEvolutionCompatibilityError::BranchControllerChanged {
-            path: base.clone(),
-        });
+        return Err(
+            ProtocolEvolutionCompatibilityError::BranchControllerChanged { path: base.clone() },
+        );
     }
 
     let next_by_label = next_branches
@@ -918,7 +975,7 @@ fn compare_branch_sets(
         compare_session_types(
             &previous_branch.continuation,
             &next_branch.continuation,
-            &branch_path(base, previous_controller, &previous_branch.label),
+            &branch_path(base, prefix, previous_controller, &previous_branch.label),
             adapter,
         )?;
     }
@@ -945,9 +1002,11 @@ fn collect_added_evidence(
 ) -> Result<Vec<String>, ProtocolEvolutionCompatibilityError> {
     for checkpoint in &previous.evidence_checkpoints {
         if !next.evidence_checkpoints.contains(checkpoint) {
-            return Err(ProtocolEvolutionCompatibilityError::RemovedEvidenceCheckpoint {
-                name: checkpoint.name.clone(),
-            });
+            return Err(
+                ProtocolEvolutionCompatibilityError::RemovedEvidenceCheckpoint {
+                    name: checkpoint.name.clone(),
+                },
+            );
         }
     }
     Ok(next
@@ -964,9 +1023,11 @@ fn collect_added_timeouts(
 ) -> Result<Vec<TimeoutOverride>, ProtocolEvolutionCompatibilityError> {
     for timeout in &previous.timeout_law.per_step {
         if !next.timeout_law.per_step.contains(timeout) {
-            return Err(ProtocolEvolutionCompatibilityError::RemovedTimeoutOverride {
-                path: timeout.path.clone(),
-            });
+            return Err(
+                ProtocolEvolutionCompatibilityError::RemovedTimeoutOverride {
+                    path: timeout.path.clone(),
+                },
+            );
         }
     }
     Ok(next
@@ -984,9 +1045,11 @@ fn collect_added_compensation(
 ) -> Result<Vec<String>, ProtocolEvolutionCompatibilityError> {
     for path in &previous.compensation_paths {
         if !next.compensation_paths.contains(path) {
-            return Err(ProtocolEvolutionCompatibilityError::RemovedCompensationPath {
-                name: path.name.clone(),
-            });
+            return Err(
+                ProtocolEvolutionCompatibilityError::RemovedCompensationPath {
+                    name: path.name.clone(),
+                },
+            );
         }
     }
     Ok(next
@@ -1028,10 +1091,16 @@ fn session_kind(session: &SessionType) -> &'static str {
     }
 }
 
+fn is_end_path(path: &SessionPath) -> bool {
+    path.segments()
+        .last()
+        .is_some_and(|segment| segment == "end")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::contract::{GlobalSessionType, SessionBranch};
+    use super::*;
 
     fn path(parts: &[&str]) -> SessionPath {
         let mut current = SessionPath::root();
@@ -1061,10 +1130,12 @@ mod tests {
             path(&["send:get_user", "receive:user"]),
             Duration::from_secs(2),
         ));
-        contract.evidence_checkpoints.push(super::super::contract::EvidenceCheckpoint::new(
-            "request-enqueued",
-            path(&["send:get_user"]),
-        ));
+        contract
+            .evidence_checkpoints
+            .push(super::super::contract::EvidenceCheckpoint::new(
+                "request-enqueued",
+                path(&["send:get_user"]),
+            ));
         contract
     }
 
@@ -1271,11 +1342,17 @@ mod tests {
         ]);
 
         assert!(matches!(
-            handler.step(&chunk_choice_path).expect("chunk choice").action,
+            handler
+                .step(&chunk_choice_path)
+                .expect("chunk choice")
+                .action,
             SynthesizedAction::ChooseBranch { .. }
         ));
         assert!(matches!(
-            handler.step(&chunk_receive_path).expect("chunk receive").action,
+            handler
+                .step(&chunk_receive_path)
+                .expect("chunk receive")
+                .action,
             SynthesizedAction::Consume { .. }
         ));
         assert!(
@@ -1332,15 +1409,13 @@ mod tests {
             .step(&path(&["send:get_user"]))
             .expect("request step");
 
-        assert!(
-            request_step.error_branches.iter().any(|branch| matches!(
-                branch.kind,
-                SynthesizedErrorBranchKind::Compensation {
-                    stage: RecoveryHookStage::Trigger,
-                    ..
-                }
-            ))
-        );
+        assert!(request_step.error_branches.iter().any(|branch| matches!(
+            branch.kind,
+            SynthesizedErrorBranchKind::Compensation {
+                stage: RecoveryHookStage::Trigger,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1359,10 +1434,11 @@ mod tests {
                 SessionType::receive(queued, SessionType::End),
             ));
         }
-        next.evidence_checkpoints.push(super::super::contract::EvidenceCheckpoint::new(
-            "reserve-sent",
-            path(&["send:reserve"]),
-        ));
+        next.evidence_checkpoints
+            .push(super::super::contract::EvidenceCheckpoint::new(
+                "reserve-sent",
+                path(&["send:reserve"]),
+            ));
 
         let adapter = adapt_protocol_evolution(&previous, &next).expect("compatible");
 

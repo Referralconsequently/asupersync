@@ -742,6 +742,7 @@ fn estimate_service_cost(service: &ServiceContract, subjects: &[SubjectSchema]) 
     cost
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn estimate_protocol_cost(protocol: &ProtocolContract, subjects: &[SubjectSchema]) -> CostVector {
     let mut cost =
         CostVector::max_dimensions(protocol_dependencies(protocol).into_iter().filter_map(
@@ -755,7 +756,10 @@ fn estimate_protocol_cost(protocol: &ProtocolContract, subjects: &[SubjectSchema
         ));
     let choice_count = count_protocol_choices(&protocol.session.steps) as u64;
     if choice_count > 0 {
-        cost.control_plane_amplification += 0.05 * choice_count as f64;
+        #[allow(clippy::cast_precision_loss)]
+        {
+            cost.control_plane_amplification += 0.05 * choice_count as f64;
+        }
         add_cpu_cost(
             &mut cost,
             choice_count.saturating_mul(3),
@@ -787,6 +791,7 @@ fn estimate_consumer_cost(consumer: &ConsumerPolicy) -> CostVector {
     cost
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn apply_consumer_policy_delta(cost: &mut CostVector, consumer: &ConsumerPolicy) {
     cost.control_plane_amplification += f64::from(consumer.max_deliver.saturating_sub(1)) * 0.02;
     add_cpu_cost(
@@ -872,6 +877,7 @@ fn estimate_quantitative_obligation_cost(contract: &QuantitativeObligationContra
     cost
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn estimate_capability_cost(capability: &CapabilityTokenSchema) -> CostVector {
     let strongest_class = capability
         .delivery_classes
@@ -889,6 +895,7 @@ fn estimate_capability_cost(capability: &CapabilityTokenSchema) -> CostVector {
     cost
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn estimate_retention_cost(retention: &RetentionPolicy) -> CostVector {
     match retention {
         RetentionPolicy::DropImmediately => CostVector::zero(),
@@ -918,6 +925,7 @@ fn estimate_retention_cost(retention: &RetentionPolicy) -> CostVector {
     }
 }
 
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
 fn apply_evidence_policy_delta(cost: &mut CostVector, policy: &EvidencePolicy) {
     let sampled_bytes = (policy.sampling_ratio.clamp(0.0, 1.0) * 128.0).round() as u64;
     add_evidence_bytes(

@@ -1,12 +1,13 @@
 //! Contract-carrying service schemas for the FABRIC lane.
 
 use super::class::{AckKind, DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError};
+use super::subject::Subject;
 use crate::lab::conformal::{HealthThresholdCalibrator, HealthThresholdConfig, ThresholdMode};
 use crate::obligation::eprocess::{
     AlertState as EProcessAlertState, LeakMonitor, MonitorConfig as LeakMonitorConfig,
 };
 use crate::obligation::ledger::{ObligationLedger, ObligationToken};
-use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
+use crate::record::{ObligationAbortReason, ObligationKind, ObligationState, SourceLocation};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -168,6 +169,7 @@ impl fmt::Display for CancellationObligations {
 
 /// Capture policy for service-plane requests and replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CaptureRules {
     /// Whether request envelopes are captured for replay or diagnostics.
     pub capture_requests: bool,
@@ -581,6 +583,7 @@ pub struct RequestCertificate {
 impl RequestCertificate {
     /// Build a certificate from request metadata and a validated request.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn from_validated(
         request_id: String,
         caller: String,
@@ -929,6 +932,7 @@ impl ServiceObligation {
     /// allocate a ledger-backed lease obligation that must later be committed,
     /// aborted, or intentionally surfaced as a leak by the runtime.
     #[track_caller]
+    #[allow(clippy::too_many_arguments)]
     pub fn allocate(
         ledger: &mut ObligationLedger,
         request_id: impl Into<String>,
@@ -1017,8 +1021,8 @@ impl ServiceObligation {
         validate_service_text("transfer.callee", &callee)?;
         validate_service_text("transfer.subject", &subject)?;
         validate_service_text("transfer.morphism", &morphism)?;
-        self.callee = callee.clone();
-        self.subject = subject.clone();
+        self.callee.clone_from(&callee);
+        self.subject.clone_from(&subject);
         self.lineage.push(ServiceTransferHop {
             morphism,
             callee,
@@ -1163,6 +1167,7 @@ pub struct ReplyObligation {
 
 impl ReplyObligation {
     #[track_caller]
+    #[allow(clippy::too_many_arguments)]
     fn allocate(
         ledger: &mut ObligationLedger,
         service_obligation_id: ObligationId,
@@ -1764,6 +1769,7 @@ impl QuantitativeContractMonitor {
     }
 
     /// Observe one completed service latency and evaluate the contract.
+    #[allow(clippy::too_many_lines)]
     pub fn observe_latency(&mut self, latency: Duration) -> QuantitativeContractEvaluation {
         self.observations = self.observations.saturating_add(1);
         let hit = self.contract.latency_satisfies(latency);
@@ -1963,7 +1969,7 @@ fn duration_from_millis(millis: f64) -> Duration {
 #[allow(clippy::cast_precision_loss)]
 fn ratio(numerator: u64, denominator: u64) -> f64 {
     if denominator == 0 {
-        1.0
+        0.0
     } else {
         numerator as f64 / denominator as f64
     }
@@ -1980,6 +1986,9 @@ fn bool_ratio(values: &VecDeque<bool>) -> f64 {
 fn should_sample_observation(index: u64, sampling_ratio: f64) -> bool {
     if sampling_ratio >= 1.0 {
         return true;
+    }
+    if index == 0 {
+        return false;
     }
     let previous_bucket = ((index - 1) as f64 * sampling_ratio).floor();
     let current_bucket = (index as f64 * sampling_ratio).floor();
@@ -2206,6 +2215,856 @@ impl ServiceRegistration {
     }
 }
 
+fn validate_workflow_text(field: &'static str, value: &str) -> Result<(), WorkflowStateError> {
+    if value.trim().is_empty() {
+        return Err(WorkflowStateError::EmptyField { field });
+    }
+    Ok(())
+}
+
+/// Validation and lifecycle failures for FABRIC workflow and saga state.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WorkflowStateError {
+    /// Required workflow text fields must be non-empty.
+    #[error("workflow field `{field}` must not be empty")]
+    EmptyField {
+        /// Field that failed validation.
+        field: &'static str,
+    },
+    /// Duration-valued workflow fields must be strictly positive when present.
+    #[error("workflow duration field `{field}` must be greater than zero")]
+    ZeroDuration {
+        /// Field that failed validation.
+        field: &'static str,
+    },
+    /// Step transitions must respect the workflow lifecycle.
+    #[error("workflow step `{step_id}` cannot {operation} while in status `{status}`")]
+    InvalidStepTransition {
+        /// Step that rejected the transition.
+        step_id: String,
+        /// Operation attempted.
+        operation: &'static str,
+        /// Current step status.
+        status: &'static str,
+    },
+    /// A saga must contain at least one step.
+    #[error("workflow saga `{saga_id}` must contain at least one step")]
+    EmptySaga {
+        /// Saga identifier.
+        saga_id: String,
+    },
+    /// The saga has no step that can be started or resumed.
+    #[error("workflow saga `{saga_id}` has no runnable step")]
+    NoRunnableStep {
+        /// Saga identifier.
+        saga_id: String,
+    },
+    /// `current_step` pointed outside the declared step list.
+    #[error(
+        "workflow saga `{saga_id}` current_step {current_step} is out of bounds for {len} steps"
+    )]
+    InvalidCurrentStep {
+        /// Saga identifier.
+        saga_id: String,
+        /// Invalid current-step index.
+        current_step: usize,
+        /// Total step count.
+        len: usize,
+    },
+    /// The workflow references an obligation id that is not present in the ledger.
+    #[error("workflow obligation `{obligation_id:?}` is not present in the ledger")]
+    UnknownObligation {
+        /// Missing obligation id.
+        obligation_id: ObligationId,
+    },
+    /// Crash recovery can still abort by id, but a commit requires the original live token.
+    #[error(
+        "workflow obligation `{obligation_id:?}` is still pending but no live token is available to commit it"
+    )]
+    MissingLiveToken {
+        /// Obligation that lost its live token.
+        obligation_id: ObligationId,
+    },
+    /// Terminal obligations cannot be resolved a second time.
+    #[error("workflow obligation `{obligation_id:?}` is already resolved as `{state:?}`")]
+    ObligationAlreadyResolved {
+        /// Obligation id.
+        obligation_id: ObligationId,
+        /// Terminal state already recorded in the ledger.
+        state: ObligationState,
+    },
+}
+
+/// Direct obligation role carried by a durable workflow step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowObligationRole {
+    /// Reply delivery or receipt still owed for the step.
+    Reply {
+        /// Delivery boundary still owed.
+        delivery_boundary: AckKind,
+        /// Whether explicit caller receipt is still owed.
+        receipt_required: bool,
+    },
+    /// A lease or reservation on an external resource remains active.
+    Lease {
+        /// Human-readable resource name.
+        resource: String,
+    },
+    /// The step is carrying an explicit timeout duty.
+    Timeout,
+    /// Compensation along a subject transition path is still owed.
+    Compensation {
+        /// Subject transition that performs the compensation action.
+        subject: Subject,
+    },
+    /// The step owes a deadline checkpoint by a specific instant.
+    Deadline {
+        /// Absolute deadline for the step.
+        deadline: Time,
+    },
+}
+
+impl WorkflowObligationRole {
+    fn validate(&self) -> Result<(), WorkflowStateError> {
+        if let Self::Lease { resource } = self {
+            validate_workflow_text("workflow_obligation.lease.resource", resource)?;
+        }
+        Ok(())
+    }
+
+    const fn obligation_kind(&self) -> ObligationKind {
+        match self {
+            Self::Reply { .. } => ObligationKind::Ack,
+            Self::Lease { .. } => ObligationKind::Lease,
+            Self::Timeout | Self::Deadline { .. } => ObligationKind::IoOp,
+            Self::Compensation { .. } => ObligationKind::SendPermit,
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Reply {
+                delivery_boundary,
+                receipt_required,
+            } => {
+                format!("reply boundary {delivery_boundary} (receipt_required={receipt_required})")
+            }
+            Self::Lease { resource } => format!("lease {resource}"),
+            Self::Timeout => "timeout".to_owned(),
+            Self::Compensation { subject } => format!("compensation {}", subject.as_str()),
+            Self::Deadline { deadline } => format!("deadline at {deadline:?}"),
+        }
+    }
+
+    const fn is_compensation(&self) -> bool {
+        matches!(self, Self::Compensation { .. })
+    }
+}
+
+/// One concrete workflow obligation tracked against the global obligation ledger.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkflowObligationHandle {
+    /// Semantic role of the live obligation.
+    pub role: WorkflowObligationRole,
+    /// Obligation id recorded in the global ledger.
+    pub obligation_id: ObligationId,
+    /// Human-readable description carried into diagnostics.
+    pub description: String,
+    /// Allocation timestamp for replay and evidence.
+    pub allocated_at: Time,
+    #[serde(skip, default)]
+    token: Option<ObligationToken>,
+}
+
+impl WorkflowObligationHandle {
+    #[track_caller]
+    fn allocate(
+        ledger: &mut ObligationLedger,
+        role: WorkflowObligationRole,
+        description: String,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> Result<Self, WorkflowStateError> {
+        role.validate()?;
+        validate_workflow_text("workflow_obligation.description", &description)?;
+
+        let token = ledger.acquire_with_context(
+            role.obligation_kind(),
+            holder,
+            region,
+            now,
+            SourceLocation::from_panic_location(Location::caller()),
+            None,
+            Some(description.clone()),
+        );
+
+        Ok(Self {
+            role,
+            obligation_id: token.id(),
+            description,
+            allocated_at: now,
+            token: Some(token),
+        })
+    }
+
+    /// Return the current ledger state for this workflow obligation.
+    pub fn state(&self, ledger: &ObligationLedger) -> Result<ObligationState, WorkflowStateError> {
+        ledger
+            .get(self.obligation_id)
+            .map(|record| record.state)
+            .ok_or(WorkflowStateError::UnknownObligation {
+                obligation_id: self.obligation_id,
+            })
+    }
+
+    /// Return whether the obligation is still owed.
+    pub fn is_owed(&self, ledger: &ObligationLedger) -> Result<bool, WorkflowStateError> {
+        Ok(self.state(ledger)? == ObligationState::Reserved)
+    }
+
+    fn commit(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<(), WorkflowStateError> {
+        if let Some(token) = self.token.take() {
+            ledger.commit(token, now);
+            return Ok(());
+        }
+
+        let state = ledger
+            .get(self.obligation_id)
+            .map(|record| record.state)
+            .ok_or(WorkflowStateError::UnknownObligation {
+                obligation_id: self.obligation_id,
+            })?;
+        if state == ObligationState::Reserved {
+            return Err(WorkflowStateError::MissingLiveToken {
+                obligation_id: self.obligation_id,
+            });
+        }
+        Err(WorkflowStateError::ObligationAlreadyResolved {
+            obligation_id: self.obligation_id,
+            state,
+        })
+    }
+
+    fn abort(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        reason: ObligationAbortReason,
+    ) -> Result<(), WorkflowStateError> {
+        if let Some(token) = self.token.take() {
+            ledger.abort(token, now, reason);
+            return Ok(());
+        }
+
+        let state = ledger
+            .get(self.obligation_id)
+            .map(|record| record.state)
+            .ok_or(WorkflowStateError::UnknownObligation {
+                obligation_id: self.obligation_id,
+            })?;
+        if state == ObligationState::Reserved {
+            ledger.abort_by_id(self.obligation_id, now, reason);
+            return Ok(());
+        }
+        Err(WorkflowStateError::ObligationAlreadyResolved {
+            obligation_id: self.obligation_id,
+            state,
+        })
+    }
+}
+
+/// One still-owed unit of work in a workflow or saga.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowOwedObligation {
+    /// Step that still owes this work.
+    pub step_id: String,
+    /// Subject transition associated with the step.
+    pub subject: Subject,
+    /// Semantic role of the still-owed work.
+    pub role: WorkflowObligationRole,
+    /// Ledger obligation id holding the work open.
+    pub obligation_id: ObligationId,
+    /// Human-readable diagnostic description.
+    pub description: String,
+    /// Current ledger state, which will be `reserved` for still-owed work.
+    pub state: ObligationState,
+}
+
+/// Lifecycle state of a workflow step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowStepStatus {
+    /// Step has been declared but not started.
+    Pending,
+    /// Step is currently executing.
+    Active,
+    /// Step finished without outstanding work.
+    Completed,
+    /// Step failed without entering compensation.
+    Failed {
+        /// Failure recorded for the step.
+        failure: ServiceFailure,
+    },
+    /// Step failed and compensation is now owed.
+    Compensating {
+        /// Failure that activated compensation.
+        failure: ServiceFailure,
+    },
+    /// Compensation finished for the failed step.
+    Compensated {
+        /// Failure that was compensated.
+        failure: ServiceFailure,
+    },
+}
+
+impl WorkflowStepStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::Failed { .. } => "failed",
+            Self::Compensating { .. } => "compensating",
+            Self::Compensated { .. } => "compensated",
+        }
+    }
+
+    const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed { .. } | Self::Compensated { .. }
+        )
+    }
+}
+
+/// Durable workflow step bound to a subject transition and explicit obligations.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    /// Stable step identifier inside the saga.
+    pub step_id: String,
+    /// Subject transition executed by the step.
+    pub subject: Subject,
+    /// Live and historical obligations allocated for the step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obligations: Vec<WorkflowObligationHandle>,
+    /// Ordered compensation path to activate on failure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compensation_path: Vec<Subject>,
+    /// Optional timeout budget attached to the step.
+    pub timeout: Option<Duration>,
+    /// Current workflow status.
+    pub status: WorkflowStepStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    declared_obligations: Vec<WorkflowObligationRole>,
+}
+
+impl WorkflowStep {
+    /// Construct a durable workflow step declaration.
+    pub fn new(
+        step_id: impl Into<String>,
+        subject: Subject,
+        obligations: Vec<WorkflowObligationRole>,
+        compensation_path: Vec<Subject>,
+        timeout: Option<Duration>,
+    ) -> Result<Self, WorkflowStateError> {
+        let step_id = step_id.into();
+        validate_workflow_text("workflow_step.step_id", &step_id)?;
+        if timeout.is_some_and(|value| value.is_zero()) {
+            return Err(WorkflowStateError::ZeroDuration {
+                field: "workflow_step.timeout",
+            });
+        }
+        for obligation in &obligations {
+            obligation.validate()?;
+        }
+
+        Ok(Self {
+            step_id,
+            subject,
+            obligations: Vec::new(),
+            compensation_path,
+            timeout,
+            status: WorkflowStepStatus::Pending,
+            declared_obligations: obligations,
+        })
+    }
+
+    fn outstanding_ids(
+        &self,
+        ledger: &ObligationLedger,
+    ) -> Result<Vec<ObligationId>, WorkflowStateError> {
+        let mut ids = Vec::new();
+        for obligation in &self.obligations {
+            if obligation.is_owed(ledger)? {
+                ids.push(obligation.obligation_id);
+            }
+        }
+        Ok(ids)
+    }
+
+    fn ensure_status(
+        &self,
+        expected: WorkflowStepStatus,
+        operation: &'static str,
+    ) -> Result<(), WorkflowStateError> {
+        if self.status != expected {
+            return Err(WorkflowStateError::InvalidStepTransition {
+                step_id: self.step_id.clone(),
+                operation,
+                status: self.status.as_str(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Start the step and allocate its declared obligations into the ledger.
+    #[track_caller]
+    pub fn start(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> Result<(), WorkflowStateError> {
+        self.ensure_status(WorkflowStepStatus::Pending, "start")?;
+        for role in self.declared_obligations.iter().cloned() {
+            let description = format!(
+                "workflow step {} on {} owes {}",
+                self.step_id,
+                self.subject.as_str(),
+                role.label()
+            );
+            self.obligations.push(WorkflowObligationHandle::allocate(
+                ledger,
+                role,
+                description,
+                holder,
+                region,
+                now,
+            )?);
+        }
+        self.status = WorkflowStepStatus::Active;
+        Ok(())
+    }
+
+    /// Commit every still-owed non-compensation obligation for a successful step.
+    pub fn complete(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<(), WorkflowStateError> {
+        self.ensure_status(WorkflowStepStatus::Active, "complete")?;
+        for obligation in &mut self.obligations {
+            if obligation.role.is_compensation() || !obligation.is_owed(ledger)? {
+                continue;
+            }
+            obligation.commit(ledger, now)?;
+        }
+        self.status = WorkflowStepStatus::Completed;
+        Ok(())
+    }
+
+    /// Fail the step, abort current obligations, and activate compensation if configured.
+    #[track_caller]
+    pub fn fail(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        failure: ServiceFailure,
+        holder: TaskId,
+        region: RegionId,
+    ) -> Result<(), WorkflowStateError> {
+        self.ensure_status(WorkflowStepStatus::Active, "fail")?;
+        for obligation in &mut self.obligations {
+            if obligation.role.is_compensation() || !obligation.is_owed(ledger)? {
+                continue;
+            }
+            obligation.abort(ledger, now, failure.abort_reason())?;
+        }
+
+        if self.compensation_path.is_empty() {
+            self.status = WorkflowStepStatus::Failed { failure };
+            return Ok(());
+        }
+
+        for subject in self.compensation_path.iter().cloned() {
+            let role = WorkflowObligationRole::Compensation { subject };
+            let description = format!(
+                "workflow step {} compensation for {} via {}",
+                self.step_id,
+                self.subject.as_str(),
+                role.label()
+            );
+            self.obligations.push(WorkflowObligationHandle::allocate(
+                ledger,
+                role,
+                description,
+                holder,
+                region,
+                now,
+            )?);
+        }
+        self.status = WorkflowStepStatus::Compensating { failure };
+        Ok(())
+    }
+
+    /// Commit every still-owed compensation obligation for the step.
+    pub fn complete_compensation(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<(), WorkflowStateError> {
+        let WorkflowStepStatus::Compensating { failure } = self.status else {
+            return Err(WorkflowStateError::InvalidStepTransition {
+                step_id: self.step_id.clone(),
+                operation: "complete compensation for",
+                status: self.status.as_str(),
+            });
+        };
+
+        for obligation in &mut self.obligations {
+            if !obligation.role.is_compensation() || !obligation.is_owed(ledger)? {
+                continue;
+            }
+            obligation.commit(ledger, now)?;
+        }
+        self.status = WorkflowStepStatus::Compensated { failure };
+        Ok(())
+    }
+
+    /// Query the step for every obligation that is still directly owed.
+    pub fn what_is_still_owed(
+        &self,
+        ledger: &ObligationLedger,
+    ) -> Result<Vec<WorkflowOwedObligation>, WorkflowStateError> {
+        let mut owed = Vec::new();
+        for obligation in &self.obligations {
+            let state = obligation.state(ledger)?;
+            if state == ObligationState::Reserved {
+                owed.push(WorkflowOwedObligation {
+                    step_id: self.step_id.clone(),
+                    subject: self.subject.clone(),
+                    role: obligation.role.clone(),
+                    obligation_id: obligation.obligation_id,
+                    description: obligation.description.clone(),
+                    state,
+                });
+            }
+        }
+        Ok(owed)
+    }
+}
+
+/// Evidence event emitted while a saga advances or recovers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SagaEvidenceEvent {
+    /// A step was started and its obligations entered the ledger.
+    Started,
+    /// A step completed successfully.
+    StepCompleted,
+    /// A step failed with a typed service failure.
+    StepFailed {
+        /// Failure recorded for the step.
+        failure: ServiceFailure,
+    },
+    /// Compensation obligations were activated.
+    CompensationActivated,
+    /// Compensation completed successfully.
+    CompensationCompleted,
+    /// A serialized saga snapshot was recovered and reconciled with the ledger.
+    Recovered,
+}
+
+/// Evidence record carried in the durable saga trail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SagaEvidenceRecord {
+    /// Timestamp when the evidence record was written.
+    pub recorded_at: Time,
+    /// Step that emitted the record, when applicable.
+    pub step_id: Option<String>,
+    /// Subject associated with the record, when applicable.
+    pub subject: Option<Subject>,
+    /// Event that occurred.
+    pub event: SagaEvidenceEvent,
+    /// Outstanding obligation ids visible at this point in the execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outstanding_obligations: Vec<ObligationId>,
+}
+
+/// Durable multi-step saga state built from subject-native workflow steps.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SagaState {
+    /// Stable saga identifier.
+    pub saga_id: String,
+    /// Ordered workflow steps.
+    pub steps: Vec<WorkflowStep>,
+    /// Current step index, if any.
+    pub current_step: Option<usize>,
+    /// Steps that finished compensation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compensated_steps: Vec<String>,
+    /// Replayable evidence trail.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_trail: Vec<SagaEvidenceRecord>,
+}
+
+impl SagaState {
+    /// Construct a new saga from ordered workflow steps.
+    pub fn new(
+        saga_id: impl Into<String>,
+        steps: Vec<WorkflowStep>,
+    ) -> Result<Self, WorkflowStateError> {
+        let saga_id = saga_id.into();
+        validate_workflow_text("saga_state.saga_id", &saga_id)?;
+        if steps.is_empty() {
+            return Err(WorkflowStateError::EmptySaga { saga_id });
+        }
+        Ok(Self {
+            saga_id,
+            steps,
+            current_step: None,
+            compensated_steps: Vec::new(),
+            evidence_trail: Vec::new(),
+        })
+    }
+
+    fn first_non_terminal_step(&self) -> Option<usize> {
+        self.steps
+            .iter()
+            .position(|step| !step.status.is_terminal())
+    }
+
+    fn current_index(&self) -> Result<usize, WorkflowStateError> {
+        let index = self
+            .current_step
+            .ok_or_else(|| WorkflowStateError::NoRunnableStep {
+                saga_id: self.saga_id.clone(),
+            })?;
+        if index >= self.steps.len() {
+            return Err(WorkflowStateError::InvalidCurrentStep {
+                saga_id: self.saga_id.clone(),
+                current_step: index,
+                len: self.steps.len(),
+            });
+        }
+        Ok(index)
+    }
+
+    fn push_evidence(
+        &mut self,
+        step_index: Option<usize>,
+        recorded_at: Time,
+        event: SagaEvidenceEvent,
+        outstanding_obligations: Vec<ObligationId>,
+    ) {
+        let (step_id, subject) = step_index
+            .and_then(|index| self.steps.get(index))
+            .map_or((None, None), |step| {
+                (Some(step.step_id.clone()), Some(step.subject.clone()))
+            });
+
+        self.evidence_trail.push(SagaEvidenceRecord {
+            recorded_at,
+            step_id,
+            subject,
+            event,
+            outstanding_obligations,
+        });
+    }
+
+    /// Start the next pending step and allocate its obligations into the ledger.
+    #[track_caller]
+    pub fn start_next_step(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> Result<(), WorkflowStateError> {
+        let index = match self.current_step {
+            Some(index) if index < self.steps.len() => match self.steps[index].status {
+                WorkflowStepStatus::Pending => index,
+                WorkflowStepStatus::Active | WorkflowStepStatus::Compensating { .. } => {
+                    return Ok(());
+                }
+                WorkflowStepStatus::Completed
+                | WorkflowStepStatus::Failed { .. }
+                | WorkflowStepStatus::Compensated { .. } => self
+                    .steps
+                    .iter()
+                    .position(|step| matches!(step.status, WorkflowStepStatus::Pending))
+                    .ok_or_else(|| WorkflowStateError::NoRunnableStep {
+                        saga_id: self.saga_id.clone(),
+                    })?,
+            },
+            Some(index) => {
+                return Err(WorkflowStateError::InvalidCurrentStep {
+                    saga_id: self.saga_id.clone(),
+                    current_step: index,
+                    len: self.steps.len(),
+                });
+            }
+            None => self
+                .steps
+                .iter()
+                .position(|step| matches!(step.status, WorkflowStepStatus::Pending))
+                .ok_or_else(|| WorkflowStateError::NoRunnableStep {
+                    saga_id: self.saga_id.clone(),
+                })?,
+        };
+
+        self.steps[index].start(ledger, holder, region, now)?;
+        self.current_step = Some(index);
+        let outstanding = self.steps[index].outstanding_ids(ledger)?;
+        self.push_evidence(Some(index), now, SagaEvidenceEvent::Started, outstanding);
+        Ok(())
+    }
+
+    /// Complete the current active step and advance the cursor to the next one.
+    pub fn complete_current_step(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<(), WorkflowStateError> {
+        let index = self.current_index()?;
+        self.steps[index].complete(ledger, now)?;
+        let outstanding = self.steps[index].outstanding_ids(ledger)?;
+        self.push_evidence(
+            Some(index),
+            now,
+            SagaEvidenceEvent::StepCompleted,
+            outstanding,
+        );
+        self.current_step = self
+            .steps
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .find(|(_, step)| !step.status.is_terminal())
+            .map(|(next, _)| next);
+        Ok(())
+    }
+
+    /// Fail the current step, preserving no-orphan semantics by activating explicit compensation work.
+    #[track_caller]
+    pub fn fail_current_step(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+        failure: ServiceFailure,
+        holder: TaskId,
+        region: RegionId,
+    ) -> Result<(), WorkflowStateError> {
+        let index = self.current_index()?;
+        self.steps[index].fail(ledger, now, failure, holder, region)?;
+        let outstanding = self.steps[index].outstanding_ids(ledger)?;
+        self.push_evidence(
+            Some(index),
+            now,
+            SagaEvidenceEvent::StepFailed { failure },
+            outstanding.clone(),
+        );
+        if matches!(
+            self.steps[index].status,
+            WorkflowStepStatus::Compensating { .. }
+        ) {
+            self.push_evidence(
+                Some(index),
+                now,
+                SagaEvidenceEvent::CompensationActivated,
+                outstanding,
+            );
+        }
+        Ok(())
+    }
+
+    /// Complete compensation for the current step.
+    pub fn complete_current_compensation(
+        &mut self,
+        ledger: &mut ObligationLedger,
+        now: Time,
+    ) -> Result<(), WorkflowStateError> {
+        let index = self.current_index()?;
+        self.steps[index].complete_compensation(ledger, now)?;
+        if !self
+            .compensated_steps
+            .iter()
+            .any(|step_id| step_id == &self.steps[index].step_id)
+        {
+            self.compensated_steps
+                .push(self.steps[index].step_id.clone());
+        }
+        let outstanding = self.steps[index].outstanding_ids(ledger)?;
+        self.push_evidence(
+            Some(index),
+            now,
+            SagaEvidenceEvent::CompensationCompleted,
+            outstanding,
+        );
+        self.current_step = self.first_non_terminal_step();
+        Ok(())
+    }
+
+    /// Query every still-owed obligation directly from the global ledger.
+    pub fn what_is_still_owed(
+        &self,
+        ledger: &ObligationLedger,
+    ) -> Result<Vec<WorkflowOwedObligation>, WorkflowStateError> {
+        let mut owed = Vec::new();
+        for step in &self.steps {
+            owed.extend(step.what_is_still_owed(ledger)?);
+        }
+        Ok(owed)
+    }
+
+    /// Reconcile a deserialized saga snapshot with the current obligation ledger.
+    pub fn recover_from_replay(
+        mut self,
+        ledger: &ObligationLedger,
+        recovered_at: Time,
+    ) -> Result<Self, WorkflowStateError> {
+        for step in &self.steps {
+            for obligation in &step.obligations {
+                obligation.state(ledger)?;
+            }
+        }
+
+        self.current_step = match self.current_step {
+            Some(index) if index < self.steps.len() && !self.steps[index].status.is_terminal() => {
+                Some(index)
+            }
+            Some(index) if index >= self.steps.len() => {
+                return Err(WorkflowStateError::InvalidCurrentStep {
+                    saga_id: self.saga_id.clone(),
+                    current_step: index,
+                    len: self.steps.len(),
+                });
+            }
+            _ => self.first_non_terminal_step(),
+        };
+
+        let outstanding = self
+            .what_is_still_owed(ledger)?
+            .into_iter()
+            .map(|owed| owed.obligation_id)
+            .collect::<Vec<_>>();
+        self.push_evidence(
+            self.current_step,
+            recovered_at,
+            SagaEvidenceEvent::Recovered,
+            outstanding,
+        );
+        Ok(self)
+    }
+}
+
 /// Validation failure for FABRIC service contracts and caller requests.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ServiceContractError {
@@ -2337,6 +3196,25 @@ mod tests {
 
     fn make_region() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(7, 0))
+    }
+
+    fn workflow_step(
+        step_id: &str,
+        subject: &str,
+        obligations: Vec<WorkflowObligationRole>,
+        compensation_path: &[&str],
+    ) -> WorkflowStep {
+        WorkflowStep::new(
+            step_id,
+            Subject::new(subject),
+            obligations,
+            compensation_path
+                .iter()
+                .map(|subject| Subject::new(*subject))
+                .collect(),
+            Some(Duration::from_secs(5)),
+        )
+        .expect("valid workflow step")
     }
 
     #[test]
@@ -4467,5 +5345,310 @@ mod tests {
         monitor.observe_latency(Duration::from_millis(110));
         monitor.observe_latency(Duration::from_millis(120));
         assert!(monitor.policy_change_evidence().is_none());
+    }
+
+    #[test]
+    fn workflow_linear_execution_tracks_subject_steps() {
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+        let reserve = workflow_step(
+            "reserve",
+            "fabric.order.reserve",
+            vec![
+                WorkflowObligationRole::Reply {
+                    delivery_boundary: AckKind::Received,
+                    receipt_required: true,
+                },
+                WorkflowObligationRole::Lease {
+                    resource: "inventory.sku-42".to_owned(),
+                },
+            ],
+            &[],
+        );
+        let settle = workflow_step(
+            "settle",
+            "fabric.payment.settle",
+            vec![WorkflowObligationRole::Reply {
+                delivery_boundary: AckKind::Received,
+                receipt_required: true,
+            }],
+            &[],
+        );
+        let mut saga = SagaState::new("checkout", vec![reserve, settle]).expect("valid saga");
+
+        saga.start_next_step(&mut ledger, task, region, Time::from_nanos(10))
+            .expect("start first step");
+        assert_eq!(saga.current_step, Some(0));
+        let owed = saga
+            .what_is_still_owed(&ledger)
+            .expect("owed obligations for first step");
+        assert_eq!(owed.len(), 2);
+        assert!(owed.iter().all(|entry| entry.step_id == "reserve"));
+
+        saga.complete_current_step(&mut ledger, Time::from_nanos(20))
+            .expect("complete first step");
+        assert_eq!(saga.steps[0].status, WorkflowStepStatus::Completed);
+        assert_eq!(saga.current_step, Some(1));
+        assert!(
+            saga.what_is_still_owed(&ledger)
+                .expect("no second-step obligations before start")
+                .is_empty()
+        );
+
+        saga.start_next_step(&mut ledger, task, region, Time::from_nanos(30))
+            .expect("start second step");
+        let owed = saga
+            .what_is_still_owed(&ledger)
+            .expect("owed obligations for second step");
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].step_id, "settle");
+
+        saga.complete_current_step(&mut ledger, Time::from_nanos(40))
+            .expect("complete second step");
+        assert_eq!(saga.steps[1].status, WorkflowStepStatus::Completed);
+        assert_eq!(saga.current_step, None);
+        assert!(
+            saga.what_is_still_owed(&ledger)
+                .expect("all work should be resolved")
+                .is_empty()
+        );
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn workflow_failure_activates_and_commits_compensation() {
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+        let charge = workflow_step(
+            "charge",
+            "fabric.payment.charge",
+            vec![
+                WorkflowObligationRole::Reply {
+                    delivery_boundary: AckKind::Received,
+                    receipt_required: true,
+                },
+                WorkflowObligationRole::Lease {
+                    resource: "payment.intent.pi_123".to_owned(),
+                },
+            ],
+            &["fabric.payment.refund", "fabric.inventory.restock"],
+        );
+        let mut saga = SagaState::new("payment-saga", vec![charge]).expect("valid saga");
+
+        saga.start_next_step(&mut ledger, task, region, Time::from_nanos(5))
+            .expect("start workflow");
+        saga.fail_current_step(
+            &mut ledger,
+            Time::from_nanos(8),
+            ServiceFailure::ApplicationError,
+            task,
+            region,
+        )
+        .expect("fail current step");
+
+        assert_eq!(
+            saga.steps[0].status,
+            WorkflowStepStatus::Compensating {
+                failure: ServiceFailure::ApplicationError,
+            }
+        );
+        let owed = saga
+            .what_is_still_owed(&ledger)
+            .expect("compensation should now be owed");
+        assert_eq!(owed.len(), 2);
+        assert!(
+            owed.iter()
+                .all(|entry| matches!(entry.role, WorkflowObligationRole::Compensation { .. }))
+        );
+
+        saga.complete_current_compensation(&mut ledger, Time::from_nanos(13))
+            .expect("commit compensation");
+        assert_eq!(
+            saga.steps[0].status,
+            WorkflowStepStatus::Compensated {
+                failure: ServiceFailure::ApplicationError,
+            }
+        );
+        assert_eq!(saga.compensated_steps, vec!["charge".to_owned()]);
+        assert!(
+            saga.what_is_still_owed(&ledger)
+                .expect("compensation should be resolved")
+                .is_empty()
+        );
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn workflow_partial_progress_tracks_only_active_step_obligations() {
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+        let prepare = workflow_step(
+            "prepare",
+            "fabric.order.prepare",
+            vec![WorkflowObligationRole::Reply {
+                delivery_boundary: AckKind::Received,
+                receipt_required: true,
+            }],
+            &[],
+        );
+        let ship = workflow_step(
+            "ship",
+            "fabric.order.ship",
+            vec![
+                WorkflowObligationRole::Reply {
+                    delivery_boundary: AckKind::Received,
+                    receipt_required: true,
+                },
+                WorkflowObligationRole::Deadline {
+                    deadline: Time::from_nanos(500),
+                },
+            ],
+            &[],
+        );
+        let mut saga = SagaState::new("ship-flow", vec![prepare, ship]).expect("valid saga");
+
+        saga.start_next_step(&mut ledger, task, region, Time::from_nanos(10))
+            .expect("start prepare");
+        saga.complete_current_step(&mut ledger, Time::from_nanos(20))
+            .expect("complete prepare");
+        saga.start_next_step(&mut ledger, task, region, Time::from_nanos(30))
+            .expect("start ship");
+
+        let owed = saga
+            .what_is_still_owed(&ledger)
+            .expect("active step obligations");
+        assert_eq!(owed.len(), 2);
+        assert!(owed.iter().all(|entry| entry.step_id == "ship"));
+        assert!(
+            owed.iter()
+                .any(|entry| matches!(entry.role, WorkflowObligationRole::Reply { .. }))
+        );
+        assert!(
+            owed.iter()
+                .any(|entry| matches!(entry.role, WorkflowObligationRole::Deadline { .. }))
+        );
+    }
+
+    #[test]
+    fn workflow_recovery_after_crash_preserves_explicit_owed_work() {
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+        let replicate = workflow_step(
+            "replicate",
+            "fabric.repair.replicate",
+            vec![
+                WorkflowObligationRole::Reply {
+                    delivery_boundary: AckKind::Received,
+                    receipt_required: true,
+                },
+                WorkflowObligationRole::Timeout,
+            ],
+            &[],
+        );
+        let mut saga = SagaState::new("repair", vec![replicate]).expect("valid saga");
+
+        saga.start_next_step(&mut ledger, task, region, Time::from_nanos(11))
+            .expect("start step");
+        let encoded = serde_json::to_string(&saga).expect("serialize saga snapshot");
+        let snapshot: SagaState = serde_json::from_str(&encoded).expect("deserialize snapshot");
+
+        let mut recovered = snapshot
+            .recover_from_replay(&ledger, Time::from_nanos(19))
+            .expect("recover from snapshot");
+        assert_eq!(recovered.current_step, Some(0));
+        assert!(matches!(
+            recovered
+                .evidence_trail
+                .last()
+                .expect("recovery evidence")
+                .event,
+            SagaEvidenceEvent::Recovered
+        ));
+        assert_eq!(
+            recovered
+                .what_is_still_owed(&ledger)
+                .expect("recovered owed work")
+                .len(),
+            2
+        );
+
+        recovered
+            .fail_current_step(
+                &mut ledger,
+                Time::from_nanos(25),
+                ServiceFailure::TimedOut,
+                task,
+                region,
+            )
+            .expect("abort by id during recovery");
+        assert_eq!(
+            recovered.steps[0].status,
+            WorkflowStepStatus::Failed {
+                failure: ServiceFailure::TimedOut,
+            }
+        );
+        assert!(
+            recovered
+                .what_is_still_owed(&ledger)
+                .expect("all recovered work should be resolved")
+                .is_empty()
+        );
+        assert_eq!(ledger.pending_count(), 0);
+    }
+
+    #[test]
+    fn workflow_what_is_still_owed_excludes_future_pending_steps() {
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+        let ingest = workflow_step(
+            "ingest",
+            "fabric.ingest.start",
+            vec![WorkflowObligationRole::Lease {
+                resource: "shard-01".to_owned(),
+            }],
+            &[],
+        );
+        let compact = workflow_step(
+            "compact",
+            "fabric.ingest.compact",
+            vec![WorkflowObligationRole::Reply {
+                delivery_boundary: AckKind::Received,
+                receipt_required: true,
+            }],
+            &[],
+        );
+        let mut saga = SagaState::new("ingest-flow", vec![ingest, compact]).expect("valid saga");
+
+        saga.start_next_step(&mut ledger, task, region, Time::from_nanos(7))
+            .expect("start ingest");
+        let owed = saga
+            .what_is_still_owed(&ledger)
+            .expect("ingest obligation should be owed");
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].step_id, "ingest");
+        assert_eq!(owed[0].state, ObligationState::Reserved);
+        let record = ledger
+            .get(owed[0].obligation_id)
+            .expect("obligation record must exist");
+        assert_eq!(record.state, ObligationState::Reserved);
+
+        saga.complete_current_step(&mut ledger, Time::from_nanos(9))
+            .expect("complete ingest");
+        assert!(
+            saga.what_is_still_owed(&ledger)
+                .expect("future pending step should stay absent")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn quantitative_ratio_is_fail_closed_on_empty_window() {
+        assert_eq!(ratio(0, 0), 0.0);
+        assert_eq!(bool_ratio(&VecDeque::new()), 0.0);
     }
 }
