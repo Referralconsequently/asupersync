@@ -166,6 +166,8 @@ impl Resolver {
             return Ok(LookupIp::new(vec![ip], Duration::from_secs(0)));
         }
 
+        validate_lookup_hostname(host)?;
+
         if !self.config.nameservers.is_empty() {
             return Err(DnsError::NotImplemented(
                 "custom nameservers in Phase 0 resolver",
@@ -202,13 +204,7 @@ impl Resolver {
     /// This function is cancel-safe. If the future is dropped, the underlying
     /// DNS query continues on the blocking pool but the result is discarded.
     async fn do_lookup_ip(&self, host: &str) -> Result<LookupIp, DnsError> {
-        // Absolute hostnames may include a trailing root dot, which should not
-        // count against the 253-byte hostname limit for validation.
-        let validated_host = host.strip_suffix('.').unwrap_or(host);
-
-        if validated_host.is_empty() || validated_host.len() > 253 {
-            return Err(DnsError::InvalidHost(host.to_string()));
-        }
+        validate_lookup_hostname(host)?;
 
         let retries = self.config.retries;
         if self.config.timeout.is_zero() {
@@ -558,6 +554,24 @@ where
     spawn_blocking_on_thread(f).await
 }
 
+fn validate_lookup_hostname(host: &str) -> Result<(), DnsError> {
+    // Absolute hostnames may include a trailing root dot, which should not
+    // count against the 253-byte hostname limit for validation.
+    let validated_host = host.strip_suffix('.').unwrap_or(host);
+    if validated_host.is_empty() || validated_host.len() > 253 {
+        return Err(DnsError::InvalidHost(host.to_string()));
+    }
+
+    if validated_host
+        .split('.')
+        .any(|label| label.is_empty() || label.len() > 63)
+    {
+        return Err(DnsError::InvalidHost(host.to_string()));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +671,83 @@ mod tests {
         crate::assert_with_log!(invalid_host, "empty hostname rejected", true, invalid_host);
 
         crate::test_complete!("resolver_invalid_host");
+    }
+
+    #[test]
+    fn resolver_invalid_hostname_fails_before_cache_lookup() {
+        init_test("resolver_invalid_hostname_fails_before_cache_lookup");
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            ..Default::default()
+        });
+        resolver
+            .cache
+            .put_negative_ip_no_records("cached..invalid.example");
+
+        let result =
+            future::block_on(async { resolver.lookup_ip("cached..invalid.example").await });
+        let invalid = matches!(
+            result,
+            Err(DnsError::InvalidHost(ref host)) if host == "cached..invalid.example"
+        );
+        crate::assert_with_log!(
+            invalid,
+            "invalid hostname must reject before consulting cache",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_invalid_hostname_fails_before_cache_lookup");
+    }
+
+    #[test]
+    fn resolver_rejects_hostname_with_empty_label() {
+        init_test("resolver_rejects_hostname_with_empty_label");
+
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        });
+        let result = future::block_on(async { resolver.lookup_ip("example..com").await });
+        let invalid = matches!(
+            result,
+            Err(DnsError::InvalidHost(ref host)) if host == "example..com"
+        );
+        crate::assert_with_log!(
+            invalid,
+            "hostname with empty label rejected before resolver fallback",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_rejects_hostname_with_empty_label");
+    }
+
+    #[test]
+    fn resolver_rejects_hostname_with_overlong_label() {
+        init_test("resolver_rejects_hostname_with_overlong_label");
+
+        let overlong = format!("{}.example", "a".repeat(64));
+        let resolver = Resolver::with_config(ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            ..Default::default()
+        });
+        let result = future::block_on(async { resolver.lookup_ip(&overlong).await });
+        let invalid = matches!(
+            result,
+            Err(DnsError::InvalidHost(ref host)) if host == &overlong
+        );
+        crate::assert_with_log!(
+            invalid,
+            "hostname with >63-byte label rejected before resolver fallback",
+            true,
+            format!("{result:?}")
+        );
+
+        crate::test_complete!("resolver_rejects_hostname_with_overlong_label");
     }
 
     #[test]
