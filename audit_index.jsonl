@@ -10476,3 +10476,5 @@
 {"file":"src/messaging/jetstream.rs","lines":1735,"batch":404,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"JetStream messaging: json parsing, base64, pull with timeout, ack lifecycle. Clean."}
 {"file":"src/messaging/control.rs","lines":3896,"batch":404,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Control plane: CRDT propagation, ReplicaCounter, LagSketch, ControlRegistry, CursorMark. Clean."}
 {"file":"src/messaging/compiler.rs","lines":1247,"batch":404,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Declaration compiler: subject/morphism/service/protocol/consumer validation, cost estimation. Clean."}
+{"file":"src/messaging/fabric.rs","lines":3633,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Brokerless fabric: placement, control capsule, rebalance, normalization. Clean."}
+{"file":"src/messaging/privacy.rs","lines":1216,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Differential privacy: Laplace noise, HMAC key hierarchy, budget ledger, blinding. Clean."}
