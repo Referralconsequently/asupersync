@@ -1852,7 +1852,7 @@ impl QuantitativeContractMonitor {
                     QuantitativeMonitorAlertState::Alert => QuantitativeContractState::Violated,
                 };
 
-                if capped {
+                if capped && matches!(alert_state, QuantitativeMonitorAlertState::Alert) {
                     self.eprocess = Some(new_quantitative_eprocess(
                         self.contract.target_latency,
                         *confidence,
