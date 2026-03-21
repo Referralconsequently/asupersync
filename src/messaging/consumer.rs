@@ -1397,6 +1397,27 @@ impl FabricConsumerState {
         self.next_delivery_attempt = self.next_delivery_attempt.saturating_add(1).max(1);
         self.next_delivery_attempt
     }
+
+    /// Recompute `ack_floor` after an ack by advancing to `candidate` only if
+    /// no pending windows start at or below `candidate`.  This prevents
+    /// out-of-order acks from advancing the floor past unacked gaps.
+    fn advance_ack_floor(&mut self, candidate: u64) {
+        if self.pending_acks.is_empty() {
+            // Nothing pending — the candidate is the new floor.
+            self.ack_floor = self.ack_floor.max(candidate);
+            return;
+        }
+        let min_pending_start = self
+            .pending_acks
+            .values()
+            .map(|p| p.window.start())
+            .min()
+            .unwrap_or(u64::MAX);
+        // Only advance as far as the lowest pending window allows.
+        // Everything below `min_pending_start` has been acked.
+        let safe_floor = min_pending_start.saturating_sub(1);
+        self.ack_floor = self.ack_floor.max(safe_floor);
+    }
 }
 
 /// Public request shape returned with a scheduled delivery.
@@ -1784,7 +1805,11 @@ impl FabricConsumer {
                         .state
                         .pending_count
                         .saturating_sub(window_len(pending.window));
-                    self.state.ack_floor = self.state.ack_floor.max(pending.window.end());
+                    // Advance ack_floor only as far as the contiguous acked
+                    // region extends.  Using max(floor, window.end()) would skip
+                    // unacked windows below on out-of-order acks, causing CatchUp
+                    // to permanently miss those ranges.
+                    self.state.advance_ack_floor(pending.window.end());
                 }
             }
             AckResolution::StaleNoOp { .. } => {
@@ -4578,6 +4603,68 @@ mod tests {
         assert!(
             err.is_err(),
             "request should have expired by its original enqueue time"
+        );
+    }
+
+    #[test]
+    fn out_of_order_ack_does_not_advance_floor_past_pending() {
+        let cell = test_cell();
+        let mut consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(1, 20).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+
+        // Dispatch [1,5] and ack it sequentially.  Floor = 5.
+        consumer
+            .queue_pull_request(PullRequest::new(5, ConsumerDemandClass::CatchUp).expect("req"))
+            .expect("queue");
+        let d1 = match consumer.dispatch_next_pull(20, &capsule, None).expect("d") {
+            PullDispatchOutcome::Scheduled(d) => *d,
+            other => panic!("expected Scheduled, got {other:?}"),
+        };
+        consumer.acknowledge_delivery(&d1.attempt).expect("ack");
+        assert_eq!(consumer.state().ack_floor, 5);
+
+        // Dispatch [6,10] (pending, not yet acked).
+        consumer
+            .queue_pull_request(PullRequest::new(5, ConsumerDemandClass::CatchUp).expect("req"))
+            .expect("queue");
+        let d2 = match consumer.dispatch_next_pull(20, &capsule, None).expect("d") {
+            PullDispatchOutcome::Scheduled(d) => *d,
+            other => panic!("expected Scheduled, got {other:?}"),
+        };
+        assert_eq!(d2.window, SequenceWindow::new(6, 10).expect("w"));
+
+        // Dispatch [6,10] again (CatchUp restarts from ack_floor+1=6 since
+        // the first [6,10] is pending but CatchUp doesn't skip pending windows).
+        // Then ack this second [6,10] — it will advance floor to at most 5
+        // because the first [6,10] is still pending.
+        consumer
+            .queue_pull_request(PullRequest::new(5, ConsumerDemandClass::CatchUp).expect("req"))
+            .expect("queue");
+        let d3 = match consumer.dispatch_next_pull(20, &capsule, None).expect("d") {
+            PullDispatchOutcome::Scheduled(d) => *d,
+            other => panic!("expected Scheduled, got {other:?}"),
+        };
+        consumer.acknowledge_delivery(&d3.attempt).expect("ack d3");
+
+        // Floor must not advance past the still-pending d2 [6,10].
+        assert!(
+            consumer.state().ack_floor <= 5,
+            "ack_floor must not advance past pending [6,10]; got {}",
+            consumer.state().ack_floor
+        );
+
+        // Now ack d2 [6,10].  Floor should advance to 10.
+        consumer.acknowledge_delivery(&d2.attempt).expect("ack d2");
+        assert_eq!(
+            consumer.state().ack_floor,
+            10,
+            "ack_floor should advance to 10 once all windows up to 10 are acked"
         );
     }
 }

@@ -10478,3 +10478,7 @@
 {"file":"src/messaging/compiler.rs","lines":1247,"batch":404,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Declaration compiler: subject/morphism/service/protocol/consumer validation, cost estimation. Clean."}
 {"file":"src/messaging/fabric.rs","lines":3633,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Brokerless fabric: placement, control capsule, rebalance, normalization. Clean."}
 {"file":"src/messaging/privacy.rs","lines":1216,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Differential privacy: Laplace noise, HMAC key hierarchy, budget ledger, blinding. Clean."}
+{"file":"src/messaging/consumer.rs","lines":4607,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"MEDIUM: ack_floor advances past pending windows on out-of-order ack (fixed with advance_ack_floor). MEDIUM: revoked_tickets unbounded growth (noted, not fixed). MEDIUM: decision_log unbounded growth (noted, not fixed)."}
+{"file":"src/messaging/explain.rs","lines":1945,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/cut.rs","lines":3207,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/ir.rs","lines":3225,"batch":403,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
