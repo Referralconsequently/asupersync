@@ -372,9 +372,10 @@ impl ChaosConfig {
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.cancel_probability > 0.0
-            || self.delay_probability > 0.0
+            || (self.delay_probability > 0.0 && delay_range_can_emit_nonzero(&self.delay_range))
             || (self.io_error_probability > 0.0 && !self.io_error_kinds.is_empty())
-            || self.wakeup_storm_probability > 0.0
+            || (self.wakeup_storm_probability > 0.0
+                && wakeup_range_can_emit_positive(&self.wakeup_storm_count))
             || self.budget_exhaust_probability > 0.0
     }
 
@@ -385,13 +386,15 @@ impl ChaosConfig {
         if self.cancel_probability > 0.0 {
             parts.push(format!("cancel:{:.1}%", self.cancel_probability * 100.0));
         }
-        if self.delay_probability > 0.0 {
+        if self.delay_probability > 0.0 && delay_range_can_emit_nonzero(&self.delay_range) {
             parts.push(format!("delay:{:.1}%", self.delay_probability * 100.0));
         }
         if self.io_error_probability > 0.0 && !self.io_error_kinds.is_empty() {
             parts.push(format!("io_err:{:.1}%", self.io_error_probability * 100.0));
         }
-        if self.wakeup_storm_probability > 0.0 {
+        if self.wakeup_storm_probability > 0.0
+            && wakeup_range_can_emit_positive(&self.wakeup_storm_count)
+        {
             parts.push(format!(
                 "wakeup:{:.1}%",
                 self.wakeup_storm_probability * 100.0
@@ -481,6 +484,9 @@ impl ChaosRng {
     /// Checks if delay should be injected based on config.
     #[must_use]
     pub fn should_inject_delay(&mut self, config: &ChaosConfig) -> bool {
+        if !delay_range_can_emit_nonzero(&config.delay_range) {
+            return false;
+        }
         self.should_inject(config.delay_probability)
     }
 
@@ -490,13 +496,18 @@ impl ChaosRng {
         let range = &config.delay_range;
         let start_nanos = range.start.as_nanos();
         let end_nanos = range.end.as_nanos();
-        if end_nanos <= start_nanos {
+        let min_nanos = if start_nanos == 0 && end_nanos > 1 {
+            1
+        } else {
+            start_nanos
+        };
+        if end_nanos <= min_nanos {
             return range.start;
         }
-        let delta = end_nanos - start_nanos;
+        let delta = end_nanos - min_nanos;
         let rand = (u128::from(self.inner.next_u64()) << 64) | u128::from(self.inner.next_u64());
         let offset = rand % delta;
-        nanos_to_duration_saturating(start_nanos + offset)
+        nanos_to_duration_saturating(min_nanos + offset)
     }
 
     /// Checks if I/O error should be injected based on config.
@@ -532,6 +543,9 @@ impl ChaosRng {
     /// Checks if wakeup storm should be triggered based on config.
     #[must_use]
     pub fn should_inject_wakeup_storm(&mut self, config: &ChaosConfig) -> bool {
+        if !wakeup_range_can_emit_positive(&config.wakeup_storm_count) {
+            return false;
+        }
         self.should_inject(config.wakeup_storm_probability)
     }
 
@@ -539,11 +553,16 @@ impl ChaosRng {
     #[must_use]
     pub fn next_wakeup_count(&mut self, config: &ChaosConfig) -> usize {
         let range = &config.wakeup_storm_count;
-        if range.end <= range.start {
+        let min_count = if range.start == 0 && range.end > 1 {
+            1
+        } else {
+            range.start
+        };
+        if range.end <= min_count {
             return range.start;
         }
-        let delta = range.end - range.start;
-        range.start + self.inner.next_usize(delta)
+        let delta = range.end - min_count;
+        min_count + self.inner.next_usize(delta)
     }
 
     /// Checks if budget exhaustion should be injected based on config.
@@ -771,6 +790,16 @@ fn nanos_to_duration_saturating(nanos: u128) -> Duration {
     }
 }
 
+fn delay_range_can_emit_nonzero(range: &Range<Duration>) -> bool {
+    let start_nanos = range.start.as_nanos();
+    let end_nanos = range.end.as_nanos();
+    start_nanos > 0 || end_nanos > 1
+}
+
+fn wakeup_range_can_emit_positive(range: &Range<usize>) -> bool {
+    range.start > 0 || range.end > 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,6 +923,42 @@ mod tests {
     }
 
     #[test]
+    fn delay_probability_without_nonzero_delay_range_is_effectively_disabled() {
+        let config = ChaosConfig::new(42)
+            .with_delay_probability(1.0)
+            .with_delay_range(Duration::ZERO..Duration::ZERO);
+        assert!(!config.is_enabled());
+        assert_eq!(config.summary(), "off");
+
+        let mut rng = config.rng();
+        for _ in 0..32 {
+            assert!(
+                !rng.should_inject_delay(&config),
+                "delay chaos without a nonzero delay range must never inject"
+            );
+            assert_eq!(rng.next_delay(&config), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn rng_delay_generation_excludes_zero_when_positive_delays_are_possible() {
+        let config = ChaosConfig::new(42).with_delay_range(Duration::ZERO..Duration::from_nanos(3));
+
+        let mut rng = config.rng();
+        for _ in 0..64 {
+            let delay = rng.next_delay(&config);
+            assert!(
+                delay >= Duration::from_nanos(1),
+                "delay {delay:?} should exclude zero when positive delays are possible"
+            );
+            assert!(
+                delay < Duration::from_nanos(3),
+                "delay {delay:?} should stay within configured range"
+            );
+        }
+    }
+
+    #[test]
     fn rng_delay_generation_handles_large_duration_ranges() {
         let start = Duration::from_secs(40_000_000_000);
         let end = start + Duration::from_secs(100);
@@ -957,6 +1022,36 @@ mod tests {
         for _ in 0..100 {
             let count = rng.next_wakeup_count(&config);
             assert!((5..15).contains(&count), "Count out of range: {count}");
+        }
+    }
+
+    #[test]
+    fn wakeup_probability_without_positive_count_is_effectively_disabled() {
+        let config = ChaosConfig::new(42)
+            .with_wakeup_storm_probability(1.0)
+            .with_wakeup_storm_count(0..1);
+        assert!(!config.is_enabled());
+        assert_eq!(config.summary(), "off");
+
+        let mut rng = config.rng();
+        for _ in 0..32 {
+            assert!(
+                !rng.should_inject_wakeup_storm(&config),
+                "wakeup storms without positive wake counts must never inject"
+            );
+            assert_eq!(rng.next_wakeup_count(&config), 0);
+        }
+    }
+
+    #[test]
+    fn rng_wakeup_count_excludes_zero_when_positive_counts_are_possible() {
+        let config = ChaosConfig::new(42).with_wakeup_storm_count(0..3);
+
+        let mut rng = config.rng();
+        for _ in 0..64 {
+            let count = rng.next_wakeup_count(&config);
+            assert!(count > 0, "wakeup storm count should exclude zero");
+            assert!(count < 3, "count should stay within configured range");
         }
     }
 
