@@ -861,6 +861,90 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
+    /// Acquire a connection with retry and exponential backoff.
+    pub async fn get_with_retry(
+        &self,
+        cx: &Cx,
+        policy: &RetryPolicy,
+    ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        let deadline = crate::time::wall_now() + self.config.connection_timeout;
+        let mut attempt = 0u32;
+
+        loop {
+            attempt += 1;
+
+            match self.get(cx).await {
+                Ok(conn) => return Ok(conn),
+                Err(DbPoolError::Closed) => return Err(DbPoolError::Closed),
+                Err(e) => {
+                    if !matches!(e, DbPoolError::Connect(_) | DbPoolError::Full) {
+                        return Err(e);
+                    }
+
+                    if attempt >= policy.max_attempts {
+                        return Err(e);
+                    }
+
+                    let remaining = deadline.saturating_duration_since(crate::time::wall_now());
+                    if remaining.is_zero() || cx.is_cancel_requested() {
+                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                        return Err(DbPoolError::Timeout);
+                    }
+
+                    let delay = calculate_delay(policy, attempt, None);
+                    // Use cx-aware sleep
+                    let _ = crate::time::timeout(crate::time::wall_now(), delay.min(remaining), crate::time::sleep(crate::time::wall_now(), delay.min(remaining))).await;
+
+                    if crate::time::wall_now() >= deadline || cx.is_cancel_requested() {
+                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                        return Err(DbPoolError::Timeout);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Try to acquire without blocking. Returns `None` if no connection available.
+    #[must_use]
+    pub fn try_get(&self) -> Option<AsyncPooledConnection<'_, M>> {
+        // Can only try to get an idle connection synchronously
+        let candidate = {
+            let mut inner = self.inner.lock();
+            if inner.closed {
+                return None;
+            }
+            inner.idle.pop_front()
+        };
+
+        if let Some(idle) = candidate {
+            let is_expired = idle.is_expired(&self.config);
+            let is_stale = idle.is_idle_too_long(&self.config);
+
+            if is_expired || is_stale {
+                {
+                    let mut inner = self.inner.lock();
+                    inner.total = inner.total.saturating_sub(1);
+                }
+                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                self.manager.disconnect(idle.conn);
+                return None;
+            }
+
+            if self.config.validate_on_checkout {
+                // Return to idle since we can't await validation
+                {
+                    let mut inner = self.inner.lock();
+                    inner.idle.push_front(idle);
+                }
+                return None;
+            }
+
+            return self.finish_async_checkout(idle.conn, idle.created_at).ok();
+        }
+
+        None
+    }
+
     fn finish_async_checkout(
         &self,
         conn: M::Connection,
