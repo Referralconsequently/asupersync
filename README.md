@@ -1350,14 +1350,13 @@ applications via `wasm-bindgen`.
 ### What does not work yet
 
 - **Public Rust-authored Browser Edition runtime lane**: external Rust
-  consumers do not yet have a supported browser-runtime bootstrap API.
-  Today the Rust-facing wasm support is limited to semantic-core/browser-profile
-  validation plus the internal binding crates
-  (`asupersync-browser-core`, `asupersync-wasm`) that feed the shipped JS/TS
-  packages. That is not just a docs gap: `src/runtime/builder.rs` still
-  assumes `std::thread`-backed worker and deadline-monitor startup, so a
-  superficial public `build_browser()` entrypoint would overstate what the
-  runtime can truthfully support today.
+  consumers now have a preview browser-runtime bootstrap API through
+  `RuntimeBuilder::browser()`, but it is intentionally narrower than the
+  shipped JS/TS Browser Edition packages. The current Rust-facing path is
+  dispatcher-backed and truthful about host support: supported hosts construct
+  a preview browser runtime, while unsupported hosts fail closed to structured
+  execution-ladder diagnostics rather than pretending full native-thread
+  parity already exists.
 - **Service worker / shared worker direct runtime**: the shipped browser
   package does not expose these as direct-runtime lanes yet. Keep them on
   explicit message/data boundaries until a worker-specific host contract is

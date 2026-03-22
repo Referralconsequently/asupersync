@@ -324,13 +324,13 @@ lane is narrower and should be treated as three separate workflows:
 | Verify browser-safe semantic-core closure | Yes | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
 | Maintain the Rust-side ABI/package boundary that feeds the JS/TS packages | Yes, for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/`, `asupersync-wasm/` |
 | Use the maintained browser-facing Rust example the repository proves end-to-end | Yes, as an in-repo fixture workflow | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `tests/wasm_rust_browser_example_contract.rs` |
-| Construct Browser Edition runtimes directly from external Rust consumer code | No, not yet a public supported lane | Do not document a public wasm/browser `RuntimeBuilder` story yet | `src/runtime/builder.rs` has no public browser-runtime constructor |
+| Construct Browser Edition runtimes directly from external Rust consumer code | Preview public lane | `RuntimeBuilder::browser()` for truthful lane negotiation and structured fail-closed diagnostics | `src/runtime/builder.rs`, `tests/fixtures/rust-browser-consumer/`, `tests/wasm_browser_feasibility_matrix.rs` |
 
 Rules:
 
 - Do not present `asupersync-browser-core` or `asupersync-wasm` as the public
   end-user Browser Edition SDK for Rust consumers.
-- Do not imply external Rust `RuntimeBuilder` parity on `wasm32`.
+- Do not imply external Rust `RuntimeBuilder` parity on `wasm32`; the public Rust browser lane is still a preview dispatcher-backed surface.
 - If you need a shipped application-facing browser product surface today, start
   from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next`.
 - If you need the truthful current Rust-authored workflow, use the maintained

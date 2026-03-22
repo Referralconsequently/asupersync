@@ -101,10 +101,11 @@ Current rule of thumb:
 - Treat `asupersync` plus exactly one `wasm-browser-*` profile as the way to
   validate browser-safe semantic-core closure, not as a guarantee of native
   `RuntimeBuilder` parity on `wasm32`.
-- Treat `RuntimeBuilder::inspect_browser_execution_ladder(...)` as the current
-  public Rust control-plane surface for truthful lane diagnostics and preferred
-  lane inspection, not as proof that the direct browser runtime constructor has
-  already shipped.
+- Treat `RuntimeBuilder::browser()` plus
+  `RuntimeBuilder::inspect_browser_execution_ladder(...)` as the current
+  preview public Rust surface: the builder constructs a dispatcher-backed
+  browser runtime on supported hosts and fail-closes to structured diagnostics
+  elsewhere, without claiming full native-thread parity.
 - Treat the remaining Rust-authored browser gap as a real runtime bootstrap
   problem, not as a naming/docs cleanup: startup now has an explicit
   `RuntimeHostServices` seam, but only the native std-thread host
@@ -119,9 +120,10 @@ explicit instead of implicit:
 - `BrowserHostServicesContract` pins the current browser requirements:
   host-turn wakeups, worker bootstrap hooks, timer/deadline driving, and
   lane-health callbacks for threadless startup.
-- `NativeThreadHostServices` is the only shipped implementation today, so the
-  public wasm/browser builder path still fail-closes instead of pretending the
-  browser already has native-thread parity.
+- `NativeThreadHostServices` is the only shipped full runtime host
+  implementation today, so the preview Rust browser builder remains
+  dispatcher-backed and fail-closed instead of pretending the browser already
+  has native-thread parity.
 - The maintained smoke harness remains
   `tests/fixtures/rust-browser-consumer/` plus
   `scripts/validate_rust_browser_consumer.sh`; use that fixture for end-to-end
@@ -138,7 +140,7 @@ lanes and avoid blending them together:
 | Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
 | Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
 | Validate the maintained browser-facing Rust example that the repository actually proves end-to-end | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `scripts/validate_rust_browser_consumer.sh`, `tests/wasm_rust_browser_example_contract.rs` |
-| Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Not yet a public supported lane | `src/runtime/builder.rs` still has no public wasm/browser runtime constructor; startup now routes through `RuntimeHostServices`, but only `NativeThreadHostServices` ships, so use the JS/TS Browser Edition packages or an explicit bridge instead |
+| Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Preview public lane | `RuntimeBuilder::browser()` now exposes truthful automatic lane negotiation, explicit lane pinning, and structured fail-closed diagnostics; treat it as a preview dispatcher-backed path rather than broad native-runtime parity |
 
 For the command-first version of this workflow, see
 `docs/wasm_quickstart_migration.md`.
@@ -315,7 +317,7 @@ Use this shorthand when reading Browser Edition diagnostics:
 |---|---|---|---|
 | Dedicated worker direct-runtime lane | may be `stable` when the worker evidence bundle stays green | `support_class=direct_runtime_supported`, `reason_code=supported`, `lane_health_status=healthy`, no demotion marker | keep browser main-thread direct runtime as the stable fallback and treat worker-specific regressions as lane-local until worker evidence recovers |
 | `WebTransport` datagrams | `guarded canary-only` | direct-runtime support plus explicit `WebTransport` prerequisite satisfaction and healthy lane state | fall back to `WebSocket` or `fetch` when the tuple carries `candidate_prerequisite_missing`, `downgrade_to_websocket_or_fetch`, or any lane-health demotion |
-| Rust-authored browser path | `preview_only` | maintained fixture evidence plus a public Rust-callable builder path, not just substrate feasibility | keep public docs on the JS/TS Browser Edition or bridge path; do not imply public Rust browser bootstrap support |
+| Rust-authored browser path | `preview_only` | maintained fixture evidence plus the dispatcher-backed `RuntimeBuilder::browser()` lane | keep public docs explicit that this remains a preview Rust-authored browser bootstrap path, not broad parity with the JS/TS Browser Edition packages |
 | Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `preview_only` | a future public SDK export plus explicit API contract tests | keep these surfaces at the application boundary or reactor substrate; do not market them as shipped Browser Edition APIs |
 | `SharedArrayBuffer` / worker offload / parallel executor lanes | `nightly-only` | explicit cross-origin isolation, worker-offload policy green, replay/perf evidence green, and no lane-health demotion | disable the lane immediately on missing isolation, replay drift, chaos regression, or performance instability; preserve the single-threaded browser runtime as the supported default |
 | Service-worker or shared-worker direct runtime | `unsupported` today | not applicable until their dedicated bounded contracts are implemented and promoted | fail closed and route operators to the broker / tenancy contracts instead of pretending direct runtime is already shipped |
@@ -345,7 +347,7 @@ implemented and promoted.
 | Service worker direct runtime | Direct-runtime feasible but not yet shipped | `packages/browser/src/index.ts` detects service-worker-like hosts and returns `service_worker_not_yet_shipped`; `src/runtime/builder.rs` maps `ServiceWorkerGlobalScope` to `service_worker_direct_runtime_not_shipped` | Governed by `docs/wasm_service_worker_broker_contract.md`; direct runtime remains fail-closed, while the package now exposes `detectBrowserServiceWorkerBrokerSupport()` and `BrowserServiceWorkerBrokerStore` only for bounded registration/durable-handoff orchestration |
 | Shared worker direct runtime | Direct-runtime feasible but not yet shipped | `src/runtime/builder.rs` explicitly detects `SharedWorkerGlobalScope` and returns `shared_worker_direct_runtime_not_shipped`; `packages/browser/src/index.ts` still rejects it as an unsupported direct-runtime host | Governed by `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`; direct runtime remains fail-closed, while the package now exposes `detectBrowserSharedWorkerCoordinatorSupport()` and `createBrowserSharedWorkerCoordinatorSelection()` only for bounded coordinator attach/handshake/fallback from browser main-thread or dedicated-worker callers |
 | Node / SSR / edge direct runtime via `@asupersync/browser` | Impossible for direct browser runtime; bridge-only or unsupported | `packages/browser/src/index.ts`, `packages/next/src/index.ts` | Browser package fails closed; Next diagnostics classify server/edge as bridge-only targets |
-| Rust-authored `wasm32-unknown-unknown` consumer path | Direct-runtime feasible but not yet shipped | semantic core is target-agnostic; `asupersync` supports canonical browser profiles and the repository ships `asupersync-browser-core` / `asupersync-wasm`, but `src/runtime/builder.rs` still exposes no public Rust-callable browser runtime builder path | Planned lane, not current public support |
+| Rust-authored `wasm32-unknown-unknown` consumer path | Preview public lane | semantic core is target-agnostic; `asupersync` supports canonical browser profiles and `src/runtime/builder.rs` now exposes `RuntimeBuilder::browser()` with truthful execution-ladder selection over the wasm dispatcher | Preview public support, not broad stable parity with the JS/TS Browser Edition packages |
 | Multi-worker / `SharedArrayBuffer` parallel execution | Guarded optional, not shipped | browser model is single-threaded today; true parallelism requires cross-origin isolation | Explicitly non-default even if pursued later |
 
 ### Capability families
@@ -528,8 +530,9 @@ should be portable. However:
 - A browser-specific scheduler pump (driven by `queueMicrotask` /
   `MessageChannel` / `setTimeout`) exists in the design but is not yet
   exposed as a Rust-callable API.
-- There is no public `RuntimeBuilder` path that produces a wasm32-compatible
-  runtime from Rust consumer code.
+- The public Rust browser builder path is preview-only and dispatcher-backed;
+  it should not be described as native runtime parity for external Rust
+  consumers.
 
 If and when a public Rust-authored browser lane ships, it should start from
 explicit browser-safe capability constructors and the same support matrix used
