@@ -391,16 +391,27 @@ pub fn racing_events(events: &[TraceEvent]) -> Vec<usize> {
 #[must_use]
 pub fn estimated_classes(events: &[TraceEvent]) -> usize {
     let analysis = detect_races(events);
-    // Each race can double the number of classes (in the worst case).
-    // But many races are "overlapping" and don't multiply independently.
-    // Conservative estimate: 1 + number of non-overlapping races.
-    if analysis.races.is_empty() {
+    // detect_races intentionally reports immediate same-task dependencies, but
+    // those are already ordered by the minimal happens-before graph and do not
+    // represent schedulable alternatives. Filter them out so the estimate
+    // remains a fail-closed lower bound on reachable equivalence classes.
+    let hb = HappensBeforeGraph::from_trace(events);
+    let mut sorted: Vec<&Race> = analysis
+        .races
+        .iter()
+        .filter(|race| !hb.happens_before(race.earlier, race.later))
+        .collect();
+
+    // Each remaining race can double the number of classes (in the worst
+    // case). But many races are "overlapping" and don't multiply
+    // independently. Conservative estimate: 1 + number of non-overlapping
+    // schedulable races.
+    if sorted.is_empty() {
         return 1;
     }
 
-    // Count non-overlapping races (greedy: sort by later index, pick
-    // races whose earlier index > previous race's later index).
-    let mut sorted: Vec<&Race> = analysis.races.iter().collect();
+    // Count non-overlapping races (greedy: sort by later index, pick races
+    // whose earlier index > previous race's later index).
     sorted.sort_by_key(|r| (r.later, r.earlier));
 
     let mut non_overlapping = 1usize;
@@ -684,6 +695,16 @@ mod tests {
         ];
         let est = estimated_classes(&events);
         assert!(est >= 2);
+    }
+
+    #[test]
+    fn estimated_classes_fail_closed_for_same_task_sequence() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        assert_eq!(detect_races(&events).race_count(), 1);
+        assert_eq!(estimated_classes(&events), 1);
     }
 
     #[test]

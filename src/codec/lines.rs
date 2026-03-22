@@ -62,6 +62,18 @@ impl LinesCodec {
     pub fn max_length(&self) -> usize {
         self.max_length
     }
+
+    #[inline]
+    fn reset_stale_scan_state(&mut self, src: &BytesMut) {
+        // Callers may clear or replace the buffer between decode() calls.
+        // When the saved scan cursor no longer fits within the current
+        // buffer, the prior partial/discard state no longer describes the
+        // current bytes, so restart scanning from the new buffer contents.
+        if self.next_index > 0 && self.next_index >= src.len() {
+            self.next_index = 0;
+            self.is_discarding = false;
+        }
+    }
 }
 
 impl Default for LinesCodec {
@@ -75,6 +87,8 @@ impl Decoder for LinesCodec {
     type Error = LinesCodecError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<String>, Self::Error> {
+        self.reset_stale_scan_state(src);
+
         loop {
             let read_to = if self.is_discarding {
                 src.len()
@@ -216,6 +230,40 @@ mod tests {
 
         // Finish the oversized line, then provide a valid line.
         buf.put_slice(b"\nok\n");
+
+        assert_eq!(codec.decode(&mut buf).unwrap(), Some("ok".to_string()));
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn test_lines_codec_reused_shorter_buffer_after_partial_line() {
+        let mut codec = LinesCodec::new();
+        let mut buf = BytesMut::from("partial");
+
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+
+        buf.clear();
+        buf.put_slice(b"ok\n");
+
+        assert_eq!(codec.decode(&mut buf).unwrap(), Some("ok".to_string()));
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn test_lines_codec_reused_shorter_buffer_clears_discarding_state() {
+        let mut codec = LinesCodec::new_with_max_length(5);
+        let mut buf = BytesMut::from("abc");
+
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+
+        buf.put_slice(b"def");
+        assert!(matches!(
+            codec.decode(&mut buf),
+            Err(LinesCodecError::MaxLineLengthExceeded)
+        ));
+
+        buf.clear();
+        buf.put_slice(b"ok\n");
 
         assert_eq!(codec.decode(&mut buf).unwrap(), Some("ok".to_string()));
         assert_eq!(codec.decode(&mut buf).unwrap(), None);

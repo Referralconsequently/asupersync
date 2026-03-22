@@ -126,7 +126,8 @@ impl<S: Stream> Stream for Peekable<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::iter;
+    use crate::stream::{StreamExt, iter};
+    use std::marker::PhantomPinned;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -157,6 +158,35 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[pin_project::pin_project]
+    struct PinnedOnce {
+        item: Option<i32>,
+        _pin: PhantomPinned,
+    }
+
+    impl PinnedOnce {
+        fn new(item: i32) -> Self {
+            Self {
+                item: Some(item),
+                _pin: PhantomPinned,
+            }
+        }
+    }
+
+    impl Stream for PinnedOnce {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.project();
+            Poll::Ready(this.item.take())
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let remaining = usize::from(self.item.is_some());
+            (remaining, Some(remaining))
+        }
     }
 
     #[test]
@@ -344,5 +374,22 @@ mod tests {
         assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
         assert_eq!(stream.size_hint(), (0, Some(0)));
         crate::test_complete!("size_hint_fail_closed_after_cached_exhaustion");
+    }
+
+    #[test]
+    fn peekable_accepts_pinned_non_unpin_streams() {
+        init_test("peekable_accepts_pinned_non_unpin_streams");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let stream = PinnedOnce::new(7).peekable();
+        let mut stream = std::pin::pin!(stream);
+
+        assert_eq!(stream.as_ref().get_ref().size_hint(), (1, Some(1)));
+        assert_eq!(stream.as_mut().poll_peek(&mut cx), Poll::Ready(Some(&7)));
+        assert_eq!(stream.as_ref().get_ref().size_hint(), (1, Some(1)));
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(Some(7)));
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("peekable_accepts_pinned_non_unpin_streams");
     }
 }

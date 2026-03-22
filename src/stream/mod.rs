@@ -415,7 +415,7 @@ pub trait StreamExt: Stream {
     /// item without consuming it.
     fn peekable(self) -> Peekable<Self>
     where
-        Self: Sized + Unpin,
+        Self: Sized,
     {
         Peekable::new(self)
     }
