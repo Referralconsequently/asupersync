@@ -9,6 +9,7 @@
 use super::capability::FabricCapability;
 use super::class::{AckKind, DeliveryClass};
 use super::control::MembershipRecord;
+use super::policy::SemanticServiceClass;
 pub use super::subject::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
 use crate::cx::Cx;
 use crate::distributed::HashRing;
@@ -615,6 +616,14 @@ impl ObservedCellLoad {
         Self {
             publishes_per_second,
         }
+    }
+}
+
+const fn cell_temperature_rank(temperature: CellTemperature) -> u8 {
+    match temperature {
+        CellTemperature::Cold => 0,
+        CellTemperature::Warm => 1,
+        CellTemperature::Hot => 2,
     }
 }
 
@@ -2225,14 +2234,8 @@ impl SubjectCell {
                         .sum::<usize>(),
                 )
                 .then_with(|| {
-                    let left_name = left
-                        .first()
-                        .map(|family| family.family_id.as_str())
-                        .unwrap_or("");
-                    let right_name = right
-                        .first()
-                        .map(|family| family.family_id.as_str())
-                        .unwrap_or("");
+                    let left_name = left.first().map_or("", |family| family.family_id.as_str());
+                    let right_name = right.first().map_or("", |family| family.family_id.as_str());
                     left_name.cmp(right_name)
                 })
         });
@@ -2337,6 +2340,638 @@ impl SubjectCell {
             resulting_cell,
         })
     }
+
+    /// Start a bounded speculative publish attempt for a low-conflict cell.
+    #[allow(clippy::result_large_err)]
+    pub fn begin_speculative_publish(
+        &self,
+        policy: &SpeculativeExecutionPolicy,
+        conflict_histogram: &CellConflictHistogram,
+        request: &SpeculativePublishRequest,
+    ) -> Result<SpeculativePublishAttempt, SpeculativeExecutionError> {
+        conflict_histogram.validate()?;
+        policy.validate(self, request, conflict_histogram)?;
+
+        Ok(SpeculativePublishAttempt::new(
+            self.cell_id,
+            request,
+            conflict_histogram.conflict_rate_basis_points(),
+        ))
+    }
+}
+
+/// Rolling conflict histogram used to decide whether speculation is still safe
+/// for a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CellConflictHistogram {
+    /// Completed speculative attempts in the current rolling window.
+    pub completed_attempts: u64,
+    /// Attempts in that window that rolled back due to a conflict.
+    pub conflicted_attempts: u64,
+}
+
+impl CellConflictHistogram {
+    /// Construct a histogram snapshot.
+    #[must_use]
+    pub const fn new(completed_attempts: u64, conflicted_attempts: u64) -> Self {
+        Self {
+            completed_attempts,
+            conflicted_attempts,
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate(self) -> Result<(), SpeculativeExecutionError> {
+        if self.conflicted_attempts > self.completed_attempts {
+            return Err(SpeculativeExecutionError::InvalidConflictHistogram {
+                completed_attempts: self.completed_attempts,
+                conflicted_attempts: self.conflicted_attempts,
+            });
+        }
+        Ok(())
+    }
+
+    /// Return the current conflict rate in basis points.
+    #[must_use]
+    pub fn conflict_rate_basis_points(self) -> u16 {
+        if self.completed_attempts == 0 {
+            return 0;
+        }
+
+        let rate =
+            (u128::from(self.conflicted_attempts) * 10_000) / u128::from(self.completed_attempts);
+        u16::try_from(rate).unwrap_or(u16::MAX)
+    }
+
+    fn record_confirmation(&mut self) {
+        self.completed_attempts = self.completed_attempts.saturating_add(1);
+    }
+
+    fn record_conflict(&mut self) {
+        self.completed_attempts = self.completed_attempts.saturating_add(1);
+        self.conflicted_attempts = self.conflicted_attempts.saturating_add(1);
+    }
+}
+
+/// Explicit operator kill switches for speculative execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeculativeKillSwitches {
+    /// Master enable flag for the whole feature.
+    pub globally_enabled: bool,
+    /// Cells that must never admit speculative work.
+    pub disabled_cells: BTreeSet<CellId>,
+    /// Service classes that must stay on the non-speculative path.
+    pub disabled_service_classes: BTreeSet<SemanticServiceClass>,
+}
+
+impl Default for SpeculativeKillSwitches {
+    fn default() -> Self {
+        Self {
+            globally_enabled: true,
+            disabled_cells: BTreeSet::new(),
+            disabled_service_classes: BTreeSet::new(),
+        }
+    }
+}
+
+impl SpeculativeKillSwitches {
+    #[allow(clippy::result_large_err)]
+    fn ensure_enabled(
+        &self,
+        cell_id: CellId,
+        service_class: SemanticServiceClass,
+    ) -> Result<(), SpeculativeExecutionError> {
+        if !self.globally_enabled {
+            return Err(SpeculativeExecutionError::GlobalKillSwitch);
+        }
+        if self.disabled_cells.contains(&cell_id) {
+            return Err(SpeculativeExecutionError::CellKillSwitch { cell_id });
+        }
+        if self.disabled_service_classes.contains(&service_class) {
+            return Err(SpeculativeExecutionError::ServiceClassKillSwitch { service_class });
+        }
+        Ok(())
+    }
+}
+
+/// Admission policy for speculative subject-cell execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeculativeExecutionPolicy {
+    /// Service classes that may use the speculative fast path.
+    pub allowed_service_classes: BTreeSet<SemanticServiceClass>,
+    /// Maximum admissible conflict rate before speculation is disabled.
+    pub max_conflict_rate_basis_points: u16,
+    /// Hottest cell temperature still allowed to speculate.
+    pub max_admissible_temperature: CellTemperature,
+    /// Explicit operator kill switches.
+    pub kill_switches: SpeculativeKillSwitches,
+}
+
+impl Default for SpeculativeExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_service_classes: BTreeSet::from([
+                SemanticServiceClass::ReplyCritical,
+                SemanticServiceClass::DurablePipeline,
+            ]),
+            max_conflict_rate_basis_points: 500,
+            max_admissible_temperature: CellTemperature::Warm,
+            kill_switches: SpeculativeKillSwitches::default(),
+        }
+    }
+}
+
+impl SpeculativeExecutionPolicy {
+    /// Disable speculation for one specific cell.
+    #[must_use]
+    pub fn with_disabled_cell(mut self, cell_id: CellId) -> Self {
+        self.kill_switches.disabled_cells.insert(cell_id);
+        self
+    }
+
+    /// Override the maximum admissible conflict rate.
+    #[must_use]
+    pub fn with_max_conflict_rate_basis_points(
+        mut self,
+        max_conflict_rate_basis_points: u16,
+    ) -> Self {
+        self.max_conflict_rate_basis_points = max_conflict_rate_basis_points.min(10_000);
+        self
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate(
+        &self,
+        cell: &SubjectCell,
+        request: &SpeculativePublishRequest,
+        conflict_histogram: &CellConflictHistogram,
+    ) -> Result<(), SpeculativeExecutionError> {
+        request.validate()?;
+        self.kill_switches
+            .ensure_enabled(cell.cell_id, request.service_class)?;
+
+        if !self.allowed_service_classes.contains(&request.service_class) {
+            return Err(SpeculativeExecutionError::ServiceClassNotAdmitted {
+                service_class: request.service_class,
+            });
+        }
+        if request.delivery_class < DeliveryClass::ObligationBacked {
+            return Err(SpeculativeExecutionError::DeliveryClassNotSupported {
+                delivery_class: request.delivery_class,
+            });
+        }
+        if cell_temperature_rank(cell.data_capsule.temperature)
+            > cell_temperature_rank(self.max_admissible_temperature)
+        {
+            return Err(SpeculativeExecutionError::CellTooHot {
+                cell_id: cell.cell_id,
+                temperature: cell.data_capsule.temperature,
+                max_temperature: self.max_admissible_temperature,
+            });
+        }
+
+        let observed_basis_points = conflict_histogram.conflict_rate_basis_points();
+        if observed_basis_points > self.max_conflict_rate_basis_points {
+            return Err(SpeculativeExecutionError::ConflictRateTooHigh {
+                cell_id: cell.cell_id,
+                observed_basis_points,
+                threshold_basis_points: self.max_conflict_rate_basis_points,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Request to begin a speculative publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeculativePublishRequest {
+    /// Stable publish identifier used for replay and diagnostics.
+    pub publish_id: String,
+    /// Service class requesting the fast path.
+    pub service_class: SemanticServiceClass,
+    /// Delivery class promised at the boundary.
+    pub delivery_class: DeliveryClass,
+    /// Stable idempotency key for the publish.
+    pub idempotency_key: String,
+    /// Deterministic digest or digest surrogate for the payload.
+    pub payload_digest: String,
+}
+
+impl SpeculativePublishRequest {
+    /// Construct a request with the canonical obligation-backed default.
+    #[must_use]
+    pub fn new(
+        publish_id: impl Into<String>,
+        service_class: SemanticServiceClass,
+        idempotency_key: impl Into<String>,
+        payload_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            publish_id: publish_id.into(),
+            service_class,
+            delivery_class: DeliveryClass::ObligationBacked,
+            idempotency_key: idempotency_key.into(),
+            payload_digest: payload_digest.into(),
+        }
+    }
+
+    /// Override the delivery class.
+    #[must_use]
+    pub fn with_delivery_class(mut self, delivery_class: DeliveryClass) -> Self {
+        self.delivery_class = delivery_class;
+        self
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn validate(&self) -> Result<(), SpeculativeExecutionError> {
+        if self.publish_id.trim().is_empty() {
+            return Err(SpeculativeExecutionError::EmptyPublishId);
+        }
+        if self.idempotency_key.trim().is_empty() {
+            return Err(SpeculativeExecutionError::EmptyIdempotencyKey);
+        }
+        if self.payload_digest.trim().is_empty() {
+            return Err(SpeculativeExecutionError::EmptyPayloadDigest);
+        }
+        Ok(())
+    }
+}
+
+/// Tentative obligation opened for a speculative publish attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TentativePublishObligation {
+    /// Stable obligation id derived from the request and cell.
+    pub obligation_id: String,
+    /// Cell that owns the speculative attempt.
+    pub cell_id: CellId,
+    /// Publish identifier carried into replay artifacts.
+    pub publish_id: String,
+    /// Idempotency key reserved by the tentative attempt.
+    pub idempotency_key: String,
+}
+
+/// Committed obligation produced after the control capsule confirms a tentative
+/// publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedPublishObligation {
+    /// Stable obligation id carried forward from the tentative stage.
+    pub obligation_id: String,
+    /// Cell that owns the committed publish.
+    pub cell_id: CellId,
+    /// Control-capsule sequence that confirmed the publish.
+    pub control_sequence: u64,
+}
+
+/// Replay-friendly state marker for a speculative attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpeculativeReplayDecision {
+    /// The publish is still tentative.
+    Tentative,
+    /// The control capsule confirmed the publish.
+    Confirmed,
+    /// The control capsule detected a conflicting append and the attempt rolled back.
+    AbortedConflict,
+}
+
+/// Stable artifact that lets tests and replay oracles verify speculative
+/// decisions from first principles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeculativeReplayArtifact {
+    /// Stable replay key for the tentative publish.
+    pub replay_key: String,
+    /// Stable oracle key used to compare repeated runs.
+    pub oracle_key: String,
+    /// Cell that owns the speculative attempt.
+    pub cell_id: CellId,
+    /// Service class that requested speculation.
+    pub service_class: SemanticServiceClass,
+    /// Delivery class promised by the caller.
+    pub delivery_class: DeliveryClass,
+    /// Tentative obligation tracked by the attempt.
+    pub tentative_obligation_id: String,
+    /// Decision reached so far.
+    pub decision: SpeculativeReplayDecision,
+    /// Conflict rate snapshot used at admission time.
+    pub conflict_rate_basis_points: u16,
+    /// Confirming control-capsule sequence, if any.
+    pub control_sequence: Option<u64>,
+    /// Stable conflict identifier, if the attempt rolled back.
+    pub conflict_key: Option<String>,
+    verification_fingerprint: u64,
+}
+
+impl SpeculativeReplayArtifact {
+    fn tentative(
+        cell_id: CellId,
+        request: &SpeculativePublishRequest,
+        tentative_obligation_id: &str,
+        conflict_rate_basis_points: u16,
+    ) -> Self {
+        let base_hash = stable_hash((
+            "speculative-publish",
+            cell_id.raw(),
+            request.publish_id.as_str(),
+            request.idempotency_key.as_str(),
+            request.payload_digest.as_str(),
+            request.service_class,
+            request.delivery_class,
+        ));
+        let replay_key = format!("speculative-replay-{base_hash:016x}");
+        let oracle_key = format!(
+            "speculative-oracle-{:016x}",
+            stable_hash(("speculative-oracle", base_hash))
+        );
+        let mut artifact = Self {
+            replay_key,
+            oracle_key,
+            cell_id,
+            service_class: request.service_class,
+            delivery_class: request.delivery_class,
+            tentative_obligation_id: tentative_obligation_id.to_owned(),
+            decision: SpeculativeReplayDecision::Tentative,
+            conflict_rate_basis_points,
+            control_sequence: None,
+            conflict_key: None,
+            verification_fingerprint: 0,
+        };
+        artifact.verification_fingerprint = artifact.compute_fingerprint();
+        artifact
+    }
+
+    fn resolved(
+        &self,
+        decision: SpeculativeReplayDecision,
+        control_sequence: Option<u64>,
+        conflict_key: Option<String>,
+    ) -> Self {
+        let mut artifact = Self {
+            replay_key: self.replay_key.clone(),
+            oracle_key: self.oracle_key.clone(),
+            cell_id: self.cell_id,
+            service_class: self.service_class,
+            delivery_class: self.delivery_class,
+            tentative_obligation_id: self.tentative_obligation_id.clone(),
+            decision,
+            conflict_rate_basis_points: self.conflict_rate_basis_points,
+            control_sequence,
+            conflict_key,
+            verification_fingerprint: 0,
+        };
+        artifact.verification_fingerprint = artifact.compute_fingerprint();
+        artifact
+    }
+
+    /// Return true when the artifact's verification fingerprint still matches
+    /// its observable fields.
+    #[must_use]
+    pub fn verifies(&self) -> bool {
+        self.verification_fingerprint == self.compute_fingerprint()
+    }
+
+    fn compute_fingerprint(&self) -> u64 {
+        stable_hash((
+            "speculative-replay-artifact",
+            self.replay_key.as_str(),
+            self.oracle_key.as_str(),
+            self.cell_id.raw(),
+            self.service_class,
+            self.delivery_class,
+            self.tentative_obligation_id.as_str(),
+            self.decision,
+            self.conflict_rate_basis_points,
+            self.control_sequence,
+            self.conflict_key.as_deref(),
+        ))
+    }
+}
+
+/// Admitted speculative publish that is still hidden from consumers until the
+/// control capsule confirms it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeculativePublishAttempt {
+    /// Cell that owns the speculative attempt.
+    pub cell_id: CellId,
+    /// Service class admitted onto the fast path.
+    pub service_class: SemanticServiceClass,
+    /// Delivery class promised by the caller.
+    pub delivery_class: DeliveryClass,
+    /// Distinct tentative obligation backing the fast path.
+    pub tentative_obligation: TentativePublishObligation,
+    /// Replay-friendly artifact for the attempt.
+    pub replay_artifact: SpeculativeReplayArtifact,
+    consumer_visible: bool,
+}
+
+impl SpeculativePublishAttempt {
+    fn new(
+        cell_id: CellId,
+        request: &SpeculativePublishRequest,
+        conflict_rate_basis_points: u16,
+    ) -> Self {
+        let obligation_hash = stable_hash((
+            "tentative-publish-obligation",
+            cell_id.raw(),
+            request.publish_id.as_str(),
+            request.idempotency_key.as_str(),
+            request.payload_digest.as_str(),
+        ));
+        let obligation_id = format!("tentative-obligation-{obligation_hash:016x}");
+        let tentative_obligation = TentativePublishObligation {
+            obligation_id: obligation_id.clone(),
+            cell_id,
+            publish_id: request.publish_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+        };
+        let replay_artifact = SpeculativeReplayArtifact::tentative(
+            cell_id,
+            request,
+            &obligation_id,
+            conflict_rate_basis_points,
+        );
+
+        Self {
+            cell_id,
+            service_class: request.service_class,
+            delivery_class: request.delivery_class,
+            tentative_obligation,
+            replay_artifact,
+            consumer_visible: false,
+        }
+    }
+
+    /// Tentative results stay hidden from consumers until confirmation.
+    #[must_use]
+    pub const fn consumer_visible(&self) -> bool {
+        self.consumer_visible
+    }
+
+    /// Confirm the speculative fast path and convert its tentative obligation
+    /// into a committed control-capsule fact.
+    pub fn confirm(
+        self,
+        conflict_histogram: &mut CellConflictHistogram,
+        control_sequence: u64,
+    ) -> ConfirmedSpeculativePublish {
+        conflict_histogram.record_confirmation();
+
+        ConfirmedSpeculativePublish {
+            committed_obligation: CommittedPublishObligation {
+                obligation_id: self.tentative_obligation.obligation_id.clone(),
+                cell_id: self.cell_id,
+                control_sequence,
+            },
+            replay_artifact: self.replay_artifact.resolved(
+                SpeculativeReplayDecision::Confirmed,
+                Some(control_sequence),
+                None,
+            ),
+            consumer_visible: true,
+        }
+    }
+
+    /// Abort the speculative fast path after the control capsule discovers a
+    /// conflicting append and surface the corrected non-speculative outcome.
+    pub fn abort_due_to_conflict(
+        self,
+        conflict_histogram: &mut CellConflictHistogram,
+        conflict_key: impl Into<String>,
+        corrected_outcome: impl Into<String>,
+    ) -> AbortedSpeculativePublish {
+        conflict_histogram.record_conflict();
+
+        let conflict_key = conflict_key.into();
+        AbortedSpeculativePublish {
+            tentative_obligation: self.tentative_obligation,
+            replay_artifact: self.replay_artifact.resolved(
+                SpeculativeReplayDecision::AbortedConflict,
+                None,
+                Some(conflict_key.clone()),
+            ),
+            corrected_outcome: corrected_outcome.into(),
+            consumer_visible: false,
+            conflict_key,
+        }
+    }
+}
+
+/// Successful resolution of a speculative publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedSpeculativePublish {
+    /// Committed obligation emitted after the control capsule confirms the
+    /// tentative path.
+    pub committed_obligation: CommittedPublishObligation,
+    /// Replay artifact covering the confirmed outcome.
+    pub replay_artifact: SpeculativeReplayArtifact,
+    consumer_visible: bool,
+}
+
+impl ConfirmedSpeculativePublish {
+    /// Confirmed speculative publishes become visible to consumers.
+    #[must_use]
+    pub const fn consumer_visible(&self) -> bool {
+        self.consumer_visible
+    }
+}
+
+/// Rolled-back speculative publish after a conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbortedSpeculativePublish {
+    /// Tentative obligation that was aborted deterministically.
+    pub tentative_obligation: TentativePublishObligation,
+    /// Replay artifact covering the aborted outcome.
+    pub replay_artifact: SpeculativeReplayArtifact,
+    /// Corrected non-speculative outcome surfaced after the rollback.
+    pub corrected_outcome: String,
+    /// Stable conflict identifier used by replay and diagnostics.
+    pub conflict_key: String,
+    consumer_visible: bool,
+}
+
+impl AbortedSpeculativePublish {
+    /// Aborted speculative publishes stay hidden from consumers.
+    #[must_use]
+    pub const fn consumer_visible(&self) -> bool {
+        self.consumer_visible
+    }
+}
+
+/// Deterministic admission and state-machine errors for speculative subject-cell
+/// execution.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SpeculativeExecutionError {
+    /// Histogram snapshots must never report more conflicts than completed attempts.
+    #[error(
+        "speculative conflict histogram has {conflicted_attempts} conflicts but only {completed_attempts} completed attempts"
+    )]
+    InvalidConflictHistogram {
+        /// Completed attempts in the rolling window.
+        completed_attempts: u64,
+        /// Conflicted attempts in the rolling window.
+        conflicted_attempts: u64,
+    },
+    /// Publish ids must be stable and non-empty.
+    #[error("speculative publish id must not be empty")]
+    EmptyPublishId,
+    /// Idempotency keys must be stable and non-empty.
+    #[error("speculative idempotency key must not be empty")]
+    EmptyIdempotencyKey,
+    /// Payload digests are mandatory for replay and rollback auditing.
+    #[error("speculative payload digest must not be empty")]
+    EmptyPayloadDigest,
+    /// Speculation is not valid below the obligation-backed tier.
+    #[error(
+        "speculative execution requires obligation-backed or stronger delivery classes, got {delivery_class}"
+    )]
+    DeliveryClassNotSupported {
+        /// Delivery class rejected for speculation.
+        delivery_class: DeliveryClass,
+    },
+    /// Operators may disable the entire speculative path.
+    #[error("speculative execution is globally disabled")]
+    GlobalKillSwitch,
+    /// Operators may disable speculation for one cell.
+    #[error("speculative execution is disabled for cell `{cell_id}`")]
+    CellKillSwitch {
+        /// Cell held off the speculative path.
+        cell_id: CellId,
+    },
+    /// Operators may disable speculation for one service class.
+    #[error("speculative execution is disabled for service class `{service_class:?}`")]
+    ServiceClassKillSwitch {
+        /// Service class held off the speculative path.
+        service_class: SemanticServiceClass,
+    },
+    /// Only explicit service classes may use the feature.
+    #[error("service class `{service_class:?}` is not admitted for speculative execution")]
+    ServiceClassNotAdmitted {
+        /// Service class rejected by the policy.
+        service_class: SemanticServiceClass,
+    },
+    /// Hotter cells must stay on the authoritative path.
+    #[error(
+        "cell `{cell_id}` has temperature {temperature:?}, above speculative limit {max_temperature:?}"
+    )]
+    CellTooHot {
+        /// Cell rejected for speculation.
+        cell_id: CellId,
+        /// Observed current temperature.
+        temperature: CellTemperature,
+        /// Hottest temperature still admitted by policy.
+        max_temperature: CellTemperature,
+    },
+    /// Conflict history exceeded the configured safe envelope.
+    #[error(
+        "cell `{cell_id}` conflict rate {observed_basis_points}bp exceeds speculative threshold {threshold_basis_points}bp"
+    )]
+    ConflictRateTooHigh {
+        /// Cell rejected for speculation.
+        cell_id: CellId,
+        /// Observed rolling conflict rate.
+        observed_basis_points: u16,
+        /// Maximum rate allowed by policy.
+        threshold_basis_points: u16,
+    },
 }
 
 /// Deterministic failures while certifying a self-rebalance.
@@ -5569,6 +6204,177 @@ mod tests {
             first.control_capsule.shared_control_shard, second.control_capsule.shared_control_shard,
             "compacted reply subjects should share the same control shard assignment"
         );
+    }
+
+    #[test]
+    fn subject_cell_speculative_publish_confirms_without_exposing_tentative_state() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let speculative_policy = SpeculativeExecutionPolicy::default();
+        let histogram = CellConflictHistogram::default();
+
+        let attempt = cell
+            .begin_speculative_publish(
+                &speculative_policy,
+                &histogram,
+                &SpeculativePublishRequest::new(
+                    "orders-confirm",
+                    SemanticServiceClass::ReplyCritical,
+                    "idem-orders-confirm",
+                    "digest-orders-confirm",
+                ),
+            )
+            .expect("low-conflict cell should admit speculative publish");
+
+        assert!(
+            !attempt.consumer_visible(),
+            "tentative results must stay hidden until confirmation"
+        );
+        assert!(attempt.replay_artifact.verifies());
+
+        let mut histogram = histogram;
+        let confirmed = attempt.confirm(&mut histogram, 41);
+        assert_eq!(histogram, CellConflictHistogram::new(1, 0));
+        assert_eq!(confirmed.committed_obligation.control_sequence, 41);
+        assert!(confirmed.consumer_visible());
+        assert_eq!(
+            confirmed.replay_artifact.decision,
+            SpeculativeReplayDecision::Confirmed
+        );
+        assert!(confirmed.replay_artifact.verifies());
+    }
+
+    #[test]
+    fn subject_cell_speculative_publish_aborts_conflict_and_tracks_histogram() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let speculative_policy = SpeculativeExecutionPolicy::default();
+        let mut histogram = CellConflictHistogram::default();
+
+        let attempt = cell
+            .begin_speculative_publish(
+                &speculative_policy,
+                &histogram,
+                &SpeculativePublishRequest::new(
+                    "orders-conflict",
+                    SemanticServiceClass::ReplyCritical,
+                    "idem-orders-conflict",
+                    "digest-orders-conflict",
+                ),
+            )
+            .expect("low-conflict cell should admit speculative publish");
+
+        let aborted = attempt.abort_due_to_conflict(
+            &mut histogram,
+            "cursor-conflict-7",
+            "fallback-authoritative-path",
+        );
+        assert_eq!(histogram, CellConflictHistogram::new(1, 1));
+        assert!(
+            !aborted.consumer_visible(),
+            "conflicted tentative results must stay hidden from consumers"
+        );
+        assert_eq!(aborted.corrected_outcome, "fallback-authoritative-path");
+        assert_eq!(aborted.conflict_key, "cursor-conflict-7");
+        assert_eq!(
+            aborted.replay_artifact.decision,
+            SpeculativeReplayDecision::AbortedConflict
+        );
+        assert!(aborted.replay_artifact.verifies());
+    }
+
+    #[test]
+    fn subject_cell_speculative_publish_honors_explicit_kill_switch() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let speculative_policy =
+            SpeculativeExecutionPolicy::default().with_disabled_cell(cell.cell_id);
+        let histogram = CellConflictHistogram::default();
+
+        let err = cell
+            .begin_speculative_publish(
+                &speculative_policy,
+                &histogram,
+                &SpeculativePublishRequest::new(
+                    "orders-kill-switch",
+                    SemanticServiceClass::ReplyCritical,
+                    "idem-orders-kill-switch",
+                    "digest-orders-kill-switch",
+                ),
+            )
+            .expect_err("disabled cells must reject speculation");
+        assert_eq!(
+            err,
+            SpeculativeExecutionError::CellKillSwitch {
+                cell_id: cell.cell_id
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_speculative_publish_rejects_high_conflict_histogram() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let speculative_policy =
+            SpeculativeExecutionPolicy::default().with_max_conflict_rate_basis_points(500);
+        let histogram = CellConflictHistogram::new(20, 2);
+
+        let err = cell
+            .begin_speculative_publish(
+                &speculative_policy,
+                &histogram,
+                &SpeculativePublishRequest::new(
+                    "orders-high-conflict",
+                    SemanticServiceClass::ReplyCritical,
+                    "idem-orders-high-conflict",
+                    "digest-orders-high-conflict",
+                ),
+            )
+            .expect_err("conflict-heavy cells must stay off the speculative path");
+        assert_eq!(
+            err,
+            SpeculativeExecutionError::ConflictRateTooHigh {
+                cell_id: cell.cell_id,
+                observed_basis_points: 1_000,
+                threshold_basis_points: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_speculative_publish_artifacts_are_replayable_for_identical_inputs() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let speculative_policy = SpeculativeExecutionPolicy::default();
+        let histogram = CellConflictHistogram::new(4, 0);
+        let request = SpeculativePublishRequest::new(
+            "orders-replay",
+            SemanticServiceClass::ReplyCritical,
+            "idem-orders-replay",
+            "digest-orders-replay",
+        )
+        .with_delivery_class(DeliveryClass::MobilitySafe);
+
+        let first = cell
+            .begin_speculative_publish(&speculative_policy, &histogram, &request)
+            .expect("first replayable attempt");
+        let second = cell
+            .begin_speculative_publish(&speculative_policy, &histogram, &request)
+            .expect("second replayable attempt");
+
+        assert_eq!(
+            first.tentative_obligation.obligation_id,
+            second.tentative_obligation.obligation_id
+        );
+        assert_eq!(first.replay_artifact.replay_key, second.replay_artifact.replay_key);
+        assert_eq!(first.replay_artifact.oracle_key, second.replay_artifact.oracle_key);
+        assert!(first.replay_artifact.verifies());
+        assert!(second.replay_artifact.verifies());
     }
 
     #[test]
