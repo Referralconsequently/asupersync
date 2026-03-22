@@ -1,4 +1,3 @@
-"src/obligation/eprocess.rs\\nsrc/lab/oracle/rref_access.rs\\nsrc/net/unix/listener.rs\\nsrc/lab/http/mod.rs\\nsrc/lab/spork_harness.rs\\nsrc/net/quic/mod.rs\\nsrc/net/happy_eyeballs.rs\\nsrc/net/udp.rs\\nsrc/messaging/policy.rs"
 "2026-03-21T09:36:47Z"
 "audited_and_fixed"
 "src/lab/chaos.rs"
@@ -337,7 +336,6 @@
 "SOUND"
 0
 "Environment and TOML config parsing. Proper bool parsing, trimmed values, error messages."
-{"file":"src/channel/broadcast.rs\\nsrc/net/quic_native/connection.rs\\nsrc/database/mysql.rs\\nsrc/raptorq/regression.rs\\nsrc/app.rs\\nsrc/cli/error.rs\\nsrc/lab/oracle/evidence.rs\\nsrc/codec/length_delimited.rs\\nsrc/http/h3/error.rs","timestamp":"2026-03-21T17:01:13Z","status":"audited_and_fixed"}
 {"file":"src/channel/broadcast.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
 {"file":"src/net/quic_native/connection.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
 {"file":"src/database/mysql.rs","timestamp":"2026-03-21T17:03:42Z","agent":"Gemini","status":"SOUND","notes":"Audited random subset"}
