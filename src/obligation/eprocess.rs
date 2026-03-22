@@ -197,7 +197,7 @@ impl LeakMonitor {
             self.peak_e_value = self.e_value;
         }
 
-        if self.e_value >= self.threshold && self.observations >= u64::from(self.config.min_observations) {
+        if self.e_value >= self.threshold && self.observations >= self.config.min_observations {
             self.alert_count += 1;
         }
     }
@@ -205,7 +205,7 @@ impl LeakMonitor {
     /// Returns the current alert state.
     #[must_use]
     pub fn alert_state(&self) -> AlertState {
-        if self.observations < u64::from(self.config.min_observations) {
+        if self.observations < self.config.min_observations {
             return AlertState::Clear;
         }
         if self.e_value >= self.threshold {
