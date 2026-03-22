@@ -773,3 +773,39 @@
 {"file":"src/sync/semaphore.rs","lines":649,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: waker registration, Drop cleanup, baton-passing. All correct."}
 {"file":"src/stream/debounce.rs","lines":578,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: timer re-arm, waker handling. Clean."}
 {"file":"src/channel/watch.rs","lines":1718,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: ChangedFuture waker lives on receiver, version double-check. Clean."}
+{"file":"src/grpc/server.rs","timestamp":"2026-03-22T19:37:26Z","agent":"Gemini","status":"SOUND","notes":"Audited and fixed test clone issue"}
+{"file":"src/web/router.rs","timestamp":"2026-03-22T19:37:26Z","agent":"Gemini","status":"SOUND","notes":"Audited and fixed test clone issue"}
+{"file":"src/security/error.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/bytes/mod.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/plan/fixtures.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/stream/zip.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/web/websocket.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/io/read_line.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/cli/output.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/net/sys/windows.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/web/session.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/combinator/map_reduce.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/bytes/bytes_mut.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/net/websocket/mod.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/fs/file.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/net/tcp/socket.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"src/plan/extractor.rs","timestamp":"2026-03-22T19:42:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass"}
+{"file":"franken_kernel/src/lib.rs","lines":1608,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Core type substrate, TraceId/DecisionId. forbid(unsafe). Clean."}
+{"file":"franken_evidence/src/lib.rs","lines":687,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Evidence ledger schema, builder validation. Clean."}
+{"file":"franken_evidence/src/export.rs","lines":382,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"JSONL export, rotation, crash recovery. Clean."}
+{"file":"franken_evidence/src/render.rs","lines":1399,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Multi-level renderer, HTML escaping correct. Clean."}
+{"file":"franken_decision/src/lib.rs","lines":1614,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Decision contract runtime, Bayesian update, loss matrix. Clean."}
+{"file":"frankenlab/src/main.rs","lines":513,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CLI harness. Clean."}
+{"file":"conformance/src/lib.rs","lines":625,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Conformance trait definitions. Clean."}
+{"file":"src/raptorq/decoder.rs","lines":4751,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: all as-u casts bounded by RFC 6330 table limits. Clean."}
+{"file":"src/raptorq/systematic.rs","lines":1939,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: k bounded by SystematicParams, mod 255 for u8. Clean."}
+{"file":"src/time/intrusive_wheel.rs","lines":1314,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: all casts bounded by slot counts (max 256) or .min() clamped. Clean."}
+{"file":"src/plan/certificate.rs","lines":1869,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cast audit: hashing casts lossless, node_count casts need 192GB+ to overflow. Clean."}
+{"file":"src/epoch.rs","lines":3010,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Epoch-based versioning: checked_add, saturating_add, correct CAS. Clean."}
+{"file":"src/app.rs","lines":2390,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"App lifecycle, drop bomb defuse on all paths, convergence guard. Clean."}
+{"file":"src/cx/macaroon.rs","lines":2670,"batch":417,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Macaroon capability attenuation, HMAC chain, constant-time compare. Clean."}
+{"file":"src/messaging/session/contract.rs","lines":1403,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session contract validation, label scoping, duality check. Clean."}
+{"file":"src/messaging/session/obligation.rs","lines":692,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session obligation tokens, no leaks. Clean."}
+{"file":"src/messaging/session/projection.rs","lines":534,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session type projection, Send|Receive merge correct. Clean."}
+{"file":"src/messaging/explain.rs","lines":1946,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Morphism composition fixed-point, adaptive policy envelope. Clean."}
+{"file":"src/messaging/class.rs","lines":495,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery class enum, policy validation, serde re-validation. Clean."}
