@@ -829,3 +829,24 @@
 {"file":"src/http/h1/codec.rs","lines":1455,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Request smuggling audit: TE+CL rejected, null bytes rejected, case-insensitive lookups. Clean."}
 {"file":"src/http/h1/server.rs","lines":919,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"100-continue handling, connection reuse after body drain. Clean."}
 {"file":"src/http/body.rs","lines":600,"batch":420,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Body consumption guard via take(), Limited size tracking. Clean."}
+{"file":"src/net/websocket/handshake.rs","lines":1288,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: SHA-1 accept key correct, CRLF sanitization, no origin bypass. Clean."}
+{"file":"src/net/websocket/client.rs","lines":1371,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: close handshake correct, message size limits, ping flood cap. Clean."}
+{"file":"src/net/websocket/server.rs","lines":944,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: data-after-close rejected, close state machine correct. Clean."}
+{"file":"src/tls/stream.rs","lines":649,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: no renegotiation, clean state machine. Clean."}
+{"file":"src/tls/acceptor.rs","lines":783,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Security audit: safe defaults, proper client cert verification. Clean."}
+{"file":"src/web/middleware.rs","lines":2889,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CORS, auth, rate limiting, body limits. CRLF sanitized. Clean."}
+{"file":"src/web/extract.rs","lines":1245,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Body extraction with size limits. Clean."}
+{"file":"src/web/router.rs","lines":500,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"URL routing, no path traversal concern. Clean."}
+{"file":"src/net/dns/resolver.rs","lines":988,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS resolution, hostname validation. Clean."}
+{"file":"src/net/dns/cache.rs","lines":686,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS cache TTL handling. Clean."}
+{"file":"src/service/discover.rs","lines":1025,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Generation-based stale protection, concurrent resolver safety. Clean."}
+{"file":"src/net/quic_native/transport.rs","lines":1534,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC transport: RTT, congestion, loss detection. saturating arithmetic. Clean."}
+{"file":"src/net/quic_core/mod.rs","lines":1300,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC varint encoding/decoding, packet number, transport params. Clean."}
+{"file":"src/transport/router.rs","lines":2946,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Endpoint routing, DispatchGuard RAII, ConnectionGuard. Clean."}
+{"file":"src/plan/analysis.rs","lines":2841,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Plan analysis: obligation safety, cancel safety, budget composition. Clean."}
+{"file":"src/plan/latency_algebra.rs","lines":2689,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Piecewise-linear curves, convolution, deviation. Clean."}
+{"file":"src/plan/rewrite.rs","lines":1707,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Rewrite rules with clone-test-apply safety pattern. Clean."}
+{"file":"src/plan/extractor.rs","lines":800,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Plan extraction with u64::MAX sentinel and saturating arithmetic. Clean."}
+{"file":"src/record/obligation.rs","lines":866,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Obligation state machine, terminal-absorbing. Clean."}
+{"file":"src/record/finalizer.rs","lines":279,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"LIFO finalizer stack. Clean."}
+{"file":"src/record/symbol_obligation_tracker.rs","lines":987,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ObligationGuard RAII, index maintenance. Clean."}
