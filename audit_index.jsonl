@@ -850,3 +850,4 @@
 {"file":"src/record/obligation.rs","lines":866,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Obligation state machine, terminal-absorbing. Clean."}
 {"file":"src/record/finalizer.rs","lines":279,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"LIFO finalizer stack. Clean."}
 {"file":"src/record/symbol_obligation_tracker.rs","lines":987,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ObligationGuard RAII, index maintenance. Clean."}
+{"file":"src/sync/mutex.rs","lines":1367,"batch":422,"date":"2026-03-22","agent":"Codex","verdict":"FIXED","bugs":1,"notes":"Fixed FIFO fairness bug: fresh lock()/try_lock()/OwnedMutexGuard::try_lock() could barge ahead of queued waiters when the mutex became free."}
