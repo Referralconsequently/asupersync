@@ -259,6 +259,10 @@ try {
     `lane health demotion must record worker_bootstrap_timeout, got ${bootstrap.laneHealthDemotion.lastTrigger ?? "missing"}`,
   );
   assert(
+    bootstrap.laneHealthDemotion.demotedToLaneId === UNSUPPORTED_LANE,
+    `lane health demotion must fail closed to ${UNSUPPORTED_LANE}, got ${bootstrap.laneHealthDemotion.demotedToLaneId ?? "missing"}`,
+  );
+  assert(
     bootstrap.runtimeSelectionDemoted.supported === false,
     "demoted runtime selection must fail closed to unsupported",
   );
@@ -277,6 +281,14 @@ try {
   assert(
     bootstrap.runtimeSelectionDemoted.health.status === "demoted",
     `demoted runtime selection must surface demoted health, got ${bootstrap.runtimeSelectionDemoted.health?.status ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionDemoted.health.lastTrigger === "worker_bootstrap_timeout",
+    `demoted runtime selection must preserve worker_bootstrap_timeout, got ${bootstrap.runtimeSelectionDemoted.health?.lastTrigger ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionDemoted.health.demotedToLaneId === UNSUPPORTED_LANE,
+    `demoted runtime selection must preserve fail-closed demoted lane ${UNSUPPORTED_LANE}, got ${bootstrap.runtimeSelectionDemoted.health?.demotedToLaneId ?? "missing"}`,
   );
   assert(preferredCandidate?.reasonCode === "candidate_lane_unhealthy", "demoted candidate matrix must preserve candidate_lane_unhealthy for the worker lane");
   assert(
@@ -310,6 +322,10 @@ try {
   assert(
     bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger === "worker_bootstrap_timeout",
     `prerequisite-loss runtime selection must preserve the stale worker_bootstrap_timeout trigger, got ${bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionPrerequisiteLoss?.health?.demotedToLaneId === UNSUPPORTED_LANE,
+    `prerequisite-loss runtime selection must preserve fail-closed demoted lane ${UNSUPPORTED_LANE}, got ${bootstrap.runtimeSelectionPrerequisiteLoss?.health?.demotedToLaneId ?? "missing"}`,
   );
   assert(
     prerequisiteLossCandidate?.reasonCode === "candidate_prerequisite_missing",
@@ -364,9 +380,14 @@ try {
     demotion_failure_count: bootstrap.laneHealthDemotion.failureCount,
     demotion_retry_budget_remaining: bootstrap.laneHealthDemotion.retryBudgetRemaining,
     demotion_cooldown_until_ms: bootstrap.laneHealthDemotion.cooldownUntilMs,
+    demotion_last_trigger: bootstrap.laneHealthDemotion.lastTrigger,
+    demotion_demoted_to_lane_id: bootstrap.laneHealthDemotion.demotedToLaneId,
     demoted_selected_lane: bootstrap.runtimeSelectionDemoted.selectedLane,
     demoted_reason_code: bootstrap.runtimeSelectionDemoted.reasonCode,
     demoted_outcome: bootstrap.runtimeSelectionDemoted.outcome,
+    demoted_health_last_trigger: bootstrap.runtimeSelectionDemoted.health.lastTrigger,
+    demoted_health_demoted_to_lane_id:
+      bootstrap.runtimeSelectionDemoted.health.demotedToLaneId,
     demoted_worker_candidate_reason: preferredCandidate?.reasonCode ?? null,
     prerequisite_loss_simulated: bootstrap.prerequisiteLossSimulation?.simulated ?? false,
     prerequisite_loss_skipped_reason:
@@ -379,6 +400,8 @@ try {
       bootstrap.runtimeSelectionPrerequisiteLoss?.health?.status ?? null,
     prerequisite_loss_health_last_trigger:
       bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger ?? null,
+    prerequisite_loss_health_demoted_to_lane_id:
+      bootstrap.runtimeSelectionPrerequisiteLoss?.health?.demotedToLaneId ?? null,
     prerequisite_loss_worker_candidate_reason:
       prerequisiteLossCandidate?.reasonCode ?? null,
     recovered_status: bootstrap.laneHealthReset.status,

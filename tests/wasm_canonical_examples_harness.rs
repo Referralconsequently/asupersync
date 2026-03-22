@@ -674,12 +674,34 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         "executionLadderRetrying",
         "retrying_retry_budget_remaining",
         "demotion_failure_count",
+        "demotion_last_trigger",
+        "demotion_demoted_to_lane_id",
+        "demoted_health_last_trigger",
+        "demoted_health_demoted_to_lane_id",
+        "prerequisite_loss_health_demoted_to_lane_id",
         "runtimeSelectionDemoted",
         "runtimeSelectionRecovered",
     ] {
         assert!(
             browser_check.contains(marker),
             "dedicated-worker browser-run check missing marker: {marker}"
+        );
+    }
+
+    let validator_path = Path::new("scripts/validate_dedicated_worker_consumer.sh");
+    let validator = std::fs::read_to_string(validator_path)
+        .unwrap_or_else(|_| panic!("missing {}", validator_path.display()));
+    for marker in [
+        "BROWSER_RUN_FILE",
+        "browser_demotion_last_trigger",
+        "browser_demotion_demoted_to_lane_id",
+        "browser_demoted_health_last_trigger",
+        "browser_demoted_health_demoted_to_lane_id",
+        "browser_prerequisite_loss_health_demoted_to_lane_id",
+    ] {
+        assert!(
+            validator.contains(marker),
+            "dedicated-worker validator missing marker: {marker}"
         );
     }
 }
