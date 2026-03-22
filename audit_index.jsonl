@@ -756,3 +756,18 @@
 {"file":"src/time/driver.rs","lines":1943,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer driver, VirtualClock CAS, BrowserMonotonicClock. Clean."}
 {"file":"src/channel/session.rs","lines":708,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session-typed channels, obligation abort on send failure. Clean."}
 {"file":"src/combinator/first_ok.rs","lines":845,"batch":414,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"First-ok combinator, cancel-point ordering, failure collection. Clean."}
+{"file":"src/gen_server.rs","lines":6443,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"OTP-style GenServer: reply obligations, mailbox drain, lifecycle. Clean."}
+{"file":"src/time/driver.rs","lines":1943,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer driver, VirtualClock CAS, BrowserMonotonicClock. Clean."}
+{"file":"src/channel/session.rs","lines":708,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session-typed channels. Clean."}
+{"file":"src/combinator/first_ok.rs","lines":845,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"First-ok combinator. Clean."}
+{"file":"src/messaging/kafka.rs","lines":1587,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka client, DeliverySender Drop guard. Clean."}
+{"file":"src/messaging/kafka_consumer.rs","lines":1266,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Kafka consumer, TOCTOU re-check, rebalance cleanup. Clean."}
+{"file":"src/messaging/stream.rs","lines":1021,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Messaging streams, retention enforcement. Clean."}
+{"file":"src/messaging/snapshot.rs","lines":842,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Service capsule snapshot/restore, digest computation. Clean."}
+{"file":"src/messaging/capability/routing.rs","lines":796,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability routing, wildcard injection prevention. Clean."}
+{"file":"src/messaging/capability/tokens.rs","lines":718,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linear capability tokens, schema authorization. Clean."}
+{"file":"src/trace/recorder.rs","lines":1423,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace recorder, DropOldest loop termination, ensure_capacity. Clean."}
+{"file":"src/trace/buffer.rs","lines":422,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Ring buffer, boundary conditions, capacity clamp. Clean."}
+{"file":"src/trace/scoring.rs","lines":482,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace scoring, persistence_sum saturating. Clean."}
+{"file":"src/trace/event_structure.rs","lines":520,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TracePoset, sorted successor invariant, topo sort. Clean."}
+{"file":"src/trace/tla_export.rs","lines":764,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TLA+ trace export. Clean."}
