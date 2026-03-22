@@ -1751,7 +1751,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.seed)
                 .collect::<Vec<_>>(),
-            vec![99]
+            vec![10]
         );
     }
 

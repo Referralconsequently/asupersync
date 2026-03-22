@@ -48,6 +48,7 @@ pub const VALID_PROFILES: &[&str] = &["fast", "full", "forensics"];
 
 /// Valid outcome markers for unit test log entries.
 pub const VALID_UNIT_OUTCOMES: &[&str] = &[
+    "pending",
     "ok",
     "fail",
     "decode_failure",

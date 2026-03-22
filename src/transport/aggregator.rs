@@ -3519,6 +3519,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn aggregator_retransmission_after_buffer_full_drop_is_accepted() {
         init_test("aggregator_retransmission_after_buffer_full_drop_is_accepted");
         let config = AggregatorConfig {
