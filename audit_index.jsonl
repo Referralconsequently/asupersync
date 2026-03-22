@@ -693,3 +693,11 @@
 "SOUND"
 0
 "Pending counter lifecycle correct, panic-safe call path, consistent lock ordering, TOCTOU handled"
+"src/channel/oneshot.rs"
+1751
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Reserve/send/abort pattern correct, sent flag prevents double-abort, waker taken under lock woken outside"
