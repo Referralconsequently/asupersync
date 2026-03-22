@@ -298,14 +298,15 @@ fn drain_with_in_flight_streams() {
         .receive_stream(cx, s2, 100)
         .expect("receive s2 while draining");
 
-    // But new stream opens are blocked (InvalidState, not 1-RTT check).
+    // But new stream opens are blocked because 1-RTT application traffic is
+    // disabled outside the Established state.
     let err = pair
         .client
         .open_local_bidi(cx)
         .expect_err("open bidi while draining");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("connection is closed")
+        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
     );
 
     let err = pair
@@ -314,7 +315,7 @@ fn drain_with_in_flight_streams() {
         .expect_err("open uni while draining");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("connection is closed")
+        NativeQuicConnectionError::InvalidState("1-RTT traffic not yet enabled")
     );
 
     // Accepting remote streams while draining is also blocked
