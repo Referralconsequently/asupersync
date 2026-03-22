@@ -304,7 +304,7 @@ impl BudgetEffect {
                 _ => None,
             },
             has_deadline: self.has_deadline || other.has_deadline,
-            parallelism: self.parallelism.max(other.parallelism),
+            parallelism: self.parallelism.saturating_add(other.parallelism),
             // In a race, the tightest deadline applies
             min_deadline: self.min_deadline.min(other.min_deadline),
             max_deadline: self.max_deadline.min(other.max_deadline),
@@ -870,8 +870,8 @@ impl PlanAnalyzer {
                 let parallelism = child_analyses
                     .iter()
                     .map(|a| a.budget.parallelism)
-                    .max()
-                    .unwrap_or(1);
+                    .fold(0u32, u32::saturating_add)
+                    .max(1);
 
                 // Race deadline: tightest constraint wins (first to complete).
                 let min_deadline = child_analyses

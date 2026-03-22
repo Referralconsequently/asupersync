@@ -652,6 +652,9 @@ where
             let _ = self.write_buf.split_to(n);
         }
 
+        // Ensure the underlying I/O stream is flushed
+        poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await?;
+
         Ok(())
     }
 

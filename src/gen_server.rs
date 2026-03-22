@@ -1468,12 +1468,11 @@ async fn run_gen_server_loop<S: GenServer>(
     // Phase 3: Drain remaining messages.
     // Calls during drain: reply with error (caller should not depend on drain).
     // Casts during drain: process normally if gracefully stopped, skip if aborted.
-    let drain_limit = cell.mailbox.capacity() as u64;
-    let mut drained: u64 = 0;
     let is_aborted = cx.is_cancel_requested();
 
     cell.mailbox.close();
 
+    let mut drained: u64 = 0;
     while let Ok(envelope) = cell.mailbox.try_recv() {
         match envelope {
             Envelope::Call {
@@ -1495,9 +1494,6 @@ async fn run_gen_server_loop<S: GenServer>(
             }
         }
         drained += 1;
-        if drained >= drain_limit {
-            break;
-        }
     }
     if drained > 0 {
         debug!(drained = drained, "gen_server::mailbox_drained");

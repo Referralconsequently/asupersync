@@ -173,6 +173,13 @@ async fn flush_write_buf<IO: AsyncWrite + Unpin>(
         let _ = guard.write_buf.split_to(n);
     }
 
+    // Ensure the underlying I/O stream is flushed
+    poll_fn(|poll_cx| {
+        let mut guard = shared.lock();
+        Pin::new(&mut guard.io).poll_flush(poll_cx)
+    })
+    .await?;
+
     Ok(())
 }
 

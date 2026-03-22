@@ -1392,25 +1392,19 @@ impl SymbolReorderer {
                 return ReorderProcessResult::accepted(ready);
             }
 
-            if gap > u64::from(self.config.max_sequence_gap) {
-                // Gap too large: give up waiting on missing sequence and advance.
-                // Deliver all buffered symbols (in sequence order) before resetting.
-                for (_, buffered) in std::mem::take(&mut state.buffer) {
-                    ready.push(buffered.symbol);
-                    self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
-                }
-                state.next_expected = seq_unwrapped.wrapping_add(1);
-                state.last_delivery = now;
-                ready.push(symbol);
-                self.in_order_deliveries.fetch_add(1, Ordering::Relaxed);
-                drop(objects);
-                return ReorderProcessResult::accepted(ready);
+            // Either gap is too large, or buffer is full.
+            // Give up waiting on missing sequence and advance.
+            // Deliver all buffered symbols (in sequence order) before resetting.
+            for (_, buffered) in std::mem::take(&mut state.buffer) {
+                ready.push(buffered.symbol);
+                self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
             }
-
-            // Buffer full: reject the symbol and let the caller undo any dedup
-            // bookkeeping so a later retransmission can still be admitted.
+            state.next_expected = seq_unwrapped.wrapping_add(1);
+            state.last_delivery = now;
+            ready.push(symbol);
+            self.in_order_deliveries.fetch_add(1, Ordering::Relaxed);
             drop(objects);
-            return ReorderProcessResult::dropped_due_to_buffer_overflow();
+            return ReorderProcessResult::accepted(ready);
         }
 
         // Late duplicate: ignore it, but keep dedup state intact.
@@ -3520,8 +3514,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn aggregator_retransmission_after_buffer_full_drop_is_accepted() {
-        init_test("aggregator_retransmission_after_buffer_full_drop_is_accepted");
+    fn aggregator_buffer_full_forces_flush() {
+        init_test("aggregator_buffer_full_forces_flush");
         let config = AggregatorConfig {
             reorder: ReordererConfig {
                 immediate_delivery: false,
@@ -3538,7 +3532,7 @@ mod tests {
             PathCharacteristics::default(),
         );
 
-        // Deliver seq 0, buffer seq 2, then drop seq 3 because the reorder buffer is full.
+        // Deliver seq 0, buffer seq 2, then flush seq 2 and deliver seq 3 because the reorder buffer is full.
         let seq0 = aggregator.process(Symbol::new_for_test(1, 0, 0, &[0]), path, Time::ZERO);
         crate::assert_with_log!(
             seq0.ready.len() == 1,
@@ -3566,77 +3560,44 @@ mod tests {
         );
         crate::assert_with_log!(
             !first_seq3.was_duplicate,
-            "buffer-full drop is not classified as duplicate",
+            "buffer-full flush is not classified as duplicate",
             false,
             first_seq3.was_duplicate
         );
         crate::assert_with_log!(
-            first_seq3.ready.is_empty(),
-            "buffer-full drop produces no output",
-            true,
-            first_seq3.ready.is_empty()
-        );
-
-        // Deliver seq 1, which drains buffered seq 2 and frees space / advances next_expected.
-        let seq1 = aggregator.process(
-            Symbol::new_for_test(1, 0, 1, &[1]),
-            path,
-            Time::from_millis(3),
-        );
-        crate::assert_with_log!(
-            seq1.ready.len() == 2,
-            "seq1 delivery drains buffered seq2",
+            first_seq3.ready.len() == 2,
+            "buffer-full flush produces buffered output",
             2,
-            seq1.ready.len()
+            first_seq3.ready.len()
         );
         crate::assert_with_log!(
-            seq1.ready[0].esi() == 1 && seq1.ready[1].esi() == 2,
-            "seq1 then seq2 delivered",
-            true,
-            seq1.ready[0].esi() == 1 && seq1.ready[1].esi() == 2
-        );
-
-        // Retransmit seq 3. Because the first attempt rolled back dedup state, this
-        // retransmission must be accepted and delivered instead of rejected as a duplicate.
-        let retried_seq3 = aggregator.process(
-            Symbol::new_for_test(1, 0, 3, &[3]),
-            path,
-            Time::from_millis(4),
+            first_seq3.ready[0].esi() == 2,
+            "buffer-full flush produces seq2",
+            2,
+            first_seq3.ready[0].esi()
         );
         crate::assert_with_log!(
-            !retried_seq3.was_duplicate,
-            "retransmitted seq3 is accepted",
-            false,
-            retried_seq3.was_duplicate
-        );
-        crate::assert_with_log!(
-            retried_seq3.ready.len() == 1,
-            "retransmitted seq3 is delivered",
-            1,
-            retried_seq3.ready.len()
-        );
-        crate::assert_with_log!(
-            retried_seq3.ready[0].esi() == 3,
-            "seq3 delivery preserved",
+            first_seq3.ready[1].esi() == 3,
+            "buffer-full flush produces seq3",
             3,
-            retried_seq3.ready[0].esi()
+            first_seq3.ready[1].esi()
         );
 
         let stats = aggregator.dedup.stats();
         crate::assert_with_log!(
-            stats.unique_symbols == 4,
-            "dedup unique count excludes rolled-back drop",
-            4,
+            stats.unique_symbols == 3,
+            "dedup unique count tracks the three delivered symbols",
+            3,
             stats.unique_symbols
         );
         crate::assert_with_log!(
-            stats.symbols_tracked == 4,
-            "dedup tracks the four delivered/buffered symbols only",
-            4,
+            stats.symbols_tracked == 3,
+            "dedup tracks the three delivered symbols only",
+            3,
             stats.symbols_tracked
         );
 
-        crate::test_complete!("aggregator_retransmission_after_buffer_full_drop_is_accepted");
+        crate::test_complete!("aggregator_buffer_full_forces_flush");
     }
 
     /// Flush timeout advances next_expected and drains consecutive.
