@@ -734,3 +734,8 @@
 {"file":"src/util/entropy.rs","lines":472,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DetEntropy SplitMix64, thread-local fork, strict guard RAII. Clean."}
 {"file":"src/runtime/blocking_pool.rs","lines":1872,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CAS thread spawning, idle retirement with re-check, catch_unwind around tasks, ThreadExitGuard. Clean."}
 {"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"io_uring PollAdd reactor, eventfd wakeup, stale user_data filtering. Clean."}
+{"file":"src/lab/http/harness.rs","lines":516,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: by_status_class u16 overflow on class * 100. Fixed with saturating_mul/add."}
+{"file":"src/fs/path_ops.rs","lines":672,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic write, temp path RAII, parent fsync. No path traversal. Clean."}
+{"file":"src/codec/framed.rs","lines":238,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Framed codec, cooperative budget, EOF handling. Clean."}
+{"file":"src/codec/length_delimited.rs","lines":241,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Length-delimited framing, checked arithmetic throughout. Clean."}
+{"file":"src/trace/geodesic.rs","lines":2344,"batch":413,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"A* geodesic normalization, greedy/beam search. No unsafe casts in production code."}

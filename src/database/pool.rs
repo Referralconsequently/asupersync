@@ -743,6 +743,40 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         &self,
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        struct ValidationGuard<'a, M: AsyncConnectionManager> {
+            pool: &'a AsyncDbPool<M>,
+            conn: Option<M::Connection>,
+        }
+
+        impl<M: AsyncConnectionManager> Drop for ValidationGuard<'_, M> {
+            fn drop(&mut self) {
+                if let Some(conn) = self.conn.take() {
+                    let mut inner = self.pool.inner.lock();
+                    inner.total = inner.total.saturating_sub(1);
+                    drop(inner);
+                    self.pool
+                        .stats
+                        .total_discards
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.pool.manager.disconnect(conn);
+                }
+            }
+        }
+
+        struct CreationGuard<'a, M: AsyncConnectionManager> {
+            pool: &'a AsyncDbPool<M>,
+            disarmed: bool,
+        }
+
+        impl<M: AsyncConnectionManager> Drop for CreationGuard<'_, M> {
+            fn drop(&mut self) {
+                if !self.disarmed {
+                    let mut inner = self.pool.inner.lock();
+                    inner.total = inner.total.saturating_sub(1);
+                }
+            }
+        }
+
         loop {
             if cx.is_cancel_requested() {
                 return Err(DbPoolError::Timeout);
@@ -771,19 +805,25 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
 
                 if self.config.validate_on_checkout {
-                    let mut conn = idle.conn;
-                    if !self.manager.is_valid(cx, &mut conn).await {
-                        {
-                            let mut inner = self.inner.lock();
-                            inner.total = inner.total.saturating_sub(1);
-                        }
+                    let mut guard = ValidationGuard {
+                        pool: self,
+                        conn: Some(idle.conn),
+                    };
+
+                    let valid = self
+                        .manager
+                        .is_valid(cx, guard.conn.as_mut().unwrap())
+                        .await;
+
+                    if !valid {
+                        // Let guard drop handle the discard and total decrement
                         self.stats
                             .total_validation_failures
                             .fetch_add(1, Ordering::Relaxed);
-                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                        self.manager.disconnect(conn);
                         continue;
                     }
+
+                    let conn = guard.conn.take().unwrap();
                     return self.finish_async_checkout(conn, idle.created_at);
                 }
 
@@ -798,19 +838,23 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 inner.total += 1;
             }
 
+            let mut creation_guard = CreationGuard {
+                pool: self,
+                disarmed: false,
+            };
+
             match self.manager.connect(cx).await {
                 Outcome::Ok(conn) => {
+                    creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
                     return self.finish_async_checkout(conn, Instant::now());
                 }
                 Outcome::Err(e) => {
-                    let mut inner = self.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
+                    // Let guard handle the decrement
                     return Err(DbPoolError::Connect(e));
                 }
                 Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                    let mut inner = self.inner.lock();
-                    inner.total = inner.total.saturating_sub(1);
+                    // Let guard handle the decrement
                     return Err(DbPoolError::Timeout);
                 }
             }

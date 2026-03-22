@@ -247,8 +247,8 @@ impl RequestTrace {
     /// Filter entries by status code class (e.g., 2 for 2xx).
     #[must_use]
     pub fn by_status_class(&self, class: u16) -> Vec<&TraceEntry> {
-        let lo = class * 100;
-        let hi = lo + 100;
+        let lo = u16::from(class).saturating_mul(100);
+        let hi = lo.saturating_add(100);
         self.entries
             .iter()
             .filter(|e| e.status >= lo && e.status < hi)
