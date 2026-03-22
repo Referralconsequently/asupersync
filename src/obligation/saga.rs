@@ -760,7 +760,7 @@ mod tests {
     fn lattice_state_idempotence() {
         use LatticeState::*;
         for &a in &[Unknown, Reserved, Committed, Aborted, Conflict] {
-            assert_eq!(Lattice::join(&a, &a), a, "idempotence failed for {a}",);
+            assert_eq!(Lattice::join(&a, &a), a, "idempotence failed for {a}");
         }
     }
 
@@ -770,7 +770,7 @@ mod tests {
         let bottom = LatticeState::bottom();
         assert_eq!(bottom, Unknown);
         for &a in &[Unknown, Reserved, Committed, Aborted, Conflict] {
-            assert_eq!(Lattice::join(&bottom, &a), a, "identity failed for {a}",);
+            assert_eq!(Lattice::join(&bottom, &a), a, "identity failed for {a}");
         }
     }
 

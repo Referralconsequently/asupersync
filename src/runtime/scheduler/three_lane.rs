@@ -210,7 +210,7 @@ fn normalized_entropy(probs: &[f64]) -> f64 {
     let mut entropy = 0.0_f64;
     for &p in probs {
         if p > f64::EPSILON {
-            entropy -= p * p.ln();
+            entropy = p.mul_add(-p.ln(), entropy);
         }
     }
     let max_entropy = (probs.len() as f64).ln();

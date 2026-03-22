@@ -323,7 +323,7 @@ fn main() {
 
     // Phase 2: minimize.
     let elements = extract_elements(seed);
-    eprintln!("demo::minimize  seed={seed}, elements={}", elements.len(),);
+    eprintln!("demo::minimize  seed={seed}, elements={}", elements.len());
 
     let minimize_start = Instant::now();
     let report = TraceMinimizer::minimize(&elements, check_for_leak);
@@ -355,7 +355,7 @@ fn main() {
     println!("  Seed:          {seed}");
     println!("  Original:      {} elements", report.original_count);
     println!("  Minimized:     {} elements", report.minimized_count);
-    println!("  Reduction:     {:.1}%", report.reduction_ratio * 100.0,);
+    println!("  Reduction:     {:.1}%", report.reduction_ratio * 100.0);
     println!("  Replays:       {}", report.replay_attempts);
     println!("  1-minimal:     {}", report.is_minimal);
     println!("  Narrative:     {narrative_path}");

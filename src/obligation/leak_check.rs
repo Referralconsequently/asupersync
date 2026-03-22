@@ -733,7 +733,7 @@ impl LeakChecker {
                         var,
                         Some(kind),
                         DiagnosticLocation::scope_exit(),
-                        format!("{var} holds {} obligation at scope exit", kind.as_str(),),
+                        format!("{var} holds {} obligation at scope exit", kind.as_str()),
                     );
                 }
                 VarState::MayHold(kind) => {

@@ -533,7 +533,7 @@ impl NoLeakProver {
                 property: LivenessProperty::CounterIncrement,
                 subject: ProofSubject::Obligation(obligation),
                 time,
-                description: format!("reserve({obligation:?}) but obligation already tracked",),
+                description: format!("reserve({obligation:?}) but obligation already tracked"),
             });
             return;
         }
@@ -595,7 +595,7 @@ impl NoLeakProver {
                 property: LivenessProperty::CounterDecrement,
                 subject: ProofSubject::Obligation(obligation),
                 time,
-                description: format!("{path}({obligation:?}) but already resolved",),
+                description: format!("{path}({obligation:?}) but already resolved"),
             });
             return;
         }
@@ -606,7 +606,7 @@ impl NoLeakProver {
                 property: LivenessProperty::CounterDecrement,
                 subject: ProofSubject::Obligation(obligation),
                 time,
-                description: format!("{path}({obligation:?}) but obligation never reserved",),
+                description: format!("{path}({obligation:?}) but obligation never reserved"),
             });
             return;
         };

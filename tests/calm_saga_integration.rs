@@ -289,7 +289,7 @@ fn lattice_associativity_exhaustive() {
 fn lattice_idempotence_exhaustive() {
     init_test_logging();
     for &a in &ALL_LATTICE_STATES {
-        assert_eq!(Lattice::join(&a, &a), a, "idempotence failed for {a:?}",);
+        assert_eq!(Lattice::join(&a, &a), a, "idempotence failed for {a:?}");
     }
 }
 
@@ -299,7 +299,7 @@ fn lattice_identity_element() {
     let bottom = LatticeState::bottom();
     assert_eq!(bottom, LatticeState::Unknown);
     for &a in &ALL_LATTICE_STATES {
-        assert_eq!(Lattice::join(&bottom, &a), a, "identity failed for {a:?}",);
+        assert_eq!(Lattice::join(&bottom, &a), a, "identity failed for {a:?}");
     }
 }
 

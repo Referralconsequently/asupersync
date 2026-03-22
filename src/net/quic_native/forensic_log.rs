@@ -820,10 +820,8 @@ impl QuicH3ScenarioManifest {
                 QuicH3Event::RegionStateChanged { .. } => {
                     summary.region_transitions += 1;
                 }
-                QuicH3Event::CloseInitiated { .. } => {
-                    if summary.first_close_initiated_ts_us.is_none() {
-                        summary.first_close_initiated_ts_us = Some(r.ts_us);
-                    }
+                QuicH3Event::CloseInitiated { .. } if summary.first_close_initiated_ts_us.is_none() => {
+                    summary.first_close_initiated_ts_us = Some(r.ts_us);
                 }
                 _ => {}
             }

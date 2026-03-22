@@ -675,7 +675,7 @@ impl NoAliasingProver {
             obligation,
             time,
             verified: true,
-            description: format!("fresh allocation: ghost_permits[{obligation:?}] = {holder:?}",),
+            description: format!("fresh allocation: ghost_permits[{obligation:?}] = {holder:?}"),
         });
     }
 
@@ -836,7 +836,7 @@ impl NoAliasingProver {
             obligation,
             time,
             verified: true,
-            description: format!("{how:?}: ghost_permits removes {obligation:?}, holders = 0",),
+            description: format!("{how:?}: ghost_permits removes {obligation:?}, holders = 0"),
         });
     }
 
@@ -864,7 +864,7 @@ impl NoAliasingProver {
                 violation: ViolationKind::UseAfterRelease,
                 obligation,
                 time,
-                description: format!("leak({obligation:?}) but permit already consumed",),
+                description: format!("leak({obligation:?}) but permit already consumed"),
             });
             self.steps.push(ProofStep {
                 lemma: Lemma::DropSafety,
@@ -882,7 +882,7 @@ impl NoAliasingProver {
                 violation: ViolationKind::UseAfterRelease,
                 obligation,
                 time,
-                description: format!("leak({obligation:?}) but permit not in ghost map",),
+                description: format!("leak({obligation:?}) but permit not in ghost map"),
             });
             self.steps.push(ProofStep {
                 lemma: Lemma::DropSafety,
@@ -988,7 +988,7 @@ impl NoAliasingProver {
                 obligation: id,
                 time,
                 verified: true,
-                description: format!("frame preserved: {id:?} still held by {:?}", entry.holder,),
+                description: format!("frame preserved: {id:?} still held by {:?}", entry.holder),
             });
         }
     }
@@ -1059,7 +1059,7 @@ impl NoAliasingProver {
                 violation: ViolationKind::UseAfterRelease,
                 obligation,
                 time,
-                description: format!("transfer({obligation:?}) but permit not active",),
+                description: format!("transfer({obligation:?}) but permit not active"),
             });
             self.steps.push(ProofStep {
                 lemma: Lemma::TransferExclusivity,

@@ -1319,7 +1319,7 @@ fn lag1_autocorrelation(values: &[f64]) -> Option<f64> {
     let mut cov = 0.0_f64;
     let mut var = 0.0_f64;
     for i in 1..n {
-        cov += (values[i] - mean) * (values[i - 1] - mean);
+        cov = (values[i] - mean).mul_add(values[i - 1] - mean, cov);
     }
     for v in values {
         var += (v - mean).powi(2);
@@ -1431,7 +1431,7 @@ fn spearman_rho(values: &[f64]) -> Option<f64> {
         let dv = value_rank - mean_value_rank;
         covariance += dt * dv;
         time_variance += dt * dt;
-        value_variance += dv * dv;
+        value_variance = dv.mul_add(dv, value_variance);
     }
 
     if time_variance <= f64::EPSILON || value_variance <= f64::EPSILON {
@@ -1637,9 +1637,9 @@ fn distance_correlation(values: &[f64]) -> Option<f64> {
         for (j, &value_j) in values.iter().enumerate() {
             let a_ij = (i_f - j as f64).abs() - a_row_mean[i] - a_row_mean[j] + a_grand_mean;
             let b_ij = (value_i - value_j).abs() - b_row_mean[i] - b_row_mean[j] + b_grand_mean;
-            dcov_sq += a_ij * b_ij;
-            dvar_time_sq += a_ij * a_ij;
-            dvar_value_sq += b_ij * b_ij;
+            dcov_sq = a_ij.mul_add(b_ij, dcov_sq);
+            dvar_time_sq = a_ij.mul_add(a_ij, dvar_time_sq);
+            dvar_value_sq = b_ij.mul_add(b_ij, dvar_value_sq);
         }
     }
 

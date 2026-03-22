@@ -25,7 +25,7 @@ pub fn todo_create_body(title: &str) -> Vec<u8> {
 
 /// Generate a realistic TODO update body.
 pub fn todo_update_body(title: &str, completed: bool) -> Vec<u8> {
-    format!(r#"{{"title":"{title}","completed":{completed},"updated_at":"2026-03-16T10:00:00Z"}}"#,)
+    format!(r#"{{"title":"{title}","completed":{completed},"updated_at":"2026-03-16T10:00:00Z"}}"#)
         .into_bytes()
 }
 
