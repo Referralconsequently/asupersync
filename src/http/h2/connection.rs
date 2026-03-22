@@ -654,6 +654,17 @@ impl Connection {
 
     /// Process HEADERS frame.
     fn process_headers(&mut self, frame: HeadersFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+        // RFC 9113 §6.8: After sending GOAWAY, refuse new streams with IDs
+        // above the advertised last_stream_id. Without this, a misbehaving
+        // peer could open unbounded streams during the drain phase.
+        if self.goaway_sent && frame.stream_id > self.last_stream_id {
+            self.pending_ops.push_back(PendingOp::RstStream {
+                stream_id: frame.stream_id,
+                error_code: ErrorCode::RefusedStream,
+            });
+            return Ok(None);
+        }
+
         // Validate stream creation before tracking last_stream_id.
         // If get_or_create fails (e.g., invalid stream parity or monotonicity
         // violation), we must not pollute last_stream_id — GOAWAY must only

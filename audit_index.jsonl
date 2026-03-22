@@ -809,3 +809,4 @@
 {"file":"src/messaging/session/projection.rs","lines":534,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Session type projection, Send|Receive merge correct. Clean."}
 {"file":"src/messaging/explain.rs","lines":1946,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Morphism composition fixed-point, adaptive policy envelope. Clean."}
 {"file":"src/messaging/class.rs","lines":495,"batch":418,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Delivery class enum, policy validation, serde re-validation. Clean."}
+{"file":"src/http/h2/connection.rs","lines":3402,"batch":419,"date":"2026-03-22","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 LOW: process_headers accepts new streams after GOAWAY sent, violating RFC 9113 §6.8. Fixed by rejecting with RST_STREAM/REFUSED_STREAM."}
