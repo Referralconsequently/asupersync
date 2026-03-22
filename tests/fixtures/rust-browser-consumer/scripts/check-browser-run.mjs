@@ -163,6 +163,54 @@ function assertCandidateReason(label, ladder, laneId, reasonCode) {
   );
 }
 
+function assertBrowserSelection(label, selection, expected) {
+  assert(
+    selection?.supported === expected.supported,
+    `${label} supported flag drifted`,
+  );
+  assert(
+    selection?.selected_lane === expected.selected_lane,
+    `${label} selected unexpected lane: ${selection?.selected_lane ?? "missing"}`,
+  );
+  assert(
+    selection?.reason_code === expected.reason_code,
+    `${label} reason code drifted: ${selection?.reason_code ?? "missing"}`,
+  );
+  assert(
+    selection?.runtime_available === expected.runtime_available,
+    `${label} runtime availability drifted`,
+  );
+  if (expected.preferred_lane !== undefined) {
+    assert(
+      selection?.preferred_lane === expected.preferred_lane,
+      `${label} preferred lane drifted: ${selection?.preferred_lane ?? "missing"}`,
+    );
+  }
+  if (expected.runtime_available) {
+    assert(
+      selection?.scope_close_outcome === "ok",
+      `${label} scope close must return ok`,
+    );
+    assert(
+      selection?.runtime_close_outcome === "ok",
+      `${label} runtime close must return ok`,
+    );
+    assert(
+      Number.isInteger(selection?.dispatch_count) && selection.dispatch_count >= 4,
+      `${label} dispatch count must stay >= 4`,
+    );
+    assert(
+      selection?.diagnostics_clean === true,
+      `${label} dispatcher diagnostics must stay clean`,
+    );
+  } else {
+    assert(
+      selection?.dispatch_count == null,
+      `${label} should not report dispatch activity when no runtime was constructed`,
+    );
+  }
+}
+
 function startStaticServer() {
   const server = http.createServer((request, response) => {
     try {
@@ -258,8 +306,15 @@ try {
   const mainThreadLadder = mainThread?.ladder;
   const workerLadder = dedicatedWorker?.ladder;
   const preferredDedicatedWorker = mainThread?.preferred_dedicated_worker;
+  const mainThreadBrowserSelection = mainThread?.browser_selection;
+  const preferredDedicatedWorkerBrowserSelection =
+    mainThread?.preferred_dedicated_worker_browser_selection;
   const preferredMainThread = dedicatedWorker?.preferred_main_thread;
+  const workerBrowserSelection = dedicatedWorker?.browser_selection;
+  const preferredMainThreadBrowserSelection =
+    dedicatedWorker?.preferred_main_thread_browser_selection;
   const downgrade = mainThread?.downgrade_without_webassembly;
+  const downgradeBrowserSelection = mainThread?.downgrade_browser_selection;
   const downgradeSimulation = mainThread?.downgrade_simulation;
   const guardedCapabilities = parsed.guarded_capabilities;
 
@@ -307,6 +362,27 @@ try {
     preferredDedicatedWorker?.preferred_lane === DEDICATED_WORKER_LANE,
     `preferred dedicated-worker lane must be requested, got ${preferredDedicatedWorker?.preferred_lane ?? "missing"}`,
   );
+  assertBrowserSelection(
+    "main-thread browser selection",
+    mainThreadBrowserSelection,
+    {
+      supported: true,
+      selected_lane: MAIN_THREAD_LANE,
+      reason_code: "supported",
+      runtime_available: true,
+    },
+  );
+  assertBrowserSelection(
+    "preferred dedicated-worker browser selection",
+    preferredDedicatedWorkerBrowserSelection,
+    {
+      supported: true,
+      preferred_lane: DEDICATED_WORKER_LANE,
+      selected_lane: MAIN_THREAD_LANE,
+      reason_code: "supported",
+      runtime_available: true,
+    },
+  );
 
   assert(downgradeSimulation?.simulated === true, "main-thread downgrade simulation must run");
   assert(
@@ -326,6 +402,16 @@ try {
     downgrade,
     MAIN_THREAD_LANE,
     "candidate_prerequisite_missing",
+  );
+  assertBrowserSelection(
+    "downgrade browser selection",
+    downgradeBrowserSelection,
+    {
+      supported: false,
+      selected_lane: UNSUPPORTED_LANE,
+      reason_code: "missing_webassembly",
+      runtime_available: false,
+    },
   );
 
   assertLadder("dedicated-worker ladder", workerLadder, {
@@ -361,6 +447,27 @@ try {
     preferredMainThread?.preferred_lane === MAIN_THREAD_LANE,
     `preferred main-thread worker lane must be requested, got ${preferredMainThread?.preferred_lane ?? "missing"}`,
   );
+  assertBrowserSelection(
+    "dedicated-worker browser selection",
+    workerBrowserSelection,
+    {
+      supported: true,
+      selected_lane: DEDICATED_WORKER_LANE,
+      reason_code: "supported",
+      runtime_available: true,
+    },
+  );
+  assertBrowserSelection(
+    "preferred main-thread worker browser selection",
+    preferredMainThreadBrowserSelection,
+    {
+      supported: true,
+      preferred_lane: MAIN_THREAD_LANE,
+      selected_lane: DEDICATED_WORKER_LANE,
+      reason_code: "supported",
+      runtime_available: true,
+    },
+  );
 
   assert(
     guardedCapabilities?.main_thread_local_storage === true,
@@ -395,16 +502,23 @@ try {
     event_symbols: mainThreadLifecycle.event_symbols,
     capabilities: mainThreadLifecycle.capabilities,
     main_thread_selected_lane: mainThreadLadder.selected_lane,
+    main_thread_browser_selection_lane: mainThreadBrowserSelection.selected_lane,
     main_thread_preferred_worker_selected_lane: preferredDedicatedWorker.selected_lane,
+    main_thread_preferred_worker_browser_selection_lane:
+      preferredDedicatedWorkerBrowserSelection.selected_lane,
     main_thread_preferred_worker_reason_code: preferredDedicatedWorker.reason_code,
     downgrade_selected_lane: downgrade.selected_lane,
+    downgrade_browser_selection_lane: downgradeBrowserSelection.selected_lane,
     downgrade_reason_code: downgrade.reason_code,
     dedicated_worker_ready_phase: workerLifecycle.ready_phase,
     dedicated_worker_disposed_phase: workerLifecycle.disposed_phase,
     dedicated_worker_completed_task_outcome: workerLifecycle.completed_task_outcome,
     dedicated_worker_cancel_event_count: workerLifecycle.cancel_event_count,
     dedicated_worker_selected_lane: workerLadder.selected_lane,
+    dedicated_worker_browser_selection_lane: workerBrowserSelection.selected_lane,
     dedicated_worker_preferred_main_thread_selected_lane: preferredMainThread.selected_lane,
+    dedicated_worker_preferred_main_thread_browser_selection_lane:
+      preferredMainThreadBrowserSelection.selected_lane,
     dedicated_worker_preferred_main_thread_reason_code: preferredMainThread.reason_code,
     main_thread_local_storage: guardedCapabilities.main_thread_local_storage,
     dedicated_worker_local_storage: guardedCapabilities.dedicated_worker_local_storage,

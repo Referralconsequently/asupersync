@@ -44,13 +44,17 @@
 //!
 //! ## Browser/WASM Status
 //!
-//! Browser-safe profiles can validate semantic-core closure on `wasm32`, but
-//! this module does not yet expose a truthful public browser bootstrap path.
-//! Runtime startup now routes through an explicit `RuntimeHostServices` seam,
-//! but the builder still only ships the native std-thread host implementation.
-//! Browser-facing guidance should stay on the repository-maintained Rust/WASM
-//! fixture and the shipped JS/TS Browser Edition packages until a browser host
-//! implementation satisfies the threadless startup contract.
+//! Browser-safe profiles can validate semantic-core closure on `wasm32`, and
+//! this module now exposes a preview public browser bootstrap path through
+//! [`RuntimeBuilder::browser`]. The preview surface is dispatcher-backed and
+//! truthful about the current execution ladder: supported hosts receive a
+//! browser runtime handle, while unsupported hosts fail closed with structured
+//! diagnostics instead of pretending native-thread parity already exists.
+//! Runtime startup still routes through an explicit `RuntimeHostServices`
+//! seam, and the native std-thread host implementation remains the only
+//! shipped full runtime host. Browser-facing guidance should continue to rely
+//! on the repository-maintained Rust/WASM fixture and the shipped JS/TS Browser
+//! Edition packages when broad end-user parity is required.
 //!
 //! ## With Deadline Monitoring
 //!
@@ -168,11 +172,18 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
+use thiserror::Error as ThisError;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
+
+use crate::types::{
+    WasmAbiOutcomeEnvelope, WasmAbiVersion, WasmAbortPropagationMode, WasmDispatchError,
+    WasmDispatcherDiagnostics, WasmExportDispatcher, WasmHandleRef, WasmScopeEnterBuilder,
+};
 
 // ---------------------------------------------------------------------------
 // Thread-local RuntimeHandle (issue #21)
@@ -1351,6 +1362,281 @@ fn build_browser_execution_ladder_from_probe(
     }
 }
 
+/// Error returned when the preview Rust browser runtime cannot be constructed.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum BrowserRuntimeBuildError {
+    /// The current host truthfully fail-closed to `lane.unsupported`.
+    #[error("{message}")]
+    Unsupported {
+        /// Execution-ladder diagnostics that explain the fail-closed decision.
+        execution_ladder: BrowserExecutionLadderDiagnostics,
+        /// Human-readable explanation preserved for quick surfacing.
+        message: String,
+    },
+    /// Runtime handle creation failed at the dispatcher boundary.
+    #[error("failed to create preview browser runtime handle: {source}")]
+    RuntimeCreate {
+        /// Execution-ladder diagnostics in effect when creation failed.
+        execution_ladder: BrowserExecutionLadderDiagnostics,
+        /// Boundary-level error returned by the dispatcher.
+        source: WasmDispatchError,
+    },
+}
+
+impl BrowserRuntimeBuildError {
+    /// Returns the browser execution-ladder diagnostics associated with this failure.
+    #[must_use]
+    pub fn execution_ladder(&self) -> &BrowserExecutionLadderDiagnostics {
+        match self {
+            Self::Unsupported {
+                execution_ladder, ..
+            }
+            | Self::RuntimeCreate {
+                execution_ladder, ..
+            } => execution_ladder,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BrowserRuntimeInner {
+    dispatcher: RefCell<WasmExportDispatcher>,
+    runtime_handle: WasmHandleRef,
+    consumer_version: Option<WasmAbiVersion>,
+    execution_ladder: BrowserExecutionLadderDiagnostics,
+}
+
+/// Dispatcher-backed preview runtime for Rust-authored browser consumers.
+///
+/// This is intentionally narrower than the native [`Runtime`]: it provides a
+/// truthful browser entrypoint over the wasm ABI dispatcher instead of
+/// pretending the browser already has full native-thread runtime parity.
+#[derive(Debug, Clone)]
+pub struct BrowserRuntime {
+    inner: Rc<BrowserRuntimeInner>,
+}
+
+impl BrowserRuntime {
+    fn new(
+        dispatcher: WasmExportDispatcher,
+        runtime_handle: WasmHandleRef,
+        consumer_version: Option<WasmAbiVersion>,
+        execution_ladder: BrowserExecutionLadderDiagnostics,
+    ) -> Self {
+        Self {
+            inner: Rc::new(BrowserRuntimeInner {
+                dispatcher: RefCell::new(dispatcher),
+                runtime_handle,
+                consumer_version,
+                execution_ladder,
+            }),
+        }
+    }
+
+    /// Returns the browser runtime handle exported through the wasm dispatcher.
+    #[must_use]
+    pub fn runtime_handle(&self) -> WasmHandleRef {
+        self.inner.runtime_handle
+    }
+
+    /// Returns the consumer ABI version used for boundary calls, if pinned.
+    #[must_use]
+    pub fn consumer_version(&self) -> Option<WasmAbiVersion> {
+        self.inner.consumer_version
+    }
+
+    /// Returns the execution-ladder diagnostics used to select this runtime.
+    #[must_use]
+    pub fn execution_ladder(&self) -> &BrowserExecutionLadderDiagnostics {
+        &self.inner.execution_ladder
+    }
+
+    /// Returns a snapshot of dispatcher state for leak detection and observability.
+    #[must_use]
+    pub fn dispatcher_diagnostics(&self) -> WasmDispatcherDiagnostics {
+        self.inner.dispatcher.borrow().diagnostic_snapshot()
+    }
+
+    /// Enters a child scope beneath the runtime handle.
+    pub fn enter_scope(&self, label: Option<&str>) -> Result<WasmHandleRef, WasmDispatchError> {
+        let mut dispatcher = self.inner.dispatcher.borrow_mut();
+        dispatcher.scope_enter(
+            &WasmScopeEnterBuilder::new(self.runtime_handle())
+                .label(label.unwrap_or("root"))
+                .build(),
+            self.consumer_version(),
+        )
+    }
+
+    /// Closes a previously entered child scope.
+    pub fn close_scope(
+        &self,
+        scope: &WasmHandleRef,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.inner
+            .dispatcher
+            .borrow_mut()
+            .scope_close(scope, self.consumer_version())
+    }
+
+    /// Closes the runtime and drains all remaining child handles.
+    pub fn close(&self) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.inner
+            .dispatcher
+            .borrow_mut()
+            .runtime_close(&self.inner.runtime_handle, self.consumer_version())
+    }
+}
+
+/// No-throw preview browser runtime selection result.
+#[derive(Debug, Clone)]
+pub struct BrowserRuntimeSelectionResult {
+    /// Truthful execution-ladder diagnostics for the current host.
+    pub execution_ladder: BrowserExecutionLadderDiagnostics,
+    /// Constructed preview runtime, when the selected lane is supported.
+    pub runtime: Option<BrowserRuntime>,
+    /// Structured failure, when construction fail-closes.
+    pub error: Option<BrowserRuntimeBuildError>,
+}
+
+impl BrowserRuntimeSelectionResult {
+    /// Returns `true` when a preview runtime was constructed successfully.
+    #[must_use]
+    pub fn runtime_available(&self) -> bool {
+        self.runtime.is_some()
+    }
+}
+
+fn build_browser_runtime_selection_from_probe(
+    preferred_lane: Option<BrowserExecutionLane>,
+    consumer_version: Option<WasmAbiVersion>,
+    abort_mode: WasmAbortPropagationMode,
+    probe: BrowserExecutionProbe,
+) -> BrowserRuntimeSelectionResult {
+    let execution_ladder = build_browser_execution_ladder_from_probe(preferred_lane, probe);
+
+    if !execution_ladder.supported {
+        return BrowserRuntimeSelectionResult {
+            runtime: None,
+            error: Some(BrowserRuntimeBuildError::Unsupported {
+                message: execution_ladder.message.clone(),
+                execution_ladder: execution_ladder.clone(),
+            }),
+            execution_ladder,
+        };
+    }
+
+    let mut dispatcher = WasmExportDispatcher::new().with_abort_mode(abort_mode);
+    match dispatcher.runtime_create(consumer_version) {
+        Ok(runtime_handle) => BrowserRuntimeSelectionResult {
+            runtime: Some(BrowserRuntime::new(
+                dispatcher,
+                runtime_handle,
+                consumer_version,
+                execution_ladder.clone(),
+            )),
+            error: None,
+            execution_ladder,
+        },
+        Err(source) => BrowserRuntimeSelectionResult {
+            runtime: None,
+            error: Some(BrowserRuntimeBuildError::RuntimeCreate {
+                execution_ladder: execution_ladder.clone(),
+                source,
+            }),
+            execution_ladder,
+        },
+    }
+}
+
+/// Preview builder for Rust-authored browser runtime construction.
+#[derive(Debug, Clone)]
+pub struct BrowserRuntimeBuilder {
+    preferred_lane: Option<BrowserExecutionLane>,
+    consumer_version: Option<WasmAbiVersion>,
+    abort_mode: WasmAbortPropagationMode,
+}
+
+impl Default for BrowserRuntimeBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BrowserRuntimeBuilder {
+    /// Creates a preview browser runtime builder with automatic lane negotiation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            preferred_lane: None,
+            consumer_version: None,
+            abort_mode: WasmAbortPropagationMode::Bidirectional,
+        }
+    }
+
+    /// Requests an explicit browser execution lane.
+    #[must_use]
+    pub fn preferred_lane(mut self, lane: BrowserExecutionLane) -> Self {
+        self.preferred_lane = Some(lane);
+        self
+    }
+
+    /// Restores automatic truthful lane negotiation.
+    #[must_use]
+    pub fn automatic_lane(mut self) -> Self {
+        self.preferred_lane = None;
+        self
+    }
+
+    /// Pins the consumer ABI version used for dispatcher boundary calls.
+    #[must_use]
+    pub fn consumer_version(mut self, version: WasmAbiVersion) -> Self {
+        self.consumer_version = Some(version);
+        self
+    }
+
+    /// Configures abort propagation semantics for the preview runtime dispatcher.
+    #[must_use]
+    pub fn abort_mode(mut self, mode: WasmAbortPropagationMode) -> Self {
+        self.abort_mode = mode;
+        self
+    }
+
+    /// Returns the truthful execution ladder for the current host and builder options.
+    #[must_use]
+    pub fn inspect_execution_ladder(self) -> BrowserExecutionLadderDiagnostics {
+        build_browser_execution_ladder_from_probe(
+            self.preferred_lane,
+            detect_browser_execution_probe(),
+        )
+    }
+
+    /// Returns a no-throw preview browser runtime selection result.
+    #[must_use]
+    pub fn build_selection(self) -> BrowserRuntimeSelectionResult {
+        build_browser_runtime_selection_from_probe(
+            self.preferred_lane,
+            self.consumer_version,
+            self.abort_mode,
+            detect_browser_execution_probe(),
+        )
+    }
+
+    /// Builds a preview browser runtime or returns a structured fail-closed error.
+    #[allow(clippy::result_large_err)]
+    pub fn build(self) -> Result<BrowserRuntime, BrowserRuntimeBuildError> {
+        let selection = self.build_selection();
+        match (selection.runtime, selection.error) {
+            (Some(runtime), None) => Ok(runtime),
+            (None | Some(_), Some(error)) => Err(error),
+            (None, None) => Err(BrowserRuntimeBuildError::Unsupported {
+                message: selection.execution_ladder.message.clone(),
+                execution_ladder: selection.execution_ladder,
+            }),
+        }
+    }
+}
+
 /// Builder for constructing an Asupersync [`Runtime`] with custom configuration.
 ///
 /// Use the fluent API to set fields, then call [`build()`](Self::build) to
@@ -1395,6 +1681,16 @@ impl RuntimeBuilder {
             entropy_source: None,
             host_services: default_runtime_host_services(),
         }
+    }
+
+    /// Creates a preview builder for Rust-authored browser runtime construction.
+    ///
+    /// The returned builder performs truthful execution-ladder selection and
+    /// fail-closes to structured diagnostics when no direct browser-runtime
+    /// lane is available.
+    #[must_use]
+    pub fn browser() -> BrowserRuntimeBuilder {
+        BrowserRuntimeBuilder::new()
     }
 
     /// Set the number of worker threads.
@@ -3222,6 +3518,131 @@ mod tests {
             direct_candidate.reason_code,
             BrowserExecutionReasonCode::CandidatePrerequisiteMissing,
             "direct lane candidate should remain a prerequisite-missing rejection"
+        );
+    }
+
+    #[test]
+    fn browser_runtime_builder_selection_constructs_runtime_for_supported_probe() {
+        let selection = build_browser_runtime_selection_from_probe(
+            None,
+            None,
+            WasmAbortPropagationMode::Bidirectional,
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                true,
+            ),
+        );
+
+        assert!(
+            selection.runtime_available(),
+            "supported probe should construct a preview browser runtime"
+        );
+        assert_eq!(
+            selection.execution_ladder.selected_lane,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "supported probe should stay on the truthful main-thread lane"
+        );
+        let runtime = selection.runtime.expect("supported runtime");
+        let scope = runtime
+            .enter_scope(Some("browser-runtime-selection-smoke"))
+            .expect("scope should open");
+        let scope_close = runtime
+            .close_scope(&scope)
+            .expect("scope close should succeed");
+        assert!(
+            matches!(scope_close, WasmAbiOutcomeEnvelope::Ok { .. }),
+            "scope close should return an ok outcome"
+        );
+        let runtime_close = runtime.close().expect("runtime close should succeed");
+        assert!(
+            matches!(runtime_close, WasmAbiOutcomeEnvelope::Ok { .. }),
+            "runtime close should return an ok outcome"
+        );
+        assert!(
+            runtime.dispatcher_diagnostics().is_clean(),
+            "dispatcher should be clean after full runtime teardown"
+        );
+    }
+
+    #[test]
+    fn browser_runtime_builder_selection_preserves_truthful_lane_under_mismatch() {
+        let selection = build_browser_runtime_selection_from_probe(
+            Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime),
+            None,
+            WasmAbortPropagationMode::Bidirectional,
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                true,
+            ),
+        );
+
+        assert!(
+            selection.runtime_available(),
+            "preferred-lane mismatch should still construct a runtime when a truthful lane exists"
+        );
+        assert_eq!(
+            selection.execution_ladder.selected_lane,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "preferred-lane mismatch must preserve the truthful selected lane"
+        );
+        assert_eq!(
+            selection.execution_ladder.preferred_lane,
+            Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime),
+            "selection should retain the requested preferred lane for diagnostics"
+        );
+    }
+
+    #[test]
+    fn browser_runtime_builder_selection_fail_closes_when_webassembly_missing() {
+        let selection = build_browser_runtime_selection_from_probe(
+            None,
+            None,
+            WasmAbortPropagationMode::Bidirectional,
+            browser_probe(
+                BrowserExecutionHostRole::BrowserMainThread,
+                BrowserRuntimeContext::BrowserMainThread,
+                true,
+                true,
+                false,
+            ),
+        );
+
+        assert!(
+            !selection.runtime_available(),
+            "missing WebAssembly must fail close instead of constructing a runtime"
+        );
+        let error = selection.error.expect("structured unsupported error");
+        assert!(matches!(
+            error,
+            BrowserRuntimeBuildError::Unsupported { .. }
+        ));
+        assert_eq!(
+            error.execution_ladder().reason_code,
+            BrowserExecutionReasonCode::MissingWebAssembly,
+            "structured unsupported error must preserve the real missing-prerequisite reason"
+        );
+    }
+
+    #[test]
+    fn browser_runtime_builder_build_returns_structured_unsupported_error() {
+        let error = BrowserRuntimeBuilder::new().build().expect_err(
+            "native test host should fail-close instead of constructing a browser runtime",
+        );
+
+        assert!(matches!(
+            error,
+            BrowserRuntimeBuildError::Unsupported { .. }
+        ));
+        assert_eq!(
+            error.execution_ladder().selected_lane,
+            BrowserExecutionLane::Unsupported,
+            "native host should fail-close to lane.unsupported"
         );
     }
 

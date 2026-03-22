@@ -85,6 +85,20 @@ struct BrowserExecutionLadderSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct BrowserRuntimeSelectionSummary {
+    preferred_lane: Option<&'static str>,
+    selected_lane: &'static str,
+    supported: bool,
+    reason_code: &'static str,
+    runtime_available: bool,
+    error_message: Option<String>,
+    scope_close_outcome: Option<&'static str>,
+    runtime_close_outcome: Option<&'static str>,
+    dispatch_count: Option<u64>,
+    diagnostics_clean: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
 struct DemoSummary {
     scenario_id: &'static str,
     support_lane: &'static str,
@@ -228,6 +242,61 @@ fn inspect_execution_ladder(
     browser_execution_ladder_summary(ladder)
 }
 
+fn outcome_envelope_str(outcome: &WasmAbiOutcomeEnvelope) -> &'static str {
+    match outcome {
+        WasmAbiOutcomeEnvelope::Ok { .. } => "ok",
+        WasmAbiOutcomeEnvelope::Err { .. } => "err",
+        WasmAbiOutcomeEnvelope::Cancelled { .. } => "cancelled",
+        WasmAbiOutcomeEnvelope::Panicked { .. } => "panicked",
+    }
+}
+
+fn select_browser_runtime(
+    preferred_lane: Option<BrowserExecutionLane>,
+) -> Result<BrowserRuntimeSelectionSummary, JsValue> {
+    let builder = preferred_lane.map_or_else(RuntimeBuilder::browser, |lane| {
+        RuntimeBuilder::browser().preferred_lane(lane)
+    });
+    let selection = builder.build_selection();
+    let mut scope_close_outcome = None;
+    let mut runtime_close_outcome = None;
+    let mut dispatch_count = None;
+    let mut diagnostics_clean = None;
+
+    if let Some(runtime) = selection.runtime.clone() {
+        let scope = runtime
+            .enter_scope(Some("rust-browser-builder-smoke"))
+            .map_err(|err| js_error(format!("browser builder enter_scope failed: {err}")))?;
+
+        let scope_close = runtime
+            .close_scope(&scope)
+            .map_err(|err| js_error(format!("browser builder close_scope failed: {err}")))?;
+        scope_close_outcome = Some(outcome_envelope_str(&scope_close));
+
+        let runtime_close = runtime
+            .close()
+            .map_err(|err| js_error(format!("browser builder close failed: {err}")))?;
+        runtime_close_outcome = Some(outcome_envelope_str(&runtime_close));
+
+        let dispatcher_diagnostics = runtime.dispatcher_diagnostics();
+        dispatch_count = Some(dispatcher_diagnostics.dispatch_count);
+        diagnostics_clean = Some(dispatcher_diagnostics.is_clean());
+    }
+
+    Ok(BrowserRuntimeSelectionSummary {
+        preferred_lane: preferred_lane.map(lane_str),
+        selected_lane: lane_str(selection.execution_ladder.selected_lane),
+        supported: selection.execution_ladder.supported,
+        reason_code: reason_code_str(selection.execution_ladder.reason_code),
+        runtime_available: selection.runtime_available(),
+        error_message: selection.error.map(|error| error.to_string()),
+        scope_close_outcome,
+        runtime_close_outcome,
+        dispatch_count,
+        diagnostics_clean,
+    })
+}
+
 #[wasm_bindgen]
 pub fn run_rust_browser_consumer_demo() -> Result<JsValue, JsValue> {
     let mut provider = ReactProviderState::new(ReactProviderConfig {
@@ -339,6 +408,36 @@ pub fn inspect_rust_browser_execution_ladder_preferred_dedicated_worker() -> Res
     .map_err(|err| {
         js_error(format!(
             "failed to encode preferred dedicated-worker ladder: {err}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn select_rust_browser_runtime() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&select_browser_runtime(None)?)
+        .map_err(|err| js_error(format!("failed to encode browser runtime selection: {err}")))
+}
+
+#[wasm_bindgen]
+pub fn select_rust_browser_runtime_preferred_main_thread() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&select_browser_runtime(Some(
+        BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+    ))?)
+    .map_err(|err| {
+        js_error(format!(
+            "failed to encode preferred main-thread browser selection: {err}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn select_rust_browser_runtime_preferred_dedicated_worker() -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&select_browser_runtime(Some(
+        BrowserExecutionLane::DedicatedWorkerDirectRuntime,
+    ))?)
+    .map_err(|err| {
+        js_error(format!(
+            "failed to encode preferred dedicated-worker browser selection: {err}"
         ))
     })
 }

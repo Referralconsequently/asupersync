@@ -2,6 +2,8 @@ import init, {
   inspect_rust_browser_execution_ladder,
   inspect_rust_browser_execution_ladder_preferred_dedicated_worker,
   run_rust_browser_consumer_demo,
+  select_rust_browser_runtime,
+  select_rust_browser_runtime_preferred_dedicated_worker,
 } from "../pkg/asupersync_rust_browser_consumer_fixture.js";
 
 const statusElement = document.getElementById("status");
@@ -112,9 +114,12 @@ async function main(): Promise<void> {
   const ladder = inspect_rust_browser_execution_ladder() as Record<string, unknown>;
   const preferredDedicatedWorker =
     inspect_rust_browser_execution_ladder_preferred_dedicated_worker() as Record<string, unknown>;
+  const browserSelection = select_rust_browser_runtime() as Record<string, unknown>;
+  const preferredDedicatedWorkerBrowserSelection =
+    select_rust_browser_runtime_preferred_dedicated_worker() as Record<string, unknown>;
   const dedicatedWorker = await collectDedicatedWorkerMatrix();
   const downgradeWithoutWebAssembly = await withDeletedGlobalProperty("WebAssembly", () =>
-    inspect_rust_browser_execution_ladder() as Record<string, unknown>,
+    select_rust_browser_runtime() as Record<string, unknown>,
   );
 
   const dedicatedWorkerLadder = dedicatedWorker.ladder as Record<string, unknown>;
@@ -142,8 +147,12 @@ async function main(): Promise<void> {
       marker: MAIN_THREAD_MATRIX_MARKER,
       lifecycle,
       ladder,
+      browser_selection: browserSelection,
       preferred_dedicated_worker: preferredDedicatedWorker,
+      preferred_dedicated_worker_browser_selection:
+        preferredDedicatedWorkerBrowserSelection,
       downgrade_without_webassembly: downgradeWithoutWebAssembly.value,
+      downgrade_browser_selection: downgradeWithoutWebAssembly.value,
       downgrade_simulation: {
         marker: DOWNGRADE_MARKER,
         simulated: downgradeWithoutWebAssembly.simulated,

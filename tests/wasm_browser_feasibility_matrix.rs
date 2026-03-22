@@ -115,53 +115,67 @@ fn shared_worker_is_feasible_not_shipped() {
 }
 
 #[test]
-fn rust_authored_wasm_consumer_path_is_feasible_not_shipped() {
+fn rust_authored_wasm_consumer_path_exposes_preview_public_builder() {
     // Evidence: the semantic core compiles to wasm32 (BrowserReactor exists,
-    // types are target-agnostic), but there is no public RuntimeBuilder or
-    // Rust-callable API for constructing a wasm32 runtime. Startup now routes
-    // through an explicit host-services seam, and the crate now exposes
-    // Rust-side execution-ladder inspection helpers, but it still only ships
-    // the native std-thread host implementation and therefore does not yet
-    // expose a public wasm/browser runtime constructor.
+    // types are target-agnostic), and the crate now exposes a preview public
+    // RuntimeBuilder browser constructor that truthfully negotiates the
+    // execution ladder and fail-closes to structured diagnostics when no
+    // direct-runtime lane exists. This remains a narrower preview lane than
+    // the shipped JS/TS Browser Edition product, but it is no longer accurate
+    // to describe the Rust side as constructor-less.
     assert!(
         file_exists("src/runtime/reactor/browser.rs"),
         "browser reactor substrate must exist"
     );
-    // Negative evidence: no public wasm32 RuntimeBuilder path yet, but the
-    // remaining blocker is now an explicit browser host-services contract
-    // rather than an implicit std::thread assumption.
     let builder_src = read_file("src/runtime/builder.rs");
     assert!(
-        !builder_src.contains("pub fn build_wasm") && !builder_src.contains("pub fn build_browser"),
-        "RuntimeBuilder must not yet expose a public wasm32 build path"
+        builder_src.contains("pub fn browser() -> BrowserRuntimeBuilder"),
+        "RuntimeBuilder should expose a preview public browser builder"
     );
     assert!(
-        builder_src.contains("pub fn inspect_browser_execution_ladder("),
-        "RuntimeBuilder should expose public browser execution-ladder inspection"
+        builder_src.contains("pub struct BrowserRuntimeBuilder"),
+        "builder should publish the preview browser builder type"
     );
     assert!(
-        builder_src.contains("pub fn inspect_browser_execution_ladder_with_preferred_lane("),
-        "RuntimeBuilder should expose public preferred-lane diagnostics shaping"
+        builder_src.contains("pub struct BrowserRuntimeSelectionResult"),
+        "builder should publish the no-throw selection result type"
+    );
+    assert!(
+        builder_src.contains("pub struct BrowserRuntime"),
+        "builder should publish the dispatcher-backed preview browser runtime type"
+    );
+    assert!(
+        builder_src.contains("pub enum BrowserRuntimeBuildError"),
+        "builder should publish structured preview browser build errors"
     );
     assert!(
         builder_src.contains("pub struct BrowserExecutionLadderDiagnostics"),
         "builder should publish structured Rust-side execution-ladder diagnostics"
     );
     assert!(
+        builder_src.contains("pub fn build_selection(self) -> BrowserRuntimeSelectionResult"),
+        "preview browser builder should expose a no-throw selection helper"
+    );
+    assert!(
+        builder_src
+            .contains("pub fn build(self) -> Result<BrowserRuntime, BrowserRuntimeBuildError>"),
+        "preview browser builder should expose a structured build helper"
+    );
+    assert!(
         builder_src.contains("RuntimeHostServices"),
-        "runtime startup evidence should name the host-services seam"
+        "runtime startup evidence should still name the host-services seam"
     );
     assert!(
         builder_src.contains("BrowserHostServicesContract"),
-        "runtime startup evidence should pin the browser host contract"
+        "runtime startup evidence should still pin the browser host contract"
     );
     assert!(
         builder_src.contains("NativeThreadHostServices"),
-        "runtime startup evidence should isolate the shipped native implementation"
+        "runtime startup evidence should still isolate the shipped native implementation"
     );
     assert!(
-        builder_src.contains("threadless startup"),
-        "runtime startup diagnostics should explain the threadless browser target"
+        builder_src.contains("dispatcher-backed"),
+        "preview browser docs should explain the dispatcher-backed scope of the new lane"
     );
 }
 

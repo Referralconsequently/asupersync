@@ -155,7 +155,10 @@ pub use crate::sync::{ContendedMutex, LockMetricsSnapshot};
 pub use blocking_pool::{
     BlockingPool, BlockingPoolHandle, BlockingPoolOptions, BlockingTaskHandle,
 };
-pub use builder::{DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder, RuntimeHandle};
+pub use builder::{
+    BrowserRuntime, BrowserRuntimeBuildError, BrowserRuntimeBuilder, BrowserRuntimeSelectionResult,
+    DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder, RuntimeHandle,
+};
 pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,

@@ -4,9 +4,9 @@ Fixture for beads `asupersync-4l9iw.2` and `asupersync-4l9iw.8`.
 
 Purpose:
 - prove the repository-maintained Rust-authored browser lane with a real wasm package layout
-- keep the example honest about scope: this is a maintained in-repo workflow, not broad public `RuntimeBuilder` parity for external Rust consumers
+- keep the example honest about scope: the crate now exposes a preview public Rust browser builder, but this fixture still validates the maintained in-repo lane rather than claiming broad stable parity with the JS/TS Browser Edition packages
 - demonstrate structured-concurrency lifecycle behavior through the existing dispatcher/provider helpers on both browser main-thread and dedicated-worker entrypoints
-- capture truthful `RuntimeBuilder` execution-ladder diagnostics for preferred-lane mismatch, downgrade, and guarded-capability snapshots without pretending a public wasm/browser runtime constructor already exists
+- capture truthful `RuntimeBuilder` execution-ladder diagnostics plus the preview public browser-builder path for preferred-lane mismatch, downgrade, and guarded-capability snapshots
 
 This fixture is executed through:
 - `scripts/validate_rust_browser_consumer.sh`
@@ -26,7 +26,7 @@ The validation script:
 - `crate/Cargo.toml`
   Rust-authored wasm package that depends on the root `asupersync` crate under a canonical browser profile
 - `crate/src/lib.rs`
-  exports a small browser-facing demo plus Rust-side `RuntimeBuilder` execution-ladder inspection helpers
+  exports a small browser-facing demo plus Rust-side `RuntimeBuilder` execution-ladder inspection helpers and preview public browser-builder selection probes
 - `src/main.ts`
   initializes the generated wasm package, captures the browser main-thread matrix, and coordinates the dedicated worker probe
 - `src/worker.ts`
@@ -39,8 +39,9 @@ The validation script:
 ## Boundary Rules
 
 - This fixture is a repository-maintained example for the current Rust-authored browser contract.
-- It does not claim a general external Rust-browser bootstrap API beyond what `docs/WASM.md` currently marks as truthful scope.
-- It uses the existing wasm dispatcher/provider helpers plus `RuntimeBuilder::inspect_browser_execution_ladder*()` diagnostics instead of inventing a new public browser `RuntimeBuilder` story.
+- It does not claim stable broad Rust-browser parity with the JS/TS Browser Edition packages.
+- It exercises the preview public Rust browser builder while keeping the repository-maintained fixture and its evidence artifacts as the authority for this lane.
+- It still uses the existing wasm dispatcher/provider helpers alongside `RuntimeBuilder::inspect_browser_execution_ladder*()` so the fixture covers both lifecycle behavior and truthful lane selection.
 
 ## Deterministic Validation
 

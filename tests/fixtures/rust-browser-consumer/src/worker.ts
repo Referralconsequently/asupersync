@@ -4,6 +4,8 @@ import init, {
   inspect_rust_browser_execution_ladder,
   inspect_rust_browser_execution_ladder_preferred_main_thread,
   run_rust_browser_consumer_demo,
+  select_rust_browser_runtime,
+  select_rust_browser_runtime_preferred_main_thread,
 } from "../pkg/asupersync_rust_browser_consumer_fixture.js";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -17,11 +19,14 @@ async function bootstrap(): Promise<void> {
 
   const lifecycle = run_rust_browser_consumer_demo() as Record<string, unknown>;
   const ladder = inspect_rust_browser_execution_ladder() as Record<string, unknown>;
+  const browserSelection = select_rust_browser_runtime() as Record<string, unknown>;
   const preferredMainThread =
     inspect_rust_browser_execution_ladder_preferred_main_thread() as Record<
       string,
       unknown
     >;
+  const preferredMainThreadBrowserSelection =
+    select_rust_browser_runtime_preferred_main_thread() as Record<string, unknown>;
 
   self.postMessage({
     type: WORKER_READY_TYPE,
@@ -29,7 +34,9 @@ async function bootstrap(): Promise<void> {
       bootstrap_marker: WORKER_BOOTSTRAP_MARKER,
       lifecycle,
       ladder,
+      browser_selection: browserSelection,
       preferred_main_thread: preferredMainThread,
+      preferred_main_thread_browser_selection: preferredMainThreadBrowserSelection,
     },
   });
 }
