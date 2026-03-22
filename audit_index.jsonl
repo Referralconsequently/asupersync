@@ -771,3 +771,7 @@
 {"file":"src/trace/scoring.rs","lines":482,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace scoring, persistence_sum saturating. Clean."}
 {"file":"src/trace/event_structure.rs","lines":520,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TracePoset, sorted successor invariant, topo sort. Clean."}
 {"file":"src/trace/tla_export.rs","lines":764,"batch":415,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TLA+ trace export. Clean."}
+{"file":"src/channel/mpsc.rs","lines":865,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: waker management, Pin safety, cancel-safety. All correct."}
+{"file":"src/sync/semaphore.rs","lines":649,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: waker registration, Drop cleanup, baton-passing. All correct."}
+{"file":"src/stream/debounce.rs","lines":578,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: timer re-arm, waker handling. Clean."}
+{"file":"src/channel/watch.rs","lines":1718,"batch":416,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async-specific audit: ChangedFuture waker lives on receiver, version double-check. Clean."}
