@@ -725,3 +725,12 @@
 "SOUND"
 0
 "Chain complex boundary operators correct (d1*d2=0 verified), deterministic cell ordering, pure computation"
+{"file":"src/distributed/bridge.rs","lines":1869,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: finalizer_count as u32 truncation. Fixed with try_from/unwrap_or."}
+{"file":"src/trace/distributed/crdt.rs","lines":1170,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: MVRegister::set unchecked += 1 on version counter. Fixed with saturating_add."}
+{"file":"src/server/shutdown.rs","lines":1221,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Phased shutdown state machine with CAS transitions. Clean."}
+{"file":"src/net/udp.rs","lines":732,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async UDP wrapper, proper WouldBlock handling, fallback wakeup. Clean."}
+{"file":"src/lab/oracle/ambient_authority.rs","lines":845,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capability model, Full wildcard, orphan safety. Clean."}
+{"file":"src/trace/boundary.rs","lines":658,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Square complex construction, GF(2) boundary operators. Clean."}
+{"file":"src/util/entropy.rs","lines":472,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DetEntropy SplitMix64, thread-local fork, strict guard RAII. Clean."}
+{"file":"src/runtime/blocking_pool.rs","lines":1872,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CAS thread spawning, idle retirement with re-check, catch_unwind around tasks, ThreadExitGuard. Clean."}
+{"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":412,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"io_uring PollAdd reactor, eventfd wakeup, stale user_data filtering. Clean."}

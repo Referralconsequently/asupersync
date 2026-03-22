@@ -365,7 +365,7 @@ impl<V: Ord + Clone> MVRegister<V> {
     /// This causally supersedes all currently held values.
     pub fn set(&mut self, value: V, node: &NodeId) {
         if let Some(v) = self.versions.get_mut(node) {
-            *v += 1;
+            *v = v.saturating_add(1);
         } else {
             self.versions.insert(node.clone(), 1);
         }

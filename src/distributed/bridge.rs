@@ -743,7 +743,7 @@ impl RegionBridge {
             sequence: self.sequence,
             tasks,
             children: self.local.child_ids(),
-            finalizer_count: self.local.finalizer_count() as u32,
+            finalizer_count: u32::try_from(self.local.finalizer_count()).unwrap_or(u32::MAX),
             budget: self.local.budget().to_distributed(),
             cancel_reason: self
                 .local
