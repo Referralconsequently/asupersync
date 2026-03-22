@@ -612,3 +612,52 @@
 {"file":"src/service/rate_limit.rs","lines":1269,"batch":415,"date":"2026-03-21","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Token bucket rate limiter. Wait queue with waker dedup. Saturating arithmetic. Cancel-safe. Clean."}
 {"file":"src/grpc/server.rs","lines":1196,"batch":417,"date":"2026-03-21","agent":"TopazWolf","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: CallContext::from_metadata_at treated a malformed grpc-timeout header as if it were absent by falling back to default_timeout, contradicting the documented fail-closed contract. Fixed by only applying the default when the header is absent and adding a focused regression test."}
 {"file":"src/distributed/distribution.rs","lines":944,"batch":418,"date":"2026-03-21","agent":"WindyLake","verdict":"SOUND","bugs":0,"notes":"Stale re-verification/closure pass: current HEAD already reports symbols_distributed from symbols_sent_total and includes focused regressions for no-replica and assignment-plan count cases. Historical fix was already present; no new source patch required in this pass."}
+{"file":"src/trace/canonicalize.rs","lines":1257,"batch":419,"date":"2026-03-21","agent":"WindyLake","verdict":"SOUND","bugs":0,"notes":"Stale re-verification/closure pass: current HEAD already has semantic-payload exact equivalence and the RegionCancel.reason regression passes remotely via rch. Historical fix was already present; no new source patch required in this pass."}
+"src/runtime/timer.rs"
+323
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Min-heap via reversed ordering, generation wrapping for tie-break, pop_expired includes exact deadline"
+"src/runtime/task_table.rs"
+387
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"ID canonicalization, stored_future cleanup on task remove, bounds checking, counter correct"
+"src/io/buf_writer.rs"
+524
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Flush tracking via written field, cancel-safe partial flush, large-write bypass"
+"src/codec/framed_read.rs"
+396
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Cooperative yielding (32 passes cap), correct EOF handling, fused end-of-stream"
+"src/runtime/reactor/interest.rs"
+711
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Standard bitflag pattern, const constructors, correct contains semantics"
+"src/stream/mod.rs"
+1089
+409
+"2026-03-21"
+"SapphireHill"
+"SOUND"
+0
+"Clean combinator library with standard delegation, comprehensive StreamExt"
