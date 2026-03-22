@@ -157,7 +157,7 @@ fn compat_cargo_contains_policy_metadata_and_scaffolding_guards() {
     for token in [
         "[package.metadata.asupersync_compat_policy]",
         "policy_version = \"1.0.0\"",
-        "compatibility_line = \"0.1.x\"",
+        "compatibility_line = \"0.2.x\"",
         "release_train = \"tokio-compat\"",
         "owner_track = \"asupersync-2oh2u.7\"",
         "default = []",

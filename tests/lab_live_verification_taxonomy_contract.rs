@@ -160,12 +160,13 @@ fn doc_pins_current_executable_anchor_inventory() -> std::io::Result<()> {
         "calibration.comparator.resource_counter_mismatch",
         "calibration.channel.commit_visibility_mismatch",
         "calibration.obligation.leak_detected",
+        "calibration.region.close.non_quiescent",
         "tests/lab_live_scenario_adapter_contract.rs",
         "tests/e2e/combinator/cancel_correctness/async_loser_drain.rs",
         "tests/e2e_channel_patterns.rs",
         "tests/obligation_lifecycle_e2e.rs",
         "tests/close_quiescence_regression.rs",
-        "current dedicated differential `T4` anchor is still missing",
+        "calibration.region.close.non_quiescent` proves non-quiescent root close is escalated through the shared runner and retained artifact bundle",
         "currently piggybacks on `phase1.cancel.protocol.drain_finalize`, `phase1.channel.reserve_send.commit`, and `phase1.region.close.quiescent`",
     ] {
         assert!(
@@ -355,6 +356,7 @@ fn cli_source_defines_differential_runner_surface() -> std::io::Result<()> {
         "calibration.cancellation.cleanup_missing",
         "calibration.comparator.resource_counter_mismatch",
         "calibration.obligation.leak_detected",
+        "calibration.region.close.non_quiescent",
         "semantic_mismatch_admitted_surface",
     ] {
         assert!(

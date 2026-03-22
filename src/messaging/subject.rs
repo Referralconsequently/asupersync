@@ -1657,6 +1657,17 @@ mod tests {
     }
 
     #[test]
+    fn root_wildcards_cover_global_and_single_token_edge_cases() {
+        let tail = SubjectPattern::parse(">").expect("tail wildcard");
+        let one = SubjectPattern::parse("*").expect("single wildcard");
+
+        assert!(tail.matches(&Subject::new("tenant")));
+        assert!(tail.matches(&Subject::new("tenant.orders.created")));
+        assert!(one.matches(&Subject::new("tenant")));
+        assert!(!one.matches(&Subject::new("tenant.orders")));
+    }
+
+    #[test]
     fn subject_pattern_parsing_matrix_covers_common_and_edge_shapes() {
         let valid_cases = [
             ("tenant", vec![lit("tenant")]),
@@ -2143,13 +2154,40 @@ mod tests {
     #[test]
     fn sublist_tail_wildcard_alone() {
         let sl = sublist();
-        // ">" alone is not valid — needs at least one prefix segment.
-        // But "foo.>" is valid: matches foo.anything.
-        let _guard = sl.subscribe(&SubjectPattern::new("tenant.>"), None);
+        let _guard = sl.subscribe(&SubjectPattern::new(">"), None);
 
+        assert_eq!(sl.lookup(&Subject::new("tenant")).total(), 1);
         assert_eq!(sl.lookup(&Subject::new("tenant.a")).total(), 1);
         assert_eq!(sl.lookup(&Subject::new("tenant.a.b")).total(), 1);
-        assert_eq!(sl.lookup(&Subject::new("other.a")).total(), 0);
+    }
+
+    #[test]
+    fn sublist_single_wildcard_alone_matches_only_single_token_subjects() {
+        let sl = sublist();
+        let _guard = sl.subscribe(&SubjectPattern::new("*"), None);
+
+        assert_eq!(sl.lookup(&Subject::new("tenant")).total(), 1);
+        assert_eq!(sl.lookup(&Subject::new("tenant.orders")).total(), 0);
+    }
+
+    #[test]
+    fn sublist_queue_group_round_robin_stays_balanced_over_many_lookups() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("work.items");
+        let g1 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let g2 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let g3 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let subject = Subject::new("work.items");
+        let mut counts = HashMap::new();
+
+        for _ in 0..120 {
+            let pick = sl.lookup(&subject).queue_group_picks[0].1;
+            *counts.entry(pick).or_insert(0_u64) += 1;
+        }
+
+        assert_eq!(counts.get(&g1.id()), Some(&40));
+        assert_eq!(counts.get(&g2.id()), Some(&40));
+        assert_eq!(counts.get(&g3.id()), Some(&40));
     }
 
     #[test]
@@ -2317,6 +2355,29 @@ mod tests {
     }
 
     #[test]
+    fn sharded_sublist_routes_wildcards_after_prefix_depth_to_same_concrete_shard() {
+        let index = ShardedSublist::with_prefix_depth(8, 2);
+        let exact = SubjectPattern::new("tenant.orders.created");
+        let wildcard_after_prefix = SubjectPattern::new("tenant.orders.*");
+        let wildcard_inside_prefix = SubjectPattern::new("tenant.*.created");
+
+        let exact_shard = index
+            .shard_index_for_pattern(&exact)
+            .expect("two literal prefix segments should route concretely");
+        let wildcard_shard = index
+            .shard_index_for_pattern(&wildcard_after_prefix)
+            .expect("wildcard after prefix depth should keep the concrete route");
+
+        assert_eq!(exact_shard, wildcard_shard);
+        assert!(
+            index
+                .shard_index_for_pattern(&wildcard_inside_prefix)
+                .is_none(),
+            "wildcards before reaching prefix depth must fall back"
+        );
+    }
+
+    #[test]
     fn sharded_sublist_mutation_bumps_only_target_shard() {
         let index = sharded_sublist();
         let (subject_a, subject_b) = distinct_sharded_subjects(&index);
@@ -2381,6 +2442,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sharded_sublist_same_shard_concurrent_access_remains_consistent() {
+        use std::thread;
+
+        let index = ShardedSublist::with_prefix_depth(8, 1);
+        let exact_pattern = SubjectPattern::new("tenant.orders.created");
+        let wildcard_pattern = SubjectPattern::new("tenant.orders.*");
+        let exact_shard = index
+            .shard_index_for_pattern(&exact_pattern)
+            .expect("literal pattern should map to a concrete shard");
+        let wildcard_shard = index
+            .shard_index_for_pattern(&wildcard_pattern)
+            .expect("wildcard pattern should stay on the same shard via literal prefix");
+        assert_eq!(exact_shard, wildcard_shard);
+        let generation_before = index
+            .shard_generation(exact_shard)
+            .expect("target shard should exist");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let writer_exact = index.clone();
+        let barrier_exact = Arc::clone(&barrier);
+        let exact = thread::spawn(move || {
+            barrier_exact.wait();
+            for _ in 0..50 {
+                let guard = writer_exact.subscribe(&exact_pattern, None);
+                let _ = writer_exact.lookup(&Subject::new("tenant.orders.created"));
+                drop(guard);
+            }
+        });
+
+        let writer_wildcard = index.clone();
+        let barrier_wildcard = Arc::clone(&barrier);
+        let wildcard = thread::spawn(move || {
+            barrier_wildcard.wait();
+            for _ in 0..50 {
+                let guard = writer_wildcard.subscribe(&wildcard_pattern, None);
+                let _ = writer_wildcard.lookup(&Subject::new("tenant.orders.created"));
+                drop(guard);
+            }
+        });
+
+        let reader = index.clone();
+        let barrier_reader = Arc::clone(&barrier);
+        let lookup = thread::spawn(move || {
+            barrier_reader.wait();
+            for _ in 0..200 {
+                let _ = reader.lookup(&Subject::new("tenant.orders.created"));
+            }
+        });
+
+        exact.join().expect("exact writer");
+        wildcard.join().expect("wildcard writer");
+        lookup.join().expect("reader");
+
+        assert_eq!(index.count(), 0);
+        let generation_after = index
+            .shard_generation(exact_shard)
+            .expect("target shard should still exist");
+        assert!(
+            generation_after > generation_before,
+            "same-shard mutations should advance the target shard generation"
+        );
+        assert_eq!(
+            index.lookup(&Subject::new("tenant.orders.created")).total(),
+            0
+        );
+    }
+
     // -----------------------------------------------------------------------
     // SubjectRegistry tests
     // -----------------------------------------------------------------------
@@ -2417,6 +2546,30 @@ mod tests {
         }
     }
 
+    fn reply_entry(pattern: &str) -> RegistryEntry {
+        RegistryEntry {
+            pattern: SubjectPattern::new(pattern),
+            family: RegistryFamily::Reply,
+            description: String::new(),
+        }
+    }
+
+    fn protocol_step_entry(pattern: &str) -> RegistryEntry {
+        RegistryEntry {
+            pattern: SubjectPattern::new(pattern),
+            family: RegistryFamily::ProtocolStep,
+            description: String::new(),
+        }
+    }
+
+    fn derived_view_entry(pattern: &str) -> RegistryEntry {
+        RegistryEntry {
+            pattern: SubjectPattern::new(pattern),
+            family: RegistryFamily::DerivedView,
+            description: String::new(),
+        }
+    }
+
     #[test]
     fn registry_register_and_lookup() {
         let reg = SubjectRegistry::new();
@@ -2435,6 +2588,68 @@ mod tests {
             .expect("register");
 
         assert!(reg.lookup(&Subject::new("payments.created")).is_none());
+    }
+
+    #[test]
+    fn registry_supports_all_semantic_families() {
+        let reg = SubjectRegistry::new();
+        reg.register(command_entry("commands.user.create"))
+            .expect("command");
+        reg.register(event_entry("events.user.created"))
+            .expect("event");
+        reg.register(reply_entry("replies.user.lookup"))
+            .expect("reply");
+        reg.register(control_entry("$SYS.health.ping"))
+            .expect("control");
+        reg.register(protocol_step_entry("protocol.checkout.step1"))
+            .expect("protocol step");
+        reg.register(capture_entry("capture.orders.>"))
+            .expect("capture selector");
+        reg.register(derived_view_entry("views.orders.summary"))
+            .expect("derived view");
+
+        assert_eq!(
+            reg.lookup(&Subject::new("commands.user.create"))
+                .expect("command lookup")
+                .family,
+            RegistryFamily::Command
+        );
+        assert_eq!(
+            reg.lookup(&Subject::new("events.user.created"))
+                .expect("event lookup")
+                .family,
+            RegistryFamily::Event
+        );
+        assert_eq!(
+            reg.lookup(&Subject::new("replies.user.lookup"))
+                .expect("reply lookup")
+                .family,
+            RegistryFamily::Reply
+        );
+        assert_eq!(
+            reg.lookup(&Subject::new("$SYS.health.ping"))
+                .expect("control lookup")
+                .family,
+            RegistryFamily::Control
+        );
+        assert_eq!(
+            reg.lookup(&Subject::new("protocol.checkout.step1"))
+                .expect("protocol step lookup")
+                .family,
+            RegistryFamily::ProtocolStep
+        );
+        assert_eq!(
+            reg.lookup(&Subject::new("capture.orders.snapshot"))
+                .expect("capture lookup")
+                .family,
+            RegistryFamily::CaptureSelector
+        );
+        assert_eq!(
+            reg.lookup(&Subject::new("views.orders.summary"))
+                .expect("derived lookup")
+                .family,
+            RegistryFamily::DerivedView
+        );
     }
 
     #[test]
@@ -2530,6 +2745,16 @@ mod tests {
             .expect_err("control entry outside sys namespace should fail");
 
         assert!(matches!(err, SubjectRegistryError::InvalidEntry { .. }));
+    }
+
+    #[test]
+    fn registry_accepts_lowercase_sys_control_namespace() {
+        let reg = SubjectRegistry::new();
+        reg.register(control_entry("sys.health.ping"))
+            .expect("lowercase sys namespace should be accepted");
+
+        let result = reg.lookup(&Subject::new("sys.health.ping")).expect("found");
+        assert_eq!(result.family, RegistryFamily::Control);
     }
 
     #[test]

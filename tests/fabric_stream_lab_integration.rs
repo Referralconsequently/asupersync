@@ -3,16 +3,16 @@
 
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::messaging::DeliveryClass;
 use asupersync::messaging::consumer::{
     AckResolution, ConsumerDemandClass, ConsumerDispatchMode, CursorLeaseHolder, FabricConsumer,
     FabricConsumerConfig, FabricConsumerError, PullDispatchOutcome, PullRequest,
     RecoverableCapsule, SequenceWindow,
 };
 use asupersync::messaging::fabric::{
-    CapturePolicy, CellEpoch, CellTemperature, DataCapsule, Fabric, FabricStreamConfig, NodeRole,
-    PlacementPolicy, RepairPolicy, StewardCandidate, StorageClass, SubjectCell, SubjectPattern,
+    CellEpoch, CellTemperature, DataCapsule, NodeRole, PlacementPolicy, RepairPolicy,
+    StewardCandidate, StorageClass, SubjectCell, SubjectPattern,
 };
+use asupersync::messaging::{CapturePolicy, DeliveryClass, Fabric, FabricStreamConfig};
 use asupersync::remote::NodeId;
 use asupersync::runtime::yield_now;
 use asupersync::types::{Budget, RegionId, TaskId};

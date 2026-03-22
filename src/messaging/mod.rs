@@ -130,6 +130,11 @@ pub use cut::{
     MobilityOperation,
 };
 #[cfg(feature = "messaging-fabric")]
+pub use fabric::{
+    CapturePolicy, Fabric, FabricMessage, FabricReply, FabricStreamConfig, FabricStreamHandle,
+    FabricSubscription, PublishReceipt,
+};
+#[cfg(feature = "messaging-fabric")]
 pub use federation::{
     BufferedLeafRoute, CatchUpPolicy, EdgeReplayBridgeRuntime, EdgeReplayConfig,
     EvidenceShippingPolicy, FederationBridge, FederationBridgeRuntime, FederationBridgeState,

@@ -4355,6 +4355,17 @@ fn lab_differential_scenarios() -> Vec<LabDifferentialScenarioDefinition> {
             },
             execute: run_calibration_obligation_leak_scenario,
         },
+        LabDifferentialScenarioDefinition {
+            id: "calibration.region.close.non_quiescent",
+            surface_id: "region.close",
+            surface_contract_version: "region.close.v1",
+            description: "Intentional live-side non-quiescent root close to prove quiescence violations stay loud.",
+            expectation: LabDifferentialExpectation::Divergence {
+                provisional: "hard_contract_break",
+                final_policy: Some(DifferentialPolicyClass::RuntimeSemanticBug),
+            },
+            execute: run_calibration_region_non_quiescent_close_scenario,
+        },
     ]
 }
 
@@ -4384,6 +4395,7 @@ fn profile_includes_lab_differential_scenario(
                 | "calibration.comparator.resource_counter_mismatch"
                 | "calibration.channel.commit_visibility_mismatch"
                 | "calibration.obligation.leak_detected"
+                | "calibration.region.close.non_quiescent"
         ),
     }
 }
@@ -4920,6 +4932,39 @@ fn run_calibration_obligation_leak_scenario(canonical_seed: u64) -> asupersync::
             witness.set_region_close(region);
             witness.set_obligation_balance(live_obligation);
             witness.record_counter("reserved_slots", 2);
+        },
+    )
+}
+
+fn run_calibration_region_non_quiescent_close_scenario(
+    canonical_seed: u64,
+) -> asupersync::lab::DualRunResult {
+    let lab_region = capture_region_close(true, true);
+    let live_region = capture_region_close(false, true);
+    let obligation = capture_obligation_balance(2, 1, 1);
+    let lab_semantics = make_normalized_semantics(
+        "region.close",
+        TerminalOutcome::ok(),
+        CancellationRecord::none(),
+        LoserDrainRecord::not_applicable(),
+        lab_region.clone(),
+        obligation.clone(),
+        &[("nested_children", 2), ("close_attempts", 1)],
+    );
+
+    run_configured_differential_scenario(
+        canonical_seed,
+        "calibration.region.close.non_quiescent",
+        "region.close",
+        "region.close.v1",
+        "Intentional live-side non-quiescent root close to prove quiescence violations stay loud.",
+        lab_semantics,
+        move |witness| {
+            witness.set_outcome(TerminalOutcome::ok());
+            witness.set_region_close(live_region);
+            witness.set_obligation_balance(obligation);
+            witness.record_counter("nested_children", 2);
+            witness.record_counter("close_attempts", 1);
         },
     )
 }
@@ -6322,6 +6367,81 @@ mod tests {
     }
 
     #[test]
+    fn lab_differential_calibration_profile_covers_non_quiescent_region_close() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = LabDifferentialArgs {
+            profile: LabDifferentialProfile::Calibration,
+            scenarios: vec!["calibration.region.close.non_quiescent".to_string()],
+            seed: 9191,
+            out_dir: temp.path().join("artifacts"),
+            json: false,
+        };
+
+        let report = run_lab_differential(&args).expect("run region-close calibration profile");
+        assert!(report.success);
+        assert_eq!(report.expected_divergence_count, 1);
+
+        let scenario = &report.scenarios[0];
+        assert_eq!(
+            scenario.status,
+            LabDifferentialScenarioStatus::ExpectedDivergence
+        );
+        assert_eq!(scenario.observed_provisional_class, "hard_contract_break");
+        assert_eq!(
+            scenario.observed_final_policy_class.as_deref(),
+            Some("runtime_semantic_bug")
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .failures_path
+                    .as_deref()
+                    .expect("failures path must exist for region-close divergence")
+            )
+            .exists()
+        );
+        assert!(
+            Path::new(
+                scenario
+                    .deviations_path
+                    .as_deref()
+                    .expect("deviations path must exist for region-close divergence")
+            )
+            .exists()
+        );
+
+        let lab_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.lab_normalized_path).expect("read lab normalized"),
+        )
+        .expect("parse lab normalized");
+        let live_normalized: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&scenario.live_normalized_path).expect("read live normalized"),
+        )
+        .expect("parse live normalized");
+        assert_eq!(
+            lab_normalized["semantics"]["region_close"]["quiescent"],
+            true
+        );
+        assert_eq!(
+            live_normalized["semantics"]["region_close"]["quiescent"],
+            false
+        );
+        assert_eq!(
+            lab_normalized["semantics"]["region_close"]["live_children"],
+            0
+        );
+        assert_eq!(
+            live_normalized["semantics"]["region_close"]["live_children"],
+            1
+        );
+
+        let event_log =
+            fs::read_to_string(&scenario.event_log_path).expect("read region-close event log");
+        assert!(event_log.contains("\"provisional_class\":\"hard_contract_break\""));
+        assert!(event_log.contains("\"final_policy_class\":\"runtime_semantic_bug\""));
+    }
+
+    #[test]
     fn lab_differential_calibration_profile_counts_pass_and_divergence_variants() {
         let temp = tempfile::tempdir().expect("tempdir");
         let args = LabDifferentialArgs {
@@ -6334,9 +6454,9 @@ mod tests {
 
         let report = run_lab_differential(&args).expect("run full calibration profile");
         assert!(report.success);
-        assert_eq!(report.scenario_count, 5);
+        assert_eq!(report.scenario_count, 6);
         assert_eq!(report.pass_count, 1);
-        assert_eq!(report.expected_divergence_count, 4);
+        assert_eq!(report.expected_divergence_count, 5);
         assert_eq!(report.unexpected_divergence_count, 0);
         assert_eq!(report.missing_expected_divergence_count, 0);
         assert!(report.scenarios.iter().any(|scenario| {
@@ -6351,6 +6471,11 @@ mod tests {
         }));
         assert!(report.scenarios.iter().any(|scenario| {
             scenario.scenario_id == "calibration.cancellation.cleanup_missing"
+                && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
+        }));
+        assert!(report.scenarios.iter().any(|scenario| {
+            scenario.scenario_id == "calibration.region.close.non_quiescent"
+                && scenario.observed_provisional_class == "hard_contract_break"
                 && scenario.observed_final_policy_class.as_deref() == Some("runtime_semantic_bug")
         }));
     }
