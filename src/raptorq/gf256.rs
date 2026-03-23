@@ -1779,7 +1779,7 @@ fn xor_chunk_8_in_place(dst: &mut [u8], src: &[u8]) {
     dst.copy_from_slice(&result.to_ne_bytes());
 }
 
-#[allow(clippy::similar_names)]
+#[inline]
 fn gf256_add_slices2_scalar(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b: &[u8]) {
     debug_assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
     debug_assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
@@ -1789,42 +1789,25 @@ fn gf256_add_slices2_scalar(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], sr
     let (common_dst_b, tail_dst_b) = dst_b.split_at_mut(common);
     let (common_src_b, tail_src_b) = src_b.split_at(common);
 
-    let mut d_chunks_a = common_dst_a.chunks_exact_mut(32);
-    let mut s_chunks_a = common_src_a.chunks_exact(32);
-    let mut d_chunks_b = common_dst_b.chunks_exact_mut(32);
-    let mut s_chunks_b = common_src_b.chunks_exact(32);
-    for ((d_chunk_a, s_chunk_a), (d_chunk_b, s_chunk_b)) in d_chunks_a
-        .by_ref()
-        .zip(s_chunks_a.by_ref())
-        .zip(d_chunks_b.by_ref().zip(s_chunks_b.by_ref()))
-    {
-        xor_chunk_32_in_place(d_chunk_a, s_chunk_a);
-        xor_chunk_32_in_place(d_chunk_b, s_chunk_b);
+    let mut offset = 0usize;
+    while offset + 32 <= common {
+        let end = offset + 32;
+        xor_chunk_32_in_place(&mut common_dst_a[offset..end], &common_src_a[offset..end]);
+        xor_chunk_32_in_place(&mut common_dst_b[offset..end], &common_src_b[offset..end]);
+        offset = end;
     }
 
-    let lane_a_dst_tail = d_chunks_a.into_remainder();
-    let lane_a_src_tail = s_chunks_a.remainder();
-    let lane_b_dst_tail = d_chunks_b.into_remainder();
-    let lane_b_src_tail = s_chunks_b.remainder();
-
-    let mut d8_a = lane_a_dst_tail.chunks_exact_mut(8);
-    let mut s8_a = lane_a_src_tail.chunks_exact(8);
-    let mut d8_b = lane_b_dst_tail.chunks_exact_mut(8);
-    let mut s8_b = lane_b_src_tail.chunks_exact(8);
-    for ((d_chunk_a, s_chunk_a), (d_chunk_b, s_chunk_b)) in d8_a
-        .by_ref()
-        .zip(s8_a.by_ref())
-        .zip(d8_b.by_ref().zip(s8_b.by_ref()))
-    {
-        xor_chunk_8_in_place(d_chunk_a, s_chunk_a);
-        xor_chunk_8_in_place(d_chunk_b, s_chunk_b);
+    while offset + 8 <= common {
+        let end = offset + 8;
+        xor_chunk_8_in_place(&mut common_dst_a[offset..end], &common_src_a[offset..end]);
+        xor_chunk_8_in_place(&mut common_dst_b[offset..end], &common_src_b[offset..end]);
+        offset = end;
     }
 
-    for (d, s) in d8_a.into_remainder().iter_mut().zip(s8_a.remainder()) {
-        *d ^= s;
-    }
-    for (d, s) in d8_b.into_remainder().iter_mut().zip(s8_b.remainder()) {
-        *d ^= s;
+    while offset < common {
+        common_dst_a[offset] ^= common_src_a[offset];
+        common_dst_b[offset] ^= common_src_b[offset];
+        offset += 1;
     }
 
     if !tail_dst_a.is_empty() {
@@ -4151,6 +4134,86 @@ mod tests {
 
         assert_eq!(actual_a, expected_a, "{context}");
         assert_eq!(actual_b, expected_b, "{context}");
+    }
+
+    #[test]
+    fn add_slices2_scalar_handles_empty_lane_pairs() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        for &(len_a, len_b, scenario) in &[
+            (0usize, 65usize, "left-empty"),
+            (65usize, 0usize, "right-empty"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "add_slices2_scalar_handles_empty_lane_pairs",
+                replay_ref,
+            );
+
+            let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(29)) as u8).collect();
+            let src_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(31)) as u8).collect();
+            let mut actual_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(37)) as u8).collect();
+            let mut actual_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(41)) as u8).collect();
+            let mut expected_a = actual_a.clone();
+            let mut expected_b = actual_b.clone();
+
+            gf256_add_slices2_scalar(&mut actual_a, &src_a, &mut actual_b, &src_b);
+            gf256_add_slice_scalar(&mut expected_a, &src_a);
+            gf256_add_slice_scalar(&mut expected_b, &src_b);
+
+            assert_eq!(actual_a, expected_a, "{scenario}: {context}");
+            assert_eq!(actual_b, expected_b, "{scenario}: {context}");
+        }
+    }
+
+    #[test]
+    fn add_slices2_scalar_handles_boundary_crossovers_and_uneven_tails() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        for &(len_a, len_b, scenario) in &[
+            (1usize, 33usize, "left-byte-right-wide-plus-byte"),
+            (33usize, 1usize, "left-wide-plus-byte-right-byte"),
+            (8usize, 41usize, "left-word-right-wide-plus-word-plus-byte"),
+            (41usize, 8usize, "left-wide-plus-word-plus-byte-right-word"),
+            (31usize, 32usize, "left-subwide-right-wide"),
+            (32usize, 31usize, "left-wide-right-subwide"),
+            (
+                39usize,
+                72usize,
+                "left-wide-plus-word-minus-byte-right-two-wide-plus-word",
+            ),
+            (
+                72usize,
+                39usize,
+                "left-two-wide-plus-word-right-wide-plus-word-minus-byte",
+            ),
+            (63usize, 64usize, "left-two-wide-minus-byte-right-two-wide"),
+            (64usize, 63usize, "left-two-wide-right-two-wide-minus-byte"),
+            (65usize, 96usize, "left-two-wide-plus-byte-right-three-wide"),
+            (96usize, 65usize, "left-three-wide-right-two-wide-plus-byte"),
+        ] {
+            let context = failure_context(
+                "RQ-U-GF256-ALGEBRA",
+                seed,
+                "add_slices2_scalar_handles_boundary_crossovers_and_uneven_tails",
+                replay_ref,
+            );
+
+            let src_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(43)) as u8).collect();
+            let src_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(47)) as u8).collect();
+            let mut actual_a: Vec<u8> = (0..len_a).map(|i| (i.wrapping_mul(53)) as u8).collect();
+            let mut actual_b: Vec<u8> = (0..len_b).map(|i| (i.wrapping_mul(59)) as u8).collect();
+            let mut expected_a = actual_a.clone();
+            let mut expected_b = actual_b.clone();
+
+            gf256_add_slices2_scalar(&mut actual_a, &src_a, &mut actual_b, &src_b);
+            gf256_add_slice_scalar(&mut expected_a, &src_a);
+            gf256_add_slice_scalar(&mut expected_b, &src_b);
+
+            assert_eq!(actual_a, expected_a, "{scenario}: {context}");
+            assert_eq!(actual_b, expected_b, "{scenario}: {context}");
+        }
     }
 
     #[test]
