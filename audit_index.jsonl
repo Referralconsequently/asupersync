@@ -944,3 +944,4 @@
 {"file":"src/lab/conformal.rs","lines":1652,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: quantile rank formula, empty set handling. Correct."}
 {"file":"src/raptorq/linalg.rs","lines":1834,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: GF(256) row ops, pivot, back-substitution. Correct."}
 {"file":"src/cancel/progress_certificate.rs","lines":2520,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Azuma-Hoeffding/Freedman bounds, variance accumulator. Correct."}
+{"file":"src/observability/task_inspector.rs","lines":1278,"batch":415,"date":"2026-03-23","agent":"BronzeSparrow","verdict":"SOUND","bugs":0,"notes":"Confirmed logical-clock fallback and pending-only obligation filtering already present; added aborted-obligation regression coverage for stale-open audit bead 1qfd0.400."}
