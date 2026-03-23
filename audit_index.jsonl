@@ -918,3 +918,29 @@
 {"file":"src/grpc/health.rs","lines":600,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic status+version capture fix correct."}
 {"file":"src/messaging/redis.rs","lines":2445,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"PubSub subscribe tracks after ACK. No pre-registration leak."}
 {"file":"src/net/happy_eyeballs.rs","lines":300,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lazy filter optimization preserves interleaving logic. No aliasing issue."}
+{"file":"src/messaging/nats.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed cancellation leak in subscribe and queue_subscribe using SubscribeGuard. Previous agent only handled Err path, not future drop/cancellation."}
+{"file":"src/net/tcp/split.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed borrow checker conflict (E0502) in waker rearm by cloning the combined waker."}
+{"file":"src/net/unix/split.rs","timestamp":"2026-03-23T01:30:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed missing combined_waker initialization and borrow checker conflict (E0609, E0502) in split I/O state."}
+{"file":"src/net/quic_native/streams.rs","status":"audited"}
+{"file":"src/net/quic_native/transport.rs","status":"audited"}
+{"file":"src/net/quic/connection.rs","status":"audited"}
+{"file":"src/io/cap.rs","status":"audited"}
+{"file":"src/lab/spork_harness.rs","status":"audited"}
+{"file":"src/net/dns/error.rs","status":"audited"}
+{"file":"src/lab/config.rs","status":"audited"}
+{"file":"src/lab/oracle/obligation_leak.rs","status":"audited"}
+{"file":"src/service/buffer.rs","timestamp":"2026-03-23T01:45:00Z","agent":"Gemini","status":"FIXED","notes":"Fixed BufferFuture to return a PolledAfterCompletion error instead of panicking, bringing it into compliance with other combinators."}
+{"file":"src/combinator/rate_limit.rs","status":"audited"}
+{"file":"src/observability/level.rs","status":"audited"}
+{"file":"src/combinator/timeout.rs","status":"audited"}
+{"file":"src/io/lines.rs","status":"audited"}
+{"file":"src/observability/diagnostics.rs","status":"audited"}
+{"file":"src/obligation/graded.rs","status":"audited"}
+{"file":"src/runtime/reactor/epoll.rs","lines":1373,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: fd validity, BorrowedFd lifetimes, libc return checks. All sound."}
+{"file":"src/runtime/reactor/kqueue.rs","lines":1300,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: kqueue fd, ManuallyDrop, kevent error handling. All sound."}
+{"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unsafe audit: eventfd, submission queue, EINTR handling. All sound."}
+{"file":"src/combinator/adaptive_hedge.rs","lines":346,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Peak-EWMA decay, clamp order. Correct."}
+{"file":"src/observability/spectral_health.rs","lines":3292,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Fiedler eigenvalue, statistical indicators, div-by-zero guards. Correct."}
+{"file":"src/lab/conformal.rs","lines":1652,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: quantile rank formula, empty set handling. Correct."}
+{"file":"src/raptorq/linalg.rs","lines":1834,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: GF(256) row ops, pivot, back-substitution. Correct."}
+{"file":"src/cancel/progress_certificate.rs","lines":2520,"batch":425,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Math audit: Azuma-Hoeffding/Freedman bounds, variance accumulator. Correct."}
