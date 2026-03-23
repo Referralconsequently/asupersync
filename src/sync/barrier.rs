@@ -238,13 +238,7 @@ impl Future for BarrierWaitFuture<'_> {
                             }
                         }
                         if !found {
-                            let new_slot = state.waiters.len();
-                            state.waiters.push((id, waker.clone()));
-                            self.state = WaitState::Waiting {
-                                generation,
-                                id,
-                                slot: new_slot,
-                            };
+                            unreachable!("waiter must be present if generation is unchanged");
                         }
                     }
                     drop(state);

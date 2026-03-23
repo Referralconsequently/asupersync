@@ -412,10 +412,11 @@ impl HealthService {
     #[must_use]
     pub fn watch(&self, service: impl Into<String>) -> HealthWatcher {
         let service_name = service.into();
+        let (last_status, last_version) = self.watched_status_and_version(&service_name);
         HealthWatcher {
             service: self.clone(),
-            last_status: self.watched_status(&service_name),
-            last_version: self.watched_version(&service_name),
+            last_status,
+            last_version,
             service_name,
         }
     }
@@ -974,6 +975,64 @@ mod tests {
             status
         );
         crate::test_complete!("health_watcher_reports_server_transient_round_trip");
+    }
+
+    #[test]
+    fn health_watch_initial_snapshot_is_atomic_for_named_services() {
+        init_test("health_watch_initial_snapshot_is_atomic_for_named_services");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let version_guard = service.watch_versions.write();
+        let watch_service = service.clone();
+        let (watcher_tx, watcher_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let watcher = watch_service.watch("svc");
+            watcher_tx.send(watcher).unwrap();
+        });
+
+        let mut status_lock_held = false;
+        for _ in 0..10_000 {
+            if service.statuses.try_write().is_none() {
+                status_lock_held = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        crate::assert_with_log!(
+            status_lock_held,
+            "watch constructor must hold statuses lock until version snapshot completes",
+            true,
+            status_lock_held
+        );
+
+        drop(version_guard);
+        let mut watcher = watcher_rx.recv().unwrap();
+        handle.join().unwrap();
+
+        crate::assert_with_log!(
+            watcher.status() == ServingStatus::Serving,
+            "initial status snapshot preserved",
+            ServingStatus::Serving,
+            watcher.status()
+        );
+
+        service.set_status("svc", ServingStatus::NotServing);
+        let changed = watcher.changed();
+        crate::assert_with_log!(
+            changed,
+            "watcher still observes later transition",
+            true,
+            changed
+        );
+        crate::assert_with_log!(
+            watcher.status() == ServingStatus::NotServing,
+            "watcher reports new status after transition",
+            ServingStatus::NotServing,
+            watcher.status()
+        );
+        crate::test_complete!("health_watch_initial_snapshot_is_atomic_for_named_services");
     }
 
     #[test]

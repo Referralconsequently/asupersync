@@ -1007,6 +1007,7 @@ impl<T> ClientIncomingBody<T> {
 
                     let name = line_str[..colon].trim();
                     let value = line_str[colon + 1..].trim();
+                    validate_header_field(name, value)?;
                     trailers.append(
                         HeaderName::from_string(name),
                         HeaderValue::from_bytes(value.as_bytes()),

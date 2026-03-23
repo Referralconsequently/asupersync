@@ -1124,18 +1124,20 @@ mod tests {
     #[test]
     fn missed_tick_behavior_debug_clone_copy_eq_hash_default() {
         use std::collections::HashSet;
+
+        fn assert_clone<T: Clone>() {}
+        fn assert_copy<T: Copy>() {}
+
         let b = MissedTickBehavior::default();
         assert_eq!(b, MissedTickBehavior::Burst);
-        let b2 = b; // Copy
-        let b3 = b; // Clone
-        assert_eq!(b, b2);
-        assert_eq!(b, b3);
+        assert_clone::<MissedTickBehavior>();
+        assert_copy::<MissedTickBehavior>();
         assert_ne!(b, MissedTickBehavior::Delay);
         assert_ne!(b, MissedTickBehavior::Skip);
         let dbg = format!("{b:?}");
         assert!(dbg.contains("Burst"));
         let mut set = HashSet::new();
         set.insert(b);
-        assert!(set.contains(&b2));
+        assert!(set.contains(&MissedTickBehavior::Burst));
     }
 }

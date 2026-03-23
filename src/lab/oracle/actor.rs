@@ -324,8 +324,6 @@ pub struct SupervisionOracle {
     restarts: Vec<RestartEvent>,
     /// Escalation events recorded.
     escalations: Vec<EscalationEvent>,
-    /// Restart counts per actor within the window.
-    restart_counts: HashMap<ActorId, u32>,
     /// Detected violations.
     violations: Vec<SupervisionViolation>,
 }
@@ -380,7 +378,6 @@ impl SupervisionOracle {
             attempt,
             time,
         });
-        *self.restart_counts.entry(actor).or_default() = attempt;
     }
 
     /// Records an escalation event.
@@ -398,21 +395,16 @@ impl SupervisionOracle {
         // Check for restart limit violations
         for failure in &self.failures {
             if let Some(config) = self.supervisors.get(&failure.parent) {
-                let restart_count = self
-                    .restart_counts
-                    .get(&failure.child)
-                    .copied()
-                    .unwrap_or(0);
+                let next_failure_time = self.next_failure_time(failure.parent, failure.time);
+                let restart_count =
+                    self.restart_attempt_in_window(failure.child, failure.time, next_failure_time);
 
                 // Check if restart limit was exceeded without escalation
+                let escalated =
+                    self.escalated_in_window(failure.parent, failure.time, next_failure_time);
+
                 if restart_count > config.max_restarts {
                     // Verify escalation happened (e.from is parent, not failure.from)
-                    #[allow(clippy::suspicious_operation_groupings)]
-                    let escalated = self
-                        .escalations
-                        .iter()
-                        .any(|e| e.from == failure.parent && e.time >= failure.time);
-
                     if !escalated && config.escalation_policy != EscalationPolicy::Stop {
                         return Err(SupervisionViolation {
                             kind: SupervisionViolationKind::RestartLimitExceeded {
@@ -438,12 +430,7 @@ impl SupervisionOracle {
 
                     let unrestarted: Vec<_> = siblings
                         .iter()
-                        .filter(|&&s| {
-                            !self
-                                .restarts
-                                .iter()
-                                .any(|r| r.actor == s && r.time >= failure.time)
-                        })
+                        .filter(|&&s| !self.restarted_in_window(s, failure.time, next_failure_time))
                         .copied()
                         .collect();
 
@@ -470,10 +457,7 @@ impl SupervisionOracle {
                         let unrestarted: Vec<_> = successors
                             .iter()
                             .filter(|&&s| {
-                                !self
-                                    .restarts
-                                    .iter()
-                                    .any(|r| r.actor == s && r.time >= failure.time)
+                                !self.restarted_in_window(s, failure.time, next_failure_time)
                             })
                             .copied()
                             .collect();
@@ -508,7 +492,6 @@ impl SupervisionOracle {
         self.failures.clear();
         self.restarts.clear();
         self.escalations.clear();
-        self.restart_counts.clear();
         self.violations.clear();
     }
 
@@ -528,6 +511,61 @@ impl SupervisionOracle {
     #[must_use]
     pub fn escalation_count(&self) -> usize {
         self.escalations.len()
+    }
+
+    fn next_failure_time(&self, parent: ActorId, failure_time: Time) -> Option<Time> {
+        self.failures
+            .iter()
+            .filter(|failure| failure.parent == parent && failure.time > failure_time)
+            .map(|failure| failure.time)
+            .min()
+    }
+
+    fn event_in_failure_window(
+        event_time: Time,
+        failure_time: Time,
+        next_failure_time: Option<Time>,
+    ) -> bool {
+        event_time >= failure_time
+            && next_failure_time.is_none_or(|next_time| event_time < next_time)
+    }
+
+    fn restart_attempt_in_window(
+        &self,
+        actor: ActorId,
+        failure_time: Time,
+        next_failure_time: Option<Time>,
+    ) -> u32 {
+        self.restarts
+            .iter()
+            .filter(|restart| {
+                restart.actor == actor
+                    && Self::event_in_failure_window(restart.time, failure_time, next_failure_time)
+            })
+            .map(|restart| restart.attempt)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn restarted_in_window(
+        &self,
+        actor: ActorId,
+        failure_time: Time,
+        next_failure_time: Option<Time>,
+    ) -> bool {
+        self.restart_attempt_in_window(actor, failure_time, next_failure_time) > 0
+    }
+
+    fn escalated_in_window(
+        &self,
+        supervisor: ActorId,
+        failure_time: Time,
+        next_failure_time: Option<Time>,
+    ) -> bool {
+        self.escalations.iter().any(|escalation| {
+            escalation.from == supervisor
+                && Self::event_in_failure_window(escalation.time, failure_time, next_failure_time)
+        })
     }
 }
 
@@ -902,6 +940,119 @@ mod tests {
             let ok = oracle.check(t(100)).is_ok();
             crate::assert_with_log!(ok, "ok", true, ok);
             crate::test_complete!("restart_within_limit_passes");
+        }
+
+        #[test]
+        fn restart_limit_escalation_from_supervisor_passes() {
+            init_test("restart_limit_escalation_from_supervisor_passes");
+            let mut oracle = SupervisionOracle::new();
+
+            oracle.register_supervisor(
+                actor(0),
+                RestartPolicy::OneForOne,
+                1,
+                EscalationPolicy::Escalate,
+            );
+            oracle.register_child(actor(0), actor(1));
+
+            oracle.on_child_failed(actor(0), actor(1), t(10), "error".into());
+            oracle.on_restart(actor(1), 2, t(20));
+            oracle.on_escalation(actor(0), actor(9), t(30), "restart limit".into());
+
+            let ok = oracle.check(t(100)).is_ok();
+            crate::assert_with_log!(ok, "ok", true, ok);
+            crate::test_complete!("restart_limit_escalation_from_supervisor_passes");
+        }
+
+        #[test]
+        fn later_escalation_does_not_mask_prior_one_for_all_violation() {
+            init_test("later_escalation_does_not_mask_prior_one_for_all_violation");
+            let mut oracle = SupervisionOracle::new();
+
+            oracle.register_supervisor(
+                actor(0),
+                RestartPolicy::OneForAll,
+                1,
+                EscalationPolicy::Escalate,
+            );
+            oracle.register_child(actor(0), actor(1));
+            oracle.register_child(actor(0), actor(2));
+            oracle.register_child(actor(0), actor(3));
+
+            // First failure violates OneForAll because siblings never restart.
+            oracle.on_child_failed(actor(0), actor(2), t(10), "first failure".into());
+            oracle.on_restart(actor(2), 1, t(20));
+
+            // A later restart-limit escalation from the same supervisor must not
+            // whitewash the earlier sibling-restart violation.
+            oracle.on_child_failed(actor(0), actor(3), t(30), "second failure".into());
+            oracle.on_restart(actor(3), 2, t(40));
+            oracle.on_escalation(actor(0), actor(9), t(50), "restart limit".into());
+
+            let violation = oracle
+                .check(t(100))
+                .expect_err("earlier OneForAll violation must still surface");
+            let kind_matches = matches!(
+                violation.kind,
+                SupervisionViolationKind::OneForAllNotFollowed {
+                    failed_actor,
+                    ref unrestarted_siblings,
+                } if failed_actor == actor(2)
+                    && unrestarted_siblings == &vec![actor(1), actor(3)]
+            );
+            crate::assert_with_log!(
+                kind_matches,
+                "kind_matches",
+                true,
+                format!("{:?}", violation.kind)
+            );
+            crate::test_complete!("later_escalation_does_not_mask_prior_one_for_all_violation");
+        }
+
+        #[test]
+        fn later_restart_does_not_mask_prior_rest_for_one_violation() {
+            init_test("later_restart_does_not_mask_prior_rest_for_one_violation");
+            let mut oracle = SupervisionOracle::new();
+
+            oracle.register_supervisor(
+                actor(0),
+                RestartPolicy::RestForOne,
+                2,
+                EscalationPolicy::Stop,
+            );
+            oracle.register_child(actor(0), actor(1));
+            oracle.register_child(actor(0), actor(2));
+            oracle.register_child(actor(0), actor(3));
+            oracle.register_child(actor(0), actor(4));
+
+            // First failure requires actors 3 and 4 to restart before any later
+            // child failure is processed by the same supervisor.
+            oracle.on_child_failed(actor(0), actor(2), t(10), "first failure".into());
+            oracle.on_restart(actor(2), 1, t(20));
+
+            // Actor 4 restarts only because it fails later itself; that must not
+            // satisfy the earlier RestForOne obligation for actor 2's failure.
+            oracle.on_child_failed(actor(0), actor(4), t(30), "second failure".into());
+            oracle.on_restart(actor(4), 1, t(40));
+
+            let violation = oracle
+                .check(t(100))
+                .expect_err("earlier RestForOne violation must still surface");
+            let kind_matches = matches!(
+                violation.kind,
+                SupervisionViolationKind::RestForOneNotFollowed {
+                    failed_actor,
+                    ref unrestarted_successors,
+                } if failed_actor == actor(2)
+                    && unrestarted_successors == &vec![actor(3), actor(4)]
+            );
+            crate::assert_with_log!(
+                kind_matches,
+                "kind_matches",
+                true,
+                format!("{:?}", violation.kind)
+            );
+            crate::test_complete!("later_restart_does_not_mask_prior_rest_for_one_violation");
         }
 
         #[test]

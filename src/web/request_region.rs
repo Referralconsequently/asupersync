@@ -107,7 +107,13 @@ impl<'a> RequestRegion<'a> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&ctx)));
 
         match result {
-            Ok(response) => RegionOutcome::Ok(response),
+            Ok(response) => {
+                if self.cx.is_cancel_requested() {
+                    RegionOutcome::Cancelled
+                } else {
+                    RegionOutcome::Ok(response)
+                }
+            }
             Err(panic_payload) => {
                 let message = extract_panic_message(&panic_payload);
                 RegionOutcome::Panicked(message)
@@ -141,8 +147,20 @@ impl<'a> RequestRegion<'a> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&ctx)));
 
         match result {
-            Ok(Ok(response)) => RegionOutcome::Ok(response),
-            Ok(Err(err)) => RegionOutcome::Error(err),
+            Ok(Ok(response)) => {
+                if self.cx.is_cancel_requested() {
+                    RegionOutcome::Cancelled
+                } else {
+                    RegionOutcome::Ok(response)
+                }
+            }
+            Ok(Err(err)) => {
+                if self.cx.is_cancel_requested() {
+                    RegionOutcome::Cancelled
+                } else {
+                    RegionOutcome::Error(err)
+                }
+            }
             Err(panic_payload) => {
                 let message = extract_panic_message(&panic_payload);
                 RegionOutcome::Panicked(message)
@@ -491,6 +509,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_cancelled_during_handler_returns_499() {
+        let cx = test_cx();
+        let req = test_request("GET", "/cancel-during");
+        let region = RequestRegion::new(&cx, req);
+
+        let outcome = region.run(|ctx| {
+            ctx.cx().set_cancel_requested(true);
+            Response::new(StatusCode::OK, b"ok".to_vec())
+        });
+
+        assert!(outcome.is_cancelled());
+        let resp = outcome.into_response();
+        assert_eq!(resp.status, StatusCode::CLIENT_CLOSED_REQUEST);
+        assert_eq!(
+            resp.body.as_ref(),
+            b"Client Closed Request: request cancelled"
+        );
+    }
+
     // --- RequestRegion::run_sync ---
 
     #[test]
@@ -534,6 +572,26 @@ mod tests {
         });
 
         assert!(outcome.is_panicked());
+    }
+
+    #[test]
+    fn run_sync_cancelled_during_handler_returns_499() {
+        let cx = test_cx();
+        let req = test_request("GET", "/cancel-during");
+        let region = RequestRegion::new(&cx, req);
+
+        let outcome = region.run_sync(|ctx| {
+            ctx.cx().set_cancel_requested(true);
+            Ok(Response::new(StatusCode::OK, b"ok".to_vec()))
+        });
+
+        assert!(outcome.is_cancelled());
+        let resp = outcome.into_response();
+        assert_eq!(resp.status, StatusCode::CLIENT_CLOSED_REQUEST);
+        assert_eq!(
+            resp.body.as_ref(),
+            b"Client Closed Request: request cancelled"
+        );
     }
 
     // --- RequestContext accessors ---

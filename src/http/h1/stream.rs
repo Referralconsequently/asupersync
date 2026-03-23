@@ -20,7 +20,7 @@ use crate::channel::mpsc;
 use crate::channel::mpsc::{RecvError, SendError};
 use crate::cx::Cx;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
-use crate::http::h1::codec::HttpError;
+use crate::http::h1::codec::{HttpError, validate_header_field};
 
 const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
@@ -478,6 +478,7 @@ impl IncomingBodyWriter {
 
                     let name = line_str[..colon].trim();
                     let value = line_str[colon + 1..].trim();
+                    validate_header_field(name, value)?;
                     self.trailers.append(
                         HeaderName::from_string(name),
                         HeaderValue::from_bytes(value.as_bytes()),
