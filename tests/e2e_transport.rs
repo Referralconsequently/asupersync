@@ -4,6 +4,11 @@
 //! See net_tcp.rs and net_udp.rs for comprehensive individual protocol tests.
 //! This E2E validates the combined transport layer.
 
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::redundant_clone)]
+
 #[macro_use]
 mod common;
 
@@ -36,6 +41,7 @@ const LOOPBACK_TRANSPORT_FRAME_ONE: &[u8] = b"frame-alpha";
 const LOOPBACK_TRANSPORT_FRAME_TWO: &[u8] = b"frame-omega";
 const LOOPBACK_TRANSPORT_ACK: &[u8] = b"ack-close";
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LoopbackTransportObservation {
     frames_sent: usize,
@@ -59,16 +65,22 @@ impl LoopbackTransportObservation {
             region_close: capture_region_close(true, true),
             obligation_balance: ObligationBalanceRecord::zero(),
             resource_surface: ResourceSurfaceRecord::empty("transport.loopback.close_ordering")
-                .with_counter("frames_sent", self.frames_sent as i64)
-                .with_counter("frames_observed", self.frames_observed as i64)
-                .with_counter("payload_bytes_observed", self.payload_bytes_observed as i64)
-                .with_counter("ordering_preserved", self.ordering_preserved as i64)
+                .with_counter("frames_sent", i64::try_from(self.frames_sent).unwrap_or(0))
+                .with_counter(
+                    "frames_observed",
+                    i64::try_from(self.frames_observed).unwrap_or(0),
+                )
+                .with_counter(
+                    "payload_bytes_observed",
+                    i64::try_from(self.payload_bytes_observed).unwrap_or(0),
+                )
+                .with_counter("ordering_preserved", i64::from(self.ordering_preserved))
                 .with_counter(
                     "eof_after_client_half_close",
-                    self.eof_after_client_half_close as i64,
+                    i64::from(self.eof_after_client_half_close),
                 )
-                .with_counter("ack_after_half_close", self.ack_after_half_close as i64)
-                .with_counter("peer_addr_loopback", self.peer_addr_loopback as i64),
+                .with_counter("ack_after_half_close", i64::from(self.ack_after_half_close))
+                .with_counter("peer_addr_loopback", i64::from(self.peer_addr_loopback)),
         }
     }
 }
@@ -229,22 +241,34 @@ fn make_transport_live_result(
                 witness.set_loser_drain(LoserDrainRecord::not_applicable());
                 witness.set_region_close(capture_region_close(true, true));
                 witness.set_obligation_balance(ObligationBalanceRecord::zero());
-                witness.record_counter("frames_sent", observation.frames_sent as i64);
-                witness.record_counter("frames_observed", observation.frames_observed as i64);
+                witness.record_counter(
+                    "frames_sent",
+                    i64::try_from(observation.frames_sent).unwrap_or(0),
+                );
+                witness.record_counter(
+                    "frames_observed",
+                    i64::try_from(observation.frames_observed).unwrap_or(0),
+                );
                 witness.record_counter(
                     "payload_bytes_observed",
-                    observation.payload_bytes_observed as i64,
+                    i64::try_from(observation.payload_bytes_observed).unwrap_or(0),
                 );
-                witness.record_counter("ordering_preserved", observation.ordering_preserved as i64);
+                witness.record_counter(
+                    "ordering_preserved",
+                    i64::from(observation.ordering_preserved),
+                );
                 witness.record_counter(
                     "eof_after_client_half_close",
-                    observation.eof_after_client_half_close as i64,
+                    i64::from(observation.eof_after_client_half_close),
                 );
                 witness.record_counter(
                     "ack_after_half_close",
-                    observation.ack_after_half_close as i64,
+                    i64::from(observation.ack_after_half_close),
                 );
-                witness.record_counter("peer_addr_loopback", observation.peer_addr_loopback as i64);
+                witness.record_counter(
+                    "peer_addr_loopback",
+                    i64::from(observation.peer_addr_loopback),
+                );
                 witness.note_nondeterminism(
                     "loopback accept scheduling may vary, but exact frame-order and half-close observables remain stable",
                 );
@@ -527,7 +551,8 @@ fn transport_virtualized_loopback_observation_encodes_normalized_contract() {
     assert_eq!(semantics.resource_surface.counters["frames_observed"], 2);
     assert_eq!(
         semantics.resource_surface.counters["payload_bytes_observed"],
-        (LOOPBACK_TRANSPORT_FRAME_ONE.len() + LOOPBACK_TRANSPORT_FRAME_TWO.len()) as i64
+        i64::try_from(LOOPBACK_TRANSPORT_FRAME_ONE.len() + LOOPBACK_TRANSPORT_FRAME_TWO.len())
+            .unwrap_or(0)
     );
     assert_eq!(semantics.resource_surface.counters["ordering_preserved"], 1);
     assert_eq!(
@@ -595,7 +620,7 @@ fn transport_dual_run_pilot_preserves_virtualized_loopback_close_and_ordering_se
                 .expect("virtualized transport observation should succeed")
                 .to_semantics()
         })
-        .live_result(move |_seed, _entropy| live_result.clone())
+        .live_result(move |_seed, _entropy| live_result)
         .run();
 
     assert_dual_run_passes(&result);

@@ -94,6 +94,14 @@ fn oracle_violation_tag(v: &OracleViolation) -> String {
         OracleViolation::RegistryLease(_) => "RegistryLease".into(),
         OracleViolation::DownOrder(_) => "DownOrder".into(),
         OracleViolation::SupervisorQuiescence(_) => "SupervisorQuiescence".into(),
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricPublish(_) => "FabricPublish".into(),
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricReply(_) => "FabricReply".into(),
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricQuiescence(_) => "FabricQuiescence".into(),
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricRedelivery(_) => "FabricRedelivery".into(),
     }
 }
 

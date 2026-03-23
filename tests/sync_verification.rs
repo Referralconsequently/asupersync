@@ -479,6 +479,10 @@ fn live_pool_observation() -> PoolObservation {
             spins += 1;
         }
         let waiters_before_release = pool.stats().waiters;
+        assert_eq!(
+            waiters_before_release, POOL_WAITER_TASKS,
+            "live pool pilot should register both waiters before release"
+        );
         drop(held);
 
         let mut spins = 0usize;
@@ -486,6 +490,10 @@ fn live_pool_observation() -> PoolObservation {
             yield_now().await;
             spins += 1;
         }
+        assert!(
+            total_acquisitions.load(Ordering::SeqCst) >= 1,
+            "live pool pilot should observe the first handoff before releasing it"
+        );
         release_first_handoff.store(1, Ordering::SeqCst);
 
         for join in joins {
@@ -565,6 +573,10 @@ fn lab_pool_observation(seed: u64) -> PoolObservation {
         steps += 1;
     }
     let waiters_before_release = pool.stats().waiters;
+    assert_eq!(
+        waiters_before_release, POOL_WAITER_TASKS,
+        "lab pool pilot should register both waiters before release"
+    );
     drop(held);
 
     let mut steps = 0usize;
@@ -572,6 +584,10 @@ fn lab_pool_observation(seed: u64) -> PoolObservation {
         runtime.step_for_test();
         steps += 1;
     }
+    assert!(
+        total_acquisitions.load(Ordering::SeqCst) >= 1,
+        "lab pool pilot should observe the first handoff before releasing it"
+    );
     release_first_handoff.store(1, Ordering::SeqCst);
     runtime.run_until_quiescent();
 

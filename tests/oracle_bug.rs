@@ -1,7 +1,8 @@
+#![allow(missing_docs)]
 use asupersync::actor::ActorId;
 use asupersync::lab::oracle::actor::*;
 use asupersync::supervision::{EscalationPolicy, RestartPolicy};
-use asupersync::types::{RegionId, TaskId, Time};
+use asupersync::types::{TaskId, Time};
 use asupersync::util::ArenaIndex;
 
 fn actor(n: u32) -> ActorId {
@@ -35,5 +36,5 @@ fn test_oracle_bug() {
     // Because it did not restart, restart_count is 0!
     // And it will trigger OneForAllNotFollowed instead!
     let res = oracle.check(t(100));
-    println!("{:?}", res);
+    println!("{res:?}");
 }

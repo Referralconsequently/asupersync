@@ -258,6 +258,7 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
         "scripts/test_websocket_e2e.sh",
         "scripts/test_http_e2e.sh",
         "scripts/test_messaging_e2e.sh",
+        "scripts/test_fabric_e2e.sh",
         "scripts/test_transport_e2e.sh",
         "scripts/test_database_e2e.sh",
         "scripts/test_distributed_e2e.sh",

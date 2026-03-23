@@ -404,6 +404,7 @@ fn dedicated_worker_storage_export_flow_is_supported() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn dedicated_worker_validation_harness_preserves_storage_artifact_markers() {
     let worker_src = read_file("tests/fixtures/dedicated-worker-consumer/src/worker.ts");
     for marker in [

@@ -71,6 +71,14 @@ fn oracle_violation_tag(violation: &OracleViolation) -> &'static str {
         OracleViolation::RegistryLease(_) => "RegistryLease",
         OracleViolation::DownOrder(_) => "DownOrder",
         OracleViolation::SupervisorQuiescence(_) => "SupervisorQuiescence",
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricPublish(_) => "FabricPublish",
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricReply(_) => "FabricReply",
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricQuiescence(_) => "FabricQuiescence",
+        #[cfg(feature = "messaging-fabric")]
+        OracleViolation::FabricRedelivery(_) => "FabricRedelivery",
     }
 }
 

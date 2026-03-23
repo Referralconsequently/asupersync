@@ -55,12 +55,12 @@ fn mutex_waiter_chain_does_not_lose_wakeup() {
 
     assert_eq!(mutex.waiters(), 3);
 
-    // Unlock wakes W1 but does not pop it from the queue
+    // Unlock wakes W1 and pops it from the queue
     drop(guard);
 
-    assert_eq!(mutex.waiters(), 3);
+    assert_eq!(mutex.waiters(), 2);
 
-    // W1 drops, removes itself, passes baton to W2 (wakes W2, but doesn't pop W2)
+    // W1 drops, it is no longer in the queue but it passes baton to W2
     drop(fut1);
 
     assert_eq!(mutex.waiters(), 2);
