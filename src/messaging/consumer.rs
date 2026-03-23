@@ -3140,6 +3140,276 @@ pub enum ConsumerCursorError {
     },
 }
 
+// ── ConsumerActor: GenServer-hosted consumer delivery engine ──────────
+
+/// Call types for the [`ConsumerActor`] GenServer.
+#[derive(Debug)]
+pub enum ConsumerCall {
+    /// Request the next available delivery (pull mode).
+    Pull {
+        /// Tail sequence available for delivery.
+        available_tail: u64,
+        /// Recoverable capsule coverage for the pull.
+        capsule: RecoverableCapsule,
+        /// Optional read-delegation ticket for relay delivery.
+        ticket: Option<ReadDelegationTicket>,
+    },
+    /// Acknowledge a successful delivery.
+    Ack {
+        /// Certificate minted for the delivery.
+        attempt: AttemptCertificate,
+    },
+    /// Negatively acknowledge a delivery.
+    Nack {
+        /// Certificate minted for the delivery.
+        attempt: AttemptCertificate,
+        /// Reason for the nack.
+        reason: ConsumerNackReason,
+    },
+    /// Query the current consumer state snapshot.
+    State,
+}
+
+/// Reply types returned by [`ConsumerActor`] calls.
+#[derive(Debug)]
+pub enum ConsumerReply {
+    /// Pull result.
+    Pull(Result<PullDispatchOutcome, FabricConsumerError>),
+    /// Ack result — returns the obligation ID that was committed.
+    Ack(Result<ObligationId, FabricConsumerError>),
+    /// Nack result.
+    Nack(Result<NackResolution, FabricConsumerError>),
+    /// Current state snapshot.
+    State(FabricConsumerState),
+}
+
+/// Cast (fire-and-forget) messages for the [`ConsumerActor`].
+#[derive(Debug)]
+pub enum ConsumerCast {
+    /// Pause delivery dispatch.
+    Pause,
+    /// Resume delivery dispatch after a pause.
+    Resume,
+}
+
+/// Info (system/out-of-band) messages for the [`ConsumerActor`].
+#[derive(Debug)]
+pub enum ConsumerInfo {
+    /// Periodic heartbeat tick.
+    Heartbeat,
+}
+
+/// Actor lifecycle state for the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerActorLifecycle {
+    /// Actively dispatching deliveries.
+    Running,
+    /// Dispatch paused; acks/nacks still accepted.
+    Paused,
+    /// Draining before shutdown.
+    Stopping,
+}
+
+/// GenServer-hosted consumer delivery engine.
+///
+/// Wraps a [`FabricConsumer`] in a GenServer mailbox so that:
+/// - pull requests are serialized through `handle_call`,
+/// - ack/nack resolve obligations synchronously,
+/// - pause/resume are fire-and-forget casts, and
+/// - heartbeat ticks arrive as info messages.
+///
+/// The actor is region-owned: spawning it ties its lifetime to the
+/// parent region's close-to-quiescence protocol.
+#[derive(Debug)]
+pub struct ConsumerActor {
+    consumer: FabricConsumer,
+    lifecycle: ConsumerActorLifecycle,
+}
+
+impl ConsumerActor {
+    /// Wrap an existing [`FabricConsumer`] in an actor shell.
+    #[must_use]
+    pub fn new(consumer: FabricConsumer) -> Self {
+        Self {
+            consumer,
+            lifecycle: ConsumerActorLifecycle::Running,
+        }
+    }
+
+    /// Returns the current actor lifecycle state.
+    #[must_use]
+    pub fn lifecycle(&self) -> ConsumerActorLifecycle {
+        self.lifecycle
+    }
+
+    /// Returns a reference to the inner consumer.
+    #[must_use]
+    pub fn consumer(&self) -> &FabricConsumer {
+        &self.consumer
+    }
+
+    /// Returns a mutable reference to the inner consumer.
+    pub fn consumer_mut(&mut self) -> &mut FabricConsumer {
+        &mut self.consumer
+    }
+}
+
+impl crate::gen_server::GenServer for ConsumerActor {
+    type Call = ConsumerCall;
+    type Reply = ConsumerReply;
+    type Cast = ConsumerCast;
+    type Info = ConsumerInfo;
+
+    fn handle_call(
+        &mut self,
+        _cx: &crate::cx::Cx,
+        request: Self::Call,
+        reply: crate::gen_server::Reply<Self::Reply>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            match request {
+                ConsumerCall::Pull {
+                    available_tail,
+                    capsule,
+                    ticket,
+                } => {
+                    if self.lifecycle == ConsumerActorLifecycle::Paused {
+                        reply.send(ConsumerReply::Pull(Err(
+                            FabricConsumerError::ConsumerPaused,
+                        )));
+                    } else {
+                        let result = self.consumer.dispatch_next_pull(
+                            available_tail,
+                            &capsule,
+                            ticket.as_ref(),
+                        );
+                        reply.send(ConsumerReply::Pull(result));
+                    }
+                }
+                ConsumerCall::Ack { attempt } => {
+                    let result = self
+                        .consumer
+                        .acknowledge_delivery(&attempt)
+                        .map(|_ack| attempt.obligation_id);
+                    reply.send(ConsumerReply::Ack(result));
+                }
+                ConsumerCall::Nack { attempt, reason } => {
+                    let result = self.consumer.nack_delivery(&attempt, reason);
+                    reply.send(ConsumerReply::Nack(result));
+                }
+                ConsumerCall::State => {
+                    reply.send(ConsumerReply::State(self.consumer.state().clone()));
+                }
+            }
+        })
+    }
+
+    fn handle_cast(
+        &mut self,
+        cx: &crate::cx::Cx,
+        msg: Self::Cast,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let cx = cx.clone();
+        Box::pin(async move {
+            let name = self
+                .consumer
+                .config()
+                .durable_name
+                .clone()
+                .unwrap_or_else(|| "anonymous".to_owned());
+            match msg {
+                ConsumerCast::Pause => {
+                    if self.lifecycle == ConsumerActorLifecycle::Running {
+                        self.lifecycle = ConsumerActorLifecycle::Paused;
+                        cx.trace_with_fields(
+                            "fabric.consumer_actor.pause",
+                            &[("event", "consumer_pause"), ("consumer", name.as_str())],
+                        );
+                    }
+                }
+                ConsumerCast::Resume => {
+                    if self.lifecycle == ConsumerActorLifecycle::Paused {
+                        self.lifecycle = ConsumerActorLifecycle::Running;
+                        cx.trace_with_fields(
+                            "fabric.consumer_actor.resume",
+                            &[("event", "consumer_resume"), ("consumer", name.as_str())],
+                        );
+                    }
+                }
+            }
+        })
+    }
+
+    fn handle_info(
+        &mut self,
+        cx: &crate::cx::Cx,
+        msg: Self::Info,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let cx = cx.clone();
+        Box::pin(async move {
+            let name = self
+                .consumer
+                .config()
+                .durable_name
+                .clone()
+                .unwrap_or_else(|| "anonymous".to_owned());
+            match msg {
+                ConsumerInfo::Heartbeat => {
+                    cx.trace_with_fields(
+                        "fabric.consumer_actor.heartbeat",
+                        &[("event", "consumer_heartbeat"), ("consumer", name.as_str())],
+                    );
+                }
+            }
+        })
+    }
+
+    fn on_start(
+        &mut self,
+        cx: &crate::cx::Cx,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let cx = cx.clone();
+        Box::pin(async move {
+            let name = self
+                .consumer
+                .config()
+                .durable_name
+                .clone()
+                .unwrap_or_else(|| "anonymous".to_owned());
+            cx.trace_with_fields(
+                "fabric.consumer_actor.start",
+                &[
+                    ("event", "consumer_actor_start"),
+                    ("consumer", name.as_str()),
+                ],
+            );
+        })
+    }
+
+    fn on_stop(
+        &mut self,
+        cx: &crate::cx::Cx,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let cx = cx.clone();
+        Box::pin(async move {
+            self.lifecycle = ConsumerActorLifecycle::Stopping;
+            let name = self
+                .consumer
+                .config()
+                .durable_name
+                .clone()
+                .unwrap_or_else(|| "anonymous".to_owned());
+            cx.trace_with_fields(
+                "fabric.consumer_actor.stop",
+                &[
+                    ("event", "consumer_actor_stop"),
+                    ("consumer", name.as_str()),
+                ],
+            );
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4742,5 +5012,91 @@ mod tests {
             10,
             "ack_floor should advance to 10 once all windows up to 10 are acked"
         );
+    }
+
+    // ── ConsumerActor unit tests ──────────────────────────────────
+
+    #[test]
+    fn consumer_actor_lifecycle_transitions() {
+        let cell = test_cell();
+        let config = FabricConsumerConfig {
+            durable_name: Some("test-actor".to_owned()),
+            ..FabricConsumerConfig::default()
+        };
+        let consumer = FabricConsumer::new(&cell, config).expect("consumer");
+        let actor = ConsumerActor::new(consumer);
+
+        assert_eq!(actor.lifecycle(), ConsumerActorLifecycle::Running);
+        assert_eq!(
+            actor.consumer().config().durable_name.as_deref(),
+            Some("test-actor")
+        );
+    }
+
+    #[test]
+    fn consumer_actor_pause_and_resume() {
+        let cell = test_cell();
+        let consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let mut actor = ConsumerActor::new(consumer);
+        let cx = crate::cx::Cx::for_testing();
+
+        assert_eq!(actor.lifecycle(), ConsumerActorLifecycle::Running);
+
+        futures_lite::future::block_on(
+            <ConsumerActor as crate::gen_server::GenServer>::handle_cast(
+                &mut actor,
+                &cx,
+                ConsumerCast::Pause,
+            ),
+        );
+        assert_eq!(actor.lifecycle(), ConsumerActorLifecycle::Paused);
+
+        futures_lite::future::block_on(
+            <ConsumerActor as crate::gen_server::GenServer>::handle_cast(
+                &mut actor,
+                &cx,
+                ConsumerCast::Resume,
+            ),
+        );
+        assert_eq!(actor.lifecycle(), ConsumerActorLifecycle::Running);
+    }
+
+    #[test]
+    fn consumer_actor_stopping_lifecycle() {
+        let cell = test_cell();
+        let consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let mut actor = ConsumerActor::new(consumer);
+        let cx = crate::cx::Cx::for_testing();
+
+        futures_lite::future::block_on(<ConsumerActor as crate::gen_server::GenServer>::on_stop(
+            &mut actor, &cx,
+        ));
+        assert_eq!(actor.lifecycle(), ConsumerActorLifecycle::Stopping);
+    }
+
+    #[test]
+    fn consumer_actor_state_query() {
+        let cell = test_cell();
+        let consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let actor = ConsumerActor::new(consumer);
+
+        let state = actor.consumer().state();
+        assert_eq!(state.delivered_count, 0);
+        assert_eq!(state.pending_count, 0);
+        assert_eq!(state.ack_floor, 0);
+    }
+
+    #[test]
+    fn consumer_actor_mutable_consumer_access() {
+        let cell = test_cell();
+        let consumer =
+            FabricConsumer::new(&cell, FabricConsumerConfig::default()).expect("consumer");
+        let mut actor = ConsumerActor::new(consumer);
+
+        let consumer_ref = actor.consumer_mut();
+        assert_eq!(consumer_ref.state().delivered_count, 0);
     }
 }
