@@ -3240,6 +3240,29 @@ mod tests {
         }
     }
 
+    fn policy_fixture_from_selection(selection: ProfilePackSelection) -> DualKernelPolicy {
+        let metadata = profile_pack_metadata(selection.profile_pack);
+        DualKernelPolicy {
+            profile_pack: metadata.profile_pack,
+            architecture_class: selection.architecture_class,
+            tuning_corpus_id: metadata.tuning_corpus_id,
+            selected_tuning_candidate_id: metadata.selected_tuning_candidate_id,
+            rejected_tuning_candidate_ids: metadata.rejected_tuning_candidate_ids,
+            fallback_reason: selection.fallback_reason,
+            rejected_candidates: selection.rejected_candidates,
+            replay_pointer: metadata.replay_pointer,
+            command_bundle: metadata.command_bundle,
+            mode: DualKernelOverride::Auto,
+            override_mask: DualKernelOverrideMask::empty(),
+            mul_min_total: metadata.mul_min_total,
+            mul_max_total: metadata.mul_max_total,
+            addmul_min_total: metadata.addmul_min_total,
+            addmul_max_total: metadata.addmul_max_total,
+            addmul_min_lane: metadata.addmul_min_lane,
+            max_lane_ratio: metadata.max_lane_ratio,
+        }
+    }
+
     // -- Table sanity --
 
     #[test]
@@ -4991,6 +5014,134 @@ mod tests {
         assert_eq!(
             selected.rejected_candidates,
             REJECTED_PROFILE_SELECTED_SCALAR
+        );
+    }
+
+    #[test]
+    fn profile_pack_env_request_keeps_canonical_metadata_when_selection_stays_canonical() {
+        let kernel = dispatch().kind;
+        let architecture_class = architecture_class_for_kernel(kernel);
+        let selection = select_profile_pack(kernel, Some(ProfilePackRequest::ScalarConservativeV1));
+        let mut policy = policy_fixture_from_selection(selection);
+        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        policy.override_mask.set_profile_pack_env_requested();
+
+        apply_effective_selection_contract(&mut policy);
+        let metadata = effective_profile_pack_metadata(&policy);
+
+        assert!(policy.override_mask.profile_pack_env_requested());
+        assert_eq!(
+            policy.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(policy.architecture_class, architecture_class);
+        assert_eq!(policy.fallback_reason, None);
+        assert_eq!(policy.rejected_candidates, REJECTED_PROFILE_SELECTED_SCALAR);
+        assert!(
+            policy_uses_canonical_selection_contract(&policy),
+            "supported profile-pack env requests in Auto mode must keep canonical provenance"
+        );
+        assert_eq!(
+            policy.selected_tuning_candidate_id,
+            catalog_profile.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            policy.rejected_tuning_candidate_ids,
+            catalog_profile.rejected_tuning_candidate_ids
+        );
+        assert_eq!(policy.replay_pointer, catalog_profile.replay_pointer);
+        assert_eq!(policy.command_bundle, catalog_profile.command_bundle);
+        assert_eq!(
+            metadata.decision_artifact_id,
+            catalog_profile.decision_artifact_id
+        );
+        assert_eq!(metadata.decision_role, catalog_profile.decision_role);
+        assert_eq!(
+            metadata.decision_evidence_status,
+            catalog_profile.decision_evidence_status
+        );
+    }
+
+    #[test]
+    fn unsupported_profile_pack_env_request_falls_back_without_scrubbing_canonical_metadata() {
+        let selection = select_profile_pack(
+            Gf256Kernel::Scalar,
+            Some(ProfilePackRequest::X86Avx2BalancedV1),
+        );
+        let mut policy = policy_fixture_from_selection(selection);
+        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        policy.override_mask.set_profile_pack_env_requested();
+
+        apply_effective_selection_contract(&mut policy);
+        let metadata = effective_profile_pack_metadata(&policy);
+
+        assert!(policy.override_mask.profile_pack_env_requested());
+        assert_eq!(
+            policy.fallback_reason,
+            Some(Gf256ProfileFallbackReason::UnsupportedProfileForHost)
+        );
+        assert!(
+            policy_uses_canonical_selection_contract(&policy),
+            "unsupported profile-pack env requests should fall back to the canonical host profile"
+        );
+        assert_eq!(
+            policy.selected_tuning_candidate_id,
+            catalog_profile.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            metadata.decision_artifact_id,
+            catalog_profile.decision_artifact_id
+        );
+        assert_eq!(metadata.decision_role, catalog_profile.decision_role);
+        assert_eq!(
+            metadata.decision_evidence_status,
+            catalog_profile.decision_evidence_status
+        );
+    }
+
+    #[test]
+    fn unknown_profile_pack_env_request_falls_back_without_scrubbing_canonical_metadata() {
+        let kernel = dispatch().kind;
+        let architecture_class = architecture_class_for_kernel(kernel);
+        let selection = select_profile_pack(kernel, None);
+        let mut policy = policy_fixture_from_selection(selection);
+        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        policy.override_mask.set_profile_pack_env_requested();
+        policy.fallback_reason = Some(Gf256ProfileFallbackReason::UnknownRequestedProfile);
+
+        apply_effective_selection_contract(&mut policy);
+        let metadata = effective_profile_pack_metadata(&policy);
+
+        assert!(policy.override_mask.profile_pack_env_requested());
+        assert_eq!(
+            policy.fallback_reason,
+            Some(Gf256ProfileFallbackReason::UnknownRequestedProfile)
+        );
+        assert_eq!(policy.architecture_class, architecture_class);
+        assert_eq!(
+            policy.profile_pack,
+            default_profile_pack_for_arch(architecture_class)
+        );
+        assert!(
+            policy_uses_canonical_selection_contract(&policy),
+            "unknown profile-pack env requests should fall back to the canonical host profile"
+        );
+        assert_eq!(
+            policy.selected_tuning_candidate_id,
+            catalog_profile.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            policy.rejected_tuning_candidate_ids,
+            catalog_profile.rejected_tuning_candidate_ids
+        );
+        assert_eq!(
+            metadata.decision_artifact_id,
+            catalog_profile.decision_artifact_id
+        );
+        assert_eq!(metadata.decision_role, catalog_profile.decision_role);
+        assert_eq!(
+            metadata.decision_evidence_status,
+            catalog_profile.decision_evidence_status
         );
     }
 
