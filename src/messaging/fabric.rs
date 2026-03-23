@@ -41,6 +41,32 @@ fn fabric_input_error(message: impl Into<String>) -> AsupersyncError {
 }
 
 #[allow(clippy::result_large_err)]
+fn validate_publish_delivery_class(
+    delivery_class: DeliveryClass,
+    has_durability_ledger: bool,
+) -> Result<(), AsupersyncError> {
+    match (has_durability_ledger, delivery_class) {
+        (false, DeliveryClass::EphemeralInteractive) | (true, DeliveryClass::DurableOrdered) => {
+            Ok(())
+        }
+        (false, DeliveryClass::DurableOrdered) => Err(fabric_input_error(
+            "durable-ordered publish requires reserve_publish_durable so the durability obligation is tracked",
+        )),
+        (true, DeliveryClass::EphemeralInteractive) => Err(fabric_input_error(
+            "ephemeral-interactive publish should use reserve_publish; reserve_publish_durable would borrow a ledger without allocating an obligation",
+        )),
+        (
+            _,
+            DeliveryClass::ObligationBacked
+            | DeliveryClass::MobilitySafe
+            | DeliveryClass::ForensicReplayable,
+        ) => Err(fabric_input_error(format!(
+            "packet-plane publish does not yet support delivery class `{delivery_class}`; use the higher-layer service or control surfaces for stronger acknowledgement boundaries"
+        ))),
+    }
+}
+
+#[allow(clippy::result_large_err)]
 fn parse_subject(raw: impl AsRef<str>) -> Result<Subject, AsupersyncError> {
     Subject::parse(raw.as_ref()).map_err(|error| fabric_input_error(error.to_string()))
 }
@@ -569,6 +595,26 @@ fn trace_publish_abort(
             ("reason", reason),
         ],
     );
+}
+
+/// Emit a structured trace when a fabric operation is cancelled at its
+/// checkpoint.  This gives operators visibility into cancel pressure on
+/// the packet plane without extra error-handling boilerplate.
+#[allow(clippy::result_large_err)]
+fn fabric_checkpoint(cx: &Cx, operation: &str) -> Result<(), AsupersyncError> {
+    match cx.checkpoint() {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            cx.trace_with_fields(
+                "fabric.cancelled",
+                &[
+                    ("event", "fabric_cancelled"),
+                    ("operation", operation),
+                ],
+            );
+            Err(err)
+        }
+    }
 }
 
 /// Operator-visible FABRIC decision classes backed by Franken decision
@@ -1517,6 +1563,9 @@ impl PublishPermit<'_> {
     /// The payload is enqueued to all routed cells, the obligation (if any)
     /// is committed, and a [`PublishReceipt`] is returned.  This method
     /// consumes the permit; calling it a second time is a compile error.
+    ///
+    /// The returned acknowledgement certifies the minimum honest boundary
+    /// for the selected delivery class on this narrow packet-plane seam.
     pub fn send(mut self, cx: &Cx, payload: impl Into<Vec<u8>>) -> PublishReceipt {
         let payload = payload.into();
         let payload_len = payload.len();
@@ -1534,15 +1583,10 @@ impl PublishPermit<'_> {
         trace_publish_commit(cx, &subject, delivery_class, obligation_id, payload_len);
         self.consumed = true;
 
-        let ack_kind = match delivery_class {
-            DeliveryClass::EphemeralInteractive => AckKind::Accepted,
-            _ => AckKind::Committed,
-        };
-
         PublishReceipt {
             subject,
             payload_len,
-            ack_kind,
+            ack_kind: delivery_class.minimum_ack(),
             delivery_class,
         }
     }
@@ -1738,7 +1782,7 @@ impl FabricSubscription {
     /// observes a cancellation request.
     #[allow(clippy::unused_async)]
     pub async fn next(&mut self, cx: &Cx) -> Option<FabricMessage> {
-        if cx.checkpoint().is_err() {
+        if fabric_checkpoint(cx, "subscription_next").is_err() {
             return None;
         }
 
@@ -1753,7 +1797,7 @@ impl Fabric {
     /// Connect to a known fabric endpoint.
     #[allow(clippy::unused_async)]
     pub async fn connect(cx: &Cx, endpoint: impl AsRef<str>) -> Result<Self, AsupersyncError> {
-        cx.checkpoint()?;
+        fabric_checkpoint(cx, "connect")?;
 
         let endpoint = endpoint.as_ref().trim();
         if endpoint.is_empty() {
@@ -1791,7 +1835,8 @@ impl Fabric {
         subject: impl AsRef<str>,
         delivery_class: DeliveryClass,
     ) -> Result<PublishPermit<'static>, AsupersyncError> {
-        cx.checkpoint()?;
+        fabric_checkpoint(cx, "reserve_publish")?;
+        validate_publish_delivery_class(delivery_class, false)?;
 
         let subject = parse_subject(subject)?;
         // Prepare with an empty payload — the real payload is supplied at
@@ -1819,7 +1864,11 @@ impl Fabric {
     /// Like [`reserve_publish`](Self::reserve_publish) but allocates an
     /// [`ObligationId`] in the provided ledger.  The obligation is
     /// committed when [`PublishPermit::send`] is called and aborted on
-    /// drop or explicit [`PublishPermit::abort`].
+    /// drop or explicit [`PublishPermit::abort`]. Today this surface only
+    /// supports [`DeliveryClass::DurableOrdered`]; ephemeral publishes
+    /// should use [`reserve_publish`](Self::reserve_publish), and stronger
+    /// classes belong to the higher-layer service/control flows that can
+    /// honestly certify them.
     #[allow(clippy::unused_async)]
     pub async fn reserve_publish_durable<'ledger>(
         &self,
@@ -1828,7 +1877,8 @@ impl Fabric {
         subject: impl AsRef<str>,
         delivery_class: DeliveryClass,
     ) -> Result<PublishPermit<'ledger>, AsupersyncError> {
-        cx.checkpoint()?;
+        fabric_checkpoint(cx, "reserve_publish_durable")?;
+        validate_publish_delivery_class(delivery_class, true)?;
 
         let subject = parse_subject(subject)?;
         let prepared =
@@ -1891,7 +1941,7 @@ impl Fabric {
         cx: &Cx,
         subject_pattern: impl AsRef<str>,
     ) -> Result<FabricSubscription, AsupersyncError> {
-        cx.checkpoint()?;
+        fabric_checkpoint(cx, "subscribe")?;
         let pattern = parse_subject_pattern(subject_pattern)?;
         let state = Arc::clone(&self.state);
         let id = {
@@ -1915,6 +1965,7 @@ impl Fabric {
         subject: impl AsRef<str>,
         payload: impl Into<Vec<u8>>,
     ) -> Result<FabricReply, AsupersyncError> {
+        fabric_checkpoint(cx, "request")?;
         let payload = payload.into();
         let receipt = self.publish(cx, subject, payload.clone()).await?;
 
@@ -1947,7 +1998,7 @@ impl Fabric {
         delivery_boundary: AckKind,
         receipt_required: bool,
     ) -> Result<FabricCertifiedReply, AsupersyncError> {
-        cx.checkpoint()?;
+        fabric_checkpoint(cx, "request_certified")?;
         admission
             .certificate
             .validate()
@@ -2050,7 +2101,7 @@ impl Fabric {
         cx: &Cx,
         config: FabricStreamConfig,
     ) -> Result<FabricStreamHandle, AsupersyncError> {
-        cx.checkpoint()?;
+        fabric_checkpoint(cx, "stream")?;
         config.validate()?;
 
         Ok(FabricStreamHandle {
@@ -9073,7 +9124,7 @@ mod tests {
             assert_eq!(permit.delivery_class(), DeliveryClass::DurableOrdered);
 
             let receipt = permit.send(&cx, b"durable-payload".to_vec());
-            assert_eq!(receipt.ack_kind, AckKind::Committed);
+            assert_eq!(receipt.ack_kind, AckKind::Recoverable);
             assert_eq!(receipt.delivery_class, DeliveryClass::DurableOrdered);
             assert_eq!(ledger.pending_count(), 0);
             assert_eq!(ledger.stats().total_committed, 1);
@@ -9159,14 +9210,33 @@ mod tests {
     }
 
     #[test]
-    fn reserve_publish_ephemeral_via_durable_path_has_no_obligation() {
+    fn reserve_publish_rejects_durable_ordered_without_ledger() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-plain-durable")
+                .await
+                .expect("connect");
+
+            let err = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::DurableOrdered)
+                .await
+                .expect_err("durable ordered publish without ledger must fail");
+
+            assert!(
+                err.to_string().contains("reserve_publish_durable"),
+                "expected ledger guidance in error, got {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn reserve_publish_durable_rejects_ephemeral_interactive() {
         run_test_with_cx(|cx| async move {
             let fabric = Fabric::connect(&cx, "node1:4222/two-phase-ephemeral-durable")
                 .await
                 .expect("connect");
             let mut ledger = ObligationLedger::new();
 
-            let permit = fabric
+            let err = fabric
                 .reserve_publish_durable(
                     &cx,
                     &mut ledger,
@@ -9174,12 +9244,40 @@ mod tests {
                     DeliveryClass::EphemeralInteractive,
                 )
                 .await
-                .expect("reserve ephemeral via durable path");
+                .expect_err("ephemeral publish should stay on reserve_publish");
 
             assert!(
-                permit.obligation_id().is_none(),
-                "ephemeral publish must not allocate obligation even via durable path"
+                err.to_string().contains("reserve_publish"),
+                "expected plain-publish guidance, got {err}"
             );
+            assert_eq!(ledger.pending_count(), 0);
+        });
+    }
+
+    #[test]
+    fn reserve_publish_durable_rejects_higher_layer_delivery_classes() {
+        run_test_with_cx(|cx| async move {
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-unsupported-class")
+                .await
+                .expect("connect");
+            let mut ledger = ObligationLedger::new();
+
+            let err = fabric
+                .reserve_publish_durable(
+                    &cx,
+                    &mut ledger,
+                    "orders.created",
+                    DeliveryClass::ObligationBacked,
+                )
+                .await
+                .expect_err("packet-plane publish must reject higher-layer delivery classes");
+
+            assert!(
+                err.to_string()
+                    .contains("does not yet support delivery class"),
+                "expected unsupported-class guidance, got {err}"
+            );
+            assert_eq!(ledger.pending_count(), 0);
         });
     }
 
