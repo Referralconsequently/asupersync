@@ -294,14 +294,53 @@ of relying on tribal memory.
 
 #### Current differential runner profiles
 
-The current CLI-owned inventory lives in `src/bin/asupersync.rs` and is exposed
-through three stable profile lanes:
+The current CLI-owned inventory lives in `src/bin/asupersync.rs` and now has a
+machine-readable source of truth:
+
+- `asupersync lab differential-profile-manifest --json`
+- schema: `lab-live-differential-profile-manifest-v1`
+
+That manifest is the stable operator-profile vocabulary for docs, CI, and
+future playbooks. It distinguishes shipped direct CLI profiles from higher-level
+operator recipes such as targeted reproduction and the reserved nightly-stress
+name.
+
+The currently shipped direct CLI lanes are:
 
 | Runner profile | Current scenario IDs | Why the profile exists |
 |---|---|---|
 | `Smoke` | `phase1.cancel.protocol.drain_finalize`, `phase1.combinator.race.one_loser`, `phase1.channel.reserve_send.commit` | the fastest shared pass/fail lane for the initial semantic core |
 | `Phase1Core` | `phase1.cancel.protocol.drain_finalize`, `phase1.cancel.protocol.before_first_poll`, `phase1.cancel.protocol.child_await`, `phase1.cancel.protocol.cleanup_budget`, `phase1.combinator.race.one_loser`, `phase1.channel.reserve_send.commit`, `phase1.channel.reserve_send.abort_visible`, `phase1.region.close.quiescent` | the full admitted `Phase 1` executable floor, including the pre-checkpoint, child-await, and cleanup-budget cancellation families plus the cancel-before-commit channel path |
 | `Calibration` | `phase1.cancel.protocol.drain_finalize`, `calibration.combinator.loser_not_drained`, `calibration.cancellation.cleanup_missing`, `calibration.cancellation.cleanup_budget_exhausted`, `calibration.comparator.resource_counter_mismatch`, `calibration.channel.commit_visibility_mismatch`, `calibration.obligation.leak_detected`, `calibration.region.close.non_quiescent` | prove the classifier, artifact bundle, and failure-retention paths with intentional divergences, including loser-drain failure on the combinator surface and cleanup-budget exhaustion on the cancellation surface |
+
+The wider operator-profile manifest currently publishes this vocabulary:
+
+| Operator profile id | Status | Backing invocation | Purpose |
+|---|---|---|---|
+| `smoke` | shipped | `scripts/run_lab_live_differential.sh --profile smoke --seed <seed> --out-dir <out-dir>` | fastest local/shared semantic-core signal |
+| `phase1-core` | shipped | `scripts/run_lab_live_differential.sh --profile phase1-core --seed <seed> --out-dir <out-dir>` | full admitted Phase 1 core validation pass |
+| `calibration` | shipped | `scripts/run_lab_live_differential.sh --profile calibration --seed <seed> --out-dir <out-dir>` | intentional self-check / negative-control lane |
+| `repro-targeted` | shipped | `scripts/run_lab_live_differential.sh --profile phase1-core --scenario <scenario-id> --seed <seed> --out-dir <out-dir>` | focused replay/reproduction of one selected witness |
+| `nightly-stress` | shipped | `scripts/run_lab_live_differential.sh --profile nightly-stress --seed <seed> --seed-count <count> --seed-stride <stride> --rotation-date <date> --out-dir <out-dir>` | rotating-seed scheduled stress on top of the admitted `phase1-core` pack, with retained divergence artifacts and escalation-ready replay pointers |
+
+The shipped `nightly-stress` operator recipe intentionally wraps the existing
+`phase1-core` differential runner instead of inventing a second artifact
+format. Each nightly execution derives a deterministic seed ring from
+`rotation_date`, `seed`, `seed_count`, and `seed_stride`, then writes:
+
+- per-seed `phase1-core` bundles under
+  `target/e2e-results/lab_live_differential/nightly-stress/<date>/<seed>/phase1-core/`
+- a nightly aggregate manifest at
+  `target/e2e-results/lab_live_differential/nightly-stress/<date>/nightly_stress_manifest.json`
+- a human-readable nightly summary at
+  `target/e2e-results/lab_live_differential/nightly-stress/<date>/nightly_stress_summary.txt`
+- top-level replay pointers for promoted witnesses under
+  `target/e2e-results/lab_live_differential/nightly-stress/<date>/retained_divergence_artifacts/`
+
+The seed rotation policy is deterministic: if the root seed is `S`, the stride
+is `D`, the seed count is `N`, and the UTC day offset from `2026-01-01` is `R`,
+then seed `i` uses `S + (R * D * N) + (i * D)`. This keeps nightly repro
+commands stable while still widening the explored schedule space over time.
 
 #### Current fast CI differential lane
 
@@ -359,6 +398,205 @@ Interpretation rules for the executable inventory:
   must still expose `obligation_balance` as a first-class discoverable field
 - if a new runner profile is added, it must be described here with the exact
   scenario IDs it admits and the reason that profile exists
+
+## Contributor Playbook (`asupersync-2a6k9.8.3`)
+
+This section is the operator-facing and contributor-facing handoff for the
+current lab-vs-live differential stack. It is intentionally procedural: a new
+contributor should be able to pick a surface, run the right lane, inspect the
+right artifacts, and know when to escalate into a new bead instead of
+reverse-engineering prior sessions.
+
+The playbook is downstream of the shipped profile manifest in
+`src/bin/asupersync.rs` and the current operator-profile vocabulary:
+
+- `local_smoke`
+- `targeted_core_validation`
+- `self_calibration`
+- `targeted_repro`
+- `scheduled_stress`
+
+The manifest remains the source of truth:
+
+- `asupersync lab differential-profile-manifest --json`
+- schema: `lab-live-differential-profile-manifest-v1`
+
+### Preflight checklist before touching a new surface
+
+Before writing code or wiring a new scenario:
+
+1. confirm the surface is admitted by
+   `docs/lab_live_differential_scope_matrix.md` or by an explicit eligibility
+   gate such as `asupersync-2a6k9.7.3`
+2. identify the normalized observables the surface must emit using
+   `docs/lab_live_normalized_observable_schema.md`
+3. identify the failure vocabulary the surface must reuse from
+   `docs/lab_live_divergence_taxonomy.md`
+4. identify the minimum tier floor from this document (`T0`, `T1`, `T2`, `T3`,
+   `T4`, and when applicable `T5`)
+5. reserve the intended edit surface, announce the bead in Agent Mail, and
+   avoid claiming a surface that another live agent already owns
+6. pick the smallest scenario family that exercises the surface without adding
+   unrelated transport or host noise
+
+If any of those answers are still vague, the surface is not ready for a new
+differential scenario yet.
+
+### Current copy-paste workflows
+
+These are the canonical day-to-day commands for the currently shipped runner
+surface. They are written in the same vocabulary as the profile manifest so the
+playbook stays aligned with the CLI.
+
+| Workflow | When to use it | Command | Expected output root |
+|---|---|---|---|
+| `smoke_local_validation` | confirm the shared runner still works on the admitted semantic core before or after a small change | `bash scripts/run_lab_live_differential.sh --profile smoke --seed 91 --out-dir target/e2e-results/lab_live_differential/playbook-smoke` | `target/e2e-results/lab_live_differential/playbook-smoke/` |
+| `phase1_core_validation` | validate a Phase 1 surface change across the current admitted floor | `bash scripts/run_lab_live_differential.sh --profile phase1-core --seed 424242 --out-dir target/e2e-results/lab_live_differential/playbook-phase1-core` | `target/e2e-results/lab_live_differential/playbook-phase1-core/` |
+| `targeted_repro` | replay one known witness or rerun one failing scenario after a code change | `bash scripts/run_lab_live_differential.sh --profile phase1-core --scenario <scenario-id> --seed <seed> --out-dir target/e2e-results/lab_live_differential/playbook-repro` | `target/e2e-results/lab_live_differential/playbook-repro/` |
+| `self_calibration` | prove the classifier and artifact-retention path still fail loudly on intentional divergence | `bash scripts/run_lab_live_differential.sh --profile calibration --seed 20260323 --out-dir target/e2e-results/lab_live_differential/playbook-calibration` | `target/e2e-results/lab_live_differential/playbook-calibration/` |
+| `scheduled_stress` | broader rotating-seed discovery after the fast/core/calibration lanes are already credible | `bash scripts/run_lab_live_differential.sh --profile nightly-stress --seed 424242 --seed-count 4 --seed-stride 9973 --rotation-date <date> --out-dir target/e2e-results/lab_live_differential` | `target/e2e-results/lab_live_differential/nightly-stress/<date>/` |
+
+The playbook rule is simple:
+
+- start with `smoke_local_validation`
+- escalate to `phase1_core_validation` when the bead changes an admitted Phase
+  1 semantic surface
+- use `targeted_repro` whenever the run already has a known `scenario_id`
+- use `self_calibration` whenever the bead changes classifier, artifact, or
+  report logic
+- use `scheduled_stress` only after the earlier lanes are already stable enough
+  to make retained-nightly failures actionable
+
+### Required artifact paths and report fields
+
+Every workflow above must leave behind the same stable top-level artifacts:
+
+- `runner_summary.json`
+- `operator_summary.txt`
+- `artifact_index.json`
+- `differential_event_log.jsonl`
+
+The shipped `nightly-stress` operator root adds three more required artifacts:
+
+- `nightly_stress_manifest.json`
+- `nightly_stress_summary.txt`
+- `retained_divergence_artifacts/`
+
+When a contributor inspects `runner_summary.json`, the minimum report fields to
+read before drawing any conclusion are:
+
+- `profile`
+- `profile_contract.evidence_grade`
+- `profile_contract.confidence_label`
+- `profile_contract.runtime_cost`
+- `profile_contract.operator_intent`
+- `profile_contract.exit_semantics`
+- `expected_divergence_count`
+- `unexpected_divergence_count`
+- `missing_expected_divergence_count`
+
+When a contributor inspects `artifact_index.json`, the minimum operator question
+is whether the retained files actually point at the same scenario lineage that
+the summary claims to represent. If the index and summary disagree, treat the
+run as an artifact-contract failure before treating it as a semantic result.
+
+### How to add a new surface without cargo-culting existing pilots
+
+When adding a new differentialized surface, do the following in order:
+
+1. add or update the surface contract and normalized observable mapping
+2. create at least one `T0 unit_contract` check for the local invariant
+3. add `T1 golden_fixture` coverage if the bead emits any serialized record,
+   summary, or artifact schema
+4. bind one small shared scenario into the dual-run harness before widening to
+   a larger surface family
+5. run `smoke_local_validation` first, then the narrowest matching
+   `phase1_core_validation` or `targeted_repro` command
+6. add a `self_calibration` witness if the bead changes comparator, policy, or
+   artifact logic
+7. update the executable inventory table in this document so future contributors
+   do not need session archaeology to find the scenario again
+
+If the new work cannot satisfy those seven steps, it probably belongs in a gate
+or policy bead first rather than in a new executable pilot.
+
+### Escalation branches for common outcomes
+
+| Observed result | Meaning | Required next step |
+|---|---|---|
+| `unexpected_divergence` | the shared runner found a mismatch that is not admitted by the scenario contract | inspect `runner_summary.json`, `artifact_index.json`, and `differential_event_log.jsonl`; rerun the exact witness through `targeted_repro`; then open or update a bead tied to the retained artifact bundle |
+| `missing_expected_divergence` | a calibration witness stopped failing where it is supposed to fail | treat this as a guardrail regression first; check classifier/report code before claiming any semantic improvement |
+| `artifact_schema_violation` | the run did not preserve the minimum artifact contract | fix the artifact pipeline before making any semantic statement about the result |
+| `unsupported_surface` | the scenario crossed a boundary the current program does not admit | stop and route the work back through the relevant eligibility gate instead of broadening the claim informally |
+| `scheduler_noise_suspected` | the run may be noisy but not yet conclusively irreproducible | rerun through `targeted_repro`, preserve seed lineage, and do not silently widen tolerances |
+| `irreproducible_divergence` | reruns did not stabilize into a trustworthy policy class | retain the full bundle, hand off ownership explicitly, and consider promoting the witness into the future nightly-stress corpus |
+
+The playbook is intentionally conservative. Contributors should bias toward
+opening a new bead with a retained artifact pointer instead of explaining away a
+result in prose.
+
+### Nightly stress retention and promotion rules
+
+`nightly-stress` inherits the same bundle redaction policy from
+`docs/lab_live_divergence_taxonomy.md`, but the operator recipe makes the
+retention and promotion decisions explicit:
+
+- local retention stays at `14` days unless the contributor deliberately
+  promotes the witness into a longer-lived corpus
+- CI retention stays at `30` days and must preserve the nightly manifest, the
+  nightly summary, and every replay-pointer file under
+  `retained_divergence_artifacts/`
+- any `unexpected_divergence` on an admitted surface becomes an
+  `open_or_update_bead_with_retained_bundle` promotion candidate
+- any repeated or minimized witness may graduate into the stable regression
+  corpus after a maintainer turns the retained bundle into a dedicated scenario
+- any `missing_expected_divergence` remains a guardrail regression first, not a
+  semantic win
+
+The purpose of `nightly-stress` is to make new witnesses actionable, not to
+accumulate unowned artifact piles.
+
+## Supported Claims and Limitations Matrix (`asupersync-2a6k9.8.4`)
+
+This section is the calibrated reader-facing statement of what the current
+differential program proves today, what it only partially covers, and what
+remains outside the current trust boundary.
+
+The matrix below must stay aligned with the actual profile manifest, the scope
+matrix, and the currently shipped scenario packs. If the implementation grows
+or shrinks, this section must change with it.
+
+| Current claim | Evidence grade / profile vocabulary | What the claim does support | What the claim does **not** support |
+|---|---|---|---|
+| Fast shared semantic-core smoke signal | `t2_dual_run_smoke`, `baseline_signal`, `smoke`, `local_smoke` | the admitted semantic-core runner can execute a small shared lab/live set and retain the standard artifact bundle | full Phase 1 coverage, broader adversarial discovery, or any claim about external/host-heavy surfaces |
+| Full current Phase 1 floor across admitted semantic surfaces | `t3_pilot_surface`, `surface_backed`, `phase1-core`, `targeted_core_validation` | cancellation, combinators, channels, obligation-visible outcomes, and region-close/quiescence through the current admitted scenario families | exhaustive schedule exploration, real kernel/network timing, or automatic coverage for transport-heavy / browser / raw-socket / HTTP surfaces |
+| Guardrail and classifier self-checks work | `t4_negative_control`, `guardrail_validation`, `calibration`, `self_calibration` | intentional divergence, artifact retention, and policy classification still fail loudly with replayable bundles | proof that a production surface is correct merely because calibration passes |
+| One retained witness can be replayed directly | `selected_scenario_tier`, `repro-targeted`, `targeted_repro` | a named scenario with a pinned seed can be rerun with the same artifact/index vocabulary | any broad statement about neighboring scenarios or the full surface family |
+| Rotating-seed nightly adversarial search is shipped for the admitted Phase 1 pack | `T5 stress_nightly`, `nightly-stress`, `scheduled_stress` | the admitted `phase1-core` scenario pack now runs as a deterministic rotated-seed nightly lane with aggregate manifests, retained divergence pointers, and direct replay/minimization guidance | automatic coverage for new surfaces, host-heavy timing behavior, or any claim that a nightly pass proves correctness beyond the current admitted semantic pack |
+
+`nightly-stress` is now shipped as an operator recipe on top of the admitted
+`phase1-core` pack. It widens discovery pressure over rotated seeds, but it does
+not magically broaden the program's surface-admission boundary.
+
+### Partial and out-of-bound claims
+
+The current differential program is intentionally narrower than "the entire
+runtime" or "all live behavior." The following boundaries are explicit:
+
+| Surface family | Current status | Why the claim is limited |
+|---|---|---|
+| admitted `Phase 1` semantic surfaces | supported today | these are the surfaces with concrete shared scenarios, retained artifacts, and current runner-profile vocabulary |
+| additional internal surfaces not yet differentialized | partial | they may have unit or local E2E evidence, but they are not covered by the current shared profile pack until a bead binds them into the dual-run runner |
+| `raw_socket`, `http_surface`, and `browser_surface` gates | not covered by the current core profiles | they require the explicit eligibility-gate machinery from `asupersync-2a6k9.7.3` and related documents before any stronger parity claim is honest |
+| real network timing, kernel poller behavior, and ambient host scheduling | outside the current trust boundary | the current program compares admitted semantic observables, not every source of real-world latency or host nondeterminism |
+| fabric, RaptorQ, and other broad subsystems with no current dual-run scenario pack | outside the current claim set unless a retained scenario says otherwise | local tests or docs do not automatically become lab-vs-live differential evidence just because the subsystem exists |
+
+The honest short answer to the motivating question therefore remains:
+
+- yes, the project can compare lab and live behavior on supported surfaces
+  using retained artifacts and stable profile vocabulary
+- no, the project does not yet simulate or prove every external-system behavior
+  or host-driven effect
 
 ## Structured Logging Standard
 

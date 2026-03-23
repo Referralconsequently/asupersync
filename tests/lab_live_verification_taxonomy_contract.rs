@@ -23,6 +23,17 @@ fn load_ci_workflow() -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
 
+fn load_nightly_differential_workflow() -> std::io::Result<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(".github/workflows/nightly-differential-stress.yml");
+    std::fs::read_to_string(path)
+}
+
+fn load_runner_script() -> std::io::Result<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run_lab_live_differential.sh");
+    std::fs::read_to_string(path)
+}
+
 fn load_ci_matrix_policy() -> std::io::Result<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/ci_matrix_policy.json");
     std::fs::read_to_string(path)
@@ -165,9 +176,13 @@ fn doc_pins_current_executable_anchor_inventory() -> std::io::Result<()> {
     for token in [
         "Current Executable Anchor Inventory",
         "Current differential runner profiles",
+        "asupersync lab differential-profile-manifest --json",
+        "lab-live-differential-profile-manifest-v1",
         "Smoke",
         "Phase1Core",
         "Calibration",
+        "repro-targeted",
+        "nightly-stress",
         "phase1.cancel.protocol.drain_finalize",
         "phase1.cancel.protocol.before_first_poll",
         "phase1.cancel.protocol.child_await",
@@ -199,6 +214,102 @@ fn doc_pins_current_executable_anchor_inventory() -> std::io::Result<()> {
         assert!(
             doc.contains(token),
             "document missing executable inventory token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn doc_defines_contributor_playbook_workflows() -> std::io::Result<()> {
+    let doc = load_doc()?;
+    for token in [
+        "Contributor Playbook (`asupersync-2a6k9.8.3`)",
+        "Preflight checklist before touching a new surface",
+        "local_smoke",
+        "targeted_core_validation",
+        "self_calibration",
+        "targeted_repro",
+        "scheduled_stress",
+        "smoke_local_validation",
+        "phase1_core_validation",
+        "playbook-smoke",
+        "playbook-phase1-core",
+        "playbook-repro",
+        "playbook-calibration",
+        "nightly-stress/<date>/<seed>/",
+        "--seed-count 4",
+        "--seed-stride 9973",
+        "nightly_stress_manifest.json",
+        "nightly_stress_summary.txt",
+        "retained_divergence_artifacts/",
+        "profile_contract.evidence_grade",
+        "profile_contract.confidence_label",
+        "profile_contract.runtime_cost",
+        "profile_contract.operator_intent",
+        "profile_contract.exit_semantics",
+        "unexpected_divergence",
+        "missing_expected_divergence",
+        "artifact_schema_violation",
+        "unsupported_surface",
+        "scheduler_noise_suspected",
+        "irreproducible_divergence",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing contributor playbook token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn doc_defines_supported_claims_and_limitations_matrix() -> std::io::Result<()> {
+    let doc = load_doc()?;
+    for token in [
+        "Supported Claims and Limitations Matrix (`asupersync-2a6k9.8.4`)",
+        "t2_dual_run_smoke",
+        "baseline_signal",
+        "t3_pilot_surface",
+        "surface_backed",
+        "t4_negative_control",
+        "guardrail_validation",
+        "selected_scenario_tier",
+        "Rotating-seed nightly adversarial search is shipped for the admitted Phase 1 pack",
+        "aggregate manifests",
+        "retained divergence pointers",
+        "direct replay/minimization guidance",
+        "not magically broaden the program's surface-admission boundary",
+        "Partial and out-of-bound claims",
+        "raw_socket",
+        "http_surface",
+        "browser_surface",
+        "outside the current trust boundary",
+        "yes, the project can compare lab and live behavior on supported surfaces",
+        "no, the project does not yet simulate or prove every external-system behavior",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing claims/limitations token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn doc_defines_nightly_stress_retention_and_promotion_rules() -> std::io::Result<()> {
+    let doc = load_doc()?;
+    for token in [
+        "Nightly stress retention and promotion rules",
+        "local retention stays at `14` days",
+        "CI retention stays at `30` days",
+        "open_or_update_bead_with_retained_bundle",
+        "missing_expected_divergence",
+        "guardrail regression first",
+        "The purpose of `nightly-stress` is to make new witnesses actionable",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing nightly-stress governance token: {token}"
         );
     }
     Ok(())
@@ -356,14 +467,24 @@ fn divergence_doc_defines_registry_schema_and_lifecycle() -> std::io::Result<()>
 
 #[test]
 fn differential_runner_script_exists_and_uses_rch_cli_surface() -> std::io::Result<()> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run_lab_live_differential.sh");
-    let script = std::fs::read_to_string(path)?;
+    let script = load_runner_script()?;
     for token in [
         "target/debug/asupersync",
         "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
-        "lab differential \"$@\"",
+        "run_differential()",
         "\"${RCH_BIN}\" exec -- cargo run --features cli --bin asupersync -- lab differential",
-        "exec cargo run --features cli --bin asupersync -- lab differential \"$@\"",
+        "exec cargo run --features cli --bin asupersync -- lab differential \"${pass_through[@]}\"",
+        "Nightly differential stress wrapper (`asupersync-2a6k9.8.2`)",
+        "--profile nightly-stress",
+        "--seed-count N",
+        "--seed-stride N",
+        "--rotation-date DATE",
+        "nightly_stress_manifest.json",
+        "nightly_stress_summary.txt",
+        "retained_divergence_artifacts/",
+        "lab-live-differential-nightly-stress-v1",
+        "open_or_update_bead_with_retained_bundle",
+        "phase1-core",
     ] {
         assert!(
             script.contains(token),
@@ -422,8 +543,60 @@ fn ci_workflow_defines_fast_differential_gate() -> std::io::Result<()> {
 }
 
 #[test]
+fn nightly_workflow_defines_rotating_seed_lane() -> std::io::Result<()> {
+    let workflow = load_nightly_differential_workflow()?;
+    for token in [
+        "name: Nightly Differential Stress",
+        "schedule:",
+        "workflow_dispatch:",
+        "nightly-differential-stress:",
+        "Run nightly differential stress lane",
+        "bash scripts/run_lab_live_differential.sh \\",
+        "--profile nightly-stress",
+        "--seed-count",
+        "--seed-stride",
+        "--rotation-date",
+        "nightly_stress_manifest.json",
+        "nightly_stress_summary.txt",
+        "lab-live-differential-nightly-stress-artifacts",
+        "retention-days: 30",
+        "GITHUB_STEP_SUMMARY",
+    ] {
+        assert!(
+            workflow.contains(token),
+            "nightly workflow missing token: {token}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn ci_matrix_policy_tracks_fast_differential_lane() -> std::io::Result<()> {
     let policy = load_ci_matrix_policy_json()?;
+    let manifest = policy["differential_profile_manifest"]
+        .as_object()
+        .expect("differential_profile_manifest must be object");
+    assert_eq!(
+        manifest["schema_version"],
+        json!("lab-live-differential-profile-manifest-v1")
+    );
+    assert_eq!(
+        manifest["command"],
+        json!(
+            "rch exec -- cargo run --features cli --bin asupersync -- lab differential-profile-manifest --json"
+        )
+    );
+    assert_eq!(
+        manifest["profile_ids"],
+        json!([
+            "smoke",
+            "phase1-core",
+            "calibration",
+            "repro-targeted",
+            "nightly-stress"
+        ])
+    );
+
     let lanes = policy["lanes"]
         .as_array()
         .expect("policy lanes must be array");
@@ -478,7 +651,15 @@ fn cli_source_defines_differential_runner_surface() -> std::io::Result<()> {
     let src = std::fs::read_to_string(path)?;
     for token in [
         "LabCommand::Differential",
+        "LabCommand::DifferentialProfileManifest",
         "struct LabDifferentialArgs",
+        "lab_differential_profile_manifest_command(&manifest_args, output)",
+        "lab-live-differential-profile-manifest-v1",
+        "\"repro-targeted\"",
+        "\"nightly-stress\"",
+        "\"rotating_seed_phase1_core_pack\"",
+        "\"nightly_stress_manifest.json\"",
+        "\"nightly_stress_summary.txt\"",
         "run_lab_differential(args)",
         "differential_event_log.jsonl",
         "runner_summary.json",
@@ -491,6 +672,7 @@ fn cli_source_defines_differential_runner_surface() -> std::io::Result<()> {
         "calibration.obligation.leak_detected",
         "calibration.region.close.non_quiescent",
         "semantic_mismatch_admitted_surface",
+        "Runs the admitted Phase 1 core pack across rotated seeds",
     ] {
         assert!(
             src.contains(token),

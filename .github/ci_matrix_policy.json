@@ -7,6 +7,17 @@
     "summary_path": "artifacts/ci_matrix_policy_summary.json",
     "events_path": "artifacts/ci_matrix_policy_events.ndjson"
   },
+  "differential_profile_manifest": {
+    "schema_version": "lab-live-differential-profile-manifest-v1",
+    "command": "rch exec -- cargo run --features cli --bin asupersync -- lab differential-profile-manifest --json",
+    "profile_ids": [
+      "smoke",
+      "phase1-core",
+      "calibration",
+      "repro-targeted",
+      "nightly-stress"
+    ]
+  },
   "rch_defaults": {
     "fallback_phrase": "falling back to local"
   },

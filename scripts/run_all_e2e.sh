@@ -316,6 +316,7 @@ declare -A SUITES=(
     [websocket]="test_websocket_e2e.sh"
     [http]="test_http_e2e.sh"
     [messaging]="test_messaging_e2e.sh"
+    [fabric]="test_fabric_e2e.sh"
     [transport]="test_transport_e2e.sh"
     [database]="test_database_e2e.sh"
     [distributed]="test_distributed_e2e.sh"
@@ -344,6 +345,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [websocket]="target/e2e-results/websocket"
     [http]="target/e2e-results/http"
     [messaging]="target/e2e-results/messaging"
+    [fabric]="target/e2e-results/fabric"
     [transport]="target/e2e-results/transport"
     [database]="target/e2e-results/database"
     [distributed]="target/e2e-results/distributed"
@@ -372,6 +374,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [websocket]="summary.json"
     [http]="summary.json"
     [messaging]="summary.json"
+    [fabric]="summary.json"
     [transport]="summary.json"
     [database]="summary.json"
     [distributed]="summary.json"
@@ -400,6 +403,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [websocket]="artifacts_*"
     [http]="artifacts_*"
     [messaging]="artifacts_*"
+    [fabric]="artifacts_*"
     [transport]="artifacts_*"
     [database]="artifacts_*"
     [distributed]="artifacts_*"
@@ -428,6 +432,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [websocket]="E2E-SUITE-WEBSOCKET"
     [http]="E2E-SUITE-HTTP"
     [messaging]="E2E-SUITE-MESSAGING"
+    [fabric]="E2E-SUITE-FABRIC"
     [transport]="E2E-SUITE-TRANSPORT"
     [database]="E2E-SUITE-DATABASE"
     [distributed]="E2E-SUITE-DISTRIBUTED"
@@ -465,7 +470,7 @@ RAPTORQ_REQUIRED_SCENARIOS=(
 
 # Ordered suite list (core subsystems first, then extended)
 SUITE_ORDER=(
-    websocket http messaging transport database distributed
+    websocket http messaging fabric transport database distributed
     h2-security net-hardening redis
     combinators cancel-attribution scheduler wasm-packaged-bootstrap wasm-packaged-cancellation wasm-cross-framework wasm-incident-forensics wasm-qa-evidence-smoke doctor-workspace-scan
     doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs doctor-stress-soak

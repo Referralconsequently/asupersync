@@ -257,7 +257,7 @@ fn promoted_schedule_divergence_bundle_retains_cancellation_mismatch() {
         .clone()
         .with_source_artifact_path("/tmp/exploration/report.json");
 
-    let result = DualRunHarness::from_identity(promoted.identity.clone())
+    let result = DualRunHarness::from_identity(promoted.identity)
         .lab(|_config| make_happy_semantics())
         .live(|_seed, _entropy| make_cancellation_finalizing_semantics())
         .run();
@@ -302,7 +302,7 @@ fn promoted_schedule_divergence_bundle_retains_region_close_mismatch() {
         .clone()
         .with_source_artifact_path("/tmp/exploration/report.json");
 
-    let result = DualRunHarness::from_identity(promoted.identity.clone())
+    let result = DualRunHarness::from_identity(promoted.identity)
         .lab(|_config| make_happy_semantics())
         .live(|_seed, _entropy| make_region_draining_semantics())
         .run();

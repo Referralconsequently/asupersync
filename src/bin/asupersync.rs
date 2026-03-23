@@ -212,6 +212,8 @@ enum LabCommand {
     Explore(LabExploreArgs),
     /// Run built-in lab-vs-live differential scenario packs
     Differential(LabDifferentialArgs),
+    /// Emit the machine-readable differential operator-profile manifest
+    DifferentialProfileManifest(LabDifferentialProfileManifestArgs),
 }
 
 #[derive(Args, Debug)]
@@ -325,6 +327,13 @@ struct LabDifferentialArgs {
     )]
     out_dir: PathBuf,
 
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct LabDifferentialProfileManifestArgs {
     /// Output results as JSON
     #[arg(long = "json", action = ArgAction::SetTrue)]
     json: bool,
@@ -902,6 +911,9 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
         LabCommand::Replay(replay_args) => lab_replay(&replay_args, output),
         LabCommand::Explore(explore_args) => lab_explore(&explore_args, output),
         LabCommand::Differential(differential_args) => lab_differential(&differential_args, output),
+        LabCommand::DifferentialProfileManifest(manifest_args) => {
+            lab_differential_profile_manifest_command(&manifest_args, output)
+        }
     }
 }
 
@@ -3758,6 +3770,8 @@ const LAB_DIFFERENTIAL_SUMMARY_SCHEMA_VERSION: &str = "lab-live-differential-run
 const LAB_DIFFERENTIAL_EVENT_SCHEMA_VERSION: &str = "lab-live-differential-event-v1";
 const LAB_DIFFERENTIAL_ARTIFACT_INDEX_SCHEMA_VERSION: &str =
     "lab-live-differential-artifact-index-v1";
+const LAB_DIFFERENTIAL_PROFILE_MANIFEST_SCHEMA_VERSION: &str =
+    "lab-live-differential-profile-manifest-v1";
 
 #[derive(Clone, Copy, Debug)]
 enum LabDifferentialExpectation {
@@ -3835,6 +3849,59 @@ struct LabDifferentialScenarioReport {
     deviations_path: Option<String>,
     repro_manifest_path: Option<String>,
     repro_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialOperatorProfileManifestEntry {
+    profile_id: String,
+    support_status: String,
+    usage_class: String,
+    tier_binding: String,
+    scenario_pack: String,
+    cli_profile: Option<String>,
+    runtime_cost: String,
+    operator_intent: String,
+    exit_semantics: String,
+    invocation_recipe: String,
+    required_artifacts: Vec<String>,
+    dependency_bead: Option<String>,
+    scenario_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct LabDifferentialProfileManifestOutput {
+    schema_version: String,
+    manifest_command: String,
+    direct_cli_profiles: Vec<String>,
+    operator_profiles: Vec<LabDifferentialOperatorProfileManifestEntry>,
+}
+
+impl Outputtable for LabDifferentialProfileManifestOutput {
+    fn human_format(&self) -> String {
+        let mut summary = String::new();
+        let _ = writeln!(summary, "Differential profile manifest");
+        let _ = writeln!(summary, "Schema: {}", self.schema_version);
+        let _ = writeln!(summary, "Manifest command: {}", self.manifest_command);
+        let _ = writeln!(
+            summary,
+            "Direct CLI profiles: {}",
+            self.direct_cli_profiles.join(", ")
+        );
+        for profile in &self.operator_profiles {
+            let _ = writeln!(
+                summary,
+                "- {} [{} / {} / {}]",
+                profile.profile_id,
+                profile.support_status,
+                profile.usage_class,
+                profile.tier_binding
+            );
+            let _ = writeln!(summary, "  scenario_pack: {}", profile.scenario_pack);
+            let _ = writeln!(summary, "  runtime_cost: {}", profile.runtime_cost);
+            let _ = writeln!(summary, "  invocation: {}", profile.invocation_recipe);
+        }
+        summary
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4000,6 +4067,150 @@ fn profile_operator_intent(profile: LabDifferentialProfile) -> &'static str {
 
 fn lab_differential_exit_semantics() -> &'static str {
     "selected scenarios must end in pass or expected_divergence; unexpected_divergence and missing_expected_divergence fail the run"
+}
+
+fn lab_differential_required_artifacts() -> Vec<String> {
+    vec![
+        "runner_summary.json".to_string(),
+        "operator_summary.txt".to_string(),
+        "artifact_index.json".to_string(),
+        "differential_event_log.jsonl".to_string(),
+    ]
+}
+
+fn lab_differential_profile_manifest_direct_entry(
+    profile: LabDifferentialProfile,
+) -> LabDifferentialOperatorProfileManifestEntry {
+    let args = LabDifferentialArgs {
+        profile,
+        scenarios: Vec::new(),
+        seed: 424_242,
+        out_dir: PathBuf::from("target/e2e-results/lab_live_differential"),
+        json: true,
+    };
+    let scenario_ids = select_lab_differential_scenarios(&args)
+        .expect("built-in differential profile must resolve")
+        .into_iter()
+        .map(|definition| definition.id.to_string())
+        .collect::<Vec<_>>();
+    let scenario_pack = match profile {
+        LabDifferentialProfile::Smoke => "smoke_semantic_core",
+        LabDifferentialProfile::Phase1Core => "phase1_core_floor",
+        LabDifferentialProfile::Calibration => "calibration_negative_control",
+    };
+    let usage_class = match profile {
+        LabDifferentialProfile::Smoke => "local_smoke",
+        LabDifferentialProfile::Phase1Core => "targeted_core_validation",
+        LabDifferentialProfile::Calibration => "self_calibration",
+    };
+
+    LabDifferentialOperatorProfileManifestEntry {
+        profile_id: profile.as_str().to_string(),
+        support_status: "shipped".to_string(),
+        usage_class: usage_class.to_string(),
+        tier_binding: profile_evidence_grade(profile).to_string(),
+        scenario_pack: scenario_pack.to_string(),
+        cli_profile: Some(profile.as_str().to_string()),
+        runtime_cost: profile_runtime_cost(profile).to_string(),
+        operator_intent: profile_operator_intent(profile).to_string(),
+        exit_semantics: lab_differential_exit_semantics().to_string(),
+        invocation_recipe: format!(
+            "scripts/run_lab_live_differential.sh --profile {} --seed <seed> --out-dir <out-dir>",
+            profile.as_str()
+        ),
+        required_artifacts: lab_differential_required_artifacts(),
+        dependency_bead: None,
+        scenario_ids,
+    }
+}
+
+fn lab_differential_profile_manifest() -> LabDifferentialProfileManifestOutput {
+    let direct_profiles = [
+        LabDifferentialProfile::Smoke,
+        LabDifferentialProfile::Phase1Core,
+        LabDifferentialProfile::Calibration,
+    ];
+    let direct_profile_entries = direct_profiles
+        .iter()
+        .copied()
+        .map(lab_differential_profile_manifest_direct_entry)
+        .collect::<Vec<_>>();
+    let phase1_core_scenario_ids = direct_profile_entries
+        .iter()
+        .find(|profile| profile.profile_id == LabDifferentialProfile::Phase1Core.as_str())
+        .map(|profile| profile.scenario_ids.clone())
+        .expect("phase1-core profile manifest entry must exist");
+    let mut operator_profiles = direct_profile_entries;
+
+    operator_profiles.push(LabDifferentialOperatorProfileManifestEntry {
+        profile_id: "repro-targeted".to_string(),
+        support_status: "shipped".to_string(),
+        usage_class: "targeted_repro".to_string(),
+        tier_binding: "selected_scenario_tier".to_string(),
+        scenario_pack: "single_scenario_replay_or_reproduction".to_string(),
+        cli_profile: Some(LabDifferentialProfile::Phase1Core.as_str().to_string()),
+        runtime_cost: "targeted".to_string(),
+        operator_intent: "Replay or reproduce one selected scenario with a pinned seed and retained artifacts.".to_string(),
+        exit_semantics: lab_differential_exit_semantics().to_string(),
+        invocation_recipe: "scripts/run_lab_live_differential.sh --profile phase1-core --scenario <scenario-id> --seed <seed> --out-dir <out-dir>".to_string(),
+        required_artifacts: lab_differential_required_artifacts(),
+        dependency_bead: None,
+        scenario_ids: Vec::new(),
+    });
+
+    operator_profiles.push(LabDifferentialOperatorProfileManifestEntry {
+        profile_id: "nightly-stress".to_string(),
+        support_status: "shipped".to_string(),
+        usage_class: "scheduled_stress".to_string(),
+        tier_binding: "T5 stress_nightly".to_string(),
+        scenario_pack: "rotating_seed_phase1_core_pack".to_string(),
+        cli_profile: Some(LabDifferentialProfile::Phase1Core.as_str().to_string()),
+        runtime_cost: "heavy".to_string(),
+        operator_intent: "Rotating-seed scheduled stress lane that repeatedly runs the admitted Phase 1 core pack and retains escalation-ready divergence artifacts.".to_string(),
+        exit_semantics: "Runs the admitted Phase 1 core pack across rotated seeds, fails on any unexpected divergence or artifact-contract regression, and writes nightly_stress_manifest.json plus per-seed replay pointers.".to_string(),
+        invocation_recipe: "scripts/run_lab_live_differential.sh --profile nightly-stress --seed <seed> --seed-count <count> --seed-stride <stride> --rotation-date <date> --out-dir <out-dir>".to_string(),
+        required_artifacts: {
+            let mut artifacts = lab_differential_required_artifacts();
+            artifacts.push("nightly_stress_manifest.json".to_string());
+            artifacts.push("nightly_stress_summary.txt".to_string());
+            artifacts.push("retained_divergence_artifacts/".to_string());
+            artifacts
+        },
+        dependency_bead: None,
+        scenario_ids: phase1_core_scenario_ids,
+    });
+
+    LabDifferentialProfileManifestOutput {
+        schema_version: LAB_DIFFERENTIAL_PROFILE_MANIFEST_SCHEMA_VERSION.to_string(),
+        manifest_command: "asupersync lab differential-profile-manifest --json".to_string(),
+        direct_cli_profiles: direct_profiles
+            .iter()
+            .copied()
+            .map(LabDifferentialProfile::as_str)
+            .map(str::to_string)
+            .collect(),
+        operator_profiles,
+    }
+}
+
+fn lab_differential_profile_manifest_command(
+    args: &LabDifferentialProfileManifestArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let manifest = lab_differential_profile_manifest();
+    if args.json {
+        let pretty = serde_json::to_string_pretty(&manifest).map_err(output_cli_error)?;
+        writeln!(io::stdout(), "{pretty}").map_err(output_cli_error)?;
+        return Ok(());
+    }
+
+    output.write(&manifest).map_err(|err| {
+        CliError::new(
+            "output_error",
+            "Failed to write differential profile manifest output",
+        )
+        .detail(err.to_string())
+    })
 }
 
 fn lab_differential_profile_contract(
@@ -6874,6 +7085,113 @@ mod tests {
         assert_eq!(args.seed, 77);
         assert_eq!(args.out_dir, PathBuf::from("artifacts/diff"));
         assert!(args.json);
+    }
+
+    #[test]
+    fn lab_differential_profile_manifest_command_parses() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "lab",
+            "differential-profile-manifest",
+            "--json",
+        ])
+        .expect("parse differential profile manifest command");
+
+        let Command::Lab(LabArgs {
+            command: LabCommand::DifferentialProfileManifest(args),
+        }) = cli.command
+        else {
+            panic!("expected lab differential-profile-manifest command");
+        };
+
+        assert!(args.json);
+    }
+
+    #[test]
+    fn lab_differential_profile_manifest_covers_operator_vocabulary() {
+        let manifest = lab_differential_profile_manifest();
+        assert_eq!(
+            manifest.schema_version,
+            LAB_DIFFERENTIAL_PROFILE_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(
+            manifest.direct_cli_profiles,
+            vec![
+                "smoke".to_string(),
+                "phase1-core".to_string(),
+                "calibration".to_string()
+            ]
+        );
+
+        let profile_ids = manifest
+            .operator_profiles
+            .iter()
+            .map(|profile| profile.profile_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            profile_ids,
+            vec![
+                "smoke",
+                "phase1-core",
+                "calibration",
+                "repro-targeted",
+                "nightly-stress"
+            ]
+        );
+
+        let repro = manifest
+            .operator_profiles
+            .iter()
+            .find(|profile| profile.profile_id == "repro-targeted")
+            .expect("repro-targeted profile present");
+        assert_eq!(repro.support_status, "shipped");
+        assert_eq!(repro.cli_profile.as_deref(), Some("phase1-core"));
+        assert!(
+            repro.invocation_recipe.contains("--scenario <scenario-id>"),
+            "repro-targeted must preserve scenario-scoped replay recipe"
+        );
+
+        let nightly = manifest
+            .operator_profiles
+            .iter()
+            .find(|profile| profile.profile_id == "nightly-stress")
+            .expect("nightly-stress profile present");
+        assert_eq!(nightly.support_status, "shipped");
+        assert_eq!(nightly.cli_profile.as_deref(), Some("phase1-core"));
+        assert_eq!(nightly.dependency_bead, None);
+        assert_eq!(nightly.tier_binding, "T5 stress_nightly");
+        assert_eq!(nightly.scenario_pack, "rotating_seed_phase1_core_pack");
+        assert!(
+            nightly
+                .invocation_recipe
+                .contains("--seed-count <count> --seed-stride <stride> --rotation-date <date>"),
+            "nightly-stress recipe must expose rotating-seed controls"
+        );
+        assert_eq!(
+            nightly.required_artifacts,
+            vec![
+                "runner_summary.json".to_string(),
+                "operator_summary.txt".to_string(),
+                "artifact_index.json".to_string(),
+                "differential_event_log.jsonl".to_string(),
+                "nightly_stress_manifest.json".to_string(),
+                "nightly_stress_summary.txt".to_string(),
+                "retained_divergence_artifacts/".to_string()
+            ]
+        );
+        assert_eq!(
+            nightly.scenario_ids,
+            vec![
+                "phase1.cancel.protocol.drain_finalize".to_string(),
+                "phase1.cancel.protocol.before_first_poll".to_string(),
+                "phase1.cancel.protocol.child_await".to_string(),
+                "phase1.cancel.protocol.cleanup_budget".to_string(),
+                "phase1.combinator.race.one_loser".to_string(),
+                "phase1.channel.reserve_send.commit".to_string(),
+                "phase1.channel.reserve_send.abort_visible".to_string(),
+                "phase1.region.close.quiescent".to_string()
+            ]
+        );
     }
 
     #[test]
