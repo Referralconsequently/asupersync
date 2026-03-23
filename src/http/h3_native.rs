@@ -1429,15 +1429,17 @@ impl H3ConnectionState {
         // on the same QUIC stream are still rejected as protocol violations.
         self.request_streams.remove(&stream_id);
         self.finished_request_streams.insert(stream_id);
-        
+
         // Compact finished streams to avoid unbounded memory growth.
         // Client bidi streams start at 0 and increment by 4.
-        let mut next_expected = self.max_contiguous_finished_request_stream_id.map_or(0, |id| id + 4);
+        let mut next_expected = self
+            .max_contiguous_finished_request_stream_id
+            .map_or(0, |id| id + 4);
         while self.finished_request_streams.remove(&next_expected) {
             self.max_contiguous_finished_request_stream_id = Some(next_expected);
             next_expected += 4;
         }
-        
+
         Ok(())
     }
 
