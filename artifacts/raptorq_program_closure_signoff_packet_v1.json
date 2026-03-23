@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-2f71w",
   "parent_track_bead_id": "asupersync-p8o9m",
   "external_ref": "bd-23cxf",
-  "generated_at_utc": "2026-03-06T00:35:00Z",
+  "generated_at_utc": "2026-03-23T08:25:00Z",
   "packet_state": {
     "status": "draft_blocked",
     "go_no_go_decision": "no_go_pending_dependency_closure",
@@ -94,7 +94,7 @@
       "track_bead_id": "asupersync-2ncba",
       "required_status": "closed",
       "current_status": "in_progress",
-      "status_reason": "Track-E is still converging; H2 closure consumes this via Track-G governance closure path.",
+      "status_reason": "Track-E remains the unresolved upstream convergence lane; H2 closure consumes it only through the still-open Track-G governance path, with E5 as the active closure-critical leaf.",
       "closure_dependency_path": "via asupersync-2cyx5",
       "evidence_refs": [
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
@@ -120,7 +120,7 @@
       "track_bead_id": "asupersync-2cyx5",
       "required_status": "closed",
       "current_status": "in_progress",
-      "status_reason": "Track-G is actively owned and in progress; governance aggregation still blocks final sign-off until closure.",
+      "status_reason": "Track-G is the sole remaining direct blocker for H2 sign-off; parent governance closure still depends on Track-E convergence, especially the active E5 lane.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "artifacts/raptorq_controlled_rollout_policy_v1.json",
@@ -133,7 +133,7 @@
       "track_bead_id": "asupersync-p8o9m",
       "required_status": "closed",
       "current_status": "closed",
-      "status_reason": "Track-H finalization/sign-off completed. Track-G and final adjudication pending.",
+      "status_reason": "Track-H finalization/sign-off completed; Track-G is the sole remaining blocker before final sign-off publication.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "docs/raptorq_program_closure_signoff_packet.md",
@@ -417,8 +417,8 @@
       "check_id": "h2-residual-risk-and-follow-up-ownership",
       "state": "blocked",
       "required_artifacts": [
-        ".beads/issues.jsonl#asupersync-346lm",
-        "asupersync-p8o9m"
+        "artifacts/raptorq_program_closure_signoff_packet_v1.json#residual_risk_register",
+        "artifacts/raptorq_program_closure_signoff_packet_v1.json#follow_up_ownership"
       ],
       "replay_commands": [
         "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_docs_are_cross_linked -- --nocapture"
@@ -438,8 +438,8 @@
       "risk_id": "RQ-H2-R2",
       "severity": "medium",
       "status": "open",
-      "description": "Track-G aggregation (`asupersync-2cyx5`) is still in progress and may update lever governance fields.",
-      "mitigation": "Re-run lever matrix and claim-boundary checklist once Track-G reaches closure.",
+      "description": "Track-G aggregation (`asupersync-2cyx5`) is the sole remaining H2 blocker because Track-E convergence, especially `asupersync-36m6p`, can still change lever governance fields.",
+      "mitigation": "Re-run the lever matrix, claim-boundary checklist, and blocker wording once Track-E/E5 closes and Track-G can transition out of in_progress.",
       "owner_bead_id": "asupersync-2cyx5"
     }
   ],
