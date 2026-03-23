@@ -71,6 +71,100 @@ function assert(condition, message) {
   }
 }
 
+function buildScenarioInventory(bootstrap, preferredCandidate, prerequisiteLossCandidate, parsed) {
+  return [
+    {
+      scenario_id: "worker_bootstrap_baseline",
+      failure_family: "baseline",
+      expected_outcome: "dedicated worker direct runtime stays selected on the no-throw path",
+      artifact_keys: ["browser_run"],
+      observed: {
+        selected_lane: bootstrap.runtimeSelectionBaseline.selectedLane,
+        scope_outcome: bootstrap.scopeSelectionBaseline.outcome,
+      },
+    },
+    {
+      scenario_id: "preferred_lane_mismatch_truthful_worker_selection",
+      failure_family: "preferred_lane_mismatch",
+      expected_outcome: "requested main-thread preference stays truthful to the worker lane",
+      artifact_keys: ["browser_run"],
+      observed: {
+        preferred_lane: bootstrap.scopeSelectionPreferredMainThread.preferredLane,
+        selected_lane: bootstrap.scopeSelectionPreferredMainThread.selectedLane,
+        outcome: bootstrap.scopeSelectionPreferredMainThread.outcome,
+      },
+    },
+    {
+      scenario_id: "worker_loss_retry_window",
+      failure_family: "worker_loss",
+      expected_outcome: "first worker loss consumes retry budget without silent downgrade",
+      artifact_keys: ["browser_run"],
+      observed: {
+        lane_health_status: bootstrap.laneHealthRetrying.status,
+        trigger: bootstrap.laneHealthRetrying.lastTrigger,
+        retry_budget_remaining: bootstrap.laneHealthRetrying.retryBudgetRemaining,
+        selected_lane: bootstrap.executionLadderRetrying.selectedLane,
+      },
+    },
+    {
+      scenario_id: "worker_loss_fail_closed_demotion",
+      failure_family: "worker_loss",
+      expected_outcome: "exhausted retry budget demotes fail-closed instead of silently falling through",
+      artifact_keys: ["browser_run"],
+      observed: {
+        lane_health_status: bootstrap.laneHealthDemotion.status,
+        demoted_to_lane_id: bootstrap.laneHealthDemotion.demotedToLaneId,
+        failure_count: bootstrap.laneHealthDemotion.failureCount,
+        reason_code: bootstrap.runtimeSelectionDemoted.reasonCode,
+        candidate_reason: preferredCandidate?.reasonCode ?? null,
+      },
+    },
+    {
+      scenario_id: "prerequisite_drift_reason_precedence",
+      failure_family: "prerequisite_drift",
+      expected_outcome: "current prerequisite loss outranks stale demotion state",
+      artifact_keys: ["browser_run"],
+      observed: {
+        reason_code: bootstrap.runtimeSelectionPrerequisiteLoss?.reasonCode ?? null,
+        health_status: bootstrap.runtimeSelectionPrerequisiteLoss?.health?.status ?? null,
+        stale_health_trigger:
+          bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger ?? null,
+        candidate_reason: prerequisiteLossCandidate?.reasonCode ?? null,
+      },
+    },
+    {
+      scenario_id: "lane_health_recovery",
+      failure_family: "recovery",
+      expected_outcome: "health reset restores the dedicated worker lane",
+      artifact_keys: ["browser_run"],
+      observed: {
+        lane_health_status: bootstrap.laneHealthReset.status,
+        selected_lane: bootstrap.runtimeSelectionRecovered.selectedLane,
+        outcome: bootstrap.runtimeSelectionRecovered.outcome,
+      },
+    },
+    {
+      scenario_id: "graceful_shutdown_handoff",
+      failure_family: "shutdown",
+      expected_outcome: "fixture reaches shutdown_complete after worker handoff",
+      artifact_keys: ["browser_run"],
+      observed: {
+        final_phase: parsed.phase,
+        shutdown_reason: parsed.shutdown_reason,
+      },
+    },
+  ];
+}
+
+function buildArtifacts(url) {
+  return {
+    browser_run: outputPath,
+    dist_dir: distDir,
+    entry_html: path.join(distDir, "index.html"),
+    served_url: url,
+  };
+}
+
 function startStaticServer() {
   const server = http.createServer((request, response) => {
     try {
@@ -360,6 +454,13 @@ try {
     `unexpected worker artifact quota failure reason: ${bootstrap.artifactExercise?.quotaFailureReason ?? "missing"}`,
   );
 
+  const scenarioInventory = buildScenarioInventory(
+    bootstrap,
+    preferredCandidate,
+    prerequisiteLossCandidate,
+    parsed,
+  );
+
   result = {
     status: "ok",
     url,
@@ -410,6 +511,8 @@ try {
     storage_backend: bootstrap.storageExercise?.backend ?? null,
     artifact_download_failure_code: bootstrap.artifactExercise?.downloadFailureCode ?? null,
     quota_failure_reason: bootstrap.artifactExercise?.quotaFailureReason ?? null,
+    scenario_inventory: scenarioInventory,
+    artifacts: buildArtifacts(url),
   };
 } catch (error) {
   caughtError = error;
@@ -418,6 +521,8 @@ try {
     url,
     executable_path: executablePath,
     message: error instanceof Error ? error.message : String(error),
+    scenario_inventory: [],
+    artifacts: buildArtifacts(url),
   };
 } finally {
   writeResult(result);

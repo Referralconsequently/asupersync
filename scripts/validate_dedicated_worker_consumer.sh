@@ -96,7 +96,7 @@ PY
   PATH="/usr/bin:${PATH}" npm run check:browser -- "${BROWSER_RUN_FILE}"
 ) | tee "${LOG_FILE}"
 
-python3 - "${CONSUMER_DIR}" "${SUMMARY_FILE}" "${TIMESTAMP}" "${BROWSER_RUN_FILE}" <<'PY'
+python3 - "${CONSUMER_DIR}" "${SUMMARY_FILE}" "${TIMESTAMP}" "${BROWSER_RUN_FILE}" "${LOG_FILE}" "${REPO_ROOT}" <<'PY'
 import json
 import pathlib
 import sys
@@ -105,6 +105,8 @@ consumer = pathlib.Path(sys.argv[1])
 summary_path = pathlib.Path(sys.argv[2])
 timestamp = sys.argv[3]
 browser_run_path = pathlib.Path(sys.argv[4])
+log_path = pathlib.Path(sys.argv[5])
+repo_root = pathlib.Path(sys.argv[6])
 dist = consumer / "dist"
 assets = dist / "assets"
 asset_files = (
@@ -117,6 +119,13 @@ asset_files = (
     else []
 )
 browser_run = json.loads(browser_run_path.read_text())
+
+
+def repo_relative(path: pathlib.Path) -> str:
+    try:
+        return str(path.relative_to(repo_root))
+    except ValueError:
+        return str(path)
 
 markers = {
     "worker_bootstrap_marker": False,
@@ -171,11 +180,47 @@ for asset in asset_files:
     markers["worker_artifact_quota_guard_marker"] |= "worker-artifact-quota-guard" in content
     markers["worker_artifact_cleanup_marker"] |= "worker-artifact-cleanup" in content
 
+scenario_inventory = browser_run.get("scenario_inventory") or [
+    {
+        "scenario_id": "worker_loss_retry_window",
+        "failure_family": "worker_loss",
+        "expected_outcome": "first worker loss consumes retry budget without silent downgrade",
+        "artifact_keys": ["browser_run", "log"],
+    },
+    {
+        "scenario_id": "worker_loss_fail_closed_demotion",
+        "failure_family": "worker_loss",
+        "expected_outcome": "exhausted retry budget demotes fail-closed instead of silently falling through",
+        "artifact_keys": ["browser_run", "log"],
+    },
+    {
+        "scenario_id": "prerequisite_drift_reason_precedence",
+        "failure_family": "prerequisite_drift",
+        "expected_outcome": "current prerequisite loss outranks stale demotion state",
+        "artifact_keys": ["browser_run", "log"],
+    },
+]
+
+artifacts = {
+    "summary": repo_relative(summary_path),
+    "browser_run": repo_relative(browser_run_path),
+    "log": repo_relative(log_path),
+    "fixture": "tests/fixtures/dedicated-worker-consumer",
+}
+
+replay_commands = [
+    "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
+    "cd tests/fixtures/dedicated-worker-consumer && PATH=/usr/bin:$PATH npm run check:bundle",
+]
+
 summary = {
     "scenario_id": "L6-BUNDLER-DEDICATED-WORKER",
     "timestamp": timestamp,
     "fixture": "tests/fixtures/dedicated-worker-consumer",
     "status": "pass",
+    "scenario_inventory": scenario_inventory,
+    "artifacts": artifacts,
+    "replay_commands": replay_commands,
     "checks": {
         "dist_exists": dist.exists(),
         "index_html_exists": (dist / "index.html").exists(),

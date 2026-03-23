@@ -275,3 +275,122 @@ fn canonical_browser_docs_reference_the_contract_and_current_reason_codes() {
         "troubleshooting guide must not mention the removed missing_browser_dom reason"
     );
 }
+
+#[test]
+fn maintained_service_worker_broker_fixture_exists_with_required_files() {
+    let fixture = repo_root().join("tests/fixtures/service-worker-broker-consumer");
+    assert!(
+        fixture.exists(),
+        "service-worker broker fixture directory must exist"
+    );
+
+    for rel in [
+        "README.md",
+        "package.json",
+        "index.html",
+        "vite.config.ts",
+        "src/main.ts",
+        "src/service-worker.ts",
+        "scripts/check-bundle.mjs",
+        "scripts/check-browser-run.mjs",
+    ] {
+        let path = fixture.join(rel);
+        assert!(path.exists(), "missing fixture file: {}", path.display());
+    }
+}
+
+#[test]
+fn maintained_service_worker_broker_validation_path_is_pinned() {
+    let script = read_file("scripts/validate_service_worker_broker_consumer.sh");
+    for marker in [
+        "tests/fixtures/service-worker-broker-consumer",
+        "target/e2e-results/service_worker_broker_consumer",
+        "BROWSER_RUN_FILE",
+        "npm run build",
+        "npm run check:bundle",
+        "npm run check:browser -- \"${BROWSER_RUN_FILE}\"",
+        "\"real_browser_run_ok\": browser_run[\"status\"] == \"ok\"",
+        "\"browser_broker_supported\": browser_run[\"broker_supported\"] is True",
+        "\"browser_direct_execution_reason\": browser_run[\"direct_execution_reason_code\"]",
+        "\"browser_handoff_target_lane_id\": browser_run[\"handoff_target_lane_id\"]",
+        "\"browser_mismatch_reason\": browser_run[\"mismatch_reason\"]",
+        "L6-SERVICE-WORKER-BROKER",
+        "asupersync-n6kwt.7.2",
+    ] {
+        assert!(
+            script.contains(marker),
+            "validation script missing expected marker: {marker}"
+        );
+    }
+
+    let fixture_readme = read_file("tests/fixtures/service-worker-broker-consumer/README.md");
+    for marker in [
+        "scripts/validate_service_worker_broker_consumer.sh",
+        "detectBrowserServiceWorkerBrokerSupport()",
+        "BrowserServiceWorkerBrokerStore",
+        "registerBroker()",
+        "persistBrokerWork()",
+        "persistDurableHandoff()",
+        "check-browser-run.mjs",
+    ] {
+        assert!(
+            fixture_readme.contains(marker),
+            "fixture readme missing expected marker: {marker}"
+        );
+    }
+
+    let main = read_file("tests/fixtures/service-worker-broker-consumer/src/main.ts");
+    for marker in [
+        "navigator.serviceWorker.register",
+        "service-worker-broker-ready",
+        "\"cleanup_complete\"",
+        "\"run-broker-demo\"",
+    ] {
+        assert!(
+            main.contains(marker),
+            "fixture main source missing expected marker: {marker}"
+        );
+    }
+
+    let service_worker =
+        read_file("tests/fixtures/service-worker-broker-consumer/src/service-worker.ts");
+    for marker in [
+        "detectBrowserServiceWorkerBrokerSupport",
+        "createBrowserServiceWorkerBrokerStore",
+        "registerBroker",
+        "persistBrokerWork",
+        "persistDurableHandoff",
+        "listDurableHandoffs",
+        "service-worker-broker-mismatch",
+        "service_worker_direct_runtime_not_shipped",
+    ] {
+        assert!(
+            service_worker.contains(marker),
+            "fixture service-worker source missing expected marker: {marker}"
+        );
+    }
+
+    let vite = read_file("tests/fixtures/service-worker-broker-consumer/vite.config.ts");
+    for marker in ["base: \"./\"", "service-worker.js", "src/service-worker.ts"] {
+        assert!(
+            vite.contains(marker),
+            "fixture vite config missing expected marker: {marker}"
+        );
+    }
+
+    let browser_check =
+        read_file("tests/fixtures/service-worker-broker-consumer/scripts/check-browser-run.mjs");
+    for marker in [
+        "import { chromium } from \"playwright-core\";",
+        "SERVICE-WORKER-BROKER-CONSUMER",
+        "service_worker_direct_runtime_not_shipped",
+        "broker_protocol_version_mismatch",
+        "cleanup_complete",
+        "service-worker-broker-ready",
+    ] {
+        assert!(
+            browser_check.contains(marker),
+            "fixture browser-run checker missing expected marker: {marker}"
+        );
+    }
+}

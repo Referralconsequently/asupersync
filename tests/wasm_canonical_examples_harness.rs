@@ -6,12 +6,12 @@ use asupersync::net::worker_channel::{
 };
 use asupersync::types::wasm_abi::ErrorBoundaryAction;
 use asupersync::types::{
+    outcome_to_error_boundary_action, outcome_to_suspense_state, outcome_to_transition_state,
     NextjsBootstrapPhase, NextjsNavigationType, ReactProviderConfig, ReactProviderPhase,
     ReactProviderState, SuspenseBoundaryState, TransitionTaskState, WasmAbiCancellation,
     WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiRecoverability, WasmAbiSymbol,
     WasmAbiValue, WasmBoundaryState, WasmExportDispatcher, WasmTaskCancelRequest,
-    WasmTaskSpawnBuilder, outcome_to_error_boundary_action, outcome_to_suspense_state,
-    outcome_to_transition_state,
+    WasmTaskSpawnBuilder,
 };
 use asupersync::web::{
     BootstrapCommand, BootstrapRecoveryAction, NextjsBootstrapError, NextjsBootstrapState,
@@ -626,9 +626,14 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         "BrowserArtifactStore",
         "createBrowserRuntimeSelection()",
         "createBrowserScopeSelection()",
+        "Chaos scenario inventory",
+        "`scenario_inventory`",
+        "`artifacts`",
         "lane-health retry window",
         "reportBrowserLaneUnhealthy()",
         "resetBrowserLaneHealth()",
+        "worker_loss_fail_closed_demotion",
+        "prerequisite_drift_reason_precedence",
         "check-browser-run.mjs",
         "browser-run.json",
         "downloadArchive()",
@@ -682,6 +687,10 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         "demoted_health_last_trigger",
         "demoted_health_demoted_to_lane_id",
         "prerequisite_loss_health_demoted_to_lane_id",
+        "scenario_inventory",
+        "worker_loss_retry_window",
+        "worker_loss_fail_closed_demotion",
+        "prerequisite_drift_reason_precedence",
         "runtimeSelectionDemoted",
         "runtimeSelectionRecovered",
     ] {
@@ -696,11 +705,16 @@ fn dedicated_worker_fixture_covers_storage_and_artifact_export_paths() {
         .unwrap_or_else(|_| panic!("missing {}", validator_path.display()));
     for marker in [
         "BROWSER_RUN_FILE",
+        "scenario_inventory",
+        "artifacts",
+        "replay_commands",
         "browser_demotion_last_trigger",
         "browser_demotion_demoted_to_lane_id",
         "browser_demoted_health_last_trigger",
         "browser_demoted_health_demoted_to_lane_id",
         "browser_prerequisite_loss_health_demoted_to_lane_id",
+        "worker_loss_fail_closed_demotion",
+        "prerequisite_drift_reason_precedence",
     ] {
         assert!(
             validator.contains(marker),

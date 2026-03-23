@@ -275,6 +275,12 @@ Related host-ladder validation:
 rch exec -- cargo test --test wasm_browser_feasibility_matrix -- --nocapture
 ```
 
+Maintained browser-run lifecycle validation:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_service_worker_broker_consumer.sh
+```
+
 ## Cross-References
 
 - `packages/browser/src/index.ts`
@@ -282,3 +288,5 @@ rch exec -- cargo test --test wasm_browser_feasibility_matrix -- --nocapture
 - `docs/WASM.md`
 - `docs/integration.md`
 - `tests/wasm_browser_feasibility_matrix.rs`
+- `tests/fixtures/service-worker-broker-consumer/`
+- `scripts/validate_service_worker_broker_consumer.sh`

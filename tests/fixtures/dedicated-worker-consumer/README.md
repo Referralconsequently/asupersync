@@ -47,6 +47,30 @@ local package copies to keep runs deterministic and side-effect free.
   selection, no-throw preferred-lane mismatch handling, fail-closed health
   demotion, and healthy recovery
 
+## Chaos scenario inventory
+
+The maintained browser-run evidence publishes a `scenario_inventory` so release
+gates can reason about the important failure families instead of treating this
+fixture as a black-box smoke test. The current inventory covers:
+
+- `worker_bootstrap_baseline`
+  proves the direct dedicated-worker lane stays selected on the no-throw path
+- `preferred_lane_mismatch_truthful_worker_selection`
+  proves a requested main-thread preference still reports the truthful worker
+  lane without throwing
+- `worker_loss_retry_window`
+  proves the first worker-loss signal stays inside the bounded retry window
+- `worker_loss_fail_closed_demotion`
+  proves exhausted retry budget demotes fail-closed instead of silently
+  downgrading
+- `prerequisite_drift_reason_precedence`
+  proves current prerequisite drift reports the live prerequisite failure rather
+  than stale demotion state
+- `lane_health_recovery`
+  proves `resetBrowserLaneHealth()` restores the dedicated-worker lane
+- `graceful_shutdown_handoff`
+  proves the worker and main thread reach `shutdown_complete`
+
 ## Deterministic Validation
 
 Run the maintained example through the canonical validation path:
@@ -61,5 +85,9 @@ The validation artifacts are emitted under:
 target/e2e-results/dedicated_worker_consumer/
 ```
 
-The canonical validator writes both `summary.json` and `browser-run.json` so
-future regressions can inspect the browser-observed lane diagnostics directly.
+The canonical validator writes `summary.json`, `browser-run.json`, and the build
+log with artifact pointers under `artifacts`, plus stable `replay_commands` for
+rerunning the maintained checks. `summary.json` preserves the
+`scenario_inventory`, while `browser-run.json` carries the browser-observed
+diagnostics for worker loss, demotion, prerequisite drift, recovery, and
+shutdown.

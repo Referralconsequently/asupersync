@@ -39,11 +39,13 @@ fn doc_defines_tenancy_tuple_and_registration_identity() {
     let doc = read_file(DOC_PATH);
     for marker in [
         "(origin, app_namespace, app_version_major, coordinator_protocol_version, run_profile)",
+        "same-origin multi-tab",
         "same-origin only",
         "client_instance_id",
         "client_epoch",
         "client_kind",
         "client_artifact_namespace",
+        "client churn",
         "registration is explicit and idempotent",
     ] {
         assert!(doc.contains(marker), "doc missing tenancy marker: {marker}");
@@ -127,4 +129,90 @@ fn canonical_browser_docs_reference_the_contract() {
         integration.contains("Browser shared worker"),
         "integration guide must carry a dedicated shared-worker environment row"
     );
+}
+
+#[test]
+fn browser_package_support_surface_pins_admission_and_recovery_guards() {
+    let browser = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "export interface BrowserSharedWorkerCoordinatorSupportDiagnostics",
+        "\"shared_worker_api_missing\"",
+        "\"origin_not_same_origin_or_opaque\"",
+        "\"app_namespace_mismatch\"",
+        "\"app_version_major_mismatch\"",
+        "\"coordinator_protocol_version_mismatch\"",
+        "\"durable_store_unavailable_for_recovery_required_profile\"",
+        "\"registration_schema_mismatch\"",
+        "\"coordinator_crash_or_browser_reclaim\"",
+        "\"lane_health_demoted\"",
+        "runProfile !== \"ephemeral\"",
+        "scriptOrigin !== null && scriptOrigin !== origin",
+        "@asupersync/browser shared-worker coordinator prerequisites are available; direct BrowserRuntime creation remains fail-closed inside the shared-worker host and attach must downgrade explicitly on denial or loss.",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser package missing SharedWorker support marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_package_selection_demotes_explicit_attach_failures() {
+    let browser = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "selectedMode: \"shared_worker\"",
+        "selectedMode: \"fallback\"",
+        "return createBrowserSharedWorkerFallbackSelection(",
+        "SharedWorker coordinator rejected attach with ${responseReason}.",
+        "SharedWorker coordinator reported protocol ${response.coordinatorProtocolVersion}, expected ${admission.coordinatorProtocolVersion}.",
+        "SharedWorker coordinator is missing required features:",
+        "SharedWorker coordinator attach timed out after ${timeoutMs}ms.",
+        "SharedWorker coordinator attach failed before the handshake could start:",
+        "Downgrade immediately to the fallback lane whenever the coordinator denies attach, crashes, or is reclaimed by the browser.",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser package missing SharedWorker fallback marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_package_client_close_preserves_detach_and_terminated_lifecycle() {
+    let browser = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "export class BrowserSharedWorkerCoordinatorClient {",
+        "type: \"asupersync.browser.shared_worker.detach\"",
+        "clientInstanceId: this.attachDiagnosticsSnapshot.client.clientInstanceId",
+        "clientEpoch: this.attachDiagnosticsSnapshot.client.clientEpoch",
+        "this.lifecycleStateValue = \"draining\";",
+        "this.lifecycleStateValue = \"terminated\";",
+        "Closing the client must stay best-effort because the browser may have",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser package missing SharedWorker lifecycle marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn release_and_readiness_docs_pin_guarded_shared_worker_evidence_story() {
+    let release = read_file("docs/wasm_release_channel_strategy.md");
+    let readiness = read_file("docs/wasm_ga_readiness_review_board_checklist.md");
+    for marker in [
+        "guarded canary-only",
+        "preview_only",
+        "shared_worker_direct_runtime_not_shipped",
+        "docs/wasm_shared_worker_tenancy_lifecycle_contract.md",
+    ] {
+        assert!(
+            release.contains(marker),
+            "release strategy missing SharedWorker marker: {marker}"
+        );
+        assert!(
+            readiness.contains(marker),
+            "readiness checklist missing SharedWorker marker: {marker}"
+        );
+    }
 }

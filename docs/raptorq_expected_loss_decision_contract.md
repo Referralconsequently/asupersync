@@ -91,6 +91,14 @@ to:
 
 - `artifacts/raptorq_replay_catalog_v1.json`
 
+Track-E evidence consumed by the expected-loss gate stays anchored to:
+
+- `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` (`highconf_v1`)
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json`
+  (`short_window_directional_not_closure_grade`, `raw-sample`)
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json`
+  (`longer_window_interval_proxy_negative_guardrail`, `raw-sample`)
+
 The replay bundle must include fixed-input decision samples for:
 
 1. `normal`
@@ -104,11 +112,8 @@ Each sample carries a full decision-output payload (`state_posterior`,
 
 Cargo-heavy validation and replay commands must use `rch`:
 
-- `rch exec -- cargo ...`
-
-Primary replay anchor:
-
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture`
+- `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture`
 
 ## Closure Readiness Contract
 
@@ -122,7 +127,7 @@ Current dependency set in the artifact:
 3. `asupersync-n5fk6` (F7 final closure evidence in G3 cards) must be `closed`
 4. `asupersync-2zu9p` (F8 implementation + closure evidence) must be `closed`
 
-Current closure-readiness status (2026-03-05 refresh):
+Current closure-readiness status (2026-03-23 refresh):
 
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`

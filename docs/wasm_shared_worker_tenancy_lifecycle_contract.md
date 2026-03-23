@@ -17,6 +17,12 @@ This contract answers:
 4. how quiescence and coordinator loss map to downgrade,
 5. which state is ephemeral coordinator state versus durable external state.
 
+The point of the bounded SharedWorker lane is explicit same-origin multi-tab
+reuse and coordinator-pool amortization without changing the semantic floor.
+Crash recovery, client churn, version mismatch, and browser reclaim are treated
+as first-class downgrade cases, not as edge conditions that silently widen
+Browser Edition claims.
+
 ## Current Truthful Runtime Status
 
 The live tree still fail-closes SharedWorker direct runtime today:
@@ -78,6 +84,9 @@ Port/session registration rules:
 - stale epochs must be rejected or replaced deterministically,
 - reconnect may recover durable artifacts, but it must not recover abandoned
   in-memory authority implicitly,
+- client churn (tab close, reload, reconnect, or worker restart) is expected
+  steady-state behavior and must remain diagnosable through explicit join and
+  detach events,
 - coordinator-side state that depends on the client must be removed when the
   port closes or the client is declared lost.
 

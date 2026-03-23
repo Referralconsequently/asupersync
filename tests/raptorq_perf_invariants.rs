@@ -2464,6 +2464,62 @@ fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
     );
 }
 
+/// Validate the live GF256 aarch64 profile-pack metadata stays explicitly
+/// provisional until same-target NEON ablation evidence exists.
+#[test]
+fn e5_live_gf256_catalog_keeps_aarch64_profile_provisional() {
+    let neon = gf256_profile_pack_catalog()
+        .iter()
+        .find(|metadata| metadata.profile_pack == Gf256ProfilePackId::Aarch64NeonBalancedV1)
+        .expect("aarch64 profile-pack metadata must exist");
+
+    assert_eq!(
+        neon.architecture_class.as_str(),
+        "aarch64-neon",
+        "live aarch64 profile-pack metadata must stay architecture-specific"
+    );
+    assert_eq!(
+        neon.selected_tuning_candidate_id, "aarch64-neon-t32-u2-pf32-fused-balanced-v1",
+        "live aarch64 profile-pack metadata must keep the pending same-target candidate explicit"
+    );
+    assert_eq!(
+        neon.decision_artifact_id, "pending_same_target_profile_ablation",
+        "aarch64 profile-pack metadata must not drift to a canonical artifact without new same-target evidence"
+    );
+    assert_eq!(
+        neon.decision_role, "catalog_bootstrap_pending_same_target_ablation",
+        "aarch64 profile-pack metadata must keep the pending decision role explicit"
+    );
+    assert_eq!(
+        neon.decision_evidence_status.as_str(),
+        "pending-same-target-ablation",
+        "aarch64 profile-pack metadata must keep the pending evidence status explicit"
+    );
+    assert_eq!(
+        neon.selected_candidate_summary,
+        "catalog default retained pending same-target aarch64 ablation evidence",
+        "aarch64 profile-pack metadata must keep the pending same-target rationale explicit"
+    );
+    assert_eq!(
+        neon.rejected_candidate_set_summary,
+        "nonselected aarch64 tuning candidates remain historical offline-tuning rejects",
+        "aarch64 profile-pack metadata must keep the rejected-candidate rationale explicit"
+    );
+
+    for required in [
+        "`aarch64-neon-balanced-v1` is intentionally surfaced as provisional",
+        "decision_artifact_id = pending_same_target_profile_ablation",
+        "decision_role = catalog_bootstrap_pending_same_target_ablation",
+        "decision_evidence_status = pending-same-target-ablation",
+        "until same-target NEON ablation evidence lands",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline/profile doc must preserve pending aarch64 profile-pack token {required}"
+        );
+    }
+}
+
 /// Validate the live runtime policy snapshot carries the same decision
 /// provenance as the effective profile-pack contract it selected.
 #[test]
