@@ -55,7 +55,7 @@ use crate::types::{CxInner, Outcome, RegionId, TaskId, Time};
 /// For now this is a thin wrapper around the actor task's `TaskId`, which already
 /// provides arena + generation semantics. Keeping a distinct type avoids mixing
 /// actor IDs with generic tasks at call sites.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ActorId(TaskId);
 
 impl ActorId {
@@ -2185,7 +2185,7 @@ mod tests {
             SupervisedOutcome::Escalated,
         ];
         for v in &variants {
-            let dbg = format!("{v:?}");
+            let dbg = format!("{:?}", v);
             assert!(!dbg.is_empty());
         }
         assert!(format!("{:?}", variants[0]).contains("Stopped"));
