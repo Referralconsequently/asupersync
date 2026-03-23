@@ -1040,3 +1040,5 @@
 {"file":"src/channel/oneshot.rs","status":"audited"}
 {"file":"src/stream/merge.rs","status":"audited"}
 {"file":"src/trace/integrity.rs","status":"audited"}
+{"file":"src/stream/fold.rs","status":"audited"}
+{"file":"src/fs/buf_writer.rs","status":"audited"}
