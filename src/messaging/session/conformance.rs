@@ -1567,7 +1567,7 @@ mod tests {
     fn compensation_paths_are_emitted_in_violation_evidence() {
         init_test("compensation_paths_are_emitted_in_violation_evidence");
         let contract = compensating_request_reply_contract();
-        let mut monitor = ConformanceMonitor::new(&contract).expect("monitor");
+        let monitor = ConformanceMonitor::new(&contract).expect("monitor");
 
         let err = monitor
             .check_timeout(Time::from_secs(2))

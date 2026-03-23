@@ -707,8 +707,8 @@ impl CircuitBreaker {
         loop {
             let state = State::from_bits(current_bits);
 
-            // Only transition if not already Open
-            if matches!(state, State::Open { .. }) {
+            // Only transition if currently Closed
+            if !matches!(state, State::Closed { .. }) {
                 break;
             }
 

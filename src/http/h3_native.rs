@@ -1313,6 +1313,7 @@ pub struct H3ConnectionState {
     control: H3ControlState,
     request_streams: BTreeMap<u64, H3RequestStreamState>,
     finished_request_streams: BTreeSet<u64>,
+    max_contiguous_finished_request_stream_id: Option<u64>,
     push_streams: BTreeMap<u64, H3RequestStreamState>,
     uni_stream_types: BTreeMap<u64, H3UniStreamType>,
     control_stream_id: Option<u64>,
@@ -1342,6 +1343,7 @@ impl H3ConnectionState {
             control: H3ControlState::default(),
             request_streams: BTreeMap::new(),
             finished_request_streams: BTreeSet::new(),
+            max_contiguous_finished_request_stream_id: None,
             push_streams: BTreeMap::new(),
             uni_stream_types: BTreeMap::new(),
             control_stream_id: None,
@@ -1349,6 +1351,15 @@ impl H3ConnectionState {
             qpack_decoder_stream_id: None,
             goaway_id: None,
         }
+    }
+
+    fn is_request_stream_finished(&self, stream_id: u64) -> bool {
+        if let Some(max_contig) = self.max_contiguous_finished_request_stream_id {
+            if stream_id <= max_contig {
+                return true;
+            }
+        }
+        self.finished_request_streams.contains(&stream_id)
     }
 
     /// Process a control-stream frame.
@@ -1384,7 +1395,7 @@ impl H3ConnectionState {
                 "request stream id is registered as unidirectional",
             ));
         }
-        if self.finished_request_streams.contains(&stream_id) {
+        if self.is_request_stream_finished(stream_id) {
             return Err(H3NativeError::ControlProtocol(
                 "request stream already finished",
             ));
@@ -1402,7 +1413,7 @@ impl H3ConnectionState {
 
     /// Mark request-stream end and remove it from tracking.
     pub fn finish_request_stream(&mut self, stream_id: u64) -> Result<(), H3NativeError> {
-        if self.finished_request_streams.contains(&stream_id) {
+        if self.is_request_stream_finished(stream_id) {
             return Err(H3NativeError::ControlProtocol(
                 "request stream already finished",
             ));
@@ -1418,6 +1429,15 @@ impl H3ConnectionState {
         // on the same QUIC stream are still rejected as protocol violations.
         self.request_streams.remove(&stream_id);
         self.finished_request_streams.insert(stream_id);
+        
+        // Compact finished streams to avoid unbounded memory growth.
+        // Client bidi streams start at 0 and increment by 4.
+        let mut next_expected = self.max_contiguous_finished_request_stream_id.map_or(0, |id| id + 4);
+        while self.finished_request_streams.remove(&next_expected) {
+            self.max_contiguous_finished_request_stream_id = Some(next_expected);
+            next_expected += 4;
+        }
+        
         Ok(())
     }
 

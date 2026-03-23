@@ -100,12 +100,18 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         let mut read_passes = 0usize;
+        let mut should_yield = false;
 
         loop {
             // Try to decode a frame from buffered data.
             match this.decoder.decode(&mut this.buffer) {
                 Ok(Some(item)) => return Poll::Ready(Some(Ok(item))),
-                Ok(None) => {} // Need more data
+                Ok(None) => {
+                    if should_yield {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                } // Need more data
                 Err(e) => return Poll::Ready(Some(Err(e))),
             }
 
@@ -134,8 +140,7 @@ where
                         this.buffer.put_slice(filled);
                         read_passes += 1;
                         if read_passes >= MAX_READ_PASSES_PER_POLL {
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
+                            should_yield = true;
                         }
                         // Loop back to try decoding.
                     }

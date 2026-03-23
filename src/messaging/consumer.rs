@@ -3320,6 +3320,11 @@ impl crate::gen_server::GenServer for ConsumerActor {
             match msg {
                 ConsumerCast::Pause => {
                     if self.lifecycle == ConsumerActorLifecycle::Running {
+                        // Delegate to the consumer's own flow-control pause.
+                        // If flow_control is disabled on the config, the inner
+                        // pause will fail — we still set the actor lifecycle so
+                        // the actor-level guard rejects pull calls.
+                        let _ = self.consumer.pause();
                         self.lifecycle = ConsumerActorLifecycle::Paused;
                         cx.trace_with_fields(
                             "fabric.consumer_actor.pause",
@@ -3329,6 +3334,7 @@ impl crate::gen_server::GenServer for ConsumerActor {
                 }
                 ConsumerCast::Resume => {
                     if self.lifecycle == ConsumerActorLifecycle::Paused {
+                        self.consumer.resume();
                         self.lifecycle = ConsumerActorLifecycle::Running;
                         cx.trace_with_fields(
                             "fabric.consumer_actor.resume",

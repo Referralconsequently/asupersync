@@ -55,7 +55,7 @@ use crate::types::{CxInner, Outcome, RegionId, TaskId, Time};
 /// For now this is a thin wrapper around the actor task's `TaskId`, which already
 /// provides arena + generation semantics. Keeping a distinct type avoids mixing
 /// actor IDs with generic tasks at call sites.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ActorId(TaskId);
 
 impl ActorId {

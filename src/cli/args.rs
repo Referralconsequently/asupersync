@@ -16,7 +16,7 @@ pub struct CommonArgs {
     /// Color output preference.
     pub color: Option<ColorChoice>,
 
-    /// Verbosity level (0 = quiet, 1 = normal, 2+ = verbose).
+    /// Verbosity level (0 = normal, 1 = verbose, 2+ = very verbose).
     pub verbosity: u8,
 
     /// Enable quiet mode (minimal output).
@@ -38,7 +38,7 @@ impl CommonArgs {
 
     /// Get the effective output format.
     ///
-    /// Uses explicit format if set, otherwise auto-detects.
+    /// Uses explicit choice if set, otherwise auto-detects.
     #[must_use]
     pub fn output_format(&self) -> OutputFormat {
         self.format.unwrap_or_else(OutputFormat::auto_detect)
@@ -55,13 +55,13 @@ impl CommonArgs {
     /// Check if verbose output is enabled.
     #[must_use]
     pub fn is_verbose(&self) -> bool {
-        self.verbosity > 1 || self.debug
+        self.verbosity > 0 || self.debug
     }
 
     /// Check if quiet mode is enabled.
     #[must_use]
     pub fn is_quiet(&self) -> bool {
-        self.quiet || self.verbosity == 0
+        self.quiet
     }
 
     /// Set output format.
@@ -232,6 +232,15 @@ mod tests {
         let verbose = args.is_verbose();
         crate::assert_with_log!(verbose, "is_verbose", true, verbose);
         crate::test_complete!("common_args_builder");
+    }
+
+    #[test]
+    fn common_args_verbose_mode() {
+        init_test("common_args_verbose_mode");
+        let args = CommonArgs::new().with_verbosity(1);
+        let verbose = args.is_verbose();
+        crate::assert_with_log!(verbose, "is_verbose", true, verbose);
+        crate::test_complete!("common_args_verbose_mode");
     }
 
     #[test]

@@ -427,6 +427,10 @@ impl SupervisionOracle {
                     continue; // Do not check sibling restarts if we correctly escalated/stopped
                 }
 
+                if escalated {
+                    continue; // Do not check sibling restarts if we escalated
+                }
+
                 // Check OneForAll policy
                 if config.restart_policy == RestartPolicy::OneForAll {
                     let siblings: Vec<_> = config

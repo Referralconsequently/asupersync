@@ -1,8 +1,8 @@
 //! Per-worker local queue.
 //!
-//! Uses a lock-protected intrusive stack for LIFO push/pop (owner) and FIFO steal (thief).
-//! The stack stores links in `TaskRecord` via a shared `TaskTable` arena,
-//! keeping hot-path operations allocation-free.
+//! Uses a lock-protected `VecDeque` for LIFO push/pop (owner) and FIFO steal (thief).
+//! The queue bounds search depth during stealing to avoid O(N) traversal overhead
+//! while maintaining hot-path LIFO locality for the owner.
 
 use crate::record::task::TaskRecord;
 use crate::runtime::{RuntimeState, TaskTable};

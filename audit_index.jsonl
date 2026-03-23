@@ -981,3 +981,21 @@
 {"file":"src/types/wasm_abi.rs","lines":6674,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"WASM ABI schema types. No casts, no arithmetic. Clean."}
 {"file":"src/lab/oracle/spork.rs","lines":600,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"All check() methods sort HashMap keys before iteration. Deterministic."}
 {"file":"src/lab/oracle/quiescence.rs","lines":400,"batch":427,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Violations stored in Vec, check returns first(). Deterministic."}
+{"file":"src/codec/framed_read.rs","lines":0,"batch":428,"date":"2026-03-23","agent":"Gemini","verdict":"FIXED","bugs":1,"notes":"Fixed cooperative yield logic to decode newly read data before yielding, preventing frame delay."}
+{"file":"src/codec/framed.rs","lines":0,"batch":428,"date":"2026-03-23","agent":"Gemini","verdict":"FIXED","bugs":1,"notes":"Fixed cooperative yield logic to decode newly read data before yielding, preventing frame delay."}
+{"file":"src/runtime/scheduler/local_queue.rs","lines":0,"batch":428,"date":"2026-03-23","agent":"Gemini","verdict":"FIXED","bugs":1,"notes":"Fixed misleading documentation falsely claiming intrusive stack, corrected to VecDeque."}
+{"file":"src/raptorq/proof.rs","status":"audited"}
+{"file":"src/io/write_permit.rs","status":"audited"}
+{"file":"src/io/ext/write_ext.rs","status":"audited"}
+{"file":"src/raptorq/decision_contract.rs","status":"audited"}
+{"file":"src/http/h2/settings.rs","status":"audited"}
+{"file":"src/io/buf_reader.rs","status":"audited"}
+{"file":"src/lab/oracle/cancellation_protocol.rs","status":"audited"}
+{"file":"src/lab/oracle/task_leak.rs","status":"audited"}
+{"file":"src/net/tcp/stream.rs","status":"audited"}
+{"file":"src/error/recovery.rs","lines":352,"batch":429,"date":"2026-03-23","agent":"CrimsonEagle","verdict":"FIXED","bugs":2,"notes":"Fixed u32->i32 exponent wrap in ExponentialBackoff::backoff_duration for attempts above i32::MAX and clamped with_jitter() to its documented 0.0..=1.0 range with regression tests."}
+{"file":"src/net/unix/stream.rs","lines":1204,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: wait_for_connect missing NotConnected fallback handler — TCP stream has it, unix/split and unix/datagram have it, but unix/stream was missed."}
+{"file":"src/net/tcp/stream.rs","lines":1411,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"poll_read/write correct, shutdown propagation correct, registration lifecycle clean."}
+{"file":"src/net/websocket/close.rs","lines":786,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Close state machine correct, RFC 6455 code validation correct."}
+{"file":"src/net/tcp/virtual_tcp.rs","lines":876,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Buffer handling correct, proper wakeups. Test infrastructure."}
+{"file":"src/net/dns/lookup.rs","lines":621,"batch":428,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Result types, Happy Eyeballs interleave correct."}

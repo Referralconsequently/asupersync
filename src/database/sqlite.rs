@@ -834,6 +834,13 @@ impl SqliteConnection {
                     .prepare(&sql)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
+                let column_count = stmt.column_count();
+                let column_names: Vec<String> = stmt
+                    .column_names()
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
+
                 let mut rows = stmt
                     .query(params_refs.as_slice())
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
@@ -843,12 +850,6 @@ impl SqliteConnection {
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
                 let result = if let Some(row) = row_opt {
-                    let column_count = stmt.column_count();
-                    let column_names: Vec<String> = stmt
-                        .column_names()
-                        .iter()
-                        .map(std::string::ToString::to_string)
-                        .collect();
                     let columns: BTreeMap<String, usize> = column_names
                         .iter()
                         .enumerate()

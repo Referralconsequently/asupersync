@@ -248,8 +248,6 @@ pub struct ServerWebSocket<IO> {
     extensions: Vec<String>,
     /// Pending pong payloads to send.
     pending_pongs: std::collections::VecDeque<crate::bytes::Bytes>,
-    /// Whether there are encoded pongs in the write buffer that need flushing.
-    pending_pong_flush: bool,
 }
 
 impl<IO> ServerWebSocket<IO>
@@ -280,7 +278,6 @@ where
             protocol: accept.protocol,
             extensions: accept.extensions,
             pending_pongs: std::collections::VecDeque::new(),
-            pending_pong_flush: false,
         }
     }
 
@@ -382,17 +379,13 @@ where
 
             // Send any pending pongs in FIFO order (cancel-safe: pop_front() takes
             // one at a time from the front without reversing the whole queue).
-            let mut flush_pending_pongs = self.pending_pong_flush;
             while let Some(payload) = self.pending_pongs.pop_front() {
-                flush_pending_pongs = true;
-                self.pending_pong_flush = true;
                 let pong = Frame::pong(payload);
                 self.encode_frame(pong)?;
             }
 
-            if flush_pending_pongs {
+            if !self.write_buf.is_empty() {
                 self.flush_write_buf().await?;
-                self.pending_pong_flush = false;
             }
 
             if let Some(frame) = self.codec.decode(&mut self.read_buf)? {

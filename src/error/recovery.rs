@@ -50,7 +50,11 @@ impl ExponentialBackoff {
     /// Sets the jitter factor.
     #[must_use]
     pub fn with_jitter(mut self, jitter: f64) -> Self {
-        self.jitter = jitter;
+        self.jitter = if jitter.is_finite() {
+            jitter.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         self
     }
 }
@@ -69,7 +73,10 @@ impl RecoveryStrategy for ExponentialBackoff {
         clippy::cast_sign_loss
     )]
     fn backoff_duration(&self, attempt: u32) -> Duration {
-        let factor = self.multiplier.powi(attempt as i32);
+        // Saturate the exponent so very large attempt counters cannot wrap the
+        // `u32 -> i32` conversion and collapse the backoff schedule.
+        let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
+        let factor = self.multiplier.powi(exponent);
         let mut base_ms = (self.initial.as_millis() as f64 * factor) as u64;
 
         // Clamp to the configured max while avoiding u128 -> u64 truncation.
@@ -235,6 +242,42 @@ mod tests {
         assert_eq!(backoff.backoff_duration(0), Duration::from_millis(10));
         assert_eq!(backoff.backoff_duration(1), Duration::from_millis(20));
         assert_eq!(backoff.backoff_duration(2), Duration::from_millis(40));
+    }
+
+    #[test]
+    fn backoff_saturates_for_attempts_beyond_i32_range() {
+        let backoff = ExponentialBackoff::new(
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+            2.0,
+            u32::MAX,
+        )
+        .with_jitter(0.0);
+
+        let duration = backoff.backoff_duration((i32::MAX as u32).saturating_add(1));
+        assert_eq!(
+            duration,
+            Duration::from_secs(1),
+            "large attempts must saturate at max delay instead of wrapping the exponent"
+        );
+    }
+
+    #[test]
+    fn jitter_is_clamped_to_documented_range() {
+        let high =
+            ExponentialBackoff::new(Duration::from_millis(10), Duration::from_secs(1), 2.0, 5)
+                .with_jitter(5.0);
+        assert_eq!(high.jitter.to_bits(), 1.0f64.to_bits());
+
+        let low =
+            ExponentialBackoff::new(Duration::from_millis(10), Duration::from_secs(1), 2.0, 5)
+                .with_jitter(-1.0);
+        assert_eq!(low.jitter.to_bits(), 0.0f64.to_bits());
+
+        let nan =
+            ExponentialBackoff::new(Duration::from_millis(10), Duration::from_secs(1), 2.0, 5)
+                .with_jitter(f64::NAN);
+        assert_eq!(nan.jitter.to_bits(), 0.0f64.to_bits());
     }
 
     #[test]

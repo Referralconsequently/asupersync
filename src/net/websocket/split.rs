@@ -440,7 +440,6 @@ where
             assembler: shared.assembler,
             protocol: shared.protocol,
             pending_pongs: shared.pending_pongs,
-            pending_pong_flush: shared.pending_pong_flush,
             entropy: shared.entropy,
         })
     }

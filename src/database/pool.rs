@@ -896,7 +896,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         return Err(e);
                     }
 
-                    let remaining = deadline.saturating_duration_since(crate::time::wall_now());
+                    let remaining = std::time::Duration::from_nanos(deadline.duration_since(crate::time::wall_now()));
                     if remaining.is_zero() || cx.is_cancel_requested() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);

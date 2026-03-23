@@ -999,6 +999,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::significant_drop_tightening)]
     fn oracle_report_emits_structured_oracle_check_events() {
         let suite = OracleSuite::new();
         let events = Arc::new(Mutex::new(Vec::new()));

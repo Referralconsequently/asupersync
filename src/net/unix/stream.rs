@@ -68,6 +68,10 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
                             fallback = true;
                             return Poll::Ready(Ok(()));
                         }
+                        Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                            fallback = true;
+                            return Poll::Ready(Ok(()));
+                        }
                         Err(err) => return Poll::Ready(Err(err)),
                     }
                 }

@@ -4055,6 +4055,7 @@ mod tests {
     /// Invariant: returning one resource from an exhausted pool only wakes one
     /// waiter; remaining waiters stay queued until another resource return.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn pool_return_wakes_waiters_one_at_a_time() {
         init_test("pool_return_wakes_waiters_one_at_a_time");
 
