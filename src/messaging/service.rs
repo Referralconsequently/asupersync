@@ -1,7 +1,12 @@
 //! Contract-carrying service schemas for the FABRIC lane.
 
 use super::class::{AckKind, DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError};
-use super::subject::Subject;
+use super::control::{
+    ControlHandlerId, ControlRegistry, ControlRegistryError, NamespaceControlScope,
+    SystemSubjectFamily,
+};
+use super::morphism::{ExportPlan, ImportPlan, Morphism, MorphismCompileError};
+use super::subject::{NamespaceKernel, NamespaceKernelError, Subject};
 use crate::lab::conformal::{HealthThresholdCalibrator, HealthThresholdConfig, ThresholdMode};
 use crate::obligation::eprocess::{
     AlertState as EProcessAlertState, LeakMonitor, MonitorConfig as LeakMonitorConfig,
@@ -2240,6 +2245,347 @@ impl ServiceRegistration {
     }
 }
 
+/// Error returned by the composed FABRIC service-boundary surface.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ServiceBoundaryError {
+    /// The declared request subject does not belong to the namespace.
+    #[error("service subject `{subject}` is outside namespace `{namespace}`")]
+    SubjectOutsideNamespace {
+        /// Subject that failed validation.
+        subject: String,
+        /// Canonical namespace pattern the subject should have matched.
+        namespace: String,
+    },
+    /// The morphism does not cover this boundary's request subject.
+    #[error(
+        "service boundary subject `{subject}` is not covered by morphism source language `{source_language}`"
+    )]
+    MorphismDoesNotCoverBoundary {
+        /// Boundary request subject that failed to match the morphism source.
+        subject: String,
+        /// Source language declared by the morphism.
+        source_language: String,
+    },
+    /// The target subject does not satisfy the morphism destination language.
+    #[error(
+        "target subject `{subject}` is not covered by morphism destination language `{dest_language}`"
+    )]
+    TargetOutsideMorphismDestination {
+        /// Concrete target subject passed to the transfer.
+        subject: String,
+        /// Destination language declared by the morphism.
+        dest_language: String,
+    },
+    /// Subject-only transfer helpers require unrestricted mobility.
+    #[error(
+        "subject-only service transfer to `{target_subject}` requires unrestricted mobility, got `{constraint}`"
+    )]
+    TransferRequiresUnrestrictedMobility {
+        /// Mobility contract attached to the admitted request.
+        constraint: MobilityConstraint,
+        /// Concrete target subject that required a mobility check.
+        target_subject: String,
+    },
+    /// The provided admission does not describe the obligation being transferred.
+    #[error(
+        "service admission request `{admission_request_id}` does not match obligation request `{obligation_request_id}`"
+    )]
+    AdmissionRequestMismatch {
+        /// Request id from the admission certificate.
+        admission_request_id: String,
+        /// Request id carried by the obligation being transferred.
+        obligation_request_id: String,
+    },
+    /// The obligation is no longer positioned at this boundary's request subject.
+    #[error(
+        "service obligation subject `{subject}` is not currently owned by boundary subject `{boundary_subject}`"
+    )]
+    ObligationOutsideBoundary {
+        /// Current obligation subject.
+        subject: String,
+        /// Request subject owned by this boundary.
+        boundary_subject: String,
+    },
+    /// Namespace-scoped subject generation failed.
+    #[error(transparent)]
+    Namespace(#[from] NamespaceKernelError),
+    /// Service contract validation failed.
+    #[error(transparent)]
+    Contract(#[from] ServiceContractError),
+    /// Control-plane handler registration failed.
+    #[error(transparent)]
+    ControlRegistry(#[from] ControlRegistryError),
+    /// Morphism boundary-plan compilation failed.
+    #[error(transparent)]
+    MorphismCompile(#[from] MorphismCompileError),
+    /// Request certificate or service-obligation operations failed.
+    #[error(transparent)]
+    Obligation(#[from] ServiceObligationError),
+}
+
+/// Concrete control and discovery subjects attached to one service boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceControlSubjects {
+    /// Data-plane discovery subject for the service namespace.
+    pub discovery: Subject,
+    /// Control-plane health status subject for the service namespace.
+    pub health: Subject,
+    /// Control-plane advisory subject for service-routing events.
+    pub advisories: Subject,
+}
+
+/// Registered control handlers for one service boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceControlHandlers {
+    /// Handler serving health subjects for the service namespace.
+    pub health: ControlHandlerId,
+    /// Handler serving service advisory subjects for the service namespace.
+    pub advisories: ControlHandlerId,
+}
+
+/// Result of admitting one request through the FABRIC service boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceAdmission {
+    /// Effective request envelope after provider-bound validation.
+    pub validated: ValidatedServiceRequest,
+    /// Deterministic request certificate emitted at admission.
+    pub certificate: RequestCertificate,
+}
+
+/// Unified FABRIC-native service boundary.
+///
+/// This composes one namespace-bound request subject, one validated service
+/// registration, control-plane health/advisory surfaces, and morphism helpers
+/// for cross-domain routing without introducing a separate service-mesh plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricServiceBoundary {
+    namespace: NamespaceKernel,
+    request_subject: Subject,
+    registration: ServiceRegistration,
+}
+
+impl FabricServiceBoundary {
+    /// Create a new FABRIC service boundary for one namespace and request subject.
+    pub fn new(
+        namespace: NamespaceKernel,
+        request_subject: Subject,
+        registration: ServiceRegistration,
+    ) -> Result<Self, ServiceBoundaryError> {
+        if !namespace.owns_subject(&request_subject) {
+            return Err(ServiceBoundaryError::SubjectOutsideNamespace {
+                subject: request_subject.as_str().to_owned(),
+                namespace: namespace.service_pattern().as_str().to_owned(),
+            });
+        }
+
+        Ok(Self {
+            namespace,
+            request_subject,
+            registration,
+        })
+    }
+
+    /// Return the namespace kernel that owns this boundary.
+    #[must_use]
+    pub fn namespace(&self) -> &NamespaceKernel {
+        &self.namespace
+    }
+
+    /// Return the request subject served by this boundary.
+    #[must_use]
+    pub fn request_subject(&self) -> &Subject {
+        &self.request_subject
+    }
+
+    /// Return the validated service registration for this boundary.
+    #[must_use]
+    pub fn registration(&self) -> &ServiceRegistration {
+        &self.registration
+    }
+
+    /// Return the discovery, health, and advisory subjects for this boundary.
+    pub fn control_subjects(&self) -> Result<ServiceControlSubjects, ServiceBoundaryError> {
+        Ok(ServiceControlSubjects {
+            discovery: self.namespace.service_discovery_subject(),
+            health: self.health_scope().subject("status")?,
+            advisories: self.advisory_scope().subject("advisory")?,
+        })
+    }
+
+    /// Register namespace-scoped control handlers for health and advisory traffic.
+    pub fn register_control_handlers(
+        &self,
+        registry: &mut ControlRegistry,
+    ) -> Result<ServiceControlHandlers, ServiceBoundaryError> {
+        Ok(ServiceControlHandlers {
+            health: registry.register_namespace_default(&self.health_scope())?,
+            advisories: registry.register_namespace_default(&self.advisory_scope())?,
+        })
+    }
+
+    /// Validate caller options and emit an admission certificate for the request.
+    pub fn admit_request(
+        &self,
+        request_id: impl Into<String>,
+        caller: impl Into<String>,
+        caller_options: &CallerOptions,
+        reply_space_rule: super::ir::ReplySpaceRule,
+        capability_fingerprint: u64,
+        issued_at: Time,
+    ) -> Result<ServiceAdmission, ServiceBoundaryError> {
+        let validated = self.registration.validate_caller(caller_options)?;
+        let certificate = RequestCertificate::from_validated(
+            request_id.into(),
+            caller.into(),
+            self.request_subject.as_str().to_owned(),
+            &validated,
+            reply_space_rule,
+            self.registration.service_name.clone(),
+            capability_fingerprint,
+            issued_at,
+        );
+        certificate.validate()?;
+
+        Ok(ServiceAdmission {
+            validated,
+            certificate,
+        })
+    }
+
+    /// Compile an import-side morphism plan for this boundary.
+    pub fn compile_import_plan(
+        &self,
+        morphism: &Morphism,
+        requested_reply_space: Option<super::ir::ReplySpaceRule>,
+    ) -> Result<ImportPlan, ServiceBoundaryError> {
+        self.ensure_morphism_covers_boundary(morphism)?;
+        Ok(morphism.compile_import_plan(requested_reply_space)?)
+    }
+
+    /// Compile an export-side morphism plan for this boundary.
+    pub fn compile_export_plan(
+        &self,
+        morphism: &Morphism,
+        requested_reply_space: Option<super::ir::ReplySpaceRule>,
+    ) -> Result<ExportPlan, ServiceBoundaryError> {
+        self.ensure_morphism_covers_boundary(morphism)?;
+        Ok(morphism.compile_export_plan(requested_reply_space)?)
+    }
+
+    /// Transfer an admitted in-flight request through an import-side morphism boundary.
+    ///
+    /// This helper operates on subject-level evidence only, so it fails closed
+    /// unless the admitted request has unrestricted mobility and the obligation
+    /// is still positioned at this boundary's request subject.
+    pub fn transfer_request_via_import(
+        &self,
+        admission: &ServiceAdmission,
+        obligation: &mut ServiceObligation,
+        callee: impl Into<String>,
+        target_subject: Subject,
+        morphism_name: impl Into<String>,
+        morphism: &Morphism,
+        requested_reply_space: Option<super::ir::ReplySpaceRule>,
+        transferred_at: Time,
+    ) -> Result<ImportPlan, ServiceBoundaryError> {
+        self.ensure_transfer_request_matches(admission, obligation)?;
+        self.ensure_transfer_mobility(&admission.validated, &target_subject)?;
+        self.ensure_morphism_target(morphism, &target_subject)?;
+        let plan = self.compile_import_plan(morphism, requested_reply_space)?;
+        obligation.transfer(
+            callee.into(),
+            target_subject.as_str(),
+            morphism_name.into(),
+            transferred_at,
+        )?;
+        Ok(plan)
+    }
+
+    /// Abort an in-flight request with the canonical cancelled failure.
+    pub fn cancel_request(
+        &self,
+        obligation: ServiceObligation,
+        ledger: &mut ObligationLedger,
+        aborted_at: Time,
+    ) -> Result<ServiceAbortReceipt, ServiceBoundaryError> {
+        Ok(obligation.abort(ledger, aborted_at, ServiceFailure::Cancelled)?)
+    }
+
+    fn health_scope(&self) -> NamespaceControlScope {
+        NamespaceControlScope::from_namespace(SystemSubjectFamily::Health, &self.namespace)
+    }
+
+    fn advisory_scope(&self) -> NamespaceControlScope {
+        NamespaceControlScope::from_namespace(SystemSubjectFamily::Route, &self.namespace)
+    }
+
+    fn ensure_morphism_covers_boundary(
+        &self,
+        morphism: &Morphism,
+    ) -> Result<(), ServiceBoundaryError> {
+        if morphism.source_language.matches(&self.request_subject) {
+            Ok(())
+        } else {
+            Err(ServiceBoundaryError::MorphismDoesNotCoverBoundary {
+                subject: self.request_subject.as_str().to_owned(),
+                source_language: morphism.source_language.as_str().to_owned(),
+            })
+        }
+    }
+
+    fn ensure_morphism_target(
+        &self,
+        morphism: &Morphism,
+        target_subject: &Subject,
+    ) -> Result<(), ServiceBoundaryError> {
+        if morphism.dest_language.matches(target_subject) {
+            Ok(())
+        } else {
+            Err(ServiceBoundaryError::TargetOutsideMorphismDestination {
+                subject: target_subject.as_str().to_owned(),
+                dest_language: morphism.dest_language.as_str().to_owned(),
+            })
+        }
+    }
+
+    fn ensure_transfer_mobility(
+        &self,
+        validated: &ValidatedServiceRequest,
+        target_subject: &Subject,
+    ) -> Result<(), ServiceBoundaryError> {
+        if validated.mobility_constraint == MobilityConstraint::Unrestricted {
+            Ok(())
+        } else {
+            Err(ServiceBoundaryError::TransferRequiresUnrestrictedMobility {
+                constraint: validated.mobility_constraint.clone(),
+                target_subject: target_subject.as_str().to_owned(),
+            })
+        }
+    }
+
+    fn ensure_transfer_request_matches(
+        &self,
+        admission: &ServiceAdmission,
+        obligation: &ServiceObligation,
+    ) -> Result<(), ServiceBoundaryError> {
+        if admission.certificate.request_id != obligation.request_id {
+            return Err(ServiceBoundaryError::AdmissionRequestMismatch {
+                admission_request_id: admission.certificate.request_id.clone(),
+                obligation_request_id: obligation.request_id.clone(),
+            });
+        }
+
+        if obligation.subject == self.request_subject.as_str() {
+            Ok(())
+        } else {
+            Err(ServiceBoundaryError::ObligationOutsideBoundary {
+                subject: obligation.subject.clone(),
+                boundary_subject: self.request_subject.as_str().to_owned(),
+            })
+        }
+    }
+}
+
 fn validate_workflow_text(field: &'static str, value: &str) -> Result<(), WorkflowStateError> {
     if value.trim().is_empty() {
         return Err(WorkflowStateError::EmptyField { field });
@@ -3185,6 +3531,7 @@ pub enum ServiceContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::messaging::subject::SubjectPattern;
     use crate::record::{ObligationAbortReason, ObligationState};
     use crate::util::ArenaIndex;
 
@@ -3202,6 +3549,13 @@ mod tests {
         }
     }
 
+    fn provider_terms_with_mobility(mobility_constraint: MobilityConstraint) -> ProviderTerms {
+        ProviderTerms {
+            mobility_constraint,
+            ..provider_terms()
+        }
+    }
+
     fn contract() -> ServiceContractSchema {
         ServiceContractSchema {
             budget_semantics: BudgetSemantics {
@@ -3212,6 +3566,52 @@ mod tests {
             mobility_constraints: MobilityConstraint::Unrestricted,
             evidence_requirements: EvidenceLevel::Standard,
             ..ServiceContractSchema::default()
+        }
+    }
+
+    fn namespace() -> NamespaceKernel {
+        NamespaceKernel::new("acme", "orders").expect("namespace kernel")
+    }
+
+    fn service_subject() -> Subject {
+        Subject::new("tenant.acme.service.orders.lookup")
+    }
+
+    fn service_boundary() -> FabricServiceBoundary {
+        let registration =
+            ServiceRegistration::new("fabric.echo", contract(), provider_terms()).expect("valid");
+        FabricServiceBoundary::new(namespace(), service_subject(), registration)
+            .expect("valid service boundary")
+    }
+
+    fn transferable_service_boundary() -> FabricServiceBoundary {
+        let registration = ServiceRegistration::new(
+            "fabric.echo",
+            contract(),
+            provider_terms_with_mobility(MobilityConstraint::Unrestricted),
+        )
+        .expect("valid");
+        FabricServiceBoundary::new(namespace(), service_subject(), registration)
+            .expect("valid service boundary")
+    }
+
+    fn authoritative_import_morphism() -> Morphism {
+        Morphism {
+            source_language: SubjectPattern::new("tenant.acme.service.orders.lookup"),
+            dest_language: SubjectPattern::new("tenant.acme.service.edge-orders.lookup"),
+            class: super::morphism::MorphismClass::Authoritative,
+            transform: super::morphism::SubjectTransform::RenamePrefix {
+                from: SubjectPattern::new("tenant.acme.service.orders.lookup"),
+                to: SubjectPattern::new("tenant.acme.service.edge-orders.lookup"),
+            },
+            reversibility: super::morphism::ReversibilityRequirement::Bijective,
+            capability_requirements: vec![
+                super::morphism::FabricCapability::CarryAuthority,
+                super::morphism::FabricCapability::ReplyAuthority,
+            ],
+            sharing_policy: super::morphism::SharingPolicy::TenantScoped,
+            response_policy: super::morphism::ResponsePolicy::ReplyAuthoritative,
+            ..Morphism::default()
         }
     }
 
@@ -3252,6 +3652,436 @@ mod tests {
             registration.provider_terms.guaranteed_durability,
             DeliveryClass::MobilitySafe
         );
+    }
+
+    #[test]
+    fn service_boundary_binds_request_and_control_subjects() {
+        let boundary = service_boundary();
+        let subjects = boundary.control_subjects().expect("subjects");
+
+        assert_eq!(
+            boundary.request_subject().as_str(),
+            "tenant.acme.service.orders.lookup"
+        );
+        assert_eq!(
+            subjects.discovery.as_str(),
+            "tenant.acme.service.orders.discover"
+        );
+        assert_eq!(
+            subjects.health.as_str(),
+            "$SYS.FABRIC.HEALTH.TENANT.acme.SERVICE.orders.status"
+        );
+        assert_eq!(
+            subjects.advisories.as_str(),
+            "$SYS.FABRIC.ROUTE.TENANT.acme.SERVICE.orders.advisory"
+        );
+    }
+
+    #[test]
+    fn service_boundary_registers_namespace_control_handlers() {
+        let boundary = service_boundary();
+        let subjects = boundary.control_subjects().expect("subjects");
+        let mut registry = ControlRegistry::new();
+
+        let handlers = boundary
+            .register_control_handlers(&mut registry)
+            .expect("register handlers");
+
+        let health_matches = registry.matching_handlers(&subjects.health);
+        assert_eq!(health_matches.len(), 1);
+        assert_eq!(health_matches[0].id, handlers.health);
+
+        let advisory_matches = registry.matching_handlers(&subjects.advisories);
+        assert_eq!(advisory_matches.len(), 1);
+        assert_eq!(advisory_matches[0].id, handlers.advisories);
+    }
+
+    #[test]
+    fn service_boundary_admission_issues_request_certificate() {
+        let boundary = service_boundary();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            timeout_override: Some(Duration::from_secs(5)),
+            priority_hint: Some(200),
+        };
+
+        let admission = boundary
+            .admit_request(
+                "req-service-boundary",
+                "caller-a",
+                &caller,
+                super::ir::ReplySpaceRule::CallerInbox,
+                0xfeed_u64,
+                Time::from_nanos(10),
+            )
+            .expect("admit request");
+
+        assert_eq!(
+            admission.validated.delivery_class,
+            DeliveryClass::MobilitySafe
+        );
+        assert_eq!(
+            admission.certificate.subject,
+            "tenant.acme.service.orders.lookup"
+        );
+        assert_eq!(admission.certificate.service_class, "fabric.echo");
+        assert_eq!(
+            admission.certificate.reply_space_rule,
+            super::ir::ReplySpaceRule::CallerInbox
+        );
+    }
+
+    #[test]
+    fn service_boundary_transfer_compiles_import_plan_and_updates_obligation() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-transfer",
+                "caller-a",
+                &caller,
+                super::ir::ReplySpaceRule::CallerInbox,
+                99,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.validated.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.validated.timeout,
+        )
+        .expect("allocate obligation");
+
+        let plan = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                "orders-edge",
+                Subject::new("tenant.acme.service.edge-orders.lookup"),
+                "import/orders->edge",
+                &authoritative_import_morphism(),
+                Some(super::ir::ReplySpaceRule::DedicatedPrefix {
+                    prefix: "tenant.acme.service.edge-orders.lookup".to_owned(),
+                }),
+                Time::from_nanos(3),
+            )
+            .expect("transfer through import plan");
+
+        assert_eq!(obligation.subject, "tenant.acme.service.edge-orders.lookup");
+        assert_eq!(obligation.callee, "orders-edge");
+        assert_eq!(obligation.lineage.len(), 1);
+        assert_eq!(obligation.lineage[0].morphism, "import/orders->edge");
+        assert_eq!(
+            plan.direction,
+            super::morphism::MorphismPlanDirection::Import
+        );
+        assert_eq!(
+            plan.selected_reply_space,
+            Some(super::ir::ReplySpaceRule::DedicatedPrefix {
+                prefix: "tenant.acme.service.edge-orders.lookup".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn service_boundary_rejects_import_morphism_outside_request_subject() {
+        let boundary = service_boundary();
+        let morphism = Morphism {
+            source_language: SubjectPattern::new("tenant.acme.service.inventory.lookup"),
+            ..authoritative_import_morphism()
+        };
+
+        let error = boundary
+            .compile_import_plan(&morphism, None)
+            .expect_err("morphism should not cover this boundary");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::MorphismDoesNotCoverBoundary {
+                subject: "tenant.acme.service.orders.lookup".to_owned(),
+                source_language: "tenant.acme.service.inventory.lookup".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_non_unrestricted_mobility() {
+        let boundary = service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-transfer-pinned",
+                "caller-a",
+                &caller,
+                super::ir::ReplySpaceRule::CallerInbox,
+                11,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-pinned",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.validated.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.validated.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                "orders-edge",
+                Subject::new("tenant.acme.service.edge-orders.lookup"),
+                "import/orders->edge",
+                &authoritative_import_morphism(),
+                None,
+                Time::from_nanos(3),
+            )
+            .expect_err("pinned mobility should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::TransferRequiresUnrestrictedMobility {
+                constraint: MobilityConstraint::Pinned,
+                target_subject: "tenant.acme.service.edge-orders.lookup".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_target_outside_destination_language() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-transfer-miss",
+                "caller-a",
+                &caller,
+                super::ir::ReplySpaceRule::CallerInbox,
+                12,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-miss",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.validated.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.validated.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                "orders-edge",
+                Subject::new("tenant.acme.service.wrong.lookup"),
+                "import/orders->edge",
+                &authoritative_import_morphism(),
+                None,
+                Time::from_nanos(3),
+            )
+            .expect_err("target outside morphism destination should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::TargetOutsideMorphismDestination {
+                subject: "tenant.acme.service.wrong.lookup".to_owned(),
+                dest_language: "tenant.acme.service.edge-orders.lookup".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_admission_request_mismatch() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-transfer-a",
+                "caller-a",
+                &caller,
+                super::ir::ReplySpaceRule::CallerInbox,
+                13,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-b",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.validated.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.validated.timeout,
+        )
+        .expect("allocate obligation");
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                "orders-edge",
+                Subject::new("tenant.acme.service.edge-orders.lookup"),
+                "import/orders->edge",
+                &authoritative_import_morphism(),
+                None,
+                Time::from_nanos(3),
+            )
+            .expect_err("mismatched admission should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::AdmissionRequestMismatch {
+                admission_request_id: "req-transfer-a".to_owned(),
+                obligation_request_id: "req-transfer-b".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_obligation_outside_boundary_subject() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-transfer-shifted",
+                "caller-a",
+                &caller,
+                super::ir::ReplySpaceRule::CallerInbox,
+                14,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-shifted",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.validated.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.validated.timeout,
+        )
+        .expect("allocate obligation");
+        obligation.subject = "tenant.acme.service.edge-orders.lookup".to_owned();
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                "orders-edge",
+                Subject::new("tenant.acme.service.edge-orders.lookup"),
+                "import/orders->edge",
+                &authoritative_import_morphism(),
+                None,
+                Time::from_nanos(3),
+            )
+            .expect_err("obligation outside boundary should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::ObligationOutsideBoundary {
+                subject: "tenant.acme.service.edge-orders.lookup".to_owned(),
+                boundary_subject: "tenant.acme.service.orders.lookup".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+    }
+
+    #[test]
+    fn service_boundary_cancellation_propagates_to_service_obligation_abort() {
+        let boundary = service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::ObligationBacked),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-cancel",
+                "caller-a",
+                &caller,
+                super::ir::ReplySpaceRule::CallerInbox,
+                42,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-cancel",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.validated.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.validated.timeout,
+        )
+        .expect("allocate obligation");
+        let obligation_id = obligation.obligation_id().expect("tracked obligation");
+
+        let aborted = boundary
+            .cancel_request(obligation, &mut ledger, Time::from_nanos(3))
+            .expect("cancel request");
+
+        assert_eq!(aborted.failure, ServiceFailure::Cancelled);
+        assert_eq!(aborted.obligation_id, Some(obligation_id));
+        assert_eq!(ledger.pending_count(), 0);
+        let record = ledger.get(obligation_id).expect("ledger record");
+        assert_eq!(record.state, ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Cancel));
     }
 
     #[test]

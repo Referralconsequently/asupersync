@@ -2751,7 +2751,8 @@ impl SpeculativeReplayArtifact {
 
 /// Admitted speculative publish that is still hidden from consumers until the
 /// control capsule confirms it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "speculative publish attempts must be resolved via confirm() or abort_due_to_conflict()"]
 pub struct SpeculativePublishAttempt {
     /// Cell that owns the speculative attempt.
     pub cell_id: CellId,
@@ -2764,6 +2765,7 @@ pub struct SpeculativePublishAttempt {
     /// Replay-friendly artifact for the attempt.
     pub replay_artifact: SpeculativeReplayArtifact,
     consumer_visible: bool,
+    resolved: bool,
 }
 
 impl SpeculativePublishAttempt {
@@ -2800,6 +2802,7 @@ impl SpeculativePublishAttempt {
             tentative_obligation,
             replay_artifact,
             consumer_visible: false,
+            resolved: false,
         }
     }
 
@@ -2812,11 +2815,12 @@ impl SpeculativePublishAttempt {
     /// Confirm the speculative fast path and convert its tentative obligation
     /// into a committed control-capsule fact.
     pub fn confirm(
-        self,
+        mut self,
         conflict_histogram: &mut CellConflictHistogram,
         control_sequence: u64,
     ) -> ConfirmedSpeculativePublish {
         conflict_histogram.record_confirmation();
+        self.resolved = true;
 
         ConfirmedSpeculativePublish {
             committed_obligation: CommittedPublishObligation {
@@ -2836,12 +2840,13 @@ impl SpeculativePublishAttempt {
     /// Abort the speculative fast path after the control capsule discovers a
     /// conflicting append and surface the corrected non-speculative outcome.
     pub fn abort_due_to_conflict(
-        self,
+        mut self,
         conflict_histogram: &mut CellConflictHistogram,
         conflict_key: impl Into<String>,
         corrected_outcome: impl Into<String>,
     ) -> AbortedSpeculativePublish {
         conflict_histogram.record_conflict();
+        self.resolved = true;
 
         let conflict_key = conflict_key.into();
         AbortedSpeculativePublish {
@@ -2855,6 +2860,15 @@ impl SpeculativePublishAttempt {
             consumer_visible: false,
             conflict_key,
         }
+    }
+}
+
+impl Drop for SpeculativePublishAttempt {
+    fn drop(&mut self) {
+        debug_assert!(
+            self.resolved || std::thread::panicking(),
+            "SpeculativePublishAttempt dropped without confirm() or abort_due_to_conflict()"
+        );
     }
 }
 
@@ -4060,6 +4074,7 @@ fn validate_repair_bindings(
 mod tests {
     use super::*;
     use crate::test_utils::run_test_with_cx;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
 
     fn candidate(
@@ -5903,6 +5918,129 @@ mod tests {
     }
 
     #[test]
+    fn subject_cell_certified_rebalance_rejects_wrong_symbol_retention_generation() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 13);
+        evidence.repair_symbols[0].retention_generation = 99;
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("repair symbols must be bound to the certified retention generation");
+        assert_eq!(
+            err,
+            RebalanceError::RepairBindingWrongRetentionGeneration {
+                node: plan.next_stewards[0].clone(),
+                expected: 13,
+                actual: 99,
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_rejects_ineligible_repair_holder() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 14);
+        evidence.repair_symbols[0].node_id = NodeId::new("observer-z");
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("non-steward non-repair candidates must not certify the cut");
+        assert_eq!(
+            err,
+            RebalanceError::IneligibleRepairHolder {
+                node: NodeId::new("observer-z"),
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_rejects_duplicate_repair_bindings() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 15);
+        evidence
+            .repair_symbols
+            .push(evidence.repair_symbols[0].clone());
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("duplicate repair bindings must fail closed");
+        assert_eq!(
+            err,
+            RebalanceError::DuplicateRepairBinding {
+                node: plan.next_stewards[0].clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_requires_binding_for_each_next_steward() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(256);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        let missing_steward = plan.next_stewards[0].clone();
+        let mut evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 16);
+        evidence
+            .repair_symbols
+            .retain(|binding| binding.node_id != missing_steward);
+
+        let err = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect_err("every next steward must carry a repair binding");
+        assert_eq!(
+            err,
+            RebalanceError::MissingStewardRepairBinding {
+                node: missing_steward,
+            }
+        );
+    }
+
+    #[test]
     fn subject_cell_certified_rebalance_allows_retained_steward_binding_after_candidate_drop() {
         let policy = PlacementPolicy {
             cold_stewards: 1,
@@ -6025,6 +6163,40 @@ mod tests {
                 .sequencer_lease_generation
                 > certified.resulting_cell.epoch.generation
         );
+    }
+
+    #[test]
+    fn subject_cell_certified_rebalance_tracks_drained_stewards_from_removed_set() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = hot_subject_cell(&candidates, &policy);
+        let observed_load = ObservedCellLoad::new(32);
+        let plan = policy
+            .plan_rebalance(
+                &cell.subject_partition,
+                &candidates,
+                &cell.steward_set,
+                cell.data_capsule.temperature,
+                observed_load,
+            )
+            .expect("rebalance plan");
+        assert!(
+            !plan.removed_stewards.is_empty(),
+            "cooling rebalance should drain at least one prior steward"
+        );
+        let evidence = successful_rebalance_evidence(&cell, &plan, &candidates, 17);
+
+        let certified = cell
+            .certify_self_rebalance(&policy, &candidates, observed_load, evidence)
+            .expect("certified rebalance");
+
+        assert_eq!(certified.drained_stewards, plan.removed_stewards);
+        for removed in &certified.drained_stewards {
+            assert!(
+                !contains_node(&certified.resulting_cell.steward_set, removed),
+                "drained steward must no longer appear in the resulting stewardship set"
+            );
+        }
     }
 
     #[test]
@@ -6384,6 +6556,45 @@ mod tests {
         );
         assert!(first.replay_artifact.verifies());
         assert!(second.replay_artifact.verifies());
+
+        let mut histogram = histogram;
+        let _ = first.confirm(&mut histogram, 7);
+        let _ = second.abort_due_to_conflict(
+            &mut histogram,
+            "cursor-replay-cleanup",
+            "fallback-replay-cleanup",
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn subject_cell_speculative_publish_drop_without_resolution_panics_in_debug() {
+        let policy = rebalance_policy();
+        let candidates = rebalance_candidates();
+        let cell = cold_subject_cell(&candidates, &policy);
+        let speculative_policy = SpeculativeExecutionPolicy::default();
+        let histogram = CellConflictHistogram::default();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let attempt = cell
+                .begin_speculative_publish(
+                    &speculative_policy,
+                    &histogram,
+                    &SpeculativePublishRequest::new(
+                        "orders-drop",
+                        SemanticServiceClass::ReplyCritical,
+                        "idem-orders-drop",
+                        "digest-orders-drop",
+                    ),
+                )
+                .expect("low-conflict cell should admit speculative publish");
+            drop(attempt);
+        }));
+
+        assert!(
+            panic.is_err(),
+            "unresolved speculative attempts should trip the debug drop contract"
+        );
     }
 
     #[test]
