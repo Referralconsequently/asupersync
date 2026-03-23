@@ -851,3 +851,31 @@
 {"file":"src/record/finalizer.rs","lines":279,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"LIFO finalizer stack. Clean."}
 {"file":"src/record/symbol_obligation_tracker.rs","lines":987,"batch":421,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ObligationGuard RAII, index maintenance. Clean."}
 {"file":"src/sync/mutex.rs","lines":1367,"batch":422,"date":"2026-03-22","agent":"Codex","verdict":"FIXED","bugs":1,"notes":"Fixed FIFO fairness bug: fresh lock()/try_lock()/OwnedMutexGuard::try_lock() could barge ahead of queued waiters when the mutex became free."}
+{"file":"src/web/debug.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/time/interval.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/grpc/reflection.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/raptorq/linalg.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/cli/exit.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/bytes/buf/chain.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/observability/collector.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/runtime/scheduler/intrusive_heap.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/distributed/assignment.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/distributed/consistent_hash.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/tls/types.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/util/resource.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/runtime/kernel.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/sync/mod.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/lab/network/network.rs","timestamp":"2026-03-22T23:56:39Z","agent":"Gemini","status":"SOUND","notes":"Audited subset, fixed Clone bypass in MissedTickBehavior"}
+{"file":"src/combinator/hedge.rs","timestamp":"2026-03-23T00:00:30Z","agent":"Gemini","status":"SOUND","notes":"Audited, fixed panic on repoll"}
+{"file":"src/combinator/retry.rs","timestamp":"2026-03-23T00:00:30Z","agent":"Gemini","status":"SOUND","notes":"Audited, fixed panic on repoll"}
+{"file":"src/fs/uring.rs","lines":700,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"io_uring file ops. Drop drains completions, position CAS, lseek seek. Clean."}
+{"file":"src/io/copy.rs","lines":400,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Async copy. EOF, partial write retry, flush-on-complete. Clean."}
+{"file":"src/stream/peekable.rs","lines":330,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Three-state PeekSlot, EOF sticky. Clean."}
+{"file":"src/stream/zip.rs","lines":200,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Queued items prevent advancement. Clean."}
+{"file":"src/stream/chain.rs","lines":170,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Atomic first→second transition. Clean."}
+{"file":"src/combinator/select.rs","lines":600,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Alternating bias, no result leak. Clean."}
+{"file":"src/service/concurrency_limit.rs","lines":1700,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Permit RAII lifecycle, panic-safe via Drop. Clean."}
+{"file":"src/combinator/bulkhead.rs","lines":1717,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Capped CAS release, FIFO queue, anti-barging. Clean."}
+{"file":"src/signal/signal.rs","lines":702,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Signal-safe handlers, atomic counter, cancel-safe recv. Clean."}
+{"file":"src/web/compress.rs","lines":481,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Compression middleware, only-if-smaller, Vary header. Clean."}
+{"file":"src/http/h1/client.rs","lines":1200,"batch":422,"date":"2026-03-22","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Header injection prevention, body framing. Clean."}
