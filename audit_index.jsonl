@@ -905,3 +905,12 @@
 {"file":"src/net/happy_eyeballs.rs","status":"audited"}
 {"file":"src/net/websocket/split.rs","status":"audited"}
 {"file":"src/observability/metrics.rs","status":"audited"}
+{"file":"src/combinator/join.rs","status":"audited"}
+{"file":"src/net/tcp/traits.rs","status":"audited"}
+{"file":"src/cancel/symbol_cancel.rs","status":"audited"}
+{"file":"src/distributed/encoding.rs","status":"audited"}
+{"file":"src/net/quic_native/mod.rs","status":"audited"}
+{"file":"src/obligation/dialectica.rs","status":"audited"}
+{"file":"src/observability/analyzer_plugin.rs","status":"audited"}
+{"file":"src/bytes/buf/limit.rs","status":"audited"}
+{"file":"src/messaging/nats.rs","lines":1953,"batch":424,"date":"2026-03-23","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: subscribe/queue_subscribe leak subscription entry on write failure. Fixed by removing entry in error path."}

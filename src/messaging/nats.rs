@@ -1053,10 +1053,18 @@ impl NatsClient {
             );
         }
 
-        // Send SUB command
+        // Send SUB command. If the write fails, clean up the subscription
+        // entry to prevent a leaked sender that would accumulate dead channel
+        // sends on every matching incoming message.
         let cmd = format!("SUB {subject} {sid}\r\n");
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.flush().await?;
+        if let Err(err) = self.stream.write_all(cmd.as_bytes()).await {
+            self.state.subscriptions.lock().remove(&sid);
+            return Err(err.into());
+        }
+        if let Err(err) = self.stream.flush().await {
+            self.state.subscriptions.lock().remove(&sid);
+            return Err(err.into());
+        }
 
         cx.trace(&format!("nats: subscribed to {subject} (sid={sid})"));
 
@@ -1097,9 +1105,17 @@ impl NatsClient {
             );
         }
 
+        // Send SUB command. Clean up the subscription entry on write failure
+        // to prevent a leaked sender (same as subscribe()).
         let cmd = format!("SUB {subject} {queue_group} {sid}\r\n");
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.flush().await?;
+        if let Err(err) = self.stream.write_all(cmd.as_bytes()).await {
+            self.state.subscriptions.lock().remove(&sid);
+            return Err(err.into());
+        }
+        if let Err(err) = self.stream.flush().await {
+            self.state.subscriptions.lock().remove(&sid);
+            return Err(err.into());
+        }
 
         Ok(Subscription {
             sid,
