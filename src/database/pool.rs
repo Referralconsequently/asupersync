@@ -738,6 +738,22 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
+    async fn sleep_retry_backoff(cx: &Cx, mut duration: Duration) -> bool {
+        const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+        while !duration.is_zero() {
+            if cx.is_cancel_requested() {
+                return false;
+            }
+
+            let chunk = duration.min(CANCEL_POLL_INTERVAL);
+            crate::time::sleep(crate::time::wall_now(), chunk).await;
+            duration = duration.saturating_sub(chunk);
+        }
+
+        !cx.is_cancel_requested()
+    }
+
     /// Acquire a connection from the pool.
     pub async fn get(
         &self,
@@ -892,13 +908,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
 
                     let delay = calculate_delay(policy, attempt, None);
-                    // Use cx-aware sleep
-                    let _ = crate::time::timeout(
-                        crate::time::wall_now(),
-                        delay.min(remaining),
-                        crate::time::sleep(crate::time::wall_now(), delay.min(remaining)),
-                    )
-                    .await;
+                    if !Self::sleep_retry_backoff(cx, delay.min(remaining)).await {
+                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                        return Err(DbPoolError::Timeout);
+                    }
 
                     if crate::time::wall_now() >= deadline || cx.is_cancel_requested() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
@@ -1120,6 +1133,7 @@ impl<M: AsyncConnectionManager> fmt::Debug for AsyncPooledConnection<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1211,6 +1225,58 @@ mod tests {
         }
     }
 
+    struct AsyncTestManager {
+        next_id: AtomicUsize,
+        valid: Arc<AtomicBool>,
+        creates: AtomicUsize,
+        disconnects: AtomicUsize,
+        fail_connect: AtomicBool,
+    }
+
+    impl AsyncTestManager {
+        fn new() -> Self {
+            Self {
+                next_id: AtomicUsize::new(1),
+                valid: Arc::new(AtomicBool::new(true)),
+                creates: AtomicUsize::new(0),
+                disconnects: AtomicUsize::new(0),
+                fail_connect: AtomicBool::new(false),
+            }
+        }
+
+        fn always_failing() -> Self {
+            let manager = Self::new();
+            manager.fail_connect.store(true, Ordering::SeqCst);
+            manager
+        }
+    }
+
+    impl AsyncConnectionManager for AsyncTestManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+            if self.fail_connect.load(Ordering::SeqCst) {
+                return Outcome::Err(TestError("connection refused".to_string()));
+            }
+
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            Outcome::Ok(TestConnection {
+                id,
+                valid: self.valid.clone(),
+            })
+        }
+
+        async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
+            conn.valid.load(Ordering::SeqCst)
+        }
+
+        fn disconnect(&self, _conn: Self::Connection) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     // ================================================================
     // DbPoolConfig
     // ================================================================
@@ -1271,6 +1337,48 @@ mod tests {
         assert_eq!(stats.max_size, 10);
         assert!(!pool.is_closed());
         crate::test_complete!("pool_new");
+    }
+
+    #[test]
+    fn async_get_with_retry_observes_cancellation_during_backoff() {
+        init_test("async_get_with_retry_observes_cancellation_during_backoff");
+        let pool = AsyncDbPool::new(
+            AsyncTestManager::always_failing(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_secs(1)),
+        );
+        let policy = RetryPolicy::fixed_delay(Duration::from_millis(250), 3);
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            cancel_cx.set_cancel_requested(true);
+        });
+
+        let started = Instant::now();
+        let result = block_on(pool.get_with_retry(&cx, &policy));
+        let elapsed = started.elapsed();
+
+        canceller
+            .join()
+            .expect("cancel thread should finish cleanly");
+
+        assert!(matches!(result, Err(DbPoolError::Timeout)));
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "cancellation during backoff should stop promptly, observed {elapsed:?}"
+        );
+        let stats = pool.stats();
+        assert_eq!(
+            stats.total, 0,
+            "cancelled retries must not leak connections"
+        );
+        assert_eq!(
+            stats.active, 0,
+            "cancelled retries must not hold active leases"
+        );
+        crate::test_complete!("async_get_with_retry_observes_cancellation_during_backoff");
     }
 
     #[test]

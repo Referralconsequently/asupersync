@@ -806,17 +806,94 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Option<SqliteRow>, SqliteError> {
-        match self.query(cx, sql, params).await {
-            Outcome::Ok(mut rows) => {
-                if rows.is_empty() {
-                    Outcome::Ok(None)
-                } else {
-                    Outcome::Ok(Some(rows.remove(0)))
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let needs_rollback = Arc::clone(&self.needs_rollback);
+        let sql = sql.to_string();
+        let params: Vec<SqliteValue> = params.to_vec();
+
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
+
+        let handle = self.pool.spawn(move || {
+            let result = (|| {
+                let guard = inner.lock();
+                if needs_rollback.swap(false, Ordering::AcqRel) {
+                    if let Ok(conn) = guard.get() {
+                        let _ = conn.execute("ROLLBACK", []);
+                    }
                 }
+                let conn = guard.get()?;
+
+                let params_refs: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                let mut rows = stmt
+                    .query(params_refs.as_slice())
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                let row_opt = rows.next().map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                let result = if let Some(row) = row_opt {
+                    let column_count = stmt.column_count();
+                    let column_names: Vec<String> = stmt
+                        .column_names()
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect();
+                    let columns: BTreeMap<String, usize> = column_names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (name.clone(), i))
+                        .collect();
+                    let columns = Arc::new(columns);
+
+                    let mut values = Vec::with_capacity(column_count);
+                    for i in 0..column_count {
+                        let value = row
+                            .get_ref(i)
+                            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                        values.push(convert_value(value));
+                    }
+                    Some(SqliteRow::new(columns, values))
+                } else {
+                    None
+                };
+
+                drop(rows);
+                drop(stmt);
+                drop(guard);
+                Ok(result)
+            })();
+            let _ = permit.send(result);
+        });
+
+        match rx.recv(cx).await {
+            Ok(Ok(row)) => Outcome::Ok(row),
+            Ok(Err(e)) => Outcome::Err(e),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("cancelled")),
+                )
             }
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("SQLite query_row awaits a fresh oneshot recv future")
+            }
         }
     }
 
