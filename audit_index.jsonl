@@ -1042,3 +1042,20 @@
 {"file":"src/trace/integrity.rs","status":"audited"}
 {"file":"src/stream/fold.rs","status":"audited"}
 {"file":"src/fs/buf_writer.rs","status":"audited"}
+{"file":"src/cli/args.rs","status":"audited"}
+{"file":"src/sync/rwlock.rs","status":"audited"}
+{"file":"src/stream/broadcast_stream.rs","status":"audited"}
+{"file":"src/bytes/buf/buf_mut_trait.rs","status":"audited"}
+{"file":"src/runtime/task_table.rs","status":"audited"}
+{"file":"src/runtime/task_handle.rs","status":"audited"}
+{"file":"src/io/ext/write_ext.rs","lines":0,"batch":431,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked the WriteExt traits to make sure the loop handles `poll_write` futures and doesn't unwrap prematurely on `Pending`. Safety is fully encapsulated by Context."}
+{"file":"src/runtime/scheduler/local_queue.rs","lines":0,"batch":431,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Inspected local queue bounded steal loop logic (`VecDeque::remove(i)`). It correctly decrements length while maintaining bounds for SKIPPED_LOCALS_INLINE_CAP."}
+{"file":"src/raptorq/pipeline.rs","lines":1233,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Boundary audit: K=0/1 handled, symbol_size=0 rejected."}
+{"file":"src/distributed/consistent_hash.rs","lines":500,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Boundary audit: 0 nodes returns None, 0 vnodes yields empty ring."}
+{"file":"src/combinator/rate_limit.rs","lines":2092,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Boundary audit: burst=0/rate=0 handled, u128 intermediates."}
+{"file":"src/stream/chunks.rs","lines":461,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Boundary audit: cap=0 panics intentionally, partial flush on EOF."}
+{"file":"src/lab/replay.rs","lines":2282,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Replay infrastructure. Clean."}
+{"file":"src/io/browser_storage.rs","lines":2178,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Browser storage: quota enforcement, base64 key encoding. Clean."}
+{"file":"src/trace/divergence.rs","lines":1749,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Trace divergence analysis. Clean."}
+{"file":"src/lab/instrumented_future.rs","lines":1716,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Instrumented future wrapper. Clean."}
+{"file":"src/lab/explorer.rs","lines":1822,"batch":430,"date":"2026-03-23","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Schedule explorer with pending seed tracking. Clean."}
