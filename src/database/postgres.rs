@@ -1104,8 +1104,9 @@ impl MessageBuffer {
         // PostgreSQL protocol uses i32 for message length. Guard against
         // overflow for pathologically large messages (> 2 GiB payload).
         let payload_len = self.buf.len().saturating_add(4); // +4 for length field
-        let len: i32 = i32::try_from(payload_len)
-            .map_err(|_| PgError::Protocol("message payload exceeds PostgreSQL 2 GiB limit".into()))?;
+        let len: i32 = i32::try_from(payload_len).map_err(|_| {
+            PgError::Protocol("message payload exceeds PostgreSQL 2 GiB limit".into())
+        })?;
         let mut result = Vec::with_capacity(1 + 4 + self.buf.len());
         result.push(msg_type);
         result.extend_from_slice(&len.to_be_bytes());
@@ -1116,8 +1117,9 @@ impl MessageBuffer {
     /// Build a startup message (no type byte, includes protocol version).
     fn build_startup_message(&mut self) -> Result<Vec<u8>, PgError> {
         let payload_len = self.buf.len().saturating_add(4);
-        let len: i32 = i32::try_from(payload_len)
-            .map_err(|_| PgError::Protocol("message payload exceeds PostgreSQL 2 GiB limit".into()))?;
+        let len: i32 = i32::try_from(payload_len).map_err(|_| {
+            PgError::Protocol("message payload exceeds PostgreSQL 2 GiB limit".into())
+        })?;
         let mut result = Vec::with_capacity(4 + self.buf.len());
         result.extend_from_slice(&len.to_be_bytes());
         result.extend_from_slice(&self.buf);

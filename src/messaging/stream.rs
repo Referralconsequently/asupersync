@@ -2647,5 +2647,4 @@ mod tests {
             "expected PermitStreamMismatch, got {err:?}"
         );
     }
-
 }
