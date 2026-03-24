@@ -50,7 +50,7 @@ impl<'a> ReadBuf<'a> {
 
     /// Advances the filled cursor by `n` bytes.
     pub fn advance(&mut self, n: usize) {
-        assert!(self.filled + n <= self.initialized, "ReadBuf overflow");
+        assert!(n <= self.remaining(), "ReadBuf overflow");
         self.filled += n;
     }
 
@@ -64,10 +64,21 @@ impl<'a> ReadBuf<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{self, AssertUnwindSafe};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            return (*message).to_owned();
+        }
+        if let Some(message) = payload.downcast_ref::<String>() {
+            return message.clone();
+        }
+        "<non-string panic payload>".to_owned()
     }
 
     #[test]
@@ -86,5 +97,28 @@ mod tests {
         let len = read_buf.filled().len();
         crate::assert_with_log!(len == 5, "filled len", 5, len);
         crate::test_complete!("read_buf_put_and_advance");
+    }
+
+    #[test]
+    fn read_buf_advance_rejects_oversized_step_without_wrapping() {
+        init_test("read_buf_advance_rejects_oversized_step_without_wrapping");
+        let mut buf = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        read_buf.put_slice(&[1, 2, 3]);
+
+        let panic = panic::catch_unwind(AssertUnwindSafe(|| {
+            read_buf.advance(usize::MAX);
+        }))
+        .expect_err("advance must fail closed on oversized step");
+        let message = panic_message(panic);
+        crate::assert_with_log!(
+            message.contains("ReadBuf overflow"),
+            "panic message",
+            true,
+            message.contains("ReadBuf overflow")
+        );
+        let len = read_buf.filled().len();
+        crate::assert_with_log!(len == 3, "filled len", 3, len);
+        crate::test_complete!("read_buf_advance_rejects_oversized_step_without_wrapping");
     }
 }

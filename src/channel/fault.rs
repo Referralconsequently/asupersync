@@ -222,13 +222,16 @@ impl<T: Clone> FaultSender<T> {
             return Err(SendError::Cancelled(value));
         }
 
-        let should_reorder;
-        let should_duplicate;
-        {
+        let (should_reorder, should_duplicate) = {
             let mut rng = self.rng.lock();
-            should_reorder = rng.should_inject(self.config.reorder_probability);
-            should_duplicate = rng.should_inject(self.config.duplication_probability);
-        }
+            let should_reorder = rng.should_inject(self.config.reorder_probability);
+            // Treat reorder vs duplication as mutually exclusive outcomes for a
+            // single send attempt so buffered sends never leak eager duplicates.
+            let should_duplicate =
+                !should_reorder && rng.should_inject(self.config.duplication_probability);
+            drop(rng);
+            (should_reorder, should_duplicate)
+        };
 
         let duplicate = if should_duplicate {
             Some(value.clone())
@@ -973,6 +976,50 @@ mod tests {
         assert!(
             !entries.is_empty(),
             "expected evidence entries for injected faults"
+        );
+    }
+
+    #[test]
+    fn reorder_buffering_suppresses_eager_duplication_until_flush() {
+        let collector = Arc::new(CollectorSink::new());
+        let sink: Arc<dyn EvidenceSink> = collector.clone();
+        let config = FaultChannelConfig::new(42)
+            .with_reorder(1.0, 4)
+            .with_duplication(1.0);
+        let (fault_tx, mut rx) = fault_channel::<u32>(16, config, sink);
+        let cx = test_cx();
+
+        block_on(fault_tx.send(&cx, 7)).expect("send");
+
+        assert_eq!(fault_tx.buffered_count(), 1);
+        assert!(
+            rx.try_recv().is_err(),
+            "buffered reorder send leaked early delivery"
+        );
+        assert_eq!(
+            fault_tx.stats().messages_duplicated,
+            0,
+            "duplication must not fire when reorder buffered the message"
+        );
+
+        let entries = collector.entries();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.action == "inject_reorder_buffer")
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.action != "inject_duplication"),
+            "duplication evidence must not appear before flush: {entries:?}"
+        );
+
+        block_on(fault_tx.flush(&cx)).expect("flush");
+        assert_eq!(rx.try_recv().expect("recv buffered message"), 7);
+        assert!(
+            rx.try_recv().is_err(),
+            "reorder+duplication path delivered extra copy"
         );
     }
 

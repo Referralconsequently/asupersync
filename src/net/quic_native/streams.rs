@@ -749,17 +749,19 @@ impl StreamTable {
         if self.connection_send_remaining() == 0 || self.streams.is_empty() {
             return None;
         }
-        let ids: Vec<StreamId> = self.streams.keys().copied().collect();
-        let start = self
-            .rr_cursor
-            .and_then(|cursor| ids.iter().position(|id| *id == cursor))
-            .map_or(0, |idx| (idx + 1) % ids.len());
 
-        for offset in 0..ids.len() {
-            let id = ids[(start + offset) % ids.len()];
-            let Some(stream) = self.streams.get(&id) else {
-                continue;
-            };
+        let start_cursor = self.rr_cursor.unwrap_or(StreamId(0));
+
+        let iter1 = self.streams.range((
+            std::ops::Bound::Excluded(start_cursor),
+            std::ops::Bound::Unbounded,
+        ));
+        let iter2 = self.streams.range((
+            std::ops::Bound::Unbounded,
+            std::ops::Bound::Included(start_cursor),
+        ));
+
+        for (id, stream) in iter1.chain(iter2) {
             let writable = match id.direction() {
                 StreamDirection::Bidirectional => true,
                 StreamDirection::Unidirectional => id.is_local_for(self.role),
@@ -767,8 +769,8 @@ impl StreamTable {
                 && stream.stop_sending_error_code.is_none()
                 && stream.send_credit.remaining() > 0;
             if writable {
-                self.rr_cursor = Some(id);
-                return Some(id);
+                self.rr_cursor = Some(*id);
+                return Some(*id);
             }
         }
         None

@@ -78,9 +78,10 @@ impl<T: Buf> Buf for Take<T> {
     }
 
     fn advance(&mut self, cnt: usize) {
+        let remaining = self.remaining();
         assert!(
-            cnt <= self.limit,
-            "advance out of bounds: cnt={cnt}, limit={}",
+            cnt <= remaining,
+            "advance out of bounds: cnt={cnt}, remaining={remaining}, limit={}",
             self.limit
         );
         self.inner.advance(cnt);
@@ -139,6 +140,29 @@ mod tests {
         let chunk = take.chunk();
         crate::assert_with_log!(chunk == [3], "chunk", &[3], chunk);
         crate::test_complete!("test_take_advance");
+    }
+
+    #[test]
+    fn test_take_advance_when_limit_exceeds_inner_remaining() {
+        init_test("test_take_advance_when_limit_exceeds_inner_remaining");
+        let buf: &[u8] = &[1, 2];
+        let mut take = Take::new(buf, 10);
+
+        take.advance(2);
+
+        let remaining = take.remaining();
+        crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
+        let chunk = take.chunk();
+        crate::assert_with_log!(chunk.is_empty(), "chunk empty", true, chunk.is_empty());
+        crate::test_complete!("test_take_advance_when_limit_exceeds_inner_remaining");
+    }
+
+    #[test]
+    #[should_panic(expected = "advance out of bounds")]
+    fn test_take_advance_panics_when_count_exceeds_effective_remaining() {
+        let buf: &[u8] = &[1, 2];
+        let mut take = Take::new(buf, 10);
+        take.advance(3);
     }
 
     #[test]

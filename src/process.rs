@@ -1133,17 +1133,58 @@ impl Child {
     }
 }
 
-fn should_background_reap_kill_on_drop() -> bool {
-    Cx::current().is_some() || crate::runtime::Runtime::current_handle().is_some()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillOnDropReapStrategy {
+    DirectWait,
+    BlockingPool,
+    DetachedThread,
 }
 
-fn reap_kill_on_drop_child(child: std_process::Child) {
-    if !should_background_reap_kill_on_drop() {
-        let mut child = child;
-        let _ = child.wait();
-        return;
-    }
+fn blocking_pool_for_kill_on_drop_reap() -> Option<crate::runtime::blocking_pool::BlockingPoolHandle>
+{
+    Cx::current()
+        .and_then(|cx| cx.blocking_pool_handle())
+        .filter(|pool| !pool.is_shutdown())
+        .or_else(|| {
+            crate::runtime::Runtime::current_handle()
+                .and_then(|handle| handle.blocking_handle())
+                .filter(|pool| !pool.is_shutdown())
+        })
+}
 
+fn kill_on_drop_reap_strategy() -> KillOnDropReapStrategy {
+    if blocking_pool_for_kill_on_drop_reap().is_some() {
+        return KillOnDropReapStrategy::BlockingPool;
+    }
+    if Cx::current().is_some() || crate::runtime::Runtime::current_handle().is_some() {
+        return KillOnDropReapStrategy::DetachedThread;
+    }
+    KillOnDropReapStrategy::DirectWait
+}
+
+fn try_dispatch_kill_on_drop_reap_on_pool(
+    pool: &crate::runtime::blocking_pool::BlockingPoolHandle,
+    child: std_process::Child,
+) -> Result<(), std_process::Child> {
+    let shared_child = std::sync::Arc::new(parking_lot::Mutex::new(Some(child)));
+    let worker_child = std::sync::Arc::clone(&shared_child);
+    let handle = pool.spawn(move || {
+        let mut child_slot = worker_child.lock();
+        if let Some(mut child) = child_slot.take() {
+            let _ = child.wait();
+        }
+    });
+
+    if handle.is_done() && handle.is_cancelled() {
+        let mut child_slot = shared_child.lock();
+        if let Some(child) = child_slot.take() {
+            return Err(child);
+        }
+    }
+    Ok(())
+}
+
+fn spawn_detached_kill_on_drop_reaper(child: std_process::Child) -> Result<(), std_process::Child> {
     let shared_child = std::sync::Arc::new(parking_lot::Mutex::new(Some(child)));
     let thread_child = std::sync::Arc::clone(&shared_child);
 
@@ -1158,12 +1199,49 @@ fn reap_kill_on_drop_child(child: std_process::Child) {
         })
         .is_ok()
     {
-        return;
+        return Ok(());
     }
 
-    let mut shared_child = shared_child.lock();
-    if let Some(mut child) = shared_child.take() {
-        let _ = child.wait();
+    let mut child_slot = shared_child.lock();
+    if let Some(child) = child_slot.take() {
+        return Err(child);
+    }
+    drop(child_slot);
+    Ok(())
+}
+
+fn reap_kill_on_drop_child(mut child: std_process::Child) {
+    match kill_on_drop_reap_strategy() {
+        KillOnDropReapStrategy::DirectWait => {
+            let _ = child.wait();
+        }
+        KillOnDropReapStrategy::BlockingPool => {
+            if let Some(pool) = blocking_pool_for_kill_on_drop_reap() {
+                match try_dispatch_kill_on_drop_reap_on_pool(&pool, child) {
+                    Ok(()) => return,
+                    Err(recovered_child) => {
+                        child = recovered_child;
+                    }
+                }
+            }
+
+            if Cx::current().is_some() || crate::runtime::Runtime::current_handle().is_some() {
+                match spawn_detached_kill_on_drop_reaper(child) {
+                    Ok(()) => {}
+                    Err(mut recovered_child) => {
+                        let _ = recovered_child.wait();
+                    }
+                }
+            } else {
+                let _ = child.wait();
+            }
+        }
+        KillOnDropReapStrategy::DetachedThread => match spawn_detached_kill_on_drop_reaper(child) {
+            Ok(()) => {}
+            Err(mut recovered_child) => {
+                let _ = recovered_child.wait();
+            }
+        },
     }
 }
 
@@ -2215,15 +2293,23 @@ mod tests {
     }
 
     #[test]
-    fn test_kill_on_drop_background_reap_branch_tracks_ambient_cx() {
-        init_test("test_kill_on_drop_background_reap_branch_tracks_ambient_cx");
+    fn test_kill_on_drop_reap_strategy_without_runtime_or_cx_is_direct_wait() {
+        init_test("test_kill_on_drop_reap_strategy_without_runtime_or_cx_is_direct_wait");
 
         crate::assert_with_log!(
-            !should_background_reap_kill_on_drop(),
-            "no ambient cx uses direct reap",
-            false,
-            should_background_reap_kill_on_drop()
+            kill_on_drop_reap_strategy() == KillOnDropReapStrategy::DirectWait,
+            "no runtime context uses direct wait",
+            KillOnDropReapStrategy::DirectWait,
+            kill_on_drop_reap_strategy()
         );
+        crate::test_complete!(
+            "test_kill_on_drop_reap_strategy_without_runtime_or_cx_is_direct_wait"
+        );
+    }
+
+    #[test]
+    fn test_kill_on_drop_reap_strategy_tracks_ambient_cx_without_pool() {
+        init_test("test_kill_on_drop_reap_strategy_tracks_ambient_cx_without_pool");
 
         let cx = Cx::new(
             RegionId::new_for_test(0, 0),
@@ -2233,55 +2319,79 @@ mod tests {
         let _guard = Cx::set_current(Some(cx));
 
         crate::assert_with_log!(
-            should_background_reap_kill_on_drop(),
-            "ambient cx enables background reap",
-            true,
-            should_background_reap_kill_on_drop()
+            kill_on_drop_reap_strategy() == KillOnDropReapStrategy::DetachedThread,
+            "ambient cx without blocking pool uses detached reaper thread",
+            KillOnDropReapStrategy::DetachedThread,
+            kill_on_drop_reap_strategy()
         );
 
-        crate::test_complete!("test_kill_on_drop_background_reap_branch_tracks_ambient_cx");
+        crate::test_complete!("test_kill_on_drop_reap_strategy_tracks_ambient_cx_without_pool");
+    }
+
+    #[test]
+    fn test_kill_on_drop_reap_strategy_prefers_cx_blocking_pool() {
+        init_test("test_kill_on_drop_reap_strategy_prefers_cx_blocking_pool");
+
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(1)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("runtime build");
+        let cx = Cx::new(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+        )
+        .with_blocking_pool_handle(runtime.blocking_handle());
+        let _guard = Cx::set_current(Some(cx));
+
+        crate::assert_with_log!(
+            kill_on_drop_reap_strategy() == KillOnDropReapStrategy::BlockingPool,
+            "ambient cx with blocking pool prefers bounded pool reaper",
+            KillOnDropReapStrategy::BlockingPool,
+            kill_on_drop_reap_strategy()
+        );
+
+        drop(runtime);
+        crate::test_complete!("test_kill_on_drop_reap_strategy_prefers_cx_blocking_pool");
     }
 
     #[test]
     fn test_kill_on_drop_background_reap_branch_detects_runtime_worker_without_cx() {
-        use std::sync::mpsc;
-
         init_test("test_kill_on_drop_background_reap_branch_detects_runtime_worker_without_cx");
 
-        let (tx, rx) = mpsc::sync_channel(1);
         let runtime = crate::runtime::RuntimeBuilder::new()
             .worker_threads(1)
-            .on_thread_start(move || {
-                let _ = tx.send((
-                    crate::runtime::Runtime::current_handle().is_some(),
-                    Cx::current().is_some(),
-                    should_background_reap_kill_on_drop(),
-                ));
-            })
+            .blocking_threads(1, 1)
             .build()
             .expect("runtime build");
 
-        let (has_runtime_handle, has_ambient_cx, should_background_reap) = rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("worker startup callback should report runtime context");
+        let (has_runtime_handle, has_ambient_cx, reap_strategy) =
+            runtime.block_on(runtime.handle().spawn(async {
+                (
+                    crate::runtime::Runtime::current_handle().is_some(),
+                    Cx::current().is_some(),
+                    kill_on_drop_reap_strategy(),
+                )
+            }));
 
         crate::assert_with_log!(
             has_runtime_handle,
-            "worker thread exposes runtime handle before first task poll",
+            "spawned runtime task exposes ambient runtime handle",
             true,
             has_runtime_handle
         );
         crate::assert_with_log!(
             !has_ambient_cx,
-            "worker startup callback runs outside task poll cx",
+            "spawned task without spawn_with_cx runs without ambient cx",
             false,
             has_ambient_cx
         );
         crate::assert_with_log!(
-            should_background_reap,
-            "runtime worker without task cx should still background reap kill_on_drop",
-            true,
-            should_background_reap
+            reap_strategy == KillOnDropReapStrategy::BlockingPool,
+            "runtime worker without task cx should prefer bounded blocking pool reaper",
+            KillOnDropReapStrategy::BlockingPool,
+            reap_strategy
         );
 
         drop(runtime);
