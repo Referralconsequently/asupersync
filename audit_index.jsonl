@@ -1066,3 +1066,36 @@
 {"file":"src/bytes/buf/take.rs","lines":224,"batch":434,"date":"2026-03-23","agent":"ScarletGorge","verdict":"FIXED","bugs":1,"notes":"Fixed Take<T>::advance to enforce the effective remaining bound instead of the raw limit, preventing inner-buffer over-advance when limit > inner.remaining(); added boundary and regression tests."}
 {"file":"src/process.rs","lines":2580,"batch":302,"date":"2026-03-23","agent":"BoldStone","verdict":"FIXED","bugs":1,"notes":"kill_on_drop reap now prefers an available bounded blocking pool over raw detached OS threads, preserving no-zombie fallback behavior while avoiding unbounded detached reaper churn"}
 {"file":"src/channel/fault.rs","lines":1298,"batch":435,"date":"2026-03-23","agent":"BoldMeadow","verdict":"FIXED","bugs":1,"notes":"Made reorder buffering and duplication mutually exclusive per send attempt so buffered messages cannot leak an eager duplicate before flush; added focused regression and revalidated exact duplication coverage."}
+{"file":"src/web/multipart.rs","status":"audited"}
+{"file":"src/io/ext/read_ext.rs","status":"audited"}
+{"file":"src/obligation/crdt.rs","status":"audited"}
+{"file":"src/lab/virtual_time_wheel.rs","status":"audited"}
+{"file":"src/fs/vfs.rs","lines":0,"batch":433,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked Virtual File System abstraction logic. Verified path symlink checking operations."}
+{"file":"src/io/ext/read_ext.rs","lines":0,"batch":433,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked AsyncRead wrappers. Cooperative yield correctly maintains buffer states and `read_to_string` handles UTF-8 incomplete sequences via intelligent rollback."}
+{"file":"src/lab/oracle/eprocess.rs","lines":0,"batch":433,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked E-Process monitor math logic. Safe from NaN/Inf injections and correctly halts at boundaries."}
+{"file":"src/lab/oracle/rref_access.rs","lines":0,"batch":433,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked RRef isolation invariant logic. Proper tracking of closing regions, matching witnesses, and cross-region contamination."}
+{"file":"src/grpc/mod.rs","lines":0,"batch":433,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked architecture exports."}
+{"file":"src/net/quic/endpoint.rs","status":"audited"}
+{"file":"src/net/quic_native/forensic_log.rs","status":"audited"}
+{"file":"src/lab/network/mod.rs","status":"audited"}
+{"file":"src/lab/network/config.rs","status":"audited"}
+{"file":"src/grpc/web.rs","lines":0,"batch":434,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked gRPC-Web framing, percent-encoding for trailers, and content-type parsing. Found no security issues with buffer handling."}
+{"file":"src/grpc/protobuf.rs","lines":0,"batch":434,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked ProtobufCodec logic for buffer overallocations and bounds tracking. Valid."}
+{"file":"src/observability/context.rs","lines":0,"batch":434,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked thread-local SpanId stack mechanisms. ContextGuard prevents `Send` correctly."}
+{"file":"src/combinator/pipeline.rs","lines":0,"batch":434,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked PipelineResult unwrapping flow. Found sound cancelation forwarding."}
+{"file":"src/lab/meta/runner.rs","lines":0,"batch":434,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked lab execution harness boundaries for deterministic random seed propagation."}
+{"file":"src/web/static_files.rs","status":"audited"}
+{"file":"src/time/budget_ext.rs","status":"audited"}
+{"file":"src/stream/any_all.rs","status":"audited"}
+{"file":"src/lab/dual_run.rs","lines":0,"batch":435,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked SeedPlan deterministic overrides and NormalizedObservable comparisons. Validation of trace provenance looks solid."}
+{"file":"src/plan/mod.rs","lines":0,"batch":435,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked EGraph union-find logic and rewrite mechanics. Node deduplication is safe and deterministic."}
+{"file":"src/lab/oracle/finalizer.rs","lines":0,"batch":435,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked region close tracking and finalizer sets. Accurate checking of run finalizers before region destruction."}
+{"file":"src/bin/asupersync.rs","lines":0,"batch":435,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Checked CLI parsing boundaries and trace export payload validation. CLI errors are mapped to ExitCode variants appropriately."}
+{"file":"src/codec/encoder.rs","lines":0,"batch":435,"date":"2026-03-23","agent":"Gemini","verdict":"AUDITED","bugs":0,"notes":"Standard codec trait. Clean."}
+{"file":"src/bytes/buf/take.rs","lines":170,"batch":432,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Verified Take::advance fix (cnt vs remaining). Correct."}
+{"file":"src/io/read_buf.rs","lines":100,"batch":432,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Verified ReadBuf::advance fix (n vs remaining). Correct."}
+{"file":"src/channel/fault.rs","lines":1248,"batch":432,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Verified mutual exclusivity fix (reorder xor duplicate). Correct."}
+{"file":"src/net/quic_native/streams.rs","lines":800,"batch":432,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Verified BTreeMap range round-robin fix. Correct."}
+{"file":"src/messaging/snapshot.rs","lines":1350,"batch":432,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"New RecoverableStreamSnapshot: epoch fence, lease invalidation, scrub. Clean."}
+{"file":"src/messaging/stream.rs","lines":1226,"batch":432,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"New snapshot/restore: validated records, WAL recovery. Clean."}
+{"file":"src/lab/oracle/fabric.rs","lines":700,"batch":432,"date":"2026-03-24","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Redelivery idempotent tracking: BTreeMap deterministic, fail-closed bounds. Clean."}
