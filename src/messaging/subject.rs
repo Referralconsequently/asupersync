@@ -1606,9 +1606,15 @@ impl NamespaceKernel {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-internals"))]
 mod tests {
     use super::*;
+    use asupersync::cx::Cx;
+    use asupersync::lab::config::LabConfig;
+    use asupersync::lab::runtime::LabRuntime;
+    use asupersync::runtime::yield_now;
+    use asupersync::types::budget::Budget;
+    use asupersync::types::cancel::CancelReason;
 
     fn lit(value: &str) -> SubjectToken {
         SubjectToken::Literal(value.to_owned())
@@ -1938,6 +1944,29 @@ mod tests {
         drop(guard);
         assert_eq!(sl.count(), 0);
         assert_eq!(sl.lookup(&Subject::new("orders.created")).total(), 0);
+    }
+
+    #[test]
+    fn sublist_resubscribe_after_drop_matches_again_with_new_id() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("orders.created");
+        let first = sl.subscribe(&pattern, None);
+        let first_id = first.id();
+
+        assert_eq!(
+            sl.lookup(&Subject::new("orders.created")).subscribers,
+            vec![first_id]
+        );
+
+        drop(first);
+
+        let second = sl.subscribe(&pattern, None);
+        let second_id = second.id();
+        assert_ne!(first_id, second_id);
+        assert_eq!(
+            sl.lookup(&Subject::new("orders.created")).subscribers,
+            vec![second_id]
+        );
     }
 
     #[test]
@@ -2504,6 +2533,134 @@ mod tests {
         assert_eq!(sl.count(), 0);
     }
 
+    fn run_lab_sublist_trace(seed: u64) -> Vec<usize> {
+        let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(2_048));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let sublist = Arc::new(Sublist::new());
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let subject = Subject::new("lab.orders.created");
+
+        let writer_sublist = Arc::clone(&sublist);
+        let writer_subject = subject.clone();
+        let writer_samples = Arc::clone(&samples);
+        let (writer_task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task cx");
+                let exact = SubjectPattern::new("lab.orders.created");
+                let wildcard = SubjectPattern::new("lab.orders.*");
+                let _exact = writer_sublist.subscribe(&exact, None);
+                let _queue_a = writer_sublist.subscribe(&wildcard, Some("workers".to_owned()));
+                let _queue_b = writer_sublist.subscribe(&wildcard, Some("workers".to_owned()));
+
+                writer_samples
+                    .lock()
+                    .push(writer_sublist.lookup(&writer_subject).total());
+                cx.checkpoint().expect("checkpoint");
+                yield_now().await;
+                writer_samples
+                    .lock()
+                    .push(writer_sublist.lookup(&writer_subject).total());
+            })
+            .expect("writer task");
+        runtime.scheduler.lock().schedule(writer_task, 0);
+
+        let reader_sublist = Arc::clone(&sublist);
+        let reader_subject = subject.clone();
+        let reader_samples = Arc::clone(&samples);
+        let (reader_task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task cx");
+                cx.checkpoint().expect("checkpoint");
+                yield_now().await;
+                reader_samples
+                    .lock()
+                    .push(reader_sublist.lookup(&reader_subject).total());
+                cx.checkpoint().expect("checkpoint");
+                yield_now().await;
+                reader_samples
+                    .lock()
+                    .push(reader_sublist.lookup(&reader_subject).total());
+            })
+            .expect("reader task");
+        runtime.scheduler.lock().schedule(reader_task, 0);
+
+        runtime.run_until_quiescent();
+
+        let recorded = samples.lock().clone();
+        assert_eq!(sublist.count(), 0);
+        assert_eq!(sublist.lookup(&subject).total(), 0);
+        recorded
+    }
+
+    #[test]
+    fn sublist_lab_runtime_schedule_is_deterministic() {
+        let first = run_lab_sublist_trace(0x5A5A_0101);
+        let second = run_lab_sublist_trace(0x5A5A_0101);
+
+        assert_eq!(first, second);
+        assert!(
+            first.contains(&2),
+            "expected at least one lookup to observe the exact subscriber plus one queue-group pick"
+        );
+    }
+
+    #[test]
+    fn sublist_lab_runtime_cancelled_task_drops_subscription() {
+        let mut runtime = LabRuntime::new(LabConfig::new(0x5A5A_0202).max_steps(4_096));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let sublist = Arc::new(Sublist::new());
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let subject = Subject::new("lab.events.created");
+
+        let task_sublist = Arc::clone(&sublist);
+        let task_started = Arc::clone(&started);
+        let (task_id, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task cx");
+                let pattern = SubjectPattern::new("lab.events.>");
+                let _guard = task_sublist.subscribe(&pattern, None);
+                task_started.store(true, Ordering::SeqCst);
+
+                loop {
+                    if cx.checkpoint().is_err() {
+                        return;
+                    }
+                    yield_now().await;
+                }
+            })
+            .expect("cancellable task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+
+        for _ in 0..32 {
+            runtime.step_for_test();
+            if started.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+
+        assert!(started.load(Ordering::SeqCst));
+        assert_eq!(sublist.lookup(&subject).total(), 1);
+
+        let cancelled =
+            runtime
+                .state
+                .cancel_request(region, &CancelReason::user("subject test cancel"), None);
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            for (task, priority) in cancelled {
+                scheduler.schedule_cancel(task, priority);
+            }
+        }
+
+        runtime.run_until_quiescent();
+
+        assert_eq!(sublist.count(), 0);
+        assert_eq!(sublist.lookup(&subject).total(), 0);
+    }
+
     fn sharded_sublist() -> ShardedSublist {
         ShardedSublist::with_prefix_depth(8, 1)
     }
@@ -2720,6 +2877,74 @@ mod tests {
         assert_eq!(
             index.lookup(&Subject::new("tenant.orders.created")).total(),
             0
+        );
+    }
+
+    fn run_lab_sharded_trace(seed: u64) -> Vec<usize> {
+        let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(4_096));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let index = Arc::new(ShardedSublist::with_prefix_depth(8, 2));
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let subject = Subject::new("tenant.orders.created");
+
+        for pattern in [
+            SubjectPattern::new("tenant.orders.created"),
+            SubjectPattern::new("tenant.orders.*"),
+            SubjectPattern::new("*.orders.>"),
+        ] {
+            let task_index = Arc::clone(&index);
+            let (task_id, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("task cx");
+                    let _guard = task_index.subscribe(&pattern, None);
+                    cx.checkpoint().expect("checkpoint");
+                    yield_now().await;
+                    cx.checkpoint().expect("checkpoint");
+                    yield_now().await;
+                })
+                .expect("subscription task");
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
+
+        let reader_index = Arc::clone(&index);
+        let reader_subject = subject.clone();
+        let reader_samples = Arc::clone(&samples);
+        let (reader_task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task cx");
+                cx.checkpoint().expect("checkpoint");
+                yield_now().await;
+                reader_samples
+                    .lock()
+                    .push(reader_index.lookup(&reader_subject).total());
+                cx.checkpoint().expect("checkpoint");
+                yield_now().await;
+                reader_samples
+                    .lock()
+                    .push(reader_index.lookup(&reader_subject).total());
+            })
+            .expect("reader task");
+        runtime.scheduler.lock().schedule(reader_task, 0);
+
+        runtime.run_until_quiescent();
+
+        let recorded = samples.lock().clone();
+        assert_eq!(index.count(), 0);
+        assert_eq!(index.lookup(&subject).total(), 0);
+        recorded
+    }
+
+    #[test]
+    fn sharded_sublist_lab_runtime_lookup_is_deterministic() {
+        let first = run_lab_sharded_trace(0x5A5A_0303);
+        let second = run_lab_sharded_trace(0x5A5A_0303);
+
+        assert_eq!(first, second);
+        assert!(
+            first.contains(&3),
+            "expected one lookup to observe exact, same-shard wildcard, and fallback wildcard matches"
         );
     }
 
@@ -3121,5 +3346,473 @@ mod tests {
                 .as_str(),
             "tenant.acme.service.orders.control.rebalance"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional routing correctness tests (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sublist_resubscribe_after_unsubscribe_works_correctly() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("orders.created");
+        let subject = Subject::new("orders.created");
+
+        let guard = sl.subscribe(&pattern, None);
+        assert_eq!(sl.lookup(&subject).total(), 1);
+
+        drop(guard);
+        assert_eq!(sl.lookup(&subject).total(), 0);
+
+        // Re-subscribe on the same pattern after the original was removed.
+        let _guard2 = sl.subscribe(&pattern, None);
+        assert_eq!(sl.lookup(&subject).total(), 1);
+        assert_eq!(sl.count(), 1);
+    }
+
+    #[test]
+    fn sublist_very_long_subject_100_plus_tokens() {
+        let sl = sublist();
+        let tokens: Vec<&str> = (0..120).map(|_| "seg").collect();
+        let long_raw = tokens.join(".");
+        let pattern = SubjectPattern::parse(&long_raw).expect("long pattern");
+        let subject = Subject::parse(&long_raw).expect("long subject");
+
+        let _guard = sl.subscribe(&pattern, None);
+        assert_eq!(
+            sl.lookup(&subject).total(),
+            1,
+            "exact match on very long subject"
+        );
+
+        // Tail wildcard on first two tokens should also match.
+        let tail_pattern = SubjectPattern::parse("seg.seg.>").expect("tail pattern");
+        let _guard2 = sl.subscribe(&tail_pattern, None);
+        assert_eq!(
+            sl.lookup(&subject).total(),
+            2,
+            "tail wildcard matches long subject"
+        );
+    }
+
+    #[test]
+    fn sublist_no_partial_match_literal_prefix() {
+        let sl = sublist();
+        let _guard = sl.subscribe(&SubjectPattern::new("foo.bar"), None);
+
+        assert_eq!(
+            sl.lookup(&Subject::new("foo.bar.baz")).total(),
+            0,
+            "literal foo.bar must not match foo.bar.baz"
+        );
+        assert_eq!(
+            sl.lookup(&Subject::new("foo")).total(),
+            0,
+            "literal foo.bar must not match foo"
+        );
+    }
+
+    #[test]
+    fn sublist_overlapping_literal_single_and_tail_all_match() {
+        let sl = sublist();
+        let _g1 = sl.subscribe(&SubjectPattern::new("foo.bar"), None);
+        let _g2 = sl.subscribe(&SubjectPattern::new("foo.*"), None);
+        let _g3 = sl.subscribe(&SubjectPattern::new("foo.>"), None);
+
+        let result = sl.lookup(&Subject::new("foo.bar"));
+        assert_eq!(
+            result.subscribers.len(),
+            3,
+            "all three patterns should match foo.bar"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional queue group tests (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sublist_queue_group_plus_non_group_delivery_semantics() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("events.user.created");
+        // Two non-queue subscribers — should both receive every message.
+        let non_q1 = sl.subscribe(&pattern, None);
+        let non_q2 = sl.subscribe(&pattern, None);
+        // Three queue group members — only one per lookup.
+        let _q1 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let _q2 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let _q3 = sl.subscribe(&pattern, Some("workers".to_owned()));
+
+        let subject = Subject::new("events.user.created");
+        for _ in 0..10 {
+            let result = sl.lookup(&subject);
+            assert_eq!(
+                result.subscribers.len(),
+                2,
+                "both non-queue subscribers should appear on every lookup"
+            );
+            assert!(result.subscribers.contains(&non_q1.id()));
+            assert!(result.subscribers.contains(&non_q2.id()));
+            assert_eq!(
+                result.queue_group_picks.len(),
+                1,
+                "exactly one queue group pick per lookup"
+            );
+        }
+    }
+
+    #[test]
+    fn sublist_queue_group_removal_remaining_members_still_work() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("work.items");
+        let g1 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let g2 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let g3 = sl.subscribe(&pattern, Some("workers".to_owned()));
+        let subject = Subject::new("work.items");
+
+        // Remove g2.
+        drop(g2);
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let pick = sl.lookup(&subject).queue_group_picks[0].1;
+            seen.insert(pick);
+        }
+
+        assert!(seen.contains(&g1.id()), "g1 should still be picked");
+        assert!(seen.contains(&g3.id()), "g3 should still be picked");
+        assert_eq!(
+            seen.len(),
+            2,
+            "only the two remaining members should be picked"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional cancel-correctness tests (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sublist_cancel_some_verify_only_cancelled_removed() {
+        let sl = sublist();
+        let p1 = SubjectPattern::new("events.>");
+        let p2 = SubjectPattern::new("events.user.*");
+        let p3 = SubjectPattern::new("events.user.created");
+
+        let g1 = sl.subscribe(&p1, None);
+        let g2 = sl.subscribe(&p2, None);
+        let g3 = sl.subscribe(&p3, None);
+
+        let subject = Subject::new("events.user.created");
+        assert_eq!(sl.lookup(&subject).subscribers.len(), 3);
+
+        // Cancel only g2 — the other two should remain.
+        let g2_id = g2.id();
+        drop(g2);
+
+        let result = sl.lookup(&subject);
+        assert_eq!(result.subscribers.len(), 2, "only g2 should be removed");
+        assert!(result.subscribers.contains(&g1.id()), "g1 should survive");
+        assert!(result.subscribers.contains(&g3.id()), "g3 should survive");
+        assert!(!result.subscribers.contains(&g2_id), "g2 should be gone");
+    }
+
+    #[test]
+    fn sublist_guard_pattern_accessor_returns_subscribed_pattern() {
+        let sl = sublist();
+        let pattern = SubjectPattern::new("orders.*.eu");
+        let guard = sl.subscribe(&pattern, None);
+
+        assert_eq!(guard.pattern().as_str(), "orders.*.eu");
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional sharding tests (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sharded_sublist_lookup_combines_concrete_and_fallback() {
+        let index = sharded_sublist();
+        let literal = SubjectPattern::new("tenant.orders");
+        let wildcard = SubjectPattern::new("*.orders");
+        let subject = Subject::new("tenant.orders");
+
+        let _g1 = index.subscribe(&literal, None);
+        let _g2 = index.subscribe(&wildcard, None);
+
+        let result = index.lookup(&subject);
+        assert_eq!(
+            result.total(),
+            2,
+            "lookup should combine concrete shard hit + fallback hit"
+        );
+    }
+
+    #[test]
+    fn sharded_sublist_queue_groups_work_through_shards() {
+        let index = sharded_sublist();
+        let pattern = SubjectPattern::new("tenant.work.items");
+        let _q1 = index.subscribe(&pattern, Some("workers".to_owned()));
+        let _q2 = index.subscribe(&pattern, Some("workers".to_owned()));
+        let _non_q = index.subscribe(&pattern, None);
+
+        let subject = Subject::new("tenant.work.items");
+        let result = index.lookup(&subject);
+
+        assert_eq!(result.subscribers.len(), 1, "non-queue subscriber");
+        assert_eq!(result.queue_group_picks.len(), 1, "one queue group pick");
+    }
+
+    #[test]
+    fn sharded_sublist_count_includes_all_shards_and_fallback() {
+        let index = sharded_sublist();
+        let _g1 = index.subscribe(&SubjectPattern::new("alpha.events"), None);
+        let _g2 = index.subscribe(&SubjectPattern::new("beta.events"), None);
+        let _g3 = index.subscribe(&SubjectPattern::new("*.events"), None); // fallback
+
+        assert_eq!(index.count(), 3);
+    }
+
+    #[test]
+    fn sharded_sublist_prefix_depth_two_routes_correctly() {
+        let index = ShardedSublist::with_prefix_depth(4, 2);
+        let p1 = SubjectPattern::new("tenant.orders.created");
+        let p2 = SubjectPattern::new("tenant.orders.cancelled");
+        let p3 = SubjectPattern::new("tenant.payments.created");
+
+        let shard1 = index.shard_index_for_pattern(&p1).expect("concrete");
+        let shard2 = index.shard_index_for_pattern(&p2).expect("concrete");
+        let shard3 = index.shard_index_for_pattern(&p3).expect("concrete");
+
+        // Same first two literal segments → same shard.
+        assert_eq!(shard1, shard2, "same prefix depth-2 hash");
+        // Different second segment → potentially different shard.
+        // (May collide by hash, but the test verifies the routing function runs.)
+        let _ = shard3;
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional registry tests (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn registry_reregister_with_different_family_after_deregister() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("orders.created")).expect("event");
+        reg.deregister("orders.created").expect("deregister");
+        reg.register(command_entry("orders.created"))
+            .expect("command re-register");
+
+        let result = reg.lookup(&Subject::new("orders.created")).expect("found");
+        assert_eq!(result.family, RegistryFamily::Command);
+    }
+
+    #[test]
+    fn registry_different_families_at_different_specificity_do_not_conflict() {
+        let reg = SubjectRegistry::new();
+        reg.register(event_entry("events.>")).expect("broad event");
+        reg.register(command_entry("events.user.created"))
+            .expect("specific command");
+
+        // Different specificity → no conflict.
+        assert_eq!(reg.count(), 2);
+
+        // Lookup returns most specific.
+        let result = reg
+            .lookup(&Subject::new("events.user.created"))
+            .expect("found");
+        assert_eq!(result.family, RegistryFamily::Command);
+    }
+
+    #[test]
+    fn registry_concurrent_register_and_lookup() {
+        use std::thread;
+
+        let reg = Arc::new(SubjectRegistry::new());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let reg1 = Arc::clone(&reg);
+        let b1 = Arc::clone(&barrier);
+        let writer = thread::spawn(move || {
+            b1.wait();
+            for i in 0..20 {
+                let _ = reg1.register(event_entry(&format!("events.concurrent.topic{i}")));
+            }
+        });
+
+        let reg2 = Arc::clone(&reg);
+        let b2 = Arc::clone(&barrier);
+        let reader1 = thread::spawn(move || {
+            b2.wait();
+            for _ in 0..100 {
+                let _ = reg2.lookup(&Subject::new("events.concurrent.topic0"));
+            }
+        });
+
+        let reg3 = Arc::clone(&reg);
+        let b3 = Arc::clone(&barrier);
+        let reader2 = thread::spawn(move || {
+            b3.wait();
+            for _ in 0..100 {
+                let _ = reg3.list_by_family(RegistryFamily::Event);
+            }
+        });
+
+        writer.join().expect("writer");
+        reader1.join().expect("reader1");
+        reader2.join().expect("reader2");
+    }
+
+    #[test]
+    fn registry_count_tracks_register_and_deregister() {
+        let reg = SubjectRegistry::new();
+        assert_eq!(reg.count(), 0);
+
+        reg.register(event_entry("orders.created"))
+            .expect("register 1");
+        assert_eq!(reg.count(), 1);
+
+        reg.register(command_entry("payments.created"))
+            .expect("register 2");
+        assert_eq!(reg.count(), 2);
+
+        reg.deregister("orders.created").expect("deregister");
+        assert_eq!(reg.count(), 1);
+    }
+
+    #[test]
+    fn registry_family_display_covers_all_variants() {
+        assert_eq!(RegistryFamily::Command.to_string(), "command");
+        assert_eq!(RegistryFamily::Event.to_string(), "event");
+        assert_eq!(RegistryFamily::Reply.to_string(), "reply");
+        assert_eq!(RegistryFamily::Control.to_string(), "control");
+        assert_eq!(RegistryFamily::ProtocolStep.to_string(), "protocol-step");
+        assert_eq!(
+            RegistryFamily::CaptureSelector.to_string(),
+            "capture-selector"
+        );
+        assert_eq!(RegistryFamily::DerivedView.to_string(), "derived-view");
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional namespace kernel tests (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn namespace_kernel_rejects_multi_segment_component() {
+        let err = NamespaceKernel::new("acme.corp", "orders").expect_err("multi-segment tenant");
+        assert!(
+            matches!(err, NamespaceKernelError::MultiSegmentComponent { .. }),
+            "expected MultiSegmentComponent, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn namespace_kernel_rejects_wildcard_component() {
+        let err = NamespaceKernel::new("*", "orders").expect_err("wildcard tenant");
+        assert!(
+            matches!(err, NamespaceKernelError::InvalidComponent { .. }),
+            "expected InvalidComponent, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn namespace_kernel_rejects_empty_component() {
+        let err = NamespaceKernel::new("", "orders").expect_err("empty tenant");
+        assert!(
+            matches!(err, NamespaceKernelError::InvalidComponent { .. }),
+            "expected InvalidComponent, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn namespace_component_display_and_as_str() {
+        let comp = NamespaceComponent::parse("myservice").expect("valid component");
+        assert_eq!(comp.as_str(), "myservice");
+        assert_eq!(comp.to_string(), "myservice");
+    }
+
+    #[test]
+    fn namespace_kernel_observability_and_capture_patterns() {
+        let kernel = NamespaceKernel::new("acme", "orders").expect("kernel");
+
+        let obs_pattern = kernel.observability_pattern();
+        assert_eq!(
+            obs_pattern.as_str(),
+            "tenant.acme.service.orders.telemetry.>"
+        );
+
+        let cap_pattern = kernel.durable_capture_pattern();
+        assert_eq!(cap_pattern.as_str(), "tenant.acme.capture.orders.>");
+
+        let tenant_pattern = kernel.tenant_pattern();
+        assert_eq!(tenant_pattern.as_str(), "tenant.acme.>");
+    }
+
+    #[test]
+    fn namespace_kernel_trust_boundary_matches_service_pattern() {
+        let kernel = NamespaceKernel::new("acme", "orders").expect("kernel");
+        assert_eq!(
+            kernel.trust_boundary_pattern().as_str(),
+            kernel.service_pattern().as_str(),
+            "trust boundary should be an alias for the service pattern"
+        );
+    }
+
+    #[test]
+    fn namespace_kernel_does_not_own_foreign_service_subject() {
+        let acme_orders = NamespaceKernel::new("acme", "orders").expect("kernel");
+        let acme_payments_subject = Subject::new("tenant.acme.service.payments.mailbox.worker-1");
+
+        assert!(
+            !acme_orders.owns_subject(&acme_payments_subject),
+            "acme/orders should not own acme/payments subjects"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SublistResult extend and total (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sublist_result_extend_merges_subscribers_and_queue_picks() {
+        let mut r1 = SublistResult {
+            subscribers: vec![SubscriptionId(1)],
+            queue_group_picks: vec![("group-a".to_owned(), SubscriptionId(2))],
+        };
+        let r2 = SublistResult {
+            subscribers: vec![SubscriptionId(3)],
+            queue_group_picks: vec![("group-b".to_owned(), SubscriptionId(4))],
+        };
+        r1.extend(r2);
+
+        assert_eq!(r1.subscribers, vec![SubscriptionId(1), SubscriptionId(3)]);
+        assert_eq!(r1.queue_group_picks.len(), 2);
+        assert_eq!(r1.total(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pattern canonical_key and Default (bead 8w83i.2.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn subject_pattern_default_is_fabric_default() {
+        let pattern = SubjectPattern::default();
+        assert_eq!(pattern.as_str(), "fabric.default");
+        assert!(!pattern.has_wildcards());
+    }
+
+    #[test]
+    fn subject_pattern_canonical_key_preserves_canonical_subject_string() {
+        let pattern = SubjectPattern::new("Tenant.Orders.EU");
+        let key = pattern.canonical_key();
+        assert_eq!(key, "Tenant.Orders.EU");
+    }
+
+    #[test]
+    fn subscription_id_display_and_raw() {
+        let id = SubscriptionId(42);
+        assert_eq!(id.raw(), 42);
+        assert_eq!(id.to_string(), "sub-42");
     }
 }

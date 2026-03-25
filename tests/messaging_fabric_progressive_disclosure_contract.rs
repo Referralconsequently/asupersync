@@ -19,8 +19,6 @@ pub mod util {
 mod class;
 #[path = "../src/messaging/ir.rs"]
 mod ir;
-#[path = "../src/messaging/subject.rs"]
-mod subject;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
