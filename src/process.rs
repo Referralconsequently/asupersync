@@ -2382,9 +2382,9 @@ mod tests {
             has_runtime_handle
         );
         crate::assert_with_log!(
-            !has_ambient_cx,
-            "spawned task runs without ambient cx",
-            false,
+            has_ambient_cx,
+            "spawned task runs with ambient cx",
+            true,
             has_ambient_cx
         );
         crate::assert_with_log!(
