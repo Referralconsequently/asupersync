@@ -240,11 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn gate_needs_evidence_below_threshold() {
-        // 4 × 0.6 / 3 = 0.8 — below threshold but promising
+    fn gate_reject_below_needs_evidence_threshold() {
+        // 4 × 0.6 / 3 = 0.8 — below 1.0 - not worthwhile
         let s = OpportunityScore::new(4.0, 0.6, 3.0).unwrap();
         let result = s.evaluate();
-        // 0.8 < 1.0, so it's actually Reject
         assert_eq!(result.decision, GateDecision::Reject);
     }
 
