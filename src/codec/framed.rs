@@ -18,6 +18,11 @@ const READ_BUF_SIZE: usize = 8192;
 /// Without this bound, an always-ready transport that never completes a frame
 /// can monopolize a single executor turn indefinitely.
 const MAX_READ_PASSES_PER_POLL: usize = 32;
+/// Cooperative cap on repeated write passes inside one `poll_flush`.
+///
+/// Without this bound, a transport that always accepts tiny writes can
+/// monopolize a single executor turn while draining a large frame buffer.
+const MAX_WRITE_PASSES_PER_POLL: usize = 32;
 
 /// Full-duplex framed transport.
 ///
@@ -202,7 +207,12 @@ where
 {
     /// Flush all buffered write data to the underlying transport.
     pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut write_passes = 0usize;
         while !self.write_buf.is_empty() {
+            if write_passes >= MAX_WRITE_PASSES_PER_POLL {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             let n = match Pin::new(&mut self.inner).poll_write(cx, &self.write_buf) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -215,6 +225,7 @@ where
                 )));
             }
             let _ = self.write_buf.split_to(n);
+            write_passes += 1;
         }
         Pin::new(&mut self.inner).poll_flush(cx)
     }
@@ -245,7 +256,7 @@ impl<T: std::fmt::Debug, U: std::fmt::Debug> std::fmt::Debug for Framed<T, U> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::LinesCodec;
+    use crate::codec::{LinesCodec, LinesCodecError};
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -376,6 +387,101 @@ mod tests {
             let this = self.get_mut();
             this.written.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct AlwaysReadyPartialWriteDuplex {
+        writes: usize,
+        panic_after: usize,
+        max_per_write: usize,
+        written: Vec<u8>,
+    }
+
+    impl AlwaysReadyPartialWriteDuplex {
+        fn new(max_per_write: usize, panic_after: usize) -> Self {
+            Self {
+                writes: 0,
+                panic_after,
+                max_per_write,
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for AlwaysReadyPartialWriteDuplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for AlwaysReadyPartialWriteDuplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            assert!(
+                this.writes < this.panic_after,
+                "transport was polled too many times without yielding"
+            );
+            this.writes += 1;
+            let n = std::cmp::min(buf.len(), this.max_per_write);
+            this.written.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ErrorDuplex {
+        kind: io::ErrorKind,
+    }
+
+    impl ErrorDuplex {
+        fn new(kind: io::ErrorKind) -> Self {
+            Self { kind }
+        }
+    }
+
+    impl AsyncRead for ErrorDuplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let kind = self.get_mut().kind;
+            Poll::Ready(Err(io::Error::new(kind, "framed duplex read error")))
+        }
+    }
+
+    impl AsyncWrite for ErrorDuplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(0))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -564,5 +670,50 @@ mod tests {
             MAX_READ_PASSES_PER_POLL,
             "already-read bytes must stay buffered across the cooperative yield"
         );
+    }
+
+    #[test]
+    fn framed_write_side_yields_cooperatively_on_always_ready_partial_transport() {
+        let transport = AlwaysReadyPartialWriteDuplex::new(1, MAX_WRITE_PASSES_PER_POLL + 1);
+        let mut framed = Framed::new(transport, LinesCodec::new());
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = track_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+
+        framed
+            .send("x".repeat(MAX_WRITE_PASSES_PER_POLL + 8))
+            .expect("encode test frame");
+
+        let poll = framed.poll_flush(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield should self-wake for continued draining"
+        );
+        assert_eq!(
+            framed.get_ref().writes,
+            MAX_WRITE_PASSES_PER_POLL,
+            "poll_flush should stop after the cooperative write budget"
+        );
+        assert!(
+            !framed.write_buffer().is_empty(),
+            "buffered frame bytes must remain after the cooperative yield"
+        );
+    }
+
+    #[test]
+    fn framed_preserves_io_error_kind_from_lines_codec() {
+        let transport = ErrorDuplex::new(io::ErrorKind::ConnectionReset);
+        let mut framed = Framed::new(transport, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+            }
+            other => panic!("expected io error propagation, got {other:?}"),
+        }
     }
 }

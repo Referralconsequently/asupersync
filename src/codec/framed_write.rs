@@ -9,6 +9,11 @@ use std::task::{Context, Poll};
 
 /// Default write buffer capacity.
 const DEFAULT_CAPACITY: usize = 8192;
+/// Cooperative cap on repeated write passes inside one `poll_flush`.
+///
+/// Without this bound, a writer that always accepts tiny chunks can monopolize
+/// a single executor turn while draining a large encoded frame.
+const MAX_WRITE_PASSES_PER_POLL: usize = 32;
 
 /// Async framed writer that applies an `Encoder` to an `AsyncWrite` sink.
 ///
@@ -101,7 +106,12 @@ where
     /// Returns `Poll::Ready(Ok(()))` when the buffer is empty and the
     /// underlying writer has been flushed.
     pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut write_passes = 0usize;
         while !self.buffer.is_empty() {
+            if write_passes >= MAX_WRITE_PASSES_PER_POLL {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             let n = match Pin::new(&mut self.inner).poll_write(cx, &self.buffer) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -114,6 +124,7 @@ where
                 )));
             }
             let _ = self.buffer.split_to(n);
+            write_passes += 1;
         }
         Pin::new(&mut self.inner).poll_flush(cx)
     }
@@ -144,6 +155,7 @@ mod tests {
     use super::*;
     use crate::codec::LinesCodec;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
@@ -154,6 +166,22 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn track_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(TrackWaker(flag)))
     }
 
     #[test]
@@ -261,5 +289,78 @@ mod tests {
 
         assert!(framed.write_buffer().is_empty());
         assert_eq!(&framed.get_ref().inner, b"abcdef\n");
+    }
+
+    struct AlwaysReadyPartialWriter {
+        inner: Vec<u8>,
+        max_per_write: usize,
+        writes: usize,
+        panic_after: usize,
+    }
+
+    impl AlwaysReadyPartialWriter {
+        fn new(max_per_write: usize, panic_after: usize) -> Self {
+            Self {
+                inner: Vec::new(),
+                max_per_write,
+                writes: 0,
+                panic_after,
+            }
+        }
+    }
+
+    impl AsyncWrite for AlwaysReadyPartialWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            assert!(
+                this.writes < this.panic_after,
+                "writer was polled too many times without yielding"
+            );
+            this.writes += 1;
+            let n = std::cmp::min(buf.len(), this.max_per_write);
+            this.inner.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_write_yields_cooperatively_on_always_ready_partial_writer() {
+        let output = AlwaysReadyPartialWriter::new(1, MAX_WRITE_PASSES_PER_POLL + 1);
+        let mut framed = FramedWrite::new(output, LinesCodec::new());
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = track_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+
+        framed
+            .send("x".repeat(MAX_WRITE_PASSES_PER_POLL + 8))
+            .expect("encode test frame");
+
+        let poll = framed.poll_flush(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield should self-wake for continued draining"
+        );
+        assert_eq!(
+            framed.get_ref().writes,
+            MAX_WRITE_PASSES_PER_POLL,
+            "poll_flush should stop after the cooperative write budget"
+        );
+        assert!(
+            !framed.write_buffer().is_empty(),
+            "buffered frame bytes must remain after the cooperative yield"
+        );
     }
 }

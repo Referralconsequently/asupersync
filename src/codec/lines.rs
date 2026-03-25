@@ -5,12 +5,14 @@ use crate::codec::{Decoder, Encoder};
 use std::io;
 
 /// Errors produced by `LinesCodec`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum LinesCodecError {
     /// Input exceeded the configured maximum line length.
     MaxLineLengthExceeded,
     /// Input was not valid UTF-8.
     InvalidUtf8,
+    /// I/O failed while driving the codec through a framed transport.
+    Io(io::Error),
 }
 
 impl std::fmt::Display for LinesCodecError {
@@ -18,17 +20,35 @@ impl std::fmt::Display for LinesCodecError {
         match self {
             Self::MaxLineLengthExceeded => write!(f, "line exceeds maximum length"),
             Self::InvalidUtf8 => write!(f, "line is not valid UTF-8"),
+            Self::Io(err) => write!(f, "i/o error while decoding line: {err}"),
         }
     }
 }
 
-impl std::error::Error for LinesCodecError {}
+impl std::error::Error for LinesCodecError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::MaxLineLengthExceeded | Self::InvalidUtf8 => None,
+        }
+    }
+}
+
+impl LinesCodecError {
+    /// Returns the underlying I/O error kind when this error originated from
+    /// the transport instead of the line parser.
+    #[must_use]
+    pub fn io_kind(&self) -> Option<io::ErrorKind> {
+        match self {
+            Self::Io(err) => Some(err.kind()),
+            Self::MaxLineLengthExceeded | Self::InvalidUtf8 => None,
+        }
+    }
+}
 
 impl From<io::Error> for LinesCodecError {
-    fn from(_: io::Error) -> Self {
-        // Map generic I/O errors to UTF-8 error to avoid leaking io::Error
-        // into the line-oriented API.
-        Self::InvalidUtf8
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
     }
 }
 
@@ -295,7 +315,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn lines_codec_error_debug_clone_copy_eq_display() {
+    fn lines_codec_error_debug_and_display() {
         let e1 = LinesCodecError::MaxLineLengthExceeded;
         let e2 = LinesCodecError::InvalidUtf8;
 
@@ -303,11 +323,6 @@ mod tests {
         assert!(format!("{e2:?}").contains("InvalidUtf8"));
         assert!(format!("{e1}").contains("maximum length"));
         assert!(format!("{e2}").contains("not valid UTF-8"));
-
-        let copied = e1;
-        let cloned = e1;
-        assert_eq!(copied, cloned);
-        assert_ne!(e1, e2);
 
         let err: &dyn std::error::Error = &e1;
         assert!(err.source().is_none());
@@ -317,7 +332,9 @@ mod tests {
     fn lines_codec_error_from_io() {
         let io_err = std::io::Error::other("test");
         let codec_err: LinesCodecError = io_err.into();
-        assert_eq!(codec_err, LinesCodecError::InvalidUtf8);
+        assert_eq!(codec_err.io_kind(), Some(io::ErrorKind::Other));
+        assert!(format!("{codec_err}").contains("i/o error"));
+        assert!(std::error::Error::source(&codec_err).is_some());
     }
 
     #[test]

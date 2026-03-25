@@ -112,10 +112,10 @@ fn e2e_codec_003_lines_max_length() {
     let mut buf = BytesMut::from("this_is_way_too_long\n");
     let err = codec2.decode(&mut buf).expect_err("should reject");
     assert_with_log!(
-        err == LinesCodecError::MaxLineLengthExceeded,
+        matches!(err, LinesCodecError::MaxLineLengthExceeded),
         "max length error",
-        LinesCodecError::MaxLineLengthExceeded,
-        err
+        "MaxLineLengthExceeded",
+        format!("{err:?}")
     );
 
     test_complete!("e2e_codec_003_lines_max_length");
@@ -228,10 +228,10 @@ fn e2e_codec_007_lines_discard_and_recover() {
     test_section!("oversized line rejected");
     let err = codec.decode(&mut buf).expect_err("should reject");
     assert_with_log!(
-        err == LinesCodecError::MaxLineLengthExceeded,
+        matches!(err, LinesCodecError::MaxLineLengthExceeded),
         "max length error",
-        LinesCodecError::MaxLineLengthExceeded,
-        err
+        "MaxLineLengthExceeded",
+        format!("{err:?}")
     );
 
     test_section!("recover after oversized newline");
@@ -555,10 +555,10 @@ fn e2e_codec_022_invalid_utf8() {
     test_section!("decode fails");
     let err = codec.decode(&mut buf).expect_err("should fail");
     assert_with_log!(
-        err == LinesCodecError::InvalidUtf8,
+        matches!(err, LinesCodecError::InvalidUtf8),
         "invalid utf8 error",
-        LinesCodecError::InvalidUtf8,
-        err
+        "InvalidUtf8",
+        format!("{err:?}")
     );
 
     test_complete!("e2e_codec_022_invalid_utf8");

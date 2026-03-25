@@ -164,7 +164,7 @@ impl<R: std::fmt::Debug, D: std::fmt::Debug> std::fmt::Debug for FramedRead<R, D
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::LinesCodec;
+    use crate::codec::{LinesCodec, LinesCodecError};
     use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -325,6 +325,27 @@ mod tests {
         }
     }
 
+    struct ErrorReader {
+        kind: io::ErrorKind,
+    }
+
+    impl ErrorReader {
+        fn new(kind: io::ErrorKind) -> Self {
+            Self { kind }
+        }
+    }
+
+    impl AsyncRead for ErrorReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let kind = self.get_mut().kind;
+            Poll::Ready(Err(io::Error::new(kind, "framed read test error")))
+        }
+    }
+
     struct AlwaysReadyByteReader {
         reads: usize,
         panic_after: usize,
@@ -397,5 +418,21 @@ mod tests {
             MAX_READ_PASSES_PER_POLL,
             "already-read bytes must stay buffered across the cooperative yield"
         );
+    }
+
+    #[test]
+    fn framed_read_preserves_io_error_kind_from_lines_codec() {
+        let reader = ErrorReader::new(io::ErrorKind::BrokenPipe);
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+            }
+            other => panic!("expected io error propagation, got {other:?}"),
+        }
     }
 }
