@@ -6,8 +6,10 @@
 //! allowing callers to submit work without blocking on the inner service's
 //! readiness.
 //!
-//! The buffer is implemented as a bounded MPSC channel. A background worker
-//! drains the channel and dispatches requests to the inner service.
+//! The buffer is implemented using an inline-polling architecture. Instead of
+//! a background worker, the futures returned by the service concurrently
+//! multiplex access to the inner service via a shared lock. This avoids the
+//! overhead of spawning background tasks while maintaining capacity limits.
 //!
 //! # Example
 //!
@@ -35,8 +37,9 @@ const DEFAULT_CAPACITY: usize = 16;
 
 /// A layer that wraps a service with a bounded request buffer.
 ///
-/// Requests are queued and dispatched to the inner service by a worker.
-/// When the buffer is full, `poll_ready` returns `Poll::Pending`.
+/// Requests are admitted up to the configured capacity and then multiplexed
+/// against the inner service by the futures returned from `call`. When the
+/// buffer is full, `poll_ready` returns `Poll::Pending`.
 #[derive(Debug, Clone)]
 pub struct BufferLayer {
     capacity: usize,
@@ -75,12 +78,11 @@ impl<S> Layer<S> for BufferLayer {
 
 // ─── Buffer service ─────────────────────────────────────────────────────────
 
-/// A service that buffers requests via a bounded channel.
+/// A service that buffers requests up to a maximum capacity.
 ///
-/// The `Buffer` accepts requests and sends them through a channel to an
-/// internal worker that dispatches them to the inner service. This allows
-/// the service to be cloned cheaply — all clones share the same buffer
-/// and worker.
+/// The `Buffer` allows multiple callers to cheaply clone the service and
+/// enqueue requests. The actual processing of these requests against the
+/// inner service is driven concurrently by the futures returned by `call`.
 pub struct Buffer<S> {
     shared: Arc<SharedBuffer<S>>,
 }
@@ -147,7 +149,17 @@ impl<S> Buffer<S> {
 
     /// Close the buffer, rejecting new requests.
     pub fn close(&self) {
-        *self.shared.closed.lock() = true;
+        let mut closed = self.shared.closed.lock();
+        if *closed {
+            return;
+        }
+        *closed = true;
+        drop(closed);
+
+        let ready_wakers = std::mem::take(&mut *self.shared.ready_wakers.lock());
+        for waker in ready_wakers {
+            waker.wake();
+        }
     }
 
     /// Returns `true` if the buffer has been closed.
@@ -302,6 +314,10 @@ where
                                     w.wake();
                                 }
                             }
+                            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                            for waker in inner_wakers {
+                                waker.wake();
+                            }
                             this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
                             // Loop around to poll Error
                         }
@@ -405,25 +421,33 @@ where
     type Future = BufferFuture<S::Future, S::Error, S, Request>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if *self.shared.closed.lock() {
+        let closed = self.shared.closed.lock();
+        if *closed {
             return Poll::Ready(Err(BufferError::Closed));
         }
-        // Lock ordering is pending -> ready_wakers everywhere to avoid inversion
-        // with completion/drop paths that decrement pending then wake waiters.
+
+        // Keep the closed lock until we either return readiness or register the
+        // waiter so `close()` cannot race between the state check and waker
+        // installation.
         let pending = self.shared.pending.lock();
-        if *pending >= self.shared.capacity {
+        let result = if *pending >= self.shared.capacity {
             let mut wakers = self.shared.ready_wakers.lock();
             if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
                 wakers.push(cx.waker().clone());
             }
+            drop(wakers);
             Poll::Pending
         } else {
             Poll::Ready(Ok(()))
-        }
+        };
+        drop(pending);
+        drop(closed);
+        result
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        if *self.shared.closed.lock() {
+        let closed = self.shared.closed.lock();
+        if *closed {
             return BufferFuture::error(BufferError::Closed);
         }
 
@@ -435,6 +459,7 @@ where
             *pending += 1;
         }
 
+        drop(closed);
         BufferFuture::waiting(req, self.shared.clone())
     }
 }
@@ -459,8 +484,22 @@ mod tests {
         fn wake(self: Arc<Self>) {}
     }
 
+    struct CountingWaker {
+        wakes: Arc<AtomicUsize>,
+    }
+
+    impl std::task::Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
+        Waker::from(Arc::new(CountingWaker { wakes: counter }))
     }
 
     // ================================================================
@@ -559,6 +598,65 @@ mod tests {
 
         fn call(&mut self, _req: i32) -> Self::Future {
             std::future::pending()
+        }
+    }
+
+    struct PendingThenFailService {
+        state: Arc<Mutex<PendingThenFailState>>,
+    }
+
+    struct PendingThenFailHandle {
+        state: Arc<Mutex<PendingThenFailState>>,
+    }
+
+    struct PendingThenFailState {
+        error: Option<&'static str>,
+        waker: Option<Waker>,
+    }
+
+    impl PendingThenFailService {
+        fn new() -> (Self, PendingThenFailHandle) {
+            let state = Arc::new(Mutex::new(PendingThenFailState {
+                error: None,
+                waker: None,
+            }));
+            (
+                Self {
+                    state: Arc::clone(&state),
+                },
+                PendingThenFailHandle { state },
+            )
+        }
+    }
+
+    impl PendingThenFailHandle {
+        fn fail(&self, error: &'static str) {
+            let mut state = self.state.lock();
+            state.error = Some(error);
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    impl Service<i32> for PendingThenFailService {
+        type Response = i32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<i32, &'static str>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            let mut state = self.state.lock();
+            state.error.map_or_else(
+                || {
+                    state.waker = Some(cx.waker().clone());
+                    Poll::Pending
+                },
+                |error| Poll::Ready(Err(error)),
+            )
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            std::future::ready(Ok(req))
         }
     }
 
@@ -908,5 +1006,74 @@ mod tests {
         assert!(svc.poll_ready(&mut cx).is_pending());
         assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
         crate::test_complete!("poll_ready_deduplicates_waker_when_full");
+    }
+
+    #[test]
+    fn close_wakes_poll_ready_waiters() {
+        init_test("close_wakes_poll_ready_waiters");
+        let mut svc = Buffer::new(EchoService, 1);
+        *svc.shared.pending.lock() = 1;
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waiter_waker = counting_waker(Arc::clone(&wake_count));
+        let mut cx = Context::from_waker(&waiter_waker);
+
+        assert!(svc.poll_ready(&mut cx).is_pending());
+        assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 0);
+
+        svc.close();
+
+        assert!(svc.is_closed());
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert!(svc.shared.ready_wakers.lock().is_empty());
+        assert!(matches!(
+            svc.poll_ready(&mut cx),
+            Poll::Ready(Err(BufferError::Closed))
+        ));
+        crate::test_complete!("close_wakes_poll_ready_waiters");
+    }
+
+    #[test]
+    fn inner_poll_ready_error_wakes_other_waiting_calls() {
+        init_test("inner_poll_ready_error_wakes_other_waiting_calls");
+        let (inner, handle) = PendingThenFailService::new();
+        let mut svc = Buffer::new(inner, 2);
+
+        let mut first = svc.call(1);
+        let mut second = svc.call(2);
+
+        let first_wake_count = Arc::new(AtomicUsize::new(0));
+        let second_wake_count = Arc::new(AtomicUsize::new(0));
+        let first_waiter_waker = counting_waker(Arc::clone(&first_wake_count));
+        let second_waiter_waker = counting_waker(Arc::clone(&second_wake_count));
+        let mut first_cx = Context::from_waker(&first_waiter_waker);
+        let mut second_cx = Context::from_waker(&second_waiter_waker);
+
+        assert!(Pin::new(&mut first).poll(&mut first_cx).is_pending());
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+
+        handle.fail("service error");
+        assert_eq!(first_wake_count.load(Ordering::SeqCst), 0);
+        assert_eq!(second_wake_count.load(Ordering::SeqCst), 1);
+
+        let second_result = Pin::new(&mut second).poll(&mut second_cx);
+        assert!(matches!(
+            second_result,
+            Poll::Ready(Err(BufferError::Inner("service error")))
+        ));
+        assert_eq!(
+            first_wake_count.load(Ordering::SeqCst),
+            1,
+            "the waiter that observes the terminal inner error must wake sibling waiters"
+        );
+
+        let first_result = Pin::new(&mut first).poll(&mut first_cx);
+        assert!(matches!(
+            first_result,
+            Poll::Ready(Err(BufferError::Inner("service error")))
+        ));
+        assert_eq!(svc.pending(), 0);
+        crate::test_complete!("inner_poll_ready_error_wakes_other_waiting_calls");
     }
 }

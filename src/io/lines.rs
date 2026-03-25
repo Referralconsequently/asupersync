@@ -106,6 +106,7 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
 mod tests {
     use super::*;
     use crate::io::BufReader;
+    use crate::io::{AsyncBufRead, AsyncRead, ReadBuf};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -128,6 +129,88 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct SplitReader {
+        chunks: Vec<Vec<u8>>,
+    }
+
+    impl AsyncRead for SplitReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            unreachable!("lines should use poll_fill_buf for this test")
+        }
+    }
+
+    impl AsyncBufRead for SplitReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                Poll::Ready(Ok(&[]))
+            } else {
+                Poll::Ready(Ok(&this.chunks[0]))
+            }
+        }
+
+        fn consume(self: Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                return;
+            }
+            if amt >= this.chunks[0].len() {
+                this.chunks.remove(0);
+            } else {
+                this.chunks[0] = this.chunks[0][amt..].to_vec();
+            }
+        }
+    }
+
+    struct PendingBetweenChunksReader {
+        chunks: Vec<Vec<u8>>,
+        pending_once: bool,
+    }
+
+    impl AsyncRead for PendingBetweenChunksReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            unreachable!("lines should use poll_fill_buf for this test")
+        }
+    }
+
+    impl AsyncBufRead for PendingBetweenChunksReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if this.pending_once {
+                this.pending_once = false;
+                return Poll::Pending;
+            }
+
+            if this.chunks.is_empty() {
+                Poll::Ready(Ok(&[]))
+            } else {
+                Poll::Ready(Ok(&this.chunks[0]))
+            }
+        }
+
+        fn consume(self: Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                return;
+            }
+
+            if amt >= this.chunks[0].len() {
+                this.chunks.remove(0);
+                this.pending_once = !this.chunks.is_empty();
+            } else {
+                this.chunks[0] = this.chunks[0][amt..].to_vec();
+            }
+        }
     }
 
     #[test]
@@ -218,5 +301,57 @@ mod tests {
 
         // Fail-closed: repoll after completion returns None instead of panicking
         assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn lines_split_utf8_across_chunks() {
+        init_test("lines_split_utf8_across_chunks");
+        let reader = SplitReader {
+            chunks: vec![vec![0xF0, 0x9F], vec![0x94, 0xA5, b'\n']],
+        };
+        let mut lines = Lines::new(reader);
+
+        let first = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "🔥");
+        crate::assert_with_log!(first, "split utf8 line", true, first);
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_split_utf8_across_chunks");
+    }
+
+    #[test]
+    fn lines_crlf_after_pending_between_chunks() {
+        init_test("lines_crlf_after_pending_between_chunks");
+        let reader = PendingBetweenChunksReader {
+            chunks: vec![b"hello\r".to_vec(), b"\n".to_vec()],
+            pending_once: false,
+        };
+        let mut lines = Lines::new(reader);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first_pending = matches!(Pin::new(&mut lines).poll_next(&mut cx), Poll::Pending);
+        crate::assert_with_log!(first_pending, "first poll pending", true, first_pending);
+
+        let second = matches!(Pin::new(&mut lines).poll_next(&mut cx), Poll::Ready(Some(Ok(s))) if s == "hello");
+        crate::assert_with_log!(second, "normalized line", true, second);
+        let done = matches!(Pin::new(&mut lines).poll_next(&mut cx), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_crlf_after_pending_between_chunks");
+    }
+
+    #[test]
+    fn lines_invalid_utf8_repoll_after_error_returns_none() {
+        init_test("lines_invalid_utf8_repoll_after_error_returns_none");
+        let reader = SplitReader {
+            chunks: vec![vec![0xF0, 0x9F], vec![b'\n']],
+        };
+        let mut lines = Lines::new(reader);
+
+        let invalid_data = matches!(poll_next(&mut lines), Poll::Ready(Some(Err(err))) if err.kind() == io::ErrorKind::InvalidData);
+        crate::assert_with_log!(invalid_data, "invalid-data line error", true, invalid_data);
+
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_invalid_utf8_repoll_after_error_returns_none");
     }
 }

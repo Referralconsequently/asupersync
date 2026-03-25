@@ -9762,6 +9762,43 @@ mod tests {
     }
 
     #[test]
+    fn semantic_conversation_family_conflicts_on_declared_kernel_footprints() {
+        let shared_interference_left = semantic_family(
+            "ledger-a",
+            split_capable_kernel("ledger-a", "shared-ledger", "ledger-a-obligation"),
+            "order:111",
+            1,
+        );
+        let shared_interference_right = semantic_family(
+            "ledger-b",
+            split_capable_kernel("ledger-b", "shared-ledger", "ledger-b-obligation"),
+            "order:222",
+            1,
+        );
+        assert!(
+            shared_interference_left.conflicts_with(&shared_interference_right),
+            "shared interference classes must keep split-capable families on one lane"
+        );
+
+        let shared_obligation_left = semantic_family(
+            "billing-a",
+            split_capable_kernel("billing-a", "billing-a", "shared-obligation"),
+            "billing:111",
+            1,
+        );
+        let shared_obligation_right = semantic_family(
+            "billing-b",
+            split_capable_kernel("billing-b", "billing-b", "shared-obligation"),
+            "billing:222",
+            1,
+        );
+        assert!(
+            shared_obligation_left.conflicts_with(&shared_obligation_right),
+            "shared obligation footprints must keep split-capable families on one lane"
+        );
+    }
+
+    #[test]
     fn subject_cell_semantic_lane_plan_decomposes_hot_namespace_by_shared_state_footprint() {
         let policy = rebalance_policy();
         let candidates = rebalance_candidates();
