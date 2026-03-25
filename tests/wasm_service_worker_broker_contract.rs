@@ -426,6 +426,10 @@ fn assert_node_broker_report_support(report: &Value) {
         Value::String("service_worker".into())
     );
     assert_eq!(
+        report["support"]["runtimeContext"],
+        Value::String("service_worker".into())
+    );
+    assert_eq!(
         report["support"]["directExecutionReasonCode"],
         Value::String("service_worker_direct_runtime_not_shipped".into())
     );

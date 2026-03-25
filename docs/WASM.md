@@ -155,7 +155,7 @@ The shipped JS/TS diagnostics expose this matrix directly:
 
 - `packages/browser/src/index.ts` reports
   `supportClass: "direct_runtime_supported" | "unsupported"` and
-  `runtimeContext: "browser_main_thread" | "dedicated_worker" | "unknown"`.
+  `runtimeContext: "browser_main_thread" | "dedicated_worker" | "service_worker" | "shared_worker" | "unknown"`.
 - `packages/next/src/index.ts` preserves the browser diagnostics for client
   boundaries and adds `supportClass: "bridge_only"` plus explicit bridge-only
   reasons for Next `server` and `edge` targets.

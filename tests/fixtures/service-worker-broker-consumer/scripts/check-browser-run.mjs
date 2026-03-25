@@ -182,7 +182,7 @@ try {
     `unexpected broker host role: ${broker.support?.hostRole ?? "missing"}`,
   );
   assert(
-    broker.support?.runtimeContext === "unknown",
+    broker.support?.runtimeContext === "service_worker",
     `unexpected broker runtime context: ${broker.support?.runtimeContext ?? "missing"}`,
   );
   assert(

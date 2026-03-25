@@ -660,17 +660,20 @@ pub struct ConformanceViolationEvidence {
 
 impl ConformanceViolationEvidence {
     fn location(&self) -> String {
-        if let Some(path) = &self.path {
-            path.to_string()
-        } else if self.candidate_paths.is_empty() {
-            "unknown-path".to_owned()
-        } else {
-            self.candidate_paths
-                .iter()
-                .map(SessionPath::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
+        self.path.as_ref().map_or_else(
+            || {
+                if self.candidate_paths.is_empty() {
+                    "unknown-path".to_owned()
+                } else {
+                    self.candidate_paths
+                        .iter()
+                        .map(SessionPath::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            },
+            SessionPath::to_string,
+        )
     }
 }
 
@@ -734,7 +737,7 @@ pub enum ConformanceViolation {
         /// Concrete observation supplied by the caller.
         observed: ConformanceObserved,
         /// Evidence/recovery metadata attached to the failing step.
-        evidence: ConformanceViolationEvidence,
+        evidence: Box<ConformanceViolationEvidence>,
     },
     /// Time budget for the next local step elapsed before progress.
     Timeout {
@@ -747,7 +750,7 @@ pub enum ConformanceViolation {
         /// Elapsed time since the current step became active.
         elapsed: Duration,
         /// Evidence/recovery metadata attached to the timed-out step.
-        evidence: ConformanceViolationEvidence,
+        evidence: Box<ConformanceViolationEvidence>,
     },
     /// The protocol was already complete for the role.
     AlreadyComplete {
@@ -949,7 +952,7 @@ impl ConformanceMonitor {
                     role: role.clone(),
                     expected: state.current.expectation(),
                     elapsed: Duration::from_nanos(elapsed_nanos),
-                    evidence: state.current.violation_evidence(&self.contract_name, role),
+                    evidence: Box::new(state.current.violation_evidence(&self.contract_name, role)),
                 });
             }
         }
@@ -991,7 +994,9 @@ impl ConformanceMonitor {
                         role: role.clone(),
                         expected: role_state.current.expectation(),
                         elapsed: Duration::from_nanos(elapsed_nanos),
-                        evidence: role_state.current.violation_evidence(&contract_name, role),
+                        evidence: Box::new(
+                            role_state.current.violation_evidence(&contract_name, role),
+                        ),
                     });
                 }
             }
@@ -1012,7 +1017,11 @@ impl ConformanceMonitor {
                             message: expected_message,
                         },
                         observed,
-                        evidence: metadata.to_violation_evidence(&contract_name, role, path),
+                        evidence: Box::new(metadata.to_violation_evidence(
+                            &contract_name,
+                            role,
+                            path,
+                        )),
                     });
                 }
                 let record = ConformanceCheckRecord {
@@ -1045,7 +1054,11 @@ impl ConformanceMonitor {
                             message: expected_message,
                         },
                         observed,
-                        evidence: metadata.to_violation_evidence(&contract_name, role, path),
+                        evidence: Box::new(metadata.to_violation_evidence(
+                            &contract_name,
+                            role,
+                            path,
+                        )),
                     });
                 }
                 let record = ConformanceCheckRecord {
@@ -1074,7 +1087,11 @@ impl ConformanceMonitor {
                         role: role.clone(),
                         expected,
                         observed,
-                        evidence: aggregate_branch_evidence(&contract_name, role, &branches),
+                        evidence: Box::new(aggregate_branch_evidence(
+                            &contract_name,
+                            role,
+                            &branches,
+                        )),
                     });
                 };
                 if message.is_some() {
@@ -1083,7 +1100,11 @@ impl ConformanceMonitor {
                         role: role.clone(),
                         expected,
                         observed,
-                        evidence: aggregate_branch_evidence(&contract_name, role, &branches),
+                        evidence: Box::new(aggregate_branch_evidence(
+                            &contract_name,
+                            role,
+                            &branches,
+                        )),
                     });
                 }
                 let Some(branch) = branches
@@ -1096,7 +1117,11 @@ impl ConformanceMonitor {
                         role: role.clone(),
                         expected,
                         observed,
-                        evidence: aggregate_branch_evidence(&contract_name, role, &branches),
+                        evidence: Box::new(aggregate_branch_evidence(
+                            &contract_name,
+                            role,
+                            &branches,
+                        )),
                     });
                 };
                 let record = ConformanceCheckRecord {
@@ -1128,7 +1153,11 @@ impl ConformanceMonitor {
                         role: role.clone(),
                         expected,
                         observed,
-                        evidence: aggregate_branch_evidence(&contract_name, role, &branches),
+                        evidence: Box::new(aggregate_branch_evidence(
+                            &contract_name,
+                            role,
+                            &branches,
+                        )),
                     });
                 };
                 if message.is_some() {
@@ -1137,7 +1166,11 @@ impl ConformanceMonitor {
                         role: role.clone(),
                         expected,
                         observed,
-                        evidence: aggregate_branch_evidence(&contract_name, role, &branches),
+                        evidence: Box::new(aggregate_branch_evidence(
+                            &contract_name,
+                            role,
+                            &branches,
+                        )),
                     });
                 }
                 let Some(branch) = branches
@@ -1150,7 +1183,11 @@ impl ConformanceMonitor {
                         role: role.clone(),
                         expected,
                         observed,
-                        evidence: aggregate_branch_evidence(&contract_name, role, &branches),
+                        evidence: Box::new(aggregate_branch_evidence(
+                            &contract_name,
+                            role,
+                            &branches,
+                        )),
                     });
                 };
                 let record = ConformanceCheckRecord {

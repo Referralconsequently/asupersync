@@ -470,7 +470,7 @@ pub struct Sublist {
     /// Cache of literal-subject lookups, invalidated by generation changes.
     cache: RwLock<SublistCache>,
     /// Round-robin counter per effective queue-delivery set.
-    queue_round_robin: Mutex<HashMap<QueueCursorKey, u64>>,
+    queue_round_robin: Mutex<HashMap<u64, u64>>,
 }
 
 /// Generation-tagged cache entry storing raw matched subscriber info
@@ -482,17 +482,6 @@ struct CacheEntry {
     plain_ids: Vec<SubscriptionId>,
     /// Queue-group subscriber ids grouped by group name.
     queue_groups: Vec<(String, Vec<SubscriptionId>)>,
-}
-
-/// Stable queue-group cursor key.
-///
-/// Queue-group fairness must not be global by group name alone, otherwise
-/// unrelated delivery sets that both use e.g. `workers` will perturb each
-/// other's round-robin state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct QueueCursorKey {
-    group: String,
-    members: Vec<SubscriptionId>,
 }
 
 /// Literal-subject lookup cache.
@@ -759,10 +748,12 @@ impl Sublist {
                 if members.is_empty() {
                     continue;
                 }
-                let key = QueueCursorKey {
-                    group: group.clone(),
-                    members: members.clone(),
-                };
+                
+                let mut hasher = DetHasher::default();
+                group.hash(&mut hasher);
+                members.hash(&mut hasher);
+                let key = hasher.finish();
+
                 let counter = rr.entry(key).or_insert(0);
                 let index = (*counter as usize) % members.len();
                 queue_group_picks.push((group.clone(), members[index]));

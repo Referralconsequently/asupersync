@@ -389,6 +389,7 @@ where
                 Err(err) => {
                     self.stats.record_spawn_failure();
                     if should_retry_after_spawn_failure(&err) {
+                        crate::runtime::yield_now().await;
                         continue;
                     }
                     return Err(io::Error::other(format!(

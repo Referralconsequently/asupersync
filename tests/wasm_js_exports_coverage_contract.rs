@@ -664,6 +664,8 @@ fn browser_src_index_pins_runtime_support_taxonomy_and_capabilities() {
         "export type BrowserRuntimeContext =",
         "\"browser_main_thread\"",
         "\"dedicated_worker\"",
+        "\"service_worker\"",
+        "\"shared_worker\"",
         "\"unknown\"",
         "\"missing_global_this\"",
         "\"service_worker_not_yet_shipped\"",
@@ -973,7 +975,7 @@ fn wasm_docs_pin_authoritative_support_matrix_and_diagnostic_taxonomy() {
     for marker in [
         "## Authoritative Support Matrix (live tree)",
         "`supportClass: \"direct_runtime_supported\" | \"unsupported\"`",
-        "`runtimeContext: \"browser_main_thread\" | \"dedicated_worker\" | \"unknown\"`",
+        "`runtimeContext: \"browser_main_thread\" | \"dedicated_worker\" | \"service_worker\" | \"shared_worker\" | \"unknown\"`",
         "`supportClass: \"bridge_only\"`",
         "| Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported |",
         "| Dedicated Web Worker (`DedicatedWorkerGlobalScope`) | Direct-runtime supported |",
