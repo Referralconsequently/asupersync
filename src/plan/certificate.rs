@@ -401,7 +401,11 @@ impl DagCostSnapshot {
 
 fn dag_depth(dag: &PlanDag) -> usize {
     fn depth_of(dag: &PlanDag, id: PlanId, memo: &mut Vec<Option<usize>>) -> usize {
-        if let Some(d) = memo[id.index()] {
+        let idx = id.index();
+        if idx >= memo.len() {
+            return 0;
+        }
+        if let Some(d) = memo[idx] {
             return d;
         }
         let d = match dag.node(id) {
@@ -417,7 +421,7 @@ fn dag_depth(dag: &PlanDag) -> usize {
             Some(PlanNode::Timeout { child, .. }) => depth_of(dag, *child, memo) + 1,
             None => 0,
         };
-        memo[id.index()] = Some(d);
+        memo[idx] = Some(d);
         d
     }
 
