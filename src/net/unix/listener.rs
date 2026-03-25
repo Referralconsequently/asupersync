@@ -246,7 +246,17 @@ impl UnixListener {
                 if let Err(err) = self.register_interest(cx) {
                     return Poll::Ready(Err(err));
                 }
-                Poll::Pending
+
+                // Close the re-arm race for edge-triggered readiness backends.
+                // If a connection arrived between the first `accept()` returning WouldBlock
+                // and the registration, we might miss the edge-triggered wakeup.
+                match self.inner.accept() {
+                    Ok((stream, addr)) => {
+                        Poll::Ready(UnixStream::from_std(stream).map(|stream| (stream, addr)))
+                    }
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+                    Err(err) => Poll::Ready(Err(err)),
+                }
             }
             Err(e) => Poll::Ready(Err(e)),
         }
