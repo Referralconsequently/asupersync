@@ -297,15 +297,19 @@ fn cargo_features_expose_native_quic_http3_surfaces() {
 }
 
 #[test]
-fn cargo_features_keep_compat_wrappers_explicitly_separate() {
+fn cargo_features_keep_compat_wrappers_out_of_core_feature_graph() {
     let cargo = load_cargo_toml();
     assert!(
-        cargo.contains("quic-compat = []"),
-        "Cargo features must keep legacy QUIC wrapper behind `quic-compat`"
+        !cargo.contains("quic-compat = []"),
+        "Core Cargo features must not expose legacy `quic-compat` wrapper gate"
     );
     assert!(
-        cargo.contains("http3-compat = [\"quic-compat\"]"),
-        "Cargo features must keep legacy HTTP/3 wrapper behind `http3-compat`"
+        !cargo.contains("http3-compat = [\"quic-compat\"]"),
+        "Core Cargo features must not expose legacy `http3-compat` wrapper gate"
+    );
+    assert!(
+        cargo.contains("asupersync-tokio-compat"),
+        "Cargo feature notes must point legacy wrappers at the separate compatibility crate"
     );
 }
 
@@ -359,7 +363,7 @@ fn risk_register_highlights_critical_blockers() {
 }
 
 #[test]
-fn quic_http3_features_are_exposed_in_cargo() {
+fn quic_http3_core_feature_graph_is_native_only() {
     let cargo = load_cargo_toml();
     assert!(
         cargo.contains("quic = []"),
@@ -370,12 +374,16 @@ fn quic_http3_features_are_exposed_in_cargo() {
         "Cargo features must expose http3 surface on top of quic"
     );
     assert!(
-        cargo.contains("quic-compat = []"),
-        "Cargo features must expose explicit compat-only quic gate"
+        !cargo.contains("quic-compat = []"),
+        "Core Cargo features must keep legacy QUIC compat gates out of the feature graph"
     );
     assert!(
-        cargo.contains("http3-compat = [\"quic-compat\"]"),
-        "Cargo features must expose explicit compat-only http3 gate"
+        !cargo.contains("http3-compat = [\"quic-compat\"]"),
+        "Core Cargo features must keep legacy HTTP/3 compat gates out of the feature graph"
+    );
+    assert!(
+        cargo.contains("Legacy Tokio-backed compatibility wrappers live in the separate"),
+        "Cargo feature notes must document the separate compat crate boundary"
     );
 }
 
@@ -386,28 +394,19 @@ fn quic_http3_public_boundary_wiring_is_explicit() {
     let net_quic_test = load_net_quic_test();
 
     assert!(
-        net_mod.contains("#[cfg(all(feature = \"quic-compat\", not(feature = \"quic\")))]")
-            && net_mod.contains("pub mod quic;"),
-        "net::quic module must be compat-gated explicitly"
+        !net_mod.contains("#[cfg(all(feature = \"quic-compat\", not(feature = \"quic\")))]")
+            && net_mod.contains("#[cfg(feature = \"quic\")]\npub mod quic {"),
+        "net::quic public boundary must expose only the native core surface"
     );
     assert!(
-        net_mod.contains("#[cfg(feature = \"quic\")]\npub mod quic {"),
-        "net::quic module must expose native surface under quic feature"
-    );
-
-    assert!(
-        http_mod.contains("#[cfg(all(feature = \"http3-compat\", not(feature = \"http3\")))]")
-            && http_mod.contains("pub mod h3;"),
-        "http::h3 module must be compat-gated explicitly"
-    );
-    assert!(
-        http_mod.contains("#[cfg(feature = \"http3\")]\npub mod h3 {"),
-        "http::h3 module must expose native surface under http3 feature"
+        !http_mod.contains("#[cfg(all(feature = \"http3-compat\", not(feature = \"http3\")))]")
+            && http_mod.contains("#[cfg(feature = \"http3\")]\npub mod h3 {"),
+        "http::h3 public boundary must expose only the native core surface"
     );
 
     assert!(
         net_quic_test.contains("#![cfg(feature = \"quic-compat\")]"),
-        "compat integration test must follow compat feature gate"
+        "historical compat integration coverage must stay parked behind the non-core compat gate"
     );
 }
 
@@ -419,7 +418,7 @@ fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
 
     for token in [
         "feature-gated** (`quic`, `http3`)",
-        "compat-only** (`quic-compat`, `http3-compat`)",
+        "parked outside the core feature graph",
         "feature surfaces are unparked",
         "T4.2/T4.3 transport parity",
     ] {
@@ -432,7 +431,7 @@ fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
     for token in [
         "T4.2/T4.3 transport parity is closed",
         "native `quic`/`http3` surfaces are exposed",
-        "compat-only and off by default",
+        "parked outside the core feature graph",
     ] {
         assert!(
             risk.contains(token),
@@ -443,6 +442,7 @@ fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
     for token in [
         "T4.2/T4.3 transport parity is closed",
         "violation/loss E2E suites",
+        "outside the core feature graph",
     ] {
         assert!(
             evidence.contains(token),

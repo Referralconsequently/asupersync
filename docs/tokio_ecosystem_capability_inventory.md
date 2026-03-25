@@ -221,13 +221,13 @@ Asupersync surface. Each family is classified on four axes:
 | Axis | Value |
 |------|-------|
 | Tokio surface | `quinn`, `h3`, `h3-quinn` |
-| Asupersync surface | `src/net/{quic/, quic_core/, quic_native/}`, `src/http/{h3/, h3_native.rs}` |
-| Ownership | **feature-gated** (`quic`, `http3`) for native rollout; **compat-only** (`quic-compat`, `http3-compat`) for legacy wrapper boundary |
+| Asupersync surface | Native core surfaces: `src/net/{quic_core/, quic_native/}`, `src/http/h3_native.rs`; historical wrapper sources retained in-tree: `src/net/quic/`, `src/http/h3/` |
+| Ownership | **feature-gated** (`quic`, `http3`) for native rollout; historical quinn/h3 wrapper sources are parked outside the core feature graph |
 | Parity | **partial** — T4.2/T4.3 transport parity is closed for handshake lifecycle, stream transitions, loss-recovery, and flow/congestion stress correctness; advanced RFC-complete QUIC/H3 behavior remains in progress |
 | Maturity | **active** — feature surfaces are unparked in Cargo/public API while native closure continues |
 | Determinism | N/A |
 | Key files | `http/h3_native.rs` (84K), `net/quic_core/` directory, `net/quic_native/` directory |
-| Gaps | **CRITICAL for full-replacement claim.** Remaining closure work is concentrated in connection migration, 0-RTT/resumption, and interop matrix coverage. Legacy quinn/h3 wrappers remain quarantined behind compat-only feature gates. |
+| Gaps | **CRITICAL for full-replacement claim.** Remaining closure work is concentrated in connection migration, 0-RTT/resumption, and interop matrix coverage. Historical quinn/h3 wrapper sources remain parked outside the core feature graph due Tokio-transitive risk. |
 
 ### F16 — Web Framework
 

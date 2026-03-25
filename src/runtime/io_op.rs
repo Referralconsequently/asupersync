@@ -131,6 +131,7 @@ mod tests {
     use crate::record::{ObligationAbortReason, ObligationState};
     use crate::trace::event::{TraceData, TraceEventKind};
     use crate::types::{Budget, Time};
+    use crate::util::ArenaIndex;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -412,6 +413,57 @@ mod tests {
         let duration = op.complete(&mut state).expect("complete");
         crate::assert_with_log!(duration == 5, "duration no desc", 5, duration);
         crate::test_complete!("io_op_submit_no_description");
+    }
+
+    #[test]
+    fn io_op_submit_rejects_missing_holder_task() {
+        init_test("io_op_submit_rejects_missing_holder_task");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let missing_holder = TaskId::from_arena(ArenaIndex::new(999, 0));
+
+        let err = IoOp::submit(&mut state, missing_holder, root, Some("missing holder".into()))
+            .expect_err("submit should reject missing holder");
+        crate::assert_with_log!(
+            err.kind() == ErrorKind::TaskNotOwned,
+            "missing holder rejected as task ownership error",
+            ErrorKind::TaskNotOwned,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "no obligations created for missing holder",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!("io_op_submit_rejects_missing_holder_task");
+    }
+
+    #[test]
+    fn io_op_submit_rejects_holder_owned_by_different_region() {
+        init_test("io_op_submit_rejects_holder_owned_by_different_region");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let child_task = create_task(&mut state, child);
+
+        let err = IoOp::submit(&mut state, child_task, root, Some("cross-region holder".into()))
+            .expect_err("submit should reject cross-region holder");
+        crate::assert_with_log!(
+            err.kind() == ErrorKind::TaskNotOwned,
+            "cross-region holder rejected as task ownership error",
+            ErrorKind::TaskNotOwned,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "no obligations created for cross-region holder",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!("io_op_submit_rejects_holder_owned_by_different_region");
     }
 
     #[test]

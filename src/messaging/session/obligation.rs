@@ -9,6 +9,7 @@ use crate::record::{ObligationKind, SourceLocation};
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 /// Semantic class of a mechanically derived protocol obligation.
@@ -126,13 +127,16 @@ impl DerivedObligation {
     pub fn description(&self) -> String {
         let mut description = format!("{} obligation triggered at {}", self.class, self.trigger);
         if let Some(message) = &self.message {
-            description.push_str(&format!(
+            write!(
+                description,
                 " for {}->{}:{}",
                 message.sender, message.receiver, message.name
-            ));
+            )
+            .expect("writing to String must succeed");
         }
         if let Some(timeout) = self.timeout {
-            description.push_str(&format!(" with timeout={}ms", timeout.as_millis()));
+            write!(description, " with timeout={}ms", timeout.as_millis())
+                .expect("writing to String must succeed");
         }
         if !self.steps.is_empty() {
             let steps = self
@@ -141,7 +145,7 @@ impl DerivedObligation {
                 .map(SessionPath::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            description.push_str(&format!(" steps=[{steps}]"));
+            write!(description, " steps=[{steps}]").expect("writing to String must succeed");
         }
         description
     }
@@ -688,5 +692,33 @@ mod tests {
             ledger.stats().total_aborted,
             derived.obligations.len() as u64
         );
+    }
+
+    #[test]
+    fn description_includes_message_timeout_and_steps() {
+        let obligation = DerivedObligation {
+            name: "reply:get_user@send:get_user".to_owned(),
+            class: DerivedObligationClass::Reply,
+            trigger: path(&["send:get_user"]),
+            steps: vec![
+                path(&["send:get_user", "receive:user"]),
+                path(&["send:get_user", "receive:user", "end"]),
+            ],
+            timeout: Some(Duration::from_millis(1500)),
+            message: Some(MessageType::new(
+                "get_user",
+                super::super::contract::RoleName::from("client"),
+                super::super::contract::RoleName::from("server"),
+                "GetUser",
+            )),
+        };
+
+        let description = obligation.description();
+        assert!(description.starts_with("reply obligation triggered at "));
+        assert!(description.contains("for client->server:get_user"));
+        assert!(description.contains("with timeout=1500ms"));
+        assert!(description.contains("steps=["));
+        assert!(description.contains("receive:user"));
+        assert!(description.contains("end"));
     }
 }

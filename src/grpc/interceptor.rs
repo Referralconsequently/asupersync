@@ -263,6 +263,20 @@ fn metadata_to_string(value: &MetadataValue) -> Option<&str> {
     }
 }
 
+fn bearer_token(auth: &str) -> Option<&str> {
+    let (scheme, token) = auth.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+
+    let token = token.trim_start_matches(' ');
+    if token.is_empty() {
+        return None;
+    }
+
+    Some(token)
+}
+
 /// Interceptor that validates bearer tokens on incoming requests.
 #[derive(Debug)]
 pub struct BearerAuthValidator<F> {
@@ -292,8 +306,7 @@ where
         let auth_str = metadata_to_string(auth_value)
             .ok_or_else(|| Status::unauthenticated("authorization must be ASCII"))?;
 
-        let token = auth_str
-            .strip_prefix("Bearer ")
+        let token = bearer_token(auth_str)
             .ok_or_else(|| Status::unauthenticated("invalid authorization format"))?;
 
         if (self.validator)(token) {
@@ -644,6 +657,40 @@ mod tests {
             code
         );
         crate::test_complete!("bearer_auth_validator_missing");
+    }
+
+    #[test]
+    fn bearer_auth_validator_accepts_case_insensitive_scheme() {
+        init_test("bearer_auth_validator_accepts_case_insensitive_scheme");
+        let interceptor = auth_validator(|token| token == "valid-token");
+
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert("authorization", "bEaReR valid-token");
+
+        let ok = interceptor.intercept_request(&mut request).is_ok();
+        crate::assert_with_log!(ok, "intercept ok", true, ok);
+        crate::test_complete!("bearer_auth_validator_accepts_case_insensitive_scheme");
+    }
+
+    #[test]
+    fn bearer_auth_validator_rejects_empty_token() {
+        init_test("bearer_auth_validator_rejects_empty_token");
+        let interceptor = auth_validator(|_| true);
+
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("authorization", "Bearer ");
+
+        let err = interceptor.intercept_request(&mut request).unwrap_err();
+        let code = err.code();
+        crate::assert_with_log!(
+            code == Code::Unauthenticated,
+            "code",
+            Code::Unauthenticated,
+            code
+        );
+        crate::test_complete!("bearer_auth_validator_rejects_empty_token");
     }
 
     #[test]

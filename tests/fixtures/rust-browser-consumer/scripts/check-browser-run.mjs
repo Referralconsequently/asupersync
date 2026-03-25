@@ -421,7 +421,7 @@ try {
     supported: false,
     selected_lane: UNSUPPORTED_LANE,
     host_role: "service_worker",
-    runtime_context: "unknown",
+    runtime_context: "service_worker",
     support_class: "unsupported",
     reason_code: "service_worker_direct_runtime_not_shipped",
   });
@@ -434,7 +434,7 @@ try {
     supported: false,
     selected_lane: UNSUPPORTED_LANE,
     host_role: "shared_worker",
-    runtime_context: "unknown",
+    runtime_context: "shared_worker",
     support_class: "unsupported",
     reason_code: "shared_worker_direct_runtime_not_shipped",
   });

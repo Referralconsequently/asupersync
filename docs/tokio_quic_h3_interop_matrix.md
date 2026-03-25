@@ -27,15 +27,15 @@ This matrix covers interoperability between the asupersync native QUIC/H3 stack 
 | Protocol core (varint, headers, transport params) | `src/net/quic_core/` | ~1,300 | Complete |
 | Native connection machine (handshake, streams, flow control) | `src/net/quic_native/` | ~6,571 | Active |
 | HTTP/3 frame codec + QPACK | `src/http/h3_native.rs` | ~2,723 | Active |
-| HTTP/3 client + body | `src/http/h3/` | ~200 | Active |
-| Quinn compatibility wrapper | `src/net/quic/` | ~500 | Feature-gated (`quic-compat`) |
+| HTTP/3 client + body wrapper | `src/http/h3/` | ~200 | Parked historical wrapper source (outside core feature graph) |
+| Quinn compatibility wrapper | `src/net/quic/` | ~500 | Parked historical wrapper source (outside core feature graph) |
 | **Total** | | **~11,294** | |
 
 ### 1.2 Existing Test Infrastructure
 
 | Test File | Focus | Test Count |
 |---|---|---|
-| `tests/net_quic.rs` | Stream lifecycle, cancellation | ~8 |
+| `tests/net_quic.rs` | Historical compat stream lifecycle, cancellation | ~8 |
 | `tests/quic_h3_e2e.rs` | Deterministic paired client+server | ~10 |
 | `tests/quic_h3_e2e_h3.rs` | HTTP/3 control/request lifecycle | ~17 |
 | `tests/quic_h3_e2e_loss.rs` | Loss detection, ACK handling | ~10 |

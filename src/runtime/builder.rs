@@ -516,7 +516,11 @@ pub enum BrowserRuntimeContext {
     BrowserMainThread,
     /// Dedicated worker context.
     DedicatedWorker,
-    /// Anything outside the currently shipped direct-runtime contexts.
+    /// Service worker context.
+    ServiceWorker,
+    /// Shared worker context.
+    SharedWorker,
+    /// Anything outside the currently classified browser runtime contexts.
     Unknown,
 }
 
@@ -527,6 +531,8 @@ impl BrowserRuntimeContext {
         match self {
             Self::BrowserMainThread => "browser_main_thread",
             Self::DedicatedWorker => "dedicated_worker",
+            Self::ServiceWorker => "service_worker",
+            Self::SharedWorker => "shared_worker",
             Self::Unknown => "unknown",
         }
     }
@@ -874,7 +880,7 @@ impl BrowserExecutionProbe {
     pub const fn service_worker() -> Self {
         Self {
             has_global_this: true,
-            runtime_context: BrowserRuntimeContext::Unknown,
+            runtime_context: BrowserRuntimeContext::ServiceWorker,
             host_role: BrowserExecutionHostRole::ServiceWorker,
             capabilities: BrowserCapabilitySnapshot {
                 execution_api: BrowserExecutionApiCapabilities {
@@ -903,7 +909,7 @@ impl BrowserExecutionProbe {
     pub const fn shared_worker() -> Self {
         Self {
             has_global_this: true,
-            runtime_context: BrowserRuntimeContext::Unknown,
+            runtime_context: BrowserRuntimeContext::SharedWorker,
             host_role: BrowserExecutionHostRole::SharedWorker,
             capabilities: BrowserCapabilitySnapshot {
                 execution_api: BrowserExecutionApiCapabilities {
@@ -983,9 +989,9 @@ fn detect_browser_execution_probe() -> BrowserExecutionProbe {
     let runtime_context = match host_role {
         BrowserExecutionHostRole::BrowserMainThread => BrowserRuntimeContext::BrowserMainThread,
         BrowserExecutionHostRole::DedicatedWorker => BrowserRuntimeContext::DedicatedWorker,
-        BrowserExecutionHostRole::ServiceWorker
-        | BrowserExecutionHostRole::SharedWorker
-        | BrowserExecutionHostRole::NonBrowserOrUnknown => BrowserRuntimeContext::Unknown,
+        BrowserExecutionHostRole::ServiceWorker => BrowserRuntimeContext::ServiceWorker,
+        BrowserExecutionHostRole::SharedWorker => BrowserRuntimeContext::SharedWorker,
+        BrowserExecutionHostRole::NonBrowserOrUnknown => BrowserRuntimeContext::Unknown,
     };
 
     BrowserExecutionProbe {
@@ -1100,11 +1106,18 @@ fn browser_runtime_support_supported(
     probe: BrowserExecutionProbe,
 ) -> BrowserRuntimeSupportDiagnostics {
     let message = match probe.runtime_context {
+        BrowserRuntimeContext::BrowserMainThread => {
+            "Rust Browser Edition runtime inspection found a browser main-thread direct-runtime context."
+        }
         BrowserRuntimeContext::DedicatedWorker => {
             "Rust Browser Edition runtime inspection found a dedicated-worker direct-runtime context."
         }
-        BrowserRuntimeContext::BrowserMainThread | BrowserRuntimeContext::Unknown => {
-            "Rust Browser Edition runtime inspection found a browser main-thread direct-runtime context."
+        BrowserRuntimeContext::ServiceWorker
+        | BrowserRuntimeContext::SharedWorker
+        | BrowserRuntimeContext::Unknown => {
+            unreachable!(
+                "supported browser runtime inspection requires a shipped direct-runtime context"
+            )
         }
     };
     browser_runtime_support_diagnostics(
@@ -3654,6 +3667,11 @@ mod tests {
             "service worker probe must preserve host role"
         );
         assert_eq!(
+            diagnostics.runtime_context,
+            BrowserRuntimeContext::ServiceWorker,
+            "service worker probe must preserve the explicit service-worker runtime context"
+        );
+        assert_eq!(
             diagnostics.reason_code,
             BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped,
             "service worker probe must preserve the explicit not-shipped reason"
@@ -3662,6 +3680,11 @@ mod tests {
             diagnostics.runtime_support.reason,
             BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped,
             "runtime-support reason must stay aligned with the execution-ladder reason"
+        );
+        assert_eq!(
+            diagnostics.runtime_support.runtime_context,
+            BrowserRuntimeContext::ServiceWorker,
+            "runtime-support diagnostics must preserve the explicit service-worker runtime context"
         );
     }
 
@@ -3682,6 +3705,11 @@ mod tests {
             "shared worker probe must preserve host role"
         );
         assert_eq!(
+            diagnostics.runtime_context,
+            BrowserRuntimeContext::SharedWorker,
+            "shared worker probe must preserve the explicit shared-worker runtime context"
+        );
+        assert_eq!(
             diagnostics.reason_code,
             BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped,
             "shared worker probe must preserve the explicit not-shipped reason"
@@ -3690,6 +3718,11 @@ mod tests {
             diagnostics.runtime_support.reason,
             BrowserRuntimeSupportReason::SharedWorkerNotYetShipped,
             "runtime-support reason must stay aligned with the execution-ladder reason"
+        );
+        assert_eq!(
+            diagnostics.runtime_support.runtime_context,
+            BrowserRuntimeContext::SharedWorker,
+            "runtime-support diagnostics must preserve the explicit shared-worker runtime context"
         );
     }
 

@@ -877,6 +877,10 @@ where
             }
         }
 
+        // Process returns again to close the race condition:
+        // A resource might have been returned between `drop(state)` and locking `return_wakers`.
+        self.pool.process_returns();
+
         Poll::Pending
     }
 }

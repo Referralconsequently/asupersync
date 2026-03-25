@@ -1257,21 +1257,35 @@ impl RuntimeState {
         region: RegionId,
         description: Option<String>,
     ) -> Result<ObligationId, Error> {
-        let Some(region_record) = self.regions.get(region.arena_index()) else {
-            return Err(Error::new(ErrorKind::RegionClosed).with_message("region not found"));
-        };
+        {
+            let Some(region_record) = self.regions.get(region.arena_index()) else {
+                return Err(Error::new(ErrorKind::RegionClosed).with_message("region not found"));
+            };
 
-        if let Err(err) = region_record.try_reserve_obligation() {
-            return Err(match err {
-                AdmissionError::Closed => {
-                    Error::new(ErrorKind::RegionClosed).with_message("region closed")
-                }
-                AdmissionError::LimitReached { limit, live, .. } => {
-                    Error::new(ErrorKind::AdmissionDenied).with_message(format!(
-                        "region {region:?} obligation limit {limit} reached (live {live})"
-                    ))
-                }
-            });
+            let Some(task_record) = self.task(holder) else {
+                return Err(Error::new(ErrorKind::TaskNotOwned)
+                    .with_message(format!("holder task {holder:?} not found")));
+            };
+
+            if task_record.owner != region {
+                return Err(Error::new(ErrorKind::TaskNotOwned).with_message(format!(
+                    "holder task {holder:?} is owned by region {:?}, not {region:?}",
+                    task_record.owner
+                )));
+            }
+
+            if let Err(err) = region_record.try_reserve_obligation() {
+                return Err(match err {
+                    AdmissionError::Closed => {
+                        Error::new(ErrorKind::RegionClosed).with_message("region closed")
+                    }
+                    AdmissionError::LimitReached { limit, live, .. } => {
+                        Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                            "region {region:?} obligation limit {limit} reached (live {live})"
+                        ))
+                    }
+                });
+            }
         }
 
         let acquired_at = SourceLocation::from_panic_location(std::panic::Location::caller());
@@ -5066,6 +5080,57 @@ mod tests {
         let pending = state.pending_obligation_count();
         crate::assert_with_log!(pending == 0, "no obligations recorded", 0, pending);
         crate::test_complete!("obligation_rejected_when_limit_reached");
+    }
+
+    #[test]
+    fn create_obligation_rejects_missing_holder_task() {
+        init_test("create_obligation_rejects_missing_holder_task");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let missing_holder = TaskId::from_arena(ArenaIndex::new(999, 0));
+
+        let err = state
+            .create_obligation(ObligationKind::IoOp, missing_holder, region, None)
+            .expect_err("missing holder should be rejected");
+        crate::assert_with_log!(
+            err.kind() == ErrorKind::TaskNotOwned,
+            "missing holder rejected as task ownership error",
+            ErrorKind::TaskNotOwned,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "no obligations created for missing holder",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!("create_obligation_rejects_missing_holder_task");
+    }
+
+    #[test]
+    fn create_obligation_rejects_holder_owned_by_different_region() {
+        init_test("create_obligation_rejects_holder_owned_by_different_region");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let child_task = insert_task(&mut state, child);
+
+        let err = state
+            .create_obligation(ObligationKind::IoOp, child_task, root, None)
+            .expect_err("cross-region holder should be rejected");
+        crate::assert_with_log!(
+            err.kind() == ErrorKind::TaskNotOwned,
+            "cross-region holder rejected as task ownership error",
+            ErrorKind::TaskNotOwned,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "no obligations created for cross-region holder",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!("create_obligation_rejects_holder_owned_by_different_region");
     }
 
     #[test]

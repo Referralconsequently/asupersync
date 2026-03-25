@@ -242,6 +242,8 @@ fn rust_browser_fixture_declares_browser_run_check_and_headless_contract() {
         "shared_worker_fail_closed_reason_code",
         "service_worker_direct_runtime_not_shipped",
         "shared_worker_direct_runtime_not_shipped",
+        "runtime_context: \"service_worker\"",
+        "runtime_context: \"shared_worker\"",
         "main_thread_browser_selection_lane",
         "dedicated_worker_selected_lane",
         "dedicated_worker_browser_selection_lane",

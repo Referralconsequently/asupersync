@@ -296,7 +296,7 @@ fn extract_boundary(content_type: &str) -> Option<String> {
 
 /// Parse multipart body given a boundary string.
 fn parse_multipart(
-    body: &[u8],
+    body: &Bytes,
     boundary: &str,
     limits: &MultipartLimits,
 ) -> Result<Vec<MultipartField>, ExtractionError> {
@@ -366,7 +366,7 @@ fn parse_multipart(
             ));
         }
 
-        let part_body = Bytes::copy_from_slice(&body[body_start..body_end]);
+        let part_body = body.slice(body_start..body_end);
 
         // Parse Content-Disposition for name and filename.
         let disposition = part_headers
@@ -643,7 +643,7 @@ mod tests {
     // Full multipart parsing
     // ================================================================
 
-    fn make_multipart_body(boundary: &str, parts: &[(&str, &[u8])]) -> Vec<u8> {
+    fn make_multipart_body(boundary: &str, parts: &[(&str, &[u8])]) -> Bytes {
         let mut buf = Vec::new();
         for (headers, body) in parts {
             buf.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
@@ -653,7 +653,7 @@ mod tests {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-        buf
+        Bytes::from(buf)
     }
 
     #[test]
@@ -670,6 +670,27 @@ mod tests {
         assert_eq!(fields[0].name(), "username");
         assert_eq!(fields[0].text().unwrap(), "alice");
         assert!(fields[0].filename().is_none());
+    }
+
+    #[test]
+    fn parse_single_field_body_is_zero_copy_slice() {
+        let body = make_multipart_body(
+            "BOUNDARY",
+            &[(
+                "Content-Disposition: form-data; name=\"username\"",
+                b"alice",
+            )],
+        );
+        let expected_offset = body
+            .windows(b"alice".len())
+            .position(|w| w == b"alice")
+            .unwrap();
+
+        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default()).unwrap();
+
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].body().as_ref(), b"alice");
+        assert_eq!(fields[0].body().as_ptr(), body[expected_offset..].as_ptr());
     }
 
     #[test]
@@ -734,7 +755,11 @@ mod tests {
 
     #[test]
     fn parse_missing_boundary_error() {
-        let result = parse_multipart(b"no boundary here", "MISSING", &MultipartLimits::default());
+        let result = parse_multipart(
+            &Bytes::from_static(b"no boundary here"),
+            "MISSING",
+            &MultipartLimits::default(),
+        );
         assert!(result.is_err());
     }
 
@@ -753,7 +778,7 @@ mod tests {
             "content-type".to_string(),
             "multipart/form-data; boundary=TEST".to_string(),
         );
-        req.body = Bytes::from(body);
+        req.body = body;
 
         let mp = Multipart::from_request(req).unwrap();
         assert_eq!(mp.len(), 1);
@@ -889,7 +914,7 @@ mod tests {
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"f\"\n\n");
         body.extend_from_slice(b"data");
         body.extend_from_slice(b"\n--B--\n");
-
+        let body = Bytes::from(body);
         let fields = parse_multipart(&body, "B", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].text().unwrap(), "data");
@@ -903,7 +928,7 @@ mod tests {
         body.extend_from_slice(b"Content-Disposition: form-data; name=\"x\"\r\n\r\n");
         body.extend_from_slice(b"val");
         body.extend_from_slice(b"\r\n--BOUND--\r\n");
-
+        let body = Bytes::from(body);
         let fields = parse_multipart(&body, "BOUND", &MultipartLimits::default()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].text().unwrap(), "val");

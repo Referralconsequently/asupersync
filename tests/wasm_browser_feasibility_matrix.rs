@@ -94,7 +94,8 @@ fn service_worker_direct_runtime_is_unshipped_but_bounded_broker_support_is_expl
     // Evidence: the browser package now ships bounded service-worker broker
     // helpers, but direct runtime creation still remains fail-closed on that
     // host. The runtime builder mirrors that truth with an explicit
-    // ServiceWorkerGlobalScope classification and a not-yet-shipped reason.
+    // ServiceWorkerGlobalScope host-role classification, service_worker
+    // runtime_context, and a not-yet-shipped reason.
     let browser_src = read_file("packages/browser/src/index.ts");
     for marker in [
         "detectBrowserServiceWorkerBrokerSupport(",
@@ -109,6 +110,8 @@ fn service_worker_direct_runtime_is_unshipped_but_bounded_broker_support_is_expl
 
     let builder_src = read_file("src/runtime/builder.rs");
     for marker in [
+        "ServiceWorker,",
+        "runtime_context: BrowserRuntimeContext::ServiceWorker",
         "Some(\"ServiceWorkerGlobalScope\") => BrowserExecutionHostRole::ServiceWorker",
         "BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped",
     ] {
@@ -124,7 +127,9 @@ fn shared_worker_direct_runtime_is_unshipped_but_bounded_attach_support_is_expli
     // Evidence: the browser package now ships bounded shared-worker
     // coordinator helpers for browser main-thread and dedicated-worker
     // callers, while direct runtime creation still remains fail-closed for the
-    // SharedWorker host itself.
+    // SharedWorker host itself. The Rust-side ladder should still expose the
+    // shared_worker runtime_context explicitly instead of collapsing it to
+    // unknown.
     let browser_src = read_file("packages/browser/src/index.ts");
     for marker in [
         "detectBrowserSharedWorkerCoordinatorSupport(",
@@ -140,6 +145,8 @@ fn shared_worker_direct_runtime_is_unshipped_but_bounded_attach_support_is_expli
 
     let builder_src = read_file("src/runtime/builder.rs");
     for marker in [
+        "SharedWorker,",
+        "runtime_context: BrowserRuntimeContext::SharedWorker",
         "Some(\"SharedWorkerGlobalScope\") => BrowserExecutionHostRole::SharedWorker",
         "BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped",
     ] {
