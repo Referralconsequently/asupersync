@@ -3,6 +3,7 @@
 use asupersync::runtime::builder::{
     BrowserCapabilitySnapshot, BrowserExecutionHostRole, BrowserExecutionLadderDiagnostics,
     BrowserExecutionLane, BrowserExecutionLaneCandidate, BrowserExecutionLaneKind,
+    BrowserExecutionProbe,
     BrowserExecutionReasonCode, BrowserRuntimeContext, BrowserRuntimeSupportClass,
     BrowserRuntimeSupportReason, RuntimeBuilder,
 };
@@ -99,6 +100,12 @@ struct BrowserRuntimeSelectionSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct UnsupportedWorkerLaddersSummary {
+    service_worker: BrowserExecutionLadderSummary,
+    shared_worker: BrowserExecutionLadderSummary,
+}
+
+#[derive(Debug, Serialize)]
 struct DemoSummary {
     scenario_id: &'static str,
     support_lane: &'static str,
@@ -112,6 +119,7 @@ struct DemoSummary {
     event_symbols: Vec<String>,
     diagnostics_clean: bool,
     capabilities: CapabilitySnapshot,
+    unsupported_worker_ladders: UnsupportedWorkerLaddersSummary,
 }
 
 fn js_error(message: impl Into<String>) -> JsValue {
@@ -226,6 +234,18 @@ fn browser_execution_ladder_summary(
             .map(browser_lane_candidate_summary)
             .collect(),
         capabilities: browser_capability_summary(ladder.capabilities),
+    }
+}
+
+fn unsupported_worker_ladders_summary() -> UnsupportedWorkerLaddersSummary {
+    let builder = RuntimeBuilder::new();
+    UnsupportedWorkerLaddersSummary {
+        service_worker: browser_execution_ladder_summary(
+            builder.inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::service_worker()),
+        ),
+        shared_worker: browser_execution_ladder_summary(
+            builder.inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::shared_worker()),
+        ),
     }
 }
 
@@ -375,6 +395,7 @@ pub fn run_rust_browser_consumer_demo() -> Result<JsValue, JsValue> {
         event_symbols,
         diagnostics_clean: diagnostics.is_clean(),
         capabilities: capability_snapshot(),
+        unsupported_worker_ladders: unsupported_worker_ladders_summary(),
     };
 
     serde_wasm_bindgen::to_value(&summary)

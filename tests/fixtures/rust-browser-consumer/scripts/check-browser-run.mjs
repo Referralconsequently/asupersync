@@ -317,6 +317,9 @@ try {
   const downgradeBrowserSelection = mainThread?.downgrade_browser_selection;
   const downgradeSimulation = mainThread?.downgrade_simulation;
   const guardedCapabilities = parsed.guarded_capabilities;
+  const unsupportedWorkerLadders = mainThreadLifecycle?.unsupported_worker_ladders;
+  const serviceWorkerFailClosed = unsupportedWorkerLadders?.service_worker;
+  const sharedWorkerFailClosed = unsupportedWorkerLadders?.shared_worker;
 
   assertLifecycle("main-thread lifecycle", mainThreadLifecycle, {
     has_window: true,
@@ -414,6 +417,32 @@ try {
     },
   );
 
+  assertLadder("service-worker fail-closed ladder", serviceWorkerFailClosed, {
+    supported: false,
+    selected_lane: UNSUPPORTED_LANE,
+    host_role: "service_worker",
+    runtime_context: "unknown",
+    support_class: "unsupported",
+    reason_code: "service_worker_direct_runtime_not_shipped",
+  });
+  assert(
+    serviceWorkerFailClosed?.runtime_support_reason === "service_worker_not_yet_shipped",
+    `service-worker runtime support reason drifted: ${serviceWorkerFailClosed?.runtime_support_reason ?? "missing"}`,
+  );
+
+  assertLadder("shared-worker fail-closed ladder", sharedWorkerFailClosed, {
+    supported: false,
+    selected_lane: UNSUPPORTED_LANE,
+    host_role: "shared_worker",
+    runtime_context: "unknown",
+    support_class: "unsupported",
+    reason_code: "shared_worker_direct_runtime_not_shipped",
+  });
+  assert(
+    sharedWorkerFailClosed?.runtime_support_reason === "shared_worker_not_yet_shipped",
+    `shared-worker runtime support reason drifted: ${sharedWorkerFailClosed?.runtime_support_reason ?? "missing"}`,
+  );
+
   assertLadder("dedicated-worker ladder", workerLadder, {
     supported: true,
     selected_lane: DEDICATED_WORKER_LANE,
@@ -507,6 +536,8 @@ try {
     main_thread_preferred_worker_browser_selection_lane:
       preferredDedicatedWorkerBrowserSelection.selected_lane,
     main_thread_preferred_worker_reason_code: preferredDedicatedWorker.reason_code,
+    service_worker_fail_closed_reason_code: serviceWorkerFailClosed.reason_code,
+    shared_worker_fail_closed_reason_code: sharedWorkerFailClosed.reason_code,
     downgrade_selected_lane: downgrade.selected_lane,
     downgrade_browser_selection_lane: downgradeBrowserSelection.selected_lane,
     downgrade_reason_code: downgrade.reason_code,

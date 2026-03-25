@@ -764,16 +764,27 @@ pub struct BrowserExecutionLadderDiagnostics {
     pub capabilities: BrowserCapabilitySnapshot,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct BrowserExecutionProbe {
-    has_global_this: bool,
-    runtime_context: BrowserRuntimeContext,
-    host_role: BrowserExecutionHostRole,
-    capabilities: BrowserCapabilitySnapshot,
+/// Synthetic or observed host snapshot used to inspect browser ladder behavior.
+///
+/// This lets external Rust callers and maintained fixtures exercise the
+/// execution-ladder policy against a deterministic host snapshot without
+/// widening runtime support claims or depending on browser-only globals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserExecutionProbe {
+    /// Whether a browser-like `globalThis` object exists.
+    pub has_global_this: bool,
+    /// Runtime context classification associated with this host snapshot.
+    pub runtime_context: BrowserRuntimeContext,
+    /// Browser host role associated with this host snapshot.
+    pub host_role: BrowserExecutionHostRole,
+    /// Capability snapshot carried by the synthetic or observed host.
+    pub capabilities: BrowserCapabilitySnapshot,
 }
 
 impl BrowserExecutionProbe {
-    const fn non_browser() -> Self {
+    /// Creates a non-browser probe that truthfully fail-closes the ladder.
+    #[must_use]
+    pub const fn non_browser() -> Self {
         Self {
             has_global_this: false,
             runtime_context: BrowserRuntimeContext::Unknown,
@@ -794,6 +805,122 @@ impl BrowserExecutionProbe {
                 },
                 transport: BrowserTransportCapabilities {
                     has_web_socket: false,
+                    has_web_transport: false,
+                },
+            },
+        }
+    }
+
+    /// Creates a browser main-thread probe with a minimal direct-runtime shape.
+    #[must_use]
+    pub const fn browser_main_thread() -> Self {
+        Self {
+            has_global_this: true,
+            runtime_context: BrowserRuntimeContext::BrowserMainThread,
+            host_role: BrowserExecutionHostRole::BrowserMainThread,
+            capabilities: BrowserCapabilitySnapshot {
+                execution_api: BrowserExecutionApiCapabilities {
+                    has_abort_controller: true,
+                    has_fetch: true,
+                    has_webassembly: true,
+                },
+                dom: BrowserDomCapabilities {
+                    has_document: true,
+                    has_window: true,
+                },
+                storage: BrowserStorageCapabilities {
+                    has_indexed_db: false,
+                    has_local_storage: false,
+                },
+                transport: BrowserTransportCapabilities {
+                    has_web_socket: true,
+                    has_web_transport: false,
+                },
+            },
+        }
+    }
+
+    /// Creates a dedicated-worker probe with a minimal direct-runtime shape.
+    #[must_use]
+    pub const fn dedicated_worker() -> Self {
+        Self {
+            has_global_this: true,
+            runtime_context: BrowserRuntimeContext::DedicatedWorker,
+            host_role: BrowserExecutionHostRole::DedicatedWorker,
+            capabilities: BrowserCapabilitySnapshot {
+                execution_api: BrowserExecutionApiCapabilities {
+                    has_abort_controller: true,
+                    has_fetch: true,
+                    has_webassembly: true,
+                },
+                dom: BrowserDomCapabilities {
+                    has_document: false,
+                    has_window: false,
+                },
+                storage: BrowserStorageCapabilities {
+                    has_indexed_db: false,
+                    has_local_storage: false,
+                },
+                transport: BrowserTransportCapabilities {
+                    has_web_socket: true,
+                    has_web_transport: false,
+                },
+            },
+        }
+    }
+
+    /// Creates a service-worker probe that remains fail-closed for direct runtime.
+    #[must_use]
+    pub const fn service_worker() -> Self {
+        Self {
+            has_global_this: true,
+            runtime_context: BrowserRuntimeContext::Unknown,
+            host_role: BrowserExecutionHostRole::ServiceWorker,
+            capabilities: BrowserCapabilitySnapshot {
+                execution_api: BrowserExecutionApiCapabilities {
+                    has_abort_controller: true,
+                    has_fetch: true,
+                    has_webassembly: true,
+                },
+                dom: BrowserDomCapabilities {
+                    has_document: false,
+                    has_window: false,
+                },
+                storage: BrowserStorageCapabilities {
+                    has_indexed_db: false,
+                    has_local_storage: false,
+                },
+                transport: BrowserTransportCapabilities {
+                    has_web_socket: true,
+                    has_web_transport: false,
+                },
+            },
+        }
+    }
+
+    /// Creates a shared-worker probe that remains fail-closed for direct runtime.
+    #[must_use]
+    pub const fn shared_worker() -> Self {
+        Self {
+            has_global_this: true,
+            runtime_context: BrowserRuntimeContext::Unknown,
+            host_role: BrowserExecutionHostRole::SharedWorker,
+            capabilities: BrowserCapabilitySnapshot {
+                execution_api: BrowserExecutionApiCapabilities {
+                    has_abort_controller: true,
+                    has_fetch: true,
+                    has_webassembly: true,
+                },
+                dom: BrowserDomCapabilities {
+                    has_document: false,
+                    has_window: false,
+                },
+                storage: BrowserStorageCapabilities {
+                    has_indexed_db: false,
+                    has_local_storage: false,
+                },
+                transport: BrowserTransportCapabilities {
+                    has_web_socket: true,
                     has_web_transport: false,
                 },
             },
@@ -2129,6 +2256,20 @@ impl RuntimeBuilder {
         build_browser_execution_ladder_from_probe(None, detect_browser_execution_probe())
     }
 
+    /// Inspect the truthful browser execution ladder for a supplied host snapshot.
+    ///
+    /// This is intended for deterministic fixtures, documentation examples,
+    /// and contract tests that need to preserve Rust-side ladder semantics for
+    /// host roles that are not directly executing the runtime.
+    #[must_use]
+    pub fn inspect_browser_execution_ladder_for_probe(
+        &self,
+        probe: BrowserExecutionProbe,
+    ) -> BrowserExecutionLadderDiagnostics {
+        let _ = self;
+        build_browser_execution_ladder_from_probe(None, probe)
+    }
+
     /// Inspect the truthful browser execution ladder while requesting a preferred lane.
     ///
     /// When the preferred lane is not truthful for the current host role, the
@@ -2144,6 +2285,18 @@ impl RuntimeBuilder {
             Some(preferred_lane),
             detect_browser_execution_probe(),
         )
+    }
+
+    /// Inspect the truthful browser execution ladder for a supplied probe while
+    /// also requesting a preferred lane.
+    #[must_use]
+    pub fn inspect_browser_execution_ladder_with_preferred_lane_for_probe(
+        &self,
+        probe: BrowserExecutionProbe,
+        preferred_lane: BrowserExecutionLane,
+    ) -> BrowserExecutionLadderDiagnostics {
+        let _ = self;
+        build_browser_execution_ladder_from_probe(Some(preferred_lane), probe)
     }
 
     /// Provide a reactor for runtime I/O integration.
@@ -3481,6 +3634,62 @@ mod tests {
             diagnostics.reason_code,
             BrowserExecutionReasonCode::MissingGlobalThis,
             "non-browser probe should surface the missing-global diagnostic"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_fail_closes_service_worker_probe_with_not_shipped_reason() {
+        let diagnostics = RuntimeBuilder::new()
+            .inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::service_worker());
+
+        assert!(!diagnostics.supported, "service worker must fail close");
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::Unsupported,
+            "service worker must remain on the fail-closed lane"
+        );
+        assert_eq!(
+            diagnostics.host_role,
+            BrowserExecutionHostRole::ServiceWorker,
+            "service worker probe must preserve host role"
+        );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped,
+            "service worker probe must preserve the explicit not-shipped reason"
+        );
+        assert_eq!(
+            diagnostics.runtime_support.reason,
+            BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped,
+            "runtime-support reason must stay aligned with the execution-ladder reason"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_fail_closes_shared_worker_probe_with_not_shipped_reason() {
+        let diagnostics = RuntimeBuilder::new()
+            .inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::shared_worker());
+
+        assert!(!diagnostics.supported, "shared worker must fail close");
+        assert_eq!(
+            diagnostics.selected_lane,
+            BrowserExecutionLane::Unsupported,
+            "shared worker must remain on the fail-closed lane"
+        );
+        assert_eq!(
+            diagnostics.host_role,
+            BrowserExecutionHostRole::SharedWorker,
+            "shared worker probe must preserve host role"
+        );
+        assert_eq!(
+            diagnostics.reason_code,
+            BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped,
+            "shared worker probe must preserve the explicit not-shipped reason"
+        );
+        assert_eq!(
+            diagnostics.runtime_support.reason,
+            BrowserRuntimeSupportReason::SharedWorkerNotYetShipped,
+            "runtime-support reason must stay aligned with the execution-ladder reason"
         );
     }
 

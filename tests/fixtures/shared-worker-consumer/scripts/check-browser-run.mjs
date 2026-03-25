@@ -220,8 +220,18 @@ try {
     `expected reuse page one to stay on shared_worker, got ${reuseOneState.selection?.selectedMode ?? "missing"}`,
   );
   assert(
+    reuseOneState.support?.directExecutionReasonCode
+      === "shared_worker_direct_runtime_not_shipped",
+    `unexpected reuse page one direct execution reason: ${reuseOneState.support?.directExecutionReasonCode ?? "missing"}`,
+  );
+  assert(
     reuseTwoState.selection?.selectedMode === "shared_worker",
     `expected reuse page two to stay on shared_worker, got ${reuseTwoState.selection?.selectedMode ?? "missing"}`,
+  );
+  assert(
+    reuseTwoState.support?.directExecutionReasonCode
+      === "shared_worker_direct_runtime_not_shipped",
+    `unexpected reuse page two direct execution reason: ${reuseTwoState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
     reuseOneState.attach?.requestedLane === SHARED_WORKER_LANE,
@@ -281,6 +291,11 @@ try {
     `unexpected mismatch fallback lane id: ${mismatchState.selection?.fallbackLaneId ?? "missing"}`,
   );
   assert(
+    mismatchState.support?.directExecutionReasonCode
+      === "shared_worker_direct_runtime_not_shipped",
+    `unexpected mismatch direct execution reason: ${mismatchState.support?.directExecutionReasonCode ?? "missing"}`,
+  );
+  assert(
     mismatchState.fallback_runtime?.executionLadder?.selectedLane === MAIN_THREAD_LANE,
     `unexpected mismatch runtime lane: ${mismatchState.fallback_runtime?.executionLadder?.selectedLane ?? "missing"}`,
   );
@@ -296,6 +311,11 @@ try {
   assert(
     crashState.selection?.fallbackLaneId === MAIN_THREAD_LANE,
     `unexpected crash fallback lane id: ${crashState.selection?.fallbackLaneId ?? "missing"}`,
+  );
+  assert(
+    crashState.support?.directExecutionReasonCode
+      === "shared_worker_direct_runtime_not_shipped",
+    `unexpected crash direct execution reason: ${crashState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
     crashState.fallback_runtime?.executionLadder?.selectedLane === MAIN_THREAD_LANE,
@@ -346,12 +366,20 @@ try {
     reuse_page_two_attach_count: reuseTwoSnapshot.attachCount,
     reuse_worker_name: reuseOneSnapshot.workerName,
     reuse_client_ids: reuseOneSnapshot.clientIds,
+    reuse_page_one_direct_execution_reason_code:
+      reuseOneState.support.directExecutionReasonCode,
+    reuse_page_two_direct_execution_reason_code:
+      reuseTwoState.support.directExecutionReasonCode,
     mismatch_mode: mismatchState.selection.selectedMode,
     mismatch_reason: mismatchState.selection.reason,
     mismatch_fallback_lane_id: mismatchState.selection.fallbackLaneId,
+    mismatch_direct_execution_reason_code:
+      mismatchState.support.directExecutionReasonCode,
     crash_mode: crashState.selection.selectedMode,
     crash_reason: crashState.selection.reason,
     crash_fallback_lane_id: crashState.selection.fallbackLaneId,
+    crash_direct_execution_reason_code:
+      crashState.support.directExecutionReasonCode,
     close_lifecycle_states: [
       reuseOneState.close_lifecycle_state,
       reuseTwoState.close_lifecycle_state,

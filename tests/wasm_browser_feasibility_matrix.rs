@@ -90,28 +90,64 @@ fn browser_core_fetch_routes_through_worker_global_scope() {
 // ── Direct-runtime feasible but not yet shipped contexts ─────────────
 
 #[test]
-fn service_worker_is_feasible_not_shipped() {
-    // Evidence: packages/browser/src/index.ts does NOT recognize
-    // ServiceWorkerGlobalScope; it falls through to "unknown" context
-    // which maps to unsupported. The reactor architecture (single-threaded,
-    // event-driven) would work but lifecycle/host constraints are not yet
-    // productized.
-    let src = read_file("packages/browser/src/index.ts");
-    assert!(
-        !src.contains("ServiceWorkerGlobalScope"),
-        "browser SDK must NOT claim service worker support (not yet shipped)"
-    );
+fn service_worker_direct_runtime_is_unshipped_but_bounded_broker_support_is_explicit() {
+    // Evidence: the browser package now ships bounded service-worker broker
+    // helpers, but direct runtime creation still remains fail-closed on that
+    // host. The runtime builder mirrors that truth with an explicit
+    // ServiceWorkerGlobalScope classification and a not-yet-shipped reason.
+    let browser_src = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "detectBrowserServiceWorkerBrokerSupport(",
+        "BrowserServiceWorkerBrokerStore",
+        "reason: \"service_worker_not_yet_shipped\"",
+    ] {
+        assert!(
+            browser_src.contains(marker),
+            "browser SDK must preserve bounded service-worker marker: {marker}"
+        );
+    }
+
+    let builder_src = read_file("src/runtime/builder.rs");
+    for marker in [
+        "Some(\"ServiceWorkerGlobalScope\") => BrowserExecutionHostRole::ServiceWorker",
+        "BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped",
+    ] {
+        assert!(
+            builder_src.contains(marker),
+            "runtime builder must preserve service-worker fail-closed marker: {marker}"
+        );
+    }
 }
 
 #[test]
-fn shared_worker_is_feasible_not_shipped() {
-    // Evidence: packages/browser/src/index.ts does NOT recognize
-    // SharedWorkerGlobalScope.
-    let src = read_file("packages/browser/src/index.ts");
-    assert!(
-        !src.contains("SharedWorkerGlobalScope"),
-        "browser SDK must NOT claim shared worker support (not yet shipped)"
-    );
+fn shared_worker_direct_runtime_is_unshipped_but_bounded_attach_support_is_explicit() {
+    // Evidence: the browser package now ships bounded shared-worker
+    // coordinator helpers for browser main-thread and dedicated-worker
+    // callers, while direct runtime creation still remains fail-closed for the
+    // SharedWorker host itself.
+    let browser_src = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "detectBrowserSharedWorkerCoordinatorSupport(",
+        "createBrowserSharedWorkerCoordinatorSelection(",
+        "BrowserSharedWorkerCoordinatorClient",
+        "@asupersync/browser shared-worker coordinator prerequisites are available; direct BrowserRuntime creation remains fail-closed inside the shared-worker host and attach must downgrade explicitly on denial or loss.",
+    ] {
+        assert!(
+            browser_src.contains(marker),
+            "browser SDK must preserve bounded shared-worker marker: {marker}"
+        );
+    }
+
+    let builder_src = read_file("src/runtime/builder.rs");
+    for marker in [
+        "Some(\"SharedWorkerGlobalScope\") => BrowserExecutionHostRole::SharedWorker",
+        "BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped",
+    ] {
+        assert!(
+            builder_src.contains(marker),
+            "runtime builder must preserve shared-worker fail-closed marker: {marker}"
+        );
+    }
 }
 
 #[test]

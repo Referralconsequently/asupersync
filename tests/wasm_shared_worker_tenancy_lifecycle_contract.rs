@@ -216,3 +216,29 @@ fn release_and_readiness_docs_pin_guarded_shared_worker_evidence_story() {
         );
     }
 }
+
+#[test]
+fn shared_worker_fixture_validator_preserves_fail_closed_direct_runtime_truth() {
+    let fixture = read_file("tests/fixtures/shared-worker-consumer/src/main.ts");
+    let browser_check =
+        read_file("tests/fixtures/shared-worker-consumer/scripts/check-browser-run.mjs");
+    let validator = read_file("scripts/validate_shared_worker_consumer.sh");
+
+    assert!(
+        fixture.contains("directExecutionReasonCode: support.directExecutionReasonCode"),
+        "shared-worker fixture must surface the directExecutionReasonCode summary"
+    );
+
+    for marker in [
+        "shared_worker_direct_runtime_not_shipped",
+        "reuse_page_one_direct_execution_reason_code",
+        "reuse_page_two_direct_execution_reason_code",
+        "mismatch_direct_execution_reason_code",
+        "crash_direct_execution_reason_code",
+    ] {
+        assert!(
+            browser_check.contains(marker) || validator.contains(marker),
+            "shared-worker fixture validation surface missing marker: {marker}"
+        );
+    }
+}

@@ -19,6 +19,7 @@ The validation script:
   - browser main-thread lifecycle + execution-ladder diagnostics
   - dedicated-worker lifecycle + execution-ladder diagnostics
   - missing-`WebAssembly` downgrade selection in the main-thread lane
+  - synthetic service-worker and shared-worker fail-closed ladder snapshots produced by the Rust-side builder seam
   - guarded advanced-capability snapshots such as `localStorage`, `indexedDB`, and `WebTransport`
 
 ## Layout
@@ -42,6 +43,7 @@ The validation script:
 - It does not claim stable broad Rust-browser parity with the JS/TS Browser Edition packages.
 - It exercises the preview public Rust browser builder while keeping the repository-maintained fixture and its evidence artifacts as the authority for this lane.
 - It still uses the existing wasm dispatcher/provider helpers alongside `RuntimeBuilder::inspect_browser_execution_ladder*()` so the fixture covers both lifecycle behavior and truthful lane selection.
+- Service-worker and shared-worker snapshots in this fixture are synthetic ladder inspections, not claims that those direct-runtime hosts are already shipped for Rust.
 
 ## Deterministic Validation
 

@@ -1,6 +1,6 @@
 //! Contract tests for JS/TS exports, type declarations, module-resolution
 //! entrypoints, and diagnostics semantics
-//! (asupersync-3qv04.8.3.1, asupersync-3qv04.8.3.2).
+//! (asupersync-3qv04.8.3.1, asupersync-3qv04.8.3.2, asupersync-1sk16w.5.2).
 //!
 //! Validates that the published package entrypoints look correct from the
 //! perspective of JavaScript and TypeScript consumers before heavier
@@ -1030,6 +1030,36 @@ fn wasm_docs_pin_execution_ladder_alias_mapping_and_required_fields() {
         assert!(
             content.contains(marker),
             "docs/WASM.md must preserve execution-ladder diagnostic marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn readme_pins_deferred_service_and_shared_worker_direct_runtime_truth() {
+    let content = read_source("README.md");
+
+    assert_markers_in_order(
+        &content,
+        &[
+            "### What does not work yet",
+            "- **Service worker / shared worker direct runtime**: the shipped browser",
+            "package does not expose these as direct-runtime lanes yet. Keep them on",
+            "explicit message/data boundaries until a worker-specific host contract is",
+            "promoted deliberately.",
+            "## Limitations",
+            "| Service worker / shared worker direct runtime | Deferred; not yet shipped |",
+        ],
+        "README must preserve the deferred service/shared-worker direct-runtime contract",
+    );
+
+    for marker in [
+        "See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,",
+        "| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |",
+        "| Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |",
+    ] {
+        assert!(
+            content.contains(marker),
+            "README must preserve service/shared-worker boundary marker: {marker}"
         );
     }
 }
