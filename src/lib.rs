@@ -64,6 +64,10 @@
 #![cfg_attr(test, allow(clippy::large_stack_frames))]
 #![cfg_attr(feature = "simd-intrinsics", feature(portable_simd))]
 
+#[cfg_attr(test, allow(unused_extern_crates))]
+#[cfg(test)]
+extern crate self as asupersync;
+
 #[cfg(feature = "quic-compat")]
 compile_error!(
     "feature `quic-compat` is reserved for legacy quinn-backed adapters and is disabled \
@@ -264,9 +268,9 @@ pub use lab::{LabConfig, LabRuntime};
 pub use remote::{
     CancelRequest, CompensationResult, ComputationName, DedupDecision, IdempotencyKey,
     IdempotencyRecord, IdempotencyStore, Lease, LeaseError, LeaseRenewal, LeaseState, NodeId,
-    RemoteCap, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome, RemoteTaskId,
-    ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason,
-    SpawnRequest, spawn_remote,
+    Phase0RemoteFailure, Phase0RetryPolicy, Phase0SimulationConfig, RemoteCap, RemoteError,
+    RemoteHandle, RemoteMessage, RemoteOutcome, RemoteTaskId, ResultDelivery, Saga, SagaState,
+    SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest, spawn_remote,
 };
 pub use types::{
     Budget, CancelKind, CancelReason, NextjsBootstrapPhase, NextjsIntegrationSnapshot,

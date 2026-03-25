@@ -223,6 +223,81 @@ pub trait RemoteRuntime: Send + Sync + fmt::Debug {
 }
 
 // ---------------------------------------------------------------------------
+// Phase-0 fallback policy
+// ---------------------------------------------------------------------------
+
+/// Failure mode used when `spawn_remote()` is called without an attached
+/// [`RemoteRuntime`].
+///
+/// The no-runtime fallback must stay explicit and deterministic. It resolves
+/// the handle to the configured terminal error immediately instead of spawning
+/// detached work or sleeping on wall-clock time inside core runtime code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Phase0RemoteFailure {
+    /// Simulate an unreachable destination node.
+    NodeUnreachable,
+    /// Simulate a node that exists but is currently down.
+    NodeDown,
+    /// Simulate a transport-layer failure after retry attempts.
+    TransportError(String),
+    /// Simulate a request that only times out.
+    Timeout,
+}
+
+impl Phase0RemoteFailure {
+    fn to_remote_error(&self, node: &NodeId) -> RemoteError {
+        match self {
+            Self::NodeUnreachable => RemoteError::NodeUnreachable(node.as_str().to_owned()),
+            Self::NodeDown => RemoteError::NodeDown(node.as_str().to_owned()),
+            Self::TransportError(message) => RemoteError::TransportError(message.clone()),
+            Self::Timeout => RemoteError::Cancelled(CancelReason::timeout()),
+        }
+    }
+}
+
+/// Retry policy for the no-runtime remote fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Phase0RetryPolicy {
+    /// Total number of attempts, including the initial attempt.
+    pub max_attempts: u32,
+    /// Initial backoff before the second attempt.
+    pub initial_backoff: Duration,
+    /// Maximum backoff cap.
+    pub max_backoff: Duration,
+}
+
+impl Default for Phase0RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(25),
+            max_backoff: Duration::from_millis(100),
+        }
+    }
+}
+
+/// Configuration for the no-runtime remote fallback path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Phase0SimulationConfig {
+    /// Failure mode produced by the no-runtime fallback.
+    pub failure: Phase0RemoteFailure,
+    /// Descriptive retry schedule for higher-level transport simulations.
+    pub retry: Phase0RetryPolicy,
+    /// Descriptive timeout budget for higher-level transport simulations.
+    pub timeout: Duration,
+}
+
+impl Default for Phase0SimulationConfig {
+    fn default() -> Self {
+        Self {
+            failure: Phase0RemoteFailure::NodeUnreachable,
+            retry: Phase0RetryPolicy::default(),
+            timeout: Duration::from_millis(250),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RemoteCap — capability token
 // ---------------------------------------------------------------------------
 
@@ -267,6 +342,8 @@ pub struct RemoteCap {
     local_node: NodeId,
     /// The connected remote runtime (transport).
     runtime: Option<Arc<dyn RemoteRuntime>>,
+    /// Explicit fallback policy used when no runtime is attached.
+    phase0_simulation: Phase0SimulationConfig,
 }
 
 impl RemoteCap {
@@ -278,6 +355,7 @@ impl RemoteCap {
             remote_budget: None,
             local_node: NodeId::new("local"),
             runtime: None,
+            phase0_simulation: Phase0SimulationConfig::default(),
         }
     }
 
@@ -309,6 +387,34 @@ impl RemoteCap {
         self
     }
 
+    /// Configures the explicit no-runtime fallback policy.
+    #[must_use]
+    pub fn with_phase0_simulation(mut self, config: Phase0SimulationConfig) -> Self {
+        self.phase0_simulation = config;
+        self
+    }
+
+    /// Sets the failure mode used by the no-runtime fallback.
+    #[must_use]
+    pub fn with_phase0_failure(mut self, failure: Phase0RemoteFailure) -> Self {
+        self.phase0_simulation.failure = failure;
+        self
+    }
+
+    /// Sets the descriptive retry policy used by the no-runtime fallback.
+    #[must_use]
+    pub fn with_phase0_retry(mut self, retry: Phase0RetryPolicy) -> Self {
+        self.phase0_simulation.retry = retry;
+        self
+    }
+
+    /// Sets the descriptive timeout used by the no-runtime fallback.
+    #[must_use]
+    pub fn with_phase0_timeout(mut self, timeout: Duration) -> Self {
+        self.phase0_simulation.timeout = timeout;
+        self
+    }
+
     /// Returns the default lease duration.
     #[must_use]
     pub fn default_lease(&self) -> Duration {
@@ -331,6 +437,12 @@ impl RemoteCap {
     #[must_use]
     pub fn runtime(&self) -> Option<&Arc<dyn RemoteRuntime>> {
         self.runtime.as_ref()
+    }
+
+    /// Returns the configuration used by the no-runtime fallback policy.
+    #[must_use]
+    pub fn phase0_simulation(&self) -> &Phase0SimulationConfig {
+        &self.phase0_simulation
     }
 }
 
@@ -385,6 +497,8 @@ pub enum RemoteError {
     NoCapability,
     /// The remote node is unreachable or unknown.
     NodeUnreachable(String),
+    /// The remote node is known but unavailable.
+    NodeDown(String),
     /// The computation name is not registered on the remote node.
     UnknownComputation(String),
     /// The lease expired before the task completed.
@@ -406,6 +520,7 @@ impl fmt::Display for RemoteError {
         match self {
             Self::NoCapability => write!(f, "remote capability not available"),
             Self::NodeUnreachable(node) => write!(f, "node unreachable: {node}"),
+            Self::NodeDown(node) => write!(f, "node down: {node}"),
             Self::UnknownComputation(name) => {
                 write!(f, "unknown computation: {name}")
             }
@@ -657,9 +772,11 @@ impl RemoteHandle {
 ///
 /// # Phase 0
 ///
-/// In Phase 0, no actual network communication occurs. The handle is
-/// created in [`RemoteTaskState::Pending`] state. The remote protocol
-/// (spawn/ack/cancel/result/heartbeat) is defined in tmh.1.2.
+/// In Phase 0, attached runtimes can still use deterministic harnesses such as
+/// [`DistributedHarness`](crate::lab::network::DistributedHarness). When no
+/// runtime is attached, `spawn_remote()` resolves the handle to the configured
+/// explicit fallback error immediately. This keeps the stub deterministic and
+/// avoids detached wall-clock work outside structured concurrency.
 ///
 /// # Errors
 ///
@@ -702,7 +819,7 @@ pub fn spawn_remote(
     let (tx, rx) = oneshot::channel::<Result<RemoteOutcome, RemoteError>>();
 
     // If a remote runtime is attached, register the task and send the request.
-    if let Some(runtime) = cap.runtime() {
+    let initial_state = if let Some(runtime) = cap.runtime() {
         runtime.register_task(remote_task_id, tx);
 
         let req = SpawnRequest {
@@ -729,12 +846,13 @@ pub fn spawn_remote(
             runtime.unregister_task(remote_task_id);
             return Err(err);
         }
+        RemoteTaskState::Pending
     } else {
-        // Phase 0: Drop sender (simulates network that never returns)
-        // or keep it alive if we want to simulate timeout?
-        // Dropping tx means rx.recv() will fail with Closed, which we map to Cancelled.
-        // This is fine for Phase 0 stub.
-    }
+        let fallback_error = cap.phase0_simulation().failure.to_remote_error(&node);
+        tx.send(cx, Err(fallback_error.clone()))
+            .expect("fresh remote receiver must accept fallback result");
+        RemoteHandle::terminal_state_for_result(&Err(fallback_error))
+    };
 
     Ok(RemoteHandle {
         remote_task_id,
@@ -744,7 +862,7 @@ pub fn spawn_remote(
         owner_region: region,
         receiver: rx,
         lease,
-        state: RemoteTaskState::Pending,
+        state: initial_state,
         completed: false,
     })
 }
@@ -2313,6 +2431,7 @@ mod tests {
         assert_eq!(cap.default_lease(), Duration::from_secs(30));
         assert!(cap.remote_budget().is_none());
         assert_eq!(cap.local_node().as_str(), "local");
+        assert_eq!(cap.phase0_simulation(), &Phase0SimulationConfig::default());
     }
 
     #[test]
@@ -2320,10 +2439,17 @@ mod tests {
         let cap = RemoteCap::new()
             .with_default_lease(Duration::from_mins(1))
             .with_remote_budget(Budget::INFINITE)
-            .with_local_node(NodeId::new("origin-a"));
+            .with_local_node(NodeId::new("origin-a"))
+            .with_phase0_failure(Phase0RemoteFailure::NodeDown)
+            .with_phase0_timeout(Duration::from_secs(2));
         assert_eq!(cap.default_lease(), Duration::from_mins(1));
         assert!(cap.remote_budget().is_some());
         assert_eq!(cap.local_node().as_str(), "origin-a");
+        assert_eq!(
+            cap.phase0_simulation().failure,
+            Phase0RemoteFailure::NodeDown
+        );
+        assert_eq!(cap.phase0_simulation().timeout, Duration::from_secs(2));
     }
 
     #[derive(Debug, Default)]
@@ -2376,6 +2502,14 @@ mod tests {
         fn unregister_task(&self, task_id: RemoteTaskId) {
             self.unregistered.lock().push(task_id);
         }
+    }
+
+    fn fast_phase0_cap() -> RemoteCap {
+        RemoteCap::new().with_phase0_failure(Phase0RemoteFailure::NodeUnreachable)
+    }
+
+    fn timeout_phase0_cap() -> RemoteCap {
+        RemoteCap::new().with_phase0_failure(Phase0RemoteFailure::Timeout)
     }
 
     #[test]
@@ -2460,6 +2594,9 @@ mod tests {
         let err = RemoteError::NodeUnreachable("worker-9".into());
         assert!(format!("{err}").contains("worker-9"));
 
+        let err = RemoteError::NodeDown("worker-9".into());
+        assert!(format!("{err}").contains("worker-9"));
+
         let err = RemoteError::UnknownComputation("bad_fn".into());
         assert!(format!("{err}").contains("bad_fn"));
     }
@@ -2481,7 +2618,7 @@ mod tests {
 
     #[test]
     fn spawn_remote_with_cap_succeeds() {
-        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
         assert!(cx.has_remote());
 
         let result = spawn_remote(
@@ -2495,14 +2632,15 @@ mod tests {
         let handle = result.unwrap();
         assert_eq!(handle.node().as_str(), "worker-1");
         assert_eq!(handle.computation().as_str(), "encode_block");
-        assert_eq!(*handle.state(), RemoteTaskState::Pending);
+        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+        assert!(handle.is_finished());
         assert_eq!(handle.lease(), Duration::from_secs(30));
         assert!(handle.local_task_id().is_none());
     }
 
     #[test]
     fn remote_handle_debug() {
-        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
         let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
@@ -2518,8 +2656,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_handle_not_finished_initially() {
-        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
+    fn remote_handle_phase0_fallback_finishes_immediately() {
+        let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
         let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
@@ -2528,13 +2666,13 @@ mod tests {
         )
         .unwrap();
 
-        // Phase 0: sender is dropped immediately, so channel closure is terminal.
         assert!(handle.is_finished());
+        assert_eq!(*handle.state(), RemoteTaskState::Failed);
     }
 
     #[test]
-    fn remote_handle_try_join_pending() {
-        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
+    fn remote_handle_try_join_phase0_fallback_returns_configured_error() {
+        let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
         let mut handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
@@ -2543,16 +2681,25 @@ mod tests {
         )
         .unwrap();
 
-        // Phase 0: sender is dropped, so try_join returns Cancelled.
-        // In Phase 1+, the transport holds the sender and try_join returns None.
-        let result = handle.try_join();
-        // Either None (transport holds sender) or Cancelled (Phase 0 sender dropped)
-        assert!(result.is_ok() || matches!(result, Err(RemoteError::Cancelled(_))));
+        let err = handle
+            .try_join()
+            .expect_err("phase-0 fallback should fail explicitly");
+        assert!(matches!(err, RemoteError::NodeUnreachable(_)));
+        assert_eq!(*handle.state(), RemoteTaskState::Failed);
     }
 
     #[test]
     fn remote_handle_join_updates_terminal_state() {
-        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cap = RemoteCap::new().with_phase0_simulation(Phase0SimulationConfig {
+            failure: Phase0RemoteFailure::NodeDown,
+            retry: Phase0RetryPolicy {
+                max_attempts: 2,
+                initial_backoff: Duration::from_millis(2),
+                max_backoff: Duration::from_millis(2),
+            },
+            timeout: Duration::from_millis(20),
+        });
+        let cx: Cx = Cx::for_testing_with_remote(cap);
         let mut handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
@@ -2561,15 +2708,16 @@ mod tests {
         )
         .expect("spawn");
 
+        assert_eq!(*handle.state(), RemoteTaskState::Failed);
         let result = futures_lite::future::block_on(handle.join(&cx));
-        assert!(matches!(result, Err(RemoteError::Cancelled(_))));
-        assert_eq!(*handle.state(), RemoteTaskState::Cancelled);
+        assert!(matches!(result, Err(RemoteError::NodeDown(_))));
+        assert_eq!(*handle.state(), RemoteTaskState::Failed);
         assert!(handle.is_finished());
     }
 
     #[test]
     fn remote_handle_try_join_updates_terminal_state() {
-        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
         let mut handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
@@ -2578,8 +2726,30 @@ mod tests {
         )
         .expect("spawn");
 
-        let result = handle.try_join();
-        assert!(matches!(result, Err(RemoteError::Cancelled(_))));
+        let err = handle
+            .try_join()
+            .expect_err("phase-0 fallback should fail explicitly");
+        assert!(matches!(err, RemoteError::NodeUnreachable(_)));
+        assert_eq!(*handle.state(), RemoteTaskState::Failed);
+    }
+
+    #[test]
+    fn remote_handle_phase0_timeout_maps_to_cancelled_state() {
+        let cx: Cx = Cx::for_testing_with_remote(timeout_phase0_cap());
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("n1"),
+            ComputationName::new("timeout-state"),
+            RemoteInput::empty(),
+        )
+        .expect("spawn");
+
+        assert_eq!(*handle.state(), RemoteTaskState::Cancelled);
+        let result = futures_lite::future::block_on(handle.join(&cx));
+        assert!(matches!(
+            result,
+            Err(RemoteError::Cancelled(reason)) if reason.kind == crate::types::CancelKind::Timeout
+        ));
         assert_eq!(*handle.state(), RemoteTaskState::Cancelled);
     }
 
@@ -2696,7 +2866,7 @@ mod tests {
 
     #[test]
     fn remote_handle_abort_no_panic() {
-        let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
+        let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
         let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
@@ -2711,7 +2881,7 @@ mod tests {
 
     #[test]
     fn remote_cap_custom_lease_propagates() {
-        let cap = RemoteCap::new().with_default_lease(Duration::from_mins(2));
+        let cap = fast_phase0_cap().with_default_lease(Duration::from_mins(2));
         let cx: Cx = Cx::for_testing_with_remote(cap);
 
         let handle = spawn_remote(

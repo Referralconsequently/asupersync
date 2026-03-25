@@ -1052,6 +1052,7 @@ fn remote_error_display_variants() {
     let errors: Vec<RemoteError> = vec![
         RemoteError::NoCapability,
         RemoteError::NodeUnreachable("node-x".into()),
+        RemoteError::NodeDown("node-x".into()),
         RemoteError::UnknownComputation("foo".into()),
         RemoteError::LeaseExpired,
         RemoteError::Cancelled(CancelReason::user("test")),

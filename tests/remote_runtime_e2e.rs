@@ -30,13 +30,14 @@
 #[macro_use]
 mod common;
 
+use asupersync::Cx;
 use asupersync::lab::network::{
     DistributedHarness, Fault, FaultScript, HarnessFault, HarnessTraceEvent, HarnessTraceKind,
     NetworkConditions, NetworkConfig, NodeEvent,
 };
 use asupersync::remote::{
-    ComputationName, DedupDecision, IdempotencyKey, IdempotencyStore, NodeId, RemoteTaskId, Saga,
-    SagaState,
+    ComputationName, DedupDecision, IdempotencyKey, IdempotencyStore, NodeId, RemoteError,
+    RemoteTaskId, Saga, SagaState, spawn_remote,
 };
 use asupersync::types::Time;
 use common::*;
@@ -224,6 +225,45 @@ fn spawn_ack_sent_immediately() {
 
     // Ack was sent back to A.
     assert!(count_sent(&h, &b, &a, "SpawnAck") >= 1);
+}
+
+#[test]
+fn spawn_to_unknown_node_returns_unreachable_error() {
+    let seed = 4301;
+    let conditions = NetworkConditions::local();
+    init_test(
+        "spawn_to_unknown_node_returns_unreachable_error",
+        seed,
+        &conditions,
+    );
+
+    let mut h = DistributedHarness::new(make_config(seed, conditions));
+    let origin = h.add_node("origin");
+    let cap = h.node(&origin).expect("origin node").create_cap();
+    let cx = Cx::for_testing().with_remote_cap(cap);
+    let mut handle = spawn_remote(
+        &cx,
+        NodeId::new("missing-worker"),
+        ComputationName::new("test-computation"),
+        asupersync::remote::RemoteInput::empty(),
+    )
+    .expect("spawn_remote");
+
+    assert!(matches!(handle.try_join(), Ok(None)));
+
+    for _ in 0..20 {
+        h.run_for(Duration::from_millis(1));
+        match handle.try_join() {
+            Ok(None) => {}
+            Err(RemoteError::NodeUnreachable(node)) => {
+                assert_eq!(node, "missing-worker");
+                return;
+            }
+            other => panic!("expected node unreachable error, got {other:?}"),
+        }
+    }
+
+    panic!("spawn to unknown node did not settle within the deterministic harness budget");
 }
 
 // ===========================================================================
