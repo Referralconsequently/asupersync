@@ -5590,16 +5590,9 @@ fn live_semaphore_cancel_recovery_observation() -> SemaphoreCancelRecoveryObserv
 
     cancel_cx.set_cancel_requested(true);
     let cancel_result = poll_once(&mut waiter);
-    let cancel_result_label = match cancel_result {
-        Poll::Pending => "pending",
-        Poll::Ready(Ok(_)) => "ready_ok",
-        Poll::Ready(Err(AcquireError::Cancelled)) => "cancelled",
-        Poll::Ready(Err(AcquireError::Closed)) => "closed",
-        Poll::Ready(Err(AcquireError::PolledAfterCompletion)) => "polled_after_completion",
-    };
     assert!(
         matches!(cancel_result, Poll::Ready(Err(AcquireError::Cancelled))),
-        "live semaphore differential waiter should cancel after being queued, got {cancel_result_label}"
+        "live semaphore differential waiter should cancel after being queued, got {cancel_result:?}"
     );
     drop(waiter);
 

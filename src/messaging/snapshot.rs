@@ -332,31 +332,6 @@ pub struct RestoredStreamConsumerState {
     pub lease_invalidated: bool,
 }
 
-/// Restore-time obligation frontier entry.
-///
-/// Restored snapshots must never carry frontier obligations as live ledger
-/// entries. Each preserved obligation id is therefore explicitly marked as
-/// replay-only so downstream consumers cannot mistake it for a commit-capable
-/// obligation in the active runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RestoredObligationFrontierEntry {
-    /// Captured obligation identifier preserved for replay/debugging.
-    pub obligation_id: ObligationId,
-    /// Whether the restored obligation may only be used for replay.
-    pub replayed: bool,
-}
-
-impl RestoredObligationFrontierEntry {
-    /// Build a replay-only frontier entry from a captured obligation id.
-    #[must_use]
-    pub const fn replayed(obligation_id: ObligationId) -> Self {
-        Self {
-            obligation_id,
-            replayed: true,
-        }
-    }
-}
-
 /// Explicit restore-time scrub summary for a recovered stream branch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamRestoreScrubSummary {
@@ -491,12 +466,7 @@ impl RecoverableStreamSnapshot {
             scrubbed_key_hierarchy,
             restored_stream_state,
             restored_consumer_states,
-            obligation_frontier: self
-                .obligation_frontier
-                .iter()
-                .copied()
-                .map(RestoredObligationFrontierEntry::replayed)
-                .collect(),
+            obligation_frontier: self.obligation_frontier.clone(),
             scrub_summary: StreamRestoreScrubSummary {
                 reply_subject_prefix,
                 import_credentials_stripped: true,
@@ -534,8 +504,8 @@ pub struct RestoredStreamSnapshot {
     pub restored_stream_state: StreamSnapshot,
     /// Restored consumer states with live leases invalidated.
     pub restored_consumer_states: Vec<RestoredStreamConsumerState>,
-    /// Preserved obligation frontier captured at the cut, marked replay-only.
-    pub obligation_frontier: Vec<RestoredObligationFrontierEntry>,
+    /// Preserved obligation frontier captured at the cut.
+    pub obligation_frontier: Vec<ObligationId>,
     /// Explicit restore-time scrub summary.
     pub scrub_summary: StreamRestoreScrubSummary,
     /// Logical time when the restored branch resumed.
@@ -1336,20 +1306,7 @@ mod tests {
                 lease_invalidated: true,
             }]
         );
-        assert_eq!(
-            restored.obligation_frontier,
-            cut.obligation_frontier
-                .iter()
-                .copied()
-                .map(RestoredObligationFrontierEntry::replayed)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            restored
-                .obligation_frontier
-                .iter()
-                .all(|entry| entry.replayed)
-        );
+        assert_eq!(restored.obligation_frontier, cut.obligation_frontier);
         assert_eq!(
             restored.scrub_summary.reply_subject_prefix,
             "_INBOX.restored"

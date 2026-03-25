@@ -750,22 +750,6 @@ impl StreamStore {
             return Err(H2Error::protocol("stream ID already used"));
         }
 
-        if self.streams.len() >= self.max_concurrent_streams as usize {
-            let active = self
-                .streams
-                .values()
-                .filter(|s| s.state.is_active())
-                .count();
-            self.streams.retain(|_, s| !s.state.is_closed());
-            if active >= self.max_concurrent_streams as usize {
-                return Err(H2Error::stream(
-                    id,
-                    ErrorCode::RefusedStream,
-                    "max concurrent streams exceeded",
-                ));
-            }
-        }
-
         let is_client_stream = id % 2 == 1;
         if self.is_client {
             if is_client_stream {
@@ -2017,35 +2001,6 @@ mod tests {
 
         // Even ID should fail for server (that's server-initiated)
         assert!(store.reserve_remote_stream(2).is_err());
-    }
-
-    #[test]
-    fn reserve_remote_enforces_max_concurrent_streams() {
-        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
-        store.set_max_concurrent_streams(2);
-
-        assert!(store.reserve_remote_stream(2).is_ok());
-        assert!(store.reserve_remote_stream(4).is_ok());
-
-        let err = store
-            .reserve_remote_stream(6)
-            .expect_err("third reserved stream should exceed max_concurrent_streams");
-        assert_eq!(err.code, ErrorCode::RefusedStream);
-    }
-
-    #[test]
-    fn reserve_remote_prunes_closed_streams_before_limit_check() {
-        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
-        store.set_max_concurrent_streams(2);
-
-        store.reserve_remote_stream(2).unwrap();
-        store.reserve_remote_stream(4).unwrap();
-        store.get_mut(2).unwrap().reset(ErrorCode::NoError);
-
-        assert!(
-            store.reserve_remote_stream(6).is_ok(),
-            "closed reserved streams should not keep the store at the concurrency limit"
-        );
     }
 
     /// Test: Stream ID monotonicity is enforced
