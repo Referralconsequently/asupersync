@@ -1596,7 +1596,7 @@ impl PgConnectOptions {
                         };
                     }
                     "application_name" => {
-                        application_name = Some(url_percent_decode(value));
+                        application_name = Some(percent_decode(value));
                     }
                     "connect_timeout" => {
                         if let Ok(secs) = value.parse::<u64>() {
@@ -1609,43 +1609,15 @@ impl PgConnectOptions {
         }
 
         Ok(Self {
-            host: url_percent_decode(host),
+            host: percent_decode(host),
             port,
-            database: url_percent_decode(database),
-            user: url_percent_decode(&user),
-            password: password.as_deref().map(url_percent_decode),
+            database: percent_decode(database),
+            user,
+            password,
             application_name,
             connect_timeout,
             ssl_mode,
         })
-    }
-}
-
-/// Decode percent-encoded characters in a URL component (RFC 3986).
-fn url_percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
-                out.push(hi << 4 | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-}
-
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }
 
