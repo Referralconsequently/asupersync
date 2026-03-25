@@ -773,7 +773,18 @@ impl FromSql for f64 {
 }
 
 impl FromSql for String {
-    fn from_sql(data: &[u8], _oid: u32, _format: Format) -> Result<Self, PgError> {
+    fn from_sql(data: &[u8], oid: u32, format: Format) -> Result<Self, PgError> {
+        let mut data = data;
+        if format == Format::Binary && oid == oid::JSONB {
+            if data.first() == Some(&1) {
+                data = &data[1..];
+            } else if !data.is_empty() {
+                return Err(PgError::Protocol(format!(
+                    "unsupported JSONB version: {}",
+                    data[0]
+                )));
+            }
+        }
         std::str::from_utf8(data)
             .map(|s| s.to_string())
             .map_err(|e| PgError::Protocol(format!("invalid UTF-8: {e}")))
@@ -3284,6 +3295,21 @@ impl PgConnection {
                 )));
             }
             oid::BYTEA => PgValue::Bytes(data.to_vec()),
+            oid::JSONB => {
+                if data.first() == Some(&1) {
+                    match std::str::from_utf8(&data[1..]) {
+                        Ok(s) => PgValue::Text(s.to_string()),
+                        Err(_) => PgValue::Bytes(data.to_vec()),
+                    }
+                } else if data.is_empty() {
+                    PgValue::Text(String::new())
+                } else {
+                    match std::str::from_utf8(data) {
+                        Ok(s) => PgValue::Text(s.to_string()),
+                        Err(_) => PgValue::Bytes(data.to_vec()),
+                    }
+                }
+            }
             _ => {
                 // Try to interpret as text
                 match std::str::from_utf8(data) {

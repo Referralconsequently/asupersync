@@ -94,13 +94,16 @@ pub enum RecvError {
     Closed,
     /// The receive operation was cancelled.
     Cancelled,
+    /// The future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for RecvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Closed => write!(f, "watch channel sender was dropped"),
-            Self::Cancelled => write!(f, "watch receive operation cancelled"),
+            Self::Closed => write!(f, "receiving on a closed watch channel"),
+            Self::Cancelled => write!(f, "receive operation cancelled"),
+            Self::PolledAfterCompletion => write!(f, "watch future polled after completion"),
         }
     }
 }
@@ -423,7 +426,11 @@ impl<T> Receiver<T> {
     /// Returns `RecvError::Cancelled` if the operation was cancelled.
     pub fn changed<'a, 'b>(&'a mut self, cx: &'b Cx) -> ChangedFuture<'a, 'b, T> {
         cx.trace("watch::changed starting wait");
-        ChangedFuture { receiver: self, cx }
+        ChangedFuture {
+            receiver: self,
+            cx,
+            completed: false,
+        }
     }
 
     /// Returns a reference to the current value.
@@ -513,6 +520,7 @@ impl<T> Receiver<T> {
 pub struct ChangedFuture<'a, 'b, T> {
     receiver: &'a mut Receiver<T>,
     cx: &'b Cx,
+    completed: bool,
 }
 
 impl<T> Future for ChangedFuture<'_, '_, T> {
@@ -521,9 +529,14 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
+        if this.completed {
+            return Poll::Ready(Err(RecvError::PolledAfterCompletion));
+        }
+
         // Check cancellation
         if this.cx.checkpoint().is_err() {
             this.cx.trace("watch::changed cancelled");
+            this.completed = true;
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
@@ -532,9 +545,11 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
             let current = this.receiver.inner.current_version();
             if current != this.receiver.seen_version {
                 this.receiver.seen_version = current;
+                this.completed = true;
                 return Poll::Ready(Ok(()));
             }
             this.cx.trace("watch::changed sender dropped");
+            this.completed = true;
             return Poll::Ready(Err(RecvError::Closed));
         }
 
@@ -543,6 +558,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
         if current != this.receiver.seen_version {
             this.receiver.seen_version = current;
             this.cx.trace("watch::changed received update");
+            this.completed = true;
             return Poll::Ready(Ok(()));
         }
 

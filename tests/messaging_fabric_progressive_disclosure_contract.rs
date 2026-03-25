@@ -17,6 +17,8 @@ pub mod util {
 
 #[path = "../src/messaging/class.rs"]
 mod class;
+#[path = "../src/messaging/subject.rs"]
+mod subject;
 #[path = "../src/messaging/ir.rs"]
 mod ir;
 

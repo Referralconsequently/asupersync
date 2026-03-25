@@ -422,8 +422,13 @@ mod tests {
         let root = state.create_root_region(Budget::INFINITE);
         let missing_holder = TaskId::from_arena(ArenaIndex::new(999, 0));
 
-        let err = IoOp::submit(&mut state, missing_holder, root, Some("missing holder".into()))
-            .expect_err("submit should reject missing holder");
+        let err = IoOp::submit(
+            &mut state,
+            missing_holder,
+            root,
+            Some("missing holder".into()),
+        )
+        .expect_err("submit should reject missing holder");
         crate::assert_with_log!(
             err.kind() == ErrorKind::TaskNotOwned,
             "missing holder rejected as task ownership error",
@@ -449,8 +454,13 @@ mod tests {
             .expect("child region");
         let child_task = create_task(&mut state, child);
 
-        let err = IoOp::submit(&mut state, child_task, root, Some("cross-region holder".into()))
-            .expect_err("submit should reject cross-region holder");
+        let err = IoOp::submit(
+            &mut state,
+            child_task,
+            root,
+            Some("cross-region holder".into()),
+        )
+        .expect_err("submit should reject cross-region holder");
         crate::assert_with_log!(
             err.kind() == ErrorKind::TaskNotOwned,
             "cross-region holder rejected as task ownership error",

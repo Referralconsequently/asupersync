@@ -229,6 +229,17 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         // Check cancellation
         if let Err(_e) = self.cx.checkpoint() {
             self.completed = true;
+            if let Some(waiter_id) = self.waiter_id.take() {
+                let mut state = self.mutex.state.lock();
+                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                    state.waiters.remove(pos);
+                }
+                if !state.locked {
+                    if let Some(next) = state.waiters.front() {
+                        next.waker.wake_by_ref();
+                    }
+                }
+            }
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
@@ -236,6 +247,16 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
         if self.mutex.is_poisoned() {
             self.completed = true;
+            if let Some(waiter_id) = self.waiter_id.take() {
+                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                    state.waiters.remove(pos);
+                }
+                if !state.locked {
+                    if let Some(next) = state.waiters.front() {
+                        next.waker.wake_by_ref();
+                    }
+                }
+            }
             return Poll::Ready(Err(LockError::Poisoned));
         }
 
@@ -425,11 +446,32 @@ impl<T> OwnedMutexGuard<T> {
                 }
                 if this.cx.checkpoint().is_err() {
                     this.completed = true;
+                    if let Some(waiter_id) = this.waiter_id.take() {
+                        let mut state = this.mutex.state.lock();
+                        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                            state.waiters.remove(pos);
+                        }
+                        if !state.locked {
+                            if let Some(next) = state.waiters.front() {
+                                next.waker.wake_by_ref();
+                            }
+                        }
+                    }
                     return Poll::Ready(Err(LockError::Cancelled));
                 }
                 let mut state = this.mutex.state.lock();
                 if this.mutex.is_poisoned() {
                     this.completed = true;
+                    if let Some(waiter_id) = this.waiter_id.take() {
+                        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                            state.waiters.remove(pos);
+                        }
+                        if !state.locked {
+                            if let Some(next) = state.waiters.front() {
+                                next.waker.wake_by_ref();
+                            }
+                        }
+                    }
                     return Poll::Ready(Err(LockError::Poisoned));
                 }
                 if !state.locked {
