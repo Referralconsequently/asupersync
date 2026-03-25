@@ -157,6 +157,9 @@ impl StateEncoder {
         if !state.symbols.iter().any(|s| s.kind().is_source()) {
             return Err(EncodingError::NoSourceSymbols);
         }
+
+        validate_complete_source_coverage(state)?;
+
         let data = rebuild_source_bytes(state);
         let layout = derive_block_layout(
             data.len(),
@@ -291,6 +294,71 @@ fn rebuild_source_bytes(encoded: &EncodedState) -> Vec<u8> {
     data
 }
 
+/// Ensure every declared source symbol is present exactly once before
+/// regenerating repairs from source bytes.
+fn validate_complete_source_coverage(encoded: &EncodedState) -> Result<(), EncodingError> {
+    let layout = derive_block_layout(
+        encoded.original_size,
+        encoded.params.symbol_size,
+        encoded.params.source_blocks,
+    )?;
+    let symbol_size = usize::from(encoded.params.symbol_size);
+    let source_blocks = usize::from(layout.source_blocks);
+    let mut seen_by_block = Vec::with_capacity(source_blocks);
+
+    for block in 0..source_blocks {
+        let (start, end) = block_bounds(block, layout.max_block_size, encoded.original_size);
+        let expected = if start >= end {
+            0
+        } else {
+            (end - start).div_ceil(symbol_size)
+        };
+        seen_by_block.push(vec![false; expected]);
+    }
+
+    for symbol in encoded.source_symbols() {
+        let block = usize::from(symbol.id().sbn());
+        if block >= source_blocks {
+            return Err(EncodingError::Pipeline(format!(
+                "source symbol block {block} exceeds declared source_blocks {source_blocks}"
+            )));
+        }
+
+        let esi = usize::try_from(symbol.id().esi()).map_err(|_| {
+            EncodingError::Pipeline(format!(
+                "source symbol esi {} exceeds usize on this platform",
+                symbol.id().esi()
+            ))
+        })?;
+        let block_seen = &mut seen_by_block[block];
+        if esi >= block_seen.len() {
+            return Err(EncodingError::Pipeline(format!(
+                "source symbol esi {esi} exceeds expected source count {} for block {block}",
+                block_seen.len()
+            )));
+        }
+        if block_seen[esi] {
+            return Err(EncodingError::Pipeline(format!(
+                "duplicate source symbol esi {esi} in block {block}"
+            )));
+        }
+        block_seen[esi] = true;
+    }
+
+    for (block, seen) in seen_by_block.iter().enumerate() {
+        let actual = seen.iter().filter(|present| **present).count();
+        if actual != seen.len() {
+            return Err(EncodingError::IncompleteSourceCoverage {
+                block: u8::try_from(block).expect("validated source block index fits in u8"),
+                expected: seen.len(),
+                actual,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // EncodedState
 // ---------------------------------------------------------------------------
@@ -355,6 +423,15 @@ pub enum EncodingError {
     },
     /// No source symbols available.
     NoSourceSymbols,
+    /// The source symbol set is incomplete for at least one declared block.
+    IncompleteSourceCoverage {
+        /// Source block with missing symbols.
+        block: u8,
+        /// Number of source symbols expected for that block.
+        expected: usize,
+        /// Number of distinct source symbols actually present for that block.
+        actual: usize,
+    },
     /// A symbol count exceeded representable bounds.
     SymbolCountOverflow {
         /// Name of the overflowing count.
@@ -379,6 +456,16 @@ impl std::fmt::Display for EncodingError {
             Self::EmptyData => write!(f, "snapshot serialized to empty data"),
             Self::InvalidConfig { reason } => write!(f, "invalid encoding config: {reason}"),
             Self::NoSourceSymbols => write!(f, "no source symbols available"),
+            Self::IncompleteSourceCoverage {
+                block,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "incomplete source coverage for block {block}: expected {expected} distinct source symbols, got {actual}"
+                )
+            }
             Self::SymbolCountOverflow { field, value, max } => {
                 write!(f, "{field} overflow: value={value}, max={max}")
             }
@@ -694,6 +781,84 @@ mod tests {
         assert_eq!(additional.len(), 5);
         assert!(additional.iter().all(|symbol| symbol.kind().is_repair()));
         assert!(additional.iter().any(|symbol| symbol.id().sbn() == 1));
+    }
+
+    #[test]
+    fn generate_repair_rejects_incomplete_source_coverage() {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 0,
+            max_source_blocks: 2,
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(31));
+        let snapshot = create_large_snapshot(56_404);
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+        let missing = encoded
+            .source_symbols()
+            .find(|symbol| symbol.id().sbn() == 1)
+            .expect("expected a source symbol in block 1")
+            .id();
+        let degraded = EncodedState {
+            params: encoded.params,
+            symbols: encoded
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.id() != missing)
+                .cloned()
+                .collect(),
+            source_count: encoded.source_count,
+            repair_count: encoded.repair_count,
+            original_size: encoded.original_size,
+            encoded_at: encoded.encoded_at,
+        };
+
+        let err = encoder
+            .generate_repair(&degraded, 1)
+            .expect_err("missing source symbol must fail closed");
+        assert!(matches!(
+            err,
+            EncodingError::IncompleteSourceCoverage {
+                block: 1,
+                expected,
+                actual,
+            } if actual + 1 == expected
+        ));
+    }
+
+    #[test]
+    fn generate_repair_rejects_duplicate_source_symbol() {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 0,
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(37));
+        let snapshot = create_large_snapshot(8_192);
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+        let duplicate = encoded
+            .source_symbols()
+            .next()
+            .expect("expected at least one source symbol")
+            .clone();
+        let mut symbols = encoded.symbols.clone();
+        symbols.push(duplicate);
+        let malformed = EncodedState {
+            params: encoded.params,
+            symbols,
+            source_count: encoded.source_count,
+            repair_count: encoded.repair_count,
+            original_size: encoded.original_size,
+            encoded_at: encoded.encoded_at,
+        };
+
+        let err = encoder
+            .generate_repair(&malformed, 1)
+            .expect_err("duplicate source symbols must be rejected");
+        assert!(
+            matches!(err, EncodingError::Pipeline(ref message) if message.contains("duplicate source symbol")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1032,5 +1197,18 @@ mod tests {
         assert_ne!(e, EncodingError::Pipeline("x".into()));
         let dbg = format!("{e:?}");
         assert!(dbg.contains("EmptyData"));
+    }
+
+    #[test]
+    fn encoding_error_incomplete_source_coverage_display() {
+        let err = EncodingError::IncompleteSourceCoverage {
+            block: 2,
+            expected: 5,
+            actual: 4,
+        };
+        let disp = format!("{err}");
+        assert!(disp.contains("block 2"));
+        assert!(disp.contains("expected 5"));
+        assert!(disp.contains("got 4"));
     }
 }
