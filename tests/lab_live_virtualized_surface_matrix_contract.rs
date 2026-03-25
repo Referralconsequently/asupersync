@@ -15,6 +15,16 @@ fn load_doc() -> String {
     std::fs::read_to_string(path).expect("virtualized surface matrix doc must exist")
 }
 
+fn load_readme() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    std::fs::read_to_string(path).expect("README must exist")
+}
+
+fn load_testing_guide() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("TESTING.md");
+    std::fs::read_to_string(path).expect("TESTING guide must exist")
+}
+
 #[test]
 fn doc_exists_and_is_substantial() {
     let doc = load_doc();
@@ -184,6 +194,42 @@ fn doc_binds_expected_downstream_beads() {
         assert!(
             doc.contains(token),
             "document missing downstream binding token: {token}"
+        );
+    }
+}
+
+#[test]
+fn readme_indexes_phase2_virtualized_surface_docs() {
+    let readme = load_readme();
+    for token in [
+        "docs/lab_live_differential_scope_matrix.md",
+        "docs/lab_live_time_normalization_policy.md",
+        "docs/lab_live_virtualized_surface_matrix.md",
+        "Lab-vs-Live Differential Scope Matrix",
+        "Time + Scheduler-Noise Policy",
+        "Phase 2 Virtualized Surface Matrix",
+    ] {
+        assert!(
+            readme.contains(token),
+            "README missing Phase 2 differential doc token: {token}"
+        );
+    }
+}
+
+#[test]
+fn testing_guide_pins_phase2_virtualized_surface_validation_commands() {
+    let testing = load_testing_guide();
+    for token in [
+        "Phase 2 Differential Policy Docs",
+        "docs/lab_live_differential_scope_matrix.md",
+        "docs/lab_live_time_normalization_policy.md",
+        "docs/lab_live_virtualized_surface_matrix.md",
+        "rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
+        "rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture",
+    ] {
+        assert!(
+            testing.contains(token),
+            "TESTING guide missing Phase 2 virtualized-surface token: {token}"
         );
     }
 }

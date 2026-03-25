@@ -8,16 +8,42 @@ failures with high-signal traces and minimal manual digging.
 
 ```bash
 # Unit + integration tests
-cargo test
+rch exec -- cargo test
 
 # Stream logs
-cargo test -- --nocapture
+rch exec -- cargo test -- --nocapture
 
 # Run a specific test file
-cargo test --test http_verification
+rch exec -- cargo test --test http_verification
 
 # Run a specific test by name (substring match)
-cargo test cancellation_conformance
+rch exec -- cargo test cancellation_conformance
+
+# Phase 2 differential policy contract checks
+rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture
+rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture
+```
+
+## Phase 2 Differential Policy Docs
+
+When widening the lab-vs-live program beyond the semantic core, use these docs
+as the operator-facing entrypoint before claiming timer or virtualized
+transport parity:
+
+- `docs/lab_live_differential_scope_matrix.md`: admitted surfaces, rollout
+  order, and external-surface eligibility gates
+- `docs/lab_live_time_normalization_policy.md`: scenario-clock rules,
+  scheduler-noise classes, and when timing remains provenance-only
+- `docs/lab_live_virtualized_surface_matrix.md`: Phase 2 timer and
+  virtual-transport coverage rows, required logs, invalid-experiment signals,
+  and promotion floors
+
+If you touch those docs or the executable policy around them, validate the
+contract surface with:
+
+```bash
+rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture
+rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture
 ```
 
 ## Test Categories and Locations

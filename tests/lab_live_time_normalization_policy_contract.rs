@@ -13,6 +13,16 @@ fn load_doc() -> String {
     std::fs::read_to_string(path).expect("lab-live time normalization policy must exist")
 }
 
+fn load_readme() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    std::fs::read_to_string(path).expect("README must exist")
+}
+
+fn load_testing_guide() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("TESTING.md");
+    std::fs::read_to_string(path).expect("TESTING guide must exist")
+}
+
 #[test]
 fn doc_exists_and_is_substantial() {
     let doc = load_doc();
@@ -190,6 +200,34 @@ fn doc_binds_downstream_beads() {
         assert!(
             doc.contains(token),
             "document missing downstream binding token: {token}"
+        );
+    }
+}
+
+#[test]
+fn readme_and_testing_surface_time_policy_for_phase2_work() {
+    let readme = load_readme();
+    let testing = load_testing_guide();
+
+    for token in [
+        "docs/lab_live_time_normalization_policy.md",
+        "Time + Scheduler-Noise Policy",
+    ] {
+        assert!(
+            readme.contains(token),
+            "README missing time-normalization policy token: {token}"
+        );
+    }
+
+    for token in [
+        "Phase 2 Differential Policy Docs",
+        "docs/lab_live_time_normalization_policy.md",
+        "scenario-clock rules",
+        "rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
+    ] {
+        assert!(
+            testing.contains(token),
+            "TESTING guide missing time-normalization policy token: {token}"
         );
     }
 }
