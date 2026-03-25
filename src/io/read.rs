@@ -253,15 +253,46 @@ impl AsyncReadVectored for &[u8] {}
 
 impl<T> AsyncReadVectored for std::io::Cursor<T> where T: AsRef<[u8]> + Unpin {}
 
-impl<R> AsyncReadVectored for &mut R where R: AsyncReadVectored + Unpin + ?Sized {}
+impl<R> AsyncReadVectored for &mut R
+where
+    R: AsyncReadVectored + Unpin + ?Sized,
+{
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        Pin::new(&mut **this).poll_read_vectored(cx, bufs)
+    }
+}
 
-impl<R> AsyncReadVectored for Box<R> where R: AsyncReadVectored + Unpin + ?Sized {}
+impl<R> AsyncReadVectored for Box<R>
+where
+    R: AsyncReadVectored + Unpin + ?Sized,
+{
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        Pin::new(&mut **this).poll_read_vectored(cx, bufs)
+    }
+}
 
 impl<R, P> AsyncReadVectored for Pin<P>
 where
     P: DerefMut<Target = R> + Unpin,
     R: AsyncReadVectored + ?Sized,
 {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().as_mut().poll_read_vectored(cx, bufs)
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +311,71 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[derive(Debug)]
+    struct VectoredProbe {
+        data: Vec<u8>,
+        pos: usize,
+        scalar_calls: usize,
+        vectored_calls: usize,
+    }
+
+    impl VectoredProbe {
+        fn new(data: &[u8]) -> Self {
+            Self {
+                data: data.to_vec(),
+                pos: 0,
+                scalar_calls: 0,
+                vectored_calls: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for VectoredProbe {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.scalar_calls += 1;
+            if self.pos >= self.data.len() || buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+
+            let end = (self.pos + 1).min(self.data.len());
+            buf.put_slice(&self.data[self.pos..end]);
+            self.pos = end;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncReadVectored for VectoredProbe {
+        fn poll_read_vectored(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+        ) -> Poll<io::Result<usize>> {
+            self.vectored_calls += 1;
+            let mut total = 0;
+
+            for buf in bufs {
+                if self.pos >= self.data.len() {
+                    break;
+                }
+                if buf.is_empty() {
+                    continue;
+                }
+
+                let remaining = self.data.len() - self.pos;
+                let to_copy = remaining.min(buf.len());
+                buf[..to_copy].copy_from_slice(&self.data[self.pos..self.pos + to_copy]);
+                self.pos += to_copy;
+                total += to_copy;
+            }
+
+            Poll::Ready(Ok(total))
+        }
     }
 
     fn init_test(name: &str) {
@@ -383,6 +479,43 @@ mod tests {
         }
     }
 
+    #[pin_project]
+    struct PinnedVectoredReader {
+        inner: VectoredProbe,
+        _pin: PhantomPinned,
+    }
+
+    impl PinnedVectoredReader {
+        fn new(data: &[u8]) -> Self {
+            Self {
+                inner: VectoredProbe::new(data),
+                _pin: PhantomPinned,
+            }
+        }
+    }
+
+    impl AsyncRead for PinnedVectoredReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let mut this = self.project();
+            Pin::new(&mut this.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncReadVectored for PinnedVectoredReader {
+        fn poll_read_vectored(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let mut this = self.project();
+            Pin::new(&mut this.inner).poll_read_vectored(cx, bufs)
+        }
+    }
+
     #[test]
     fn pin_wrapper_read_supports_non_unpin_inner() {
         init_test("pin_wrapper_read_supports_non_unpin_inner");
@@ -405,5 +538,103 @@ mod tests {
         crate::assert_with_log!(filled == b"ok", "filled", b"ok", filled);
 
         crate::test_complete!("pin_wrapper_read_supports_non_unpin_inner");
+    }
+
+    #[test]
+    fn vectored_wrapper_for_mut_reader_uses_inner_impl() {
+        init_test("vectored_wrapper_for_mut_reader_uses_inner_impl");
+
+        let mut inner = VectoredProbe::new(b"abcdef");
+        let mut wrapper = &mut inner;
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut first = [0u8; 2];
+        let mut second = [0u8; 4];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+
+        let poll = Pin::new(&mut wrapper).poll_read_vectored(&mut cx, &mut bufs);
+        let ready = matches!(poll, Poll::Ready(Ok(6)));
+        crate::assert_with_log!(ready, "vectored length", true, ready);
+        crate::assert_with_log!(first == *b"ab", "first buffer", *b"ab", first);
+        crate::assert_with_log!(second == *b"cdef", "second buffer", *b"cdef", second);
+        crate::assert_with_log!(
+            inner.vectored_calls == 1,
+            "vectored calls",
+            1,
+            inner.vectored_calls
+        );
+        crate::assert_with_log!(
+            inner.scalar_calls == 0,
+            "scalar calls",
+            0,
+            inner.scalar_calls
+        );
+
+        crate::test_complete!("vectored_wrapper_for_mut_reader_uses_inner_impl");
+    }
+
+    #[test]
+    fn vectored_wrapper_for_box_reader_uses_inner_impl() {
+        init_test("vectored_wrapper_for_box_reader_uses_inner_impl");
+
+        let mut reader: Box<VectoredProbe> = Box::new(VectoredProbe::new(b"abcdef"));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut first = [0u8; 2];
+        let mut second = [0u8; 4];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+
+        let poll = Pin::new(&mut reader).poll_read_vectored(&mut cx, &mut bufs);
+        let ready = matches!(poll, Poll::Ready(Ok(6)));
+        crate::assert_with_log!(ready, "vectored length", true, ready);
+        crate::assert_with_log!(first == *b"ab", "first buffer", *b"ab", first);
+        crate::assert_with_log!(second == *b"cdef", "second buffer", *b"cdef", second);
+        crate::assert_with_log!(
+            reader.vectored_calls == 1,
+            "vectored calls",
+            1,
+            reader.vectored_calls
+        );
+        crate::assert_with_log!(
+            reader.scalar_calls == 0,
+            "scalar calls",
+            0,
+            reader.scalar_calls
+        );
+
+        crate::test_complete!("vectored_wrapper_for_box_reader_uses_inner_impl");
+    }
+
+    #[test]
+    fn vectored_wrapper_for_pin_box_reader_uses_inner_impl() {
+        init_test("vectored_wrapper_for_pin_box_reader_uses_inner_impl");
+
+        let mut reader = Box::pin(PinnedVectoredReader::new(b"abcdef"));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut first = [0u8; 2];
+        let mut second = [0u8; 4];
+        let mut bufs = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+
+        let poll = Pin::new(&mut reader).poll_read_vectored(&mut cx, &mut bufs);
+        let ready = matches!(poll, Poll::Ready(Ok(6)));
+        crate::assert_with_log!(ready, "vectored length", true, ready);
+        crate::assert_with_log!(first == *b"ab", "first buffer", *b"ab", first);
+        crate::assert_with_log!(second == *b"cdef", "second buffer", *b"cdef", second);
+        let inner = &reader.as_ref().get_ref().inner;
+        crate::assert_with_log!(
+            inner.vectored_calls == 1,
+            "vectored calls",
+            1,
+            inner.vectored_calls
+        );
+        crate::assert_with_log!(
+            inner.scalar_calls == 0,
+            "scalar calls",
+            0,
+            inner.scalar_calls
+        );
+
+        crate::test_complete!("vectored_wrapper_for_pin_box_reader_uses_inner_impl");
     }
 }

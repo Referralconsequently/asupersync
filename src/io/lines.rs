@@ -304,6 +304,21 @@ mod tests {
     }
 
     #[test]
+    fn lines_long_line_remains_unbounded() {
+        init_test("lines_long_line_remains_unbounded");
+        let long = "a".repeat(16 * 1024);
+        let payload = format!("{long}\n");
+        let reader = BufReader::new(payload.as_bytes());
+        let mut lines = Lines::new(reader);
+
+        let first = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(ref s))) if s == &long);
+        crate::assert_with_log!(first, "long line", true, first);
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_long_line_remains_unbounded");
+    }
+
+    #[test]
     fn lines_invalid_utf8_repoll_after_error_returns_none() {
         init_test("lines_invalid_utf8_repoll_after_error_returns_none");
         let reader = SplitReader {
