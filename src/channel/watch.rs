@@ -604,6 +604,19 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
     }
 }
 
+impl<T> Drop for ChangedFuture<'_, '_, T> {
+    fn drop(&mut self) {
+        if let Some(waiter) = self.receiver.waiter.as_ref() {
+            if waiter.load(Ordering::Acquire) {
+                let mut waiters = self.receiver.inner.waiters.lock();
+                waiters.retain(|entry| {
+                    !Arc::ptr_eq(&entry.queued, waiter) && Arc::strong_count(&entry.queued) > 1
+                });
+            }
+        }
+    }
+}
+
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
