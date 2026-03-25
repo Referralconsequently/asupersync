@@ -26,6 +26,7 @@ use crate::lab::conformal::{HealthThresholdCalibrator, HealthThresholdConfig, Th
 use crate::lab::oracle::eprocess::{EProcess, EProcessConfig};
 use crate::raptorq::decoder::DecodeStats;
 use serde::Serialize;
+use serde_json::to_string as json_string;
 use std::collections::BTreeMap;
 
 /// Schema version for G8 regression artifacts.
@@ -383,25 +384,32 @@ pub fn regression_log_lines(report: &RegressionReport) -> Vec<String> {
         .metrics
         .iter()
         .map(|result| {
+            let schema_version =
+                json_string(report.schema_version).expect("schema version should serialize");
+            let replay_ref = json_string(report.replay_ref).expect("replay ref should serialize");
+            let metric = json_string(&result.metric).expect("metric should serialize");
+            let regime_state = json_string(report.regime_state.as_deref().unwrap_or("unknown"))
+                .expect("regime state should serialize");
+            let verdict = json_string(result.verdict.label()).expect("verdict should serialize");
             format!(
-                "{{\"schema_version\":\"{}\",\"replay_ref\":\"{}\",\
-             \"metric\":\"{}\",\"value\":{:.3},\"threshold\":{},\
+                "{{\"schema_version\":{},\"replay_ref\":{},\
+             \"metric\":{},\"value\":{:.3},\"threshold\":{},\
              \"e_value\":{:.6},\"exceeds_threshold\":{},\
-             \"verdict\":\"{}\",\"calibration_n\":{},\
-             \"total_observations\":{},\"regime_state\":\"{}\"}}",
-                report.schema_version,
-                report.replay_ref,
-                result.metric,
+             \"verdict\":{},\"calibration_n\":{},\
+             \"total_observations\":{},\"regime_state\":{}}}",
+                schema_version,
+                replay_ref,
+                metric,
                 result.value,
                 result
                     .threshold
                     .map_or_else(|| "null".to_string(), |t| format!("{t:.3}")),
                 result.e_value,
                 result.exceeds_threshold,
-                result.verdict.label(),
+                verdict,
                 result.calibration_n,
                 report.total_observations,
-                report.regime_state.as_deref().unwrap_or("unknown"),
+                regime_state,
             )
         })
         .collect()
@@ -469,6 +477,37 @@ mod tests {
         assert!(lines[0].contains("\"metric\":\"gauss_ops\""));
         assert!(lines[0].contains("\"verdict\":\"accept\""));
         assert!(lines[0].contains("\"regime_state\":\"stable\""));
+    }
+
+    #[test]
+    fn regression_log_lines_escape_string_fields() {
+        let regime_state = "retuned\\fallback\"line\nbreak".to_string();
+        let metric = "gauss\"ops\nburst".to_string();
+        let report = RegressionReport {
+            schema_version: G8_SCHEMA_VERSION,
+            replay_ref: G8_REPLAY_REF,
+            metrics: vec![MetricRegressionResult {
+                metric: metric.clone(),
+                value: 12.0,
+                threshold: Some(15.0),
+                e_value: 1.25,
+                calibration_n: 10,
+                exceeds_threshold: false,
+                verdict: RegressionVerdict::Accept,
+            }],
+            overall_verdict: RegressionVerdict::Accept,
+            total_observations: 11,
+            regressed_count: 0,
+            warning_count: 0,
+            regime_state: Some(regime_state.clone()),
+        };
+
+        let lines = regression_log_lines(&report);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("rendered line must stay valid JSON");
+
+        assert_eq!(parsed["metric"].as_str(), Some(metric.as_str()));
+        assert_eq!(parsed["regime_state"].as_str(), Some(regime_state.as_str()));
     }
 
     #[test]
