@@ -119,6 +119,8 @@ summary = {
         "main_thread_preferred_worker_selected_lane": browser_run["main_thread_preferred_worker_selected_lane"],
         "main_thread_preferred_worker_browser_selection_lane": browser_run["main_thread_preferred_worker_browser_selection_lane"],
         "main_thread_preferred_worker_reason_code": browser_run["main_thread_preferred_worker_reason_code"],
+        "service_worker_fail_closed_reason_code": browser_run["service_worker_fail_closed_reason_code"],
+        "shared_worker_fail_closed_reason_code": browser_run["shared_worker_fail_closed_reason_code"],
         "downgrade_selected_lane": browser_run["downgrade_selected_lane"],
         "downgrade_browser_selection_lane": browser_run["downgrade_browser_selection_lane"],
         "downgrade_reason_code": browser_run["downgrade_reason_code"],

@@ -4,6 +4,7 @@
 Runs documented onboarding command bundles for:
 - vanilla browser smoke
 - dedicated worker readiness
+- shared-worker coordinator readiness
 - react readiness
 - next readiness
 
@@ -333,6 +334,31 @@ SCENARIOS: dict[str, list[Step]] = {
             trace_artifact_hint="target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
         ),
     ],
+    "shared_worker": [
+        Step(
+            "shared_worker.support_matrix",
+            "rch exec -- cargo test --test wasm_browser_feasibility_matrix "
+            "shared_worker_ -- --nocapture",
+            "Inspect shared-worker fail-closed and bounded coordinator contract drift across docs, onboarding, and package helpers.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="shared_worker/coordinator",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="support_matrix",
+            coverage_kind="behavioral",
+            trace_artifact_hint="artifacts/onboarding/shared_worker.support_matrix.log",
+        ),
+        Step(
+            "shared_worker.coordinator_fixture",
+            "PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh",
+            "Rebuild or restage package artifacts if the maintained shared-worker consumer fixture cannot bundle or replay the bounded coordinator attach/reuse/fallback path cleanly.",
+            package_entrypoint="@asupersync/browser",
+            adapter_path="shared_worker/coordinator",
+            runtime_profile="FP-BR-DEV",
+            diagnostic_category="shared_worker_coordination",
+            coverage_kind="behavioral",
+            trace_artifact_hint="target/e2e-results/shared_worker_consumer/<timestamp>/summary.json",
+        ),
+    ],
     "next": [
         Step(
             "next.typescript_type_model",
@@ -570,7 +596,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run browser onboarding check bundles.")
     parser.add_argument(
         "--scenario",
-        choices=["vanilla", "worker", "react", "next", "all"],
+        choices=["vanilla", "worker", "shared_worker", "react", "next", "all"],
         default="all",
         help="Scenario to run (default: all).",
     )
@@ -592,7 +618,11 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    scenarios = ["vanilla", "worker", "react", "next"] if args.scenario == "all" else [args.scenario]
+    scenarios = (
+        ["vanilla", "worker", "shared_worker", "react", "next"]
+        if args.scenario == "all"
+        else [args.scenario]
+    )
 
     exit_code = 0
     for scenario_id in scenarios:

@@ -56,15 +56,16 @@ evidence landed.
 
 | Workflow | Canonical command | Primary artifacts |
 |---|---|---|
-| Onboarding smoke and framework readiness | `python3 scripts/run_browser_onboarding_checks.py --scenario all` | `artifacts/onboarding/{vanilla,worker,react,next}.ndjson`, `artifacts/onboarding/{vanilla,worker,react,next}.summary.json` |
+| Onboarding smoke and framework readiness | `python3 scripts/run_browser_onboarding_checks.py --scenario all` | `artifacts/onboarding/{vanilla,worker,shared_worker,react,next}.ndjson`, `artifacts/onboarding/{vanilla,worker,shared_worker,react,next}.summary.json` |
 | Vanilla packaged-consumer validation | `PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh` | `target/e2e-results/vite_vanilla_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json` |
-| Browser Edition onboarding + QA smoke lane | `python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke` | `artifacts/onboarding/{vanilla,worker,react,next}.summary.json`, `target/wasm-qa-evidence-smoke/<run>/<scenario>/{bundle_manifest.json,run_report.json,run.log,events.ndjson}`, `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json` |
+| Browser Edition onboarding + QA smoke lane | `python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke` | `artifacts/onboarding/{vanilla,worker,shared_worker,react,next}.summary.json`, `target/wasm-qa-evidence-smoke/<run>/<scenario>/{bundle_manifest.json,run_report.json,run.log,events.ndjson}`, `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json` |
 | WASM dependency/profile audit | `python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json` | `artifacts/wasm_dependency_audit_summary.json`, `artifacts/wasm_dependency_audit_log.ndjson` |
 | WASM flake governance | `python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json` | `artifacts/wasm_flake_governance_report.json`, `artifacts/wasm_flake_governance_events.ndjson` |
 | E2E orchestration matrix | `bash ./scripts/run_all_e2e.sh --verify-matrix` | `target/e2e-results/orchestrator_<timestamp>/report.json`, `artifact_manifest.json`, `artifact_manifest.ndjson`, `replay_verification.json`, `artifact_lifecycle_policy.json` |
 | Packaged bootstrap/load/reload harness | `bash ./scripts/test_wasm_packaged_bootstrap_e2e.sh` | `target/e2e-results/wasm_packaged_bootstrap/e2e-runs/<scenario>/<run>/summary.json`, `run-metadata.json`, `log.jsonl`, `steps.ndjson`, `perf-summary.json`, `artifacts/wasm_packaged_bootstrap_perf_summary.json` |
 | React packaged-consumer validation | `bash ./scripts/validate_react_consumer.sh` | `target/e2e-results/react_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/react_consumer/<timestamp>/summary.json` |
 | Dedicated-worker packaged-consumer validation | `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | `target/e2e-results/dedicated_worker_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`; the summary bundle preserves `scenario_inventory` plus artifact pointers under `artifacts` and includes `worker_storage_roundtrip_marker`, `worker_artifact_export_marker`, `worker_artifact_download_guard_marker`, `worker_artifact_quota_guard_marker`, and `worker_artifact_cleanup_marker` |
+| Shared-worker packaged-consumer validation | `PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh` | `target/e2e-results/shared_worker_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/shared_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/shared_worker_consumer/<timestamp>/browser-run.json`; the summary bundle preserves `scenario_inventory` plus artifact pointers under `artifacts` and includes attach, reuse, protocol-mismatch fallback, crash-before-handshake fallback, and detach-cleanup markers |
 | Package shape / `npm pack` smoke | `bash ./scripts/validate_npm_pack_smoke.sh` | terminal validation output plus package artifact presence under `packages/browser-core/` |
 | Browser-core artifact staging | `PATH=/usr/bin:$PATH corepack pnpm run build` | `packages/browser-core/asupersync.js`, `packages/browser-core/asupersync.d.ts`, `packages/browser-core/asupersync_bg.wasm`, `packages/browser-core/abi-metadata.json`, `packages/browser-core/debug-metadata.json` |
 
@@ -79,6 +80,7 @@ evidence landed.
 | `ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED`, `ASUPERSYNC_BROWSER_ARTIFACT_OPERATION_FAILED`, or `ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED` surfaces during browser persistence flows | blocked IndexedDB upgrade/open, quota pressure, corrupt artifact index state, or a worker/non-DOM runtime attempting direct download instead of export handoff | `rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture`<br>`PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh`<br>`PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | contract output proves the exported codes/reasons/guidance stay in sync; bundle summaries under `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, and `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json` confirm the maintained fixtures still exercise storage/artifact bundle markers while preserving dedicated-worker `scenario_inventory` plus artifact pointers under `artifacts` |
 | packaged consumer validation says required Browser Edition artifacts are missing | `packages/browser-core/` wasm artifacts or higher-level package `dist/` outputs were not built/staged before running consumer validation | `PATH=/usr/bin:$PATH corepack pnpm run build && bash ./scripts/validate_react_consumer.sh` | built artifacts appear under `packages/browser-core/`; consumer evidence appears at `target/e2e-results/react_consumer/<timestamp>/consumer_build.log` and `summary.json` |
 | dedicated-worker onboarding or bootstrap validation fails | dedicated-worker runtime guard drift, worker fetch-host regression, coordination protocol drift, or a stale packaged consumer fixture | `python3 scripts/run_browser_onboarding_checks.py --scenario worker` | `artifacts/onboarding/worker.ndjson`, `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`; confirm the summary still preserves `scenario_inventory` plus artifact pointers under `artifacts` |
+| shared-worker coordinator onboarding or packaged-consumer validation fails | shared-worker support-matrix drift, coordinator attach/reuse/fallback regression, or a stale packaged consumer fixture | `python3 scripts/run_browser_onboarding_checks.py --scenario shared_worker`<br>`PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh` | `artifacts/onboarding/shared_worker.ndjson`, `artifacts/onboarding/shared_worker.summary.json`, `target/e2e-results/shared_worker_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/shared_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/shared_worker_consumer/<timestamp>/browser-run.json`; confirm the summary still preserves `scenario_inventory` plus artifact pointers under `artifacts` |
 | `npm pack --dry-run` or package-shape validation fails | manifest/export-map/files-array drift, missing staged browser-core artifacts, or resolver policy drift | `bash ./scripts/validate_npm_pack_smoke.sh` | terminal output names the failing manifest field or missing artifact; warnings reference `packages/browser-core/*` and tell you whether `build:wasm` must run first |
 | Browser Edition onboarding + QA smoke CI lane red | onboarding command bundle drift, smoke-scenario command drift, or mismatch between `.github/workflows/ci.yml` and `.github/ci_matrix_policy.json` for lane `wasm-browser-qa-smoke` | `python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke` | onboarding summaries under `artifacts/onboarding/`; per-scenario smoke bundles under `target/wasm-qa-evidence-smoke/<run>/<scenario>/`; suite summary under `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`; CI lane id `wasm-browser-qa-smoke` |
 | `run_all_e2e --verify-matrix` fails on redaction/retention/lifecycle policy | invalid `ARTIFACT_REDACTION_MODE`, retention settings, or suite matrix drift | `bash ./scripts/run_all_e2e.sh --verify-matrix` | orchestrator report bundle under `target/e2e-results/orchestrator_<timestamp>/`; inspect `report.json`, `artifact_manifest.json`, `replay_verification.json`, and `artifact_lifecycle_policy.json` |
@@ -144,6 +146,10 @@ Expected operator action:
   `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh`
   plus `rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture`
   to separate package/bootstrap breakage from coordination protocol drift
+- when the failure is shared-worker-specific, rerun
+  `python3 scripts/run_browser_onboarding_checks.py --scenario shared_worker`
+  plus `PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh`
+  to separate support-matrix drift from coordinator attach/reuse/fallback regressions
 - keep `@asupersync/react` direct runtime usage inside client-rendered React
   trees only
 - keep `@asupersync/next` server and edge code on bridge-only adapters and move
@@ -161,6 +167,7 @@ trees, or broken local consumer installs.
 PATH=/usr/bin:$PATH corepack pnpm run build
 bash ./scripts/validate_react_consumer.sh
 PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
+PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh
 bash ./scripts/validate_npm_pack_smoke.sh
 ```
 
@@ -190,10 +197,12 @@ Evidence to capture:
 
 - `artifacts/onboarding/vanilla.ndjson`
 - `artifacts/onboarding/worker.ndjson`
+- `artifacts/onboarding/shared_worker.ndjson`
 - `artifacts/onboarding/react.ndjson`
 - `artifacts/onboarding/next.ndjson`
 - `artifacts/onboarding/vanilla.summary.json`
 - `artifacts/onboarding/worker.summary.json`
+- `artifacts/onboarding/shared_worker.summary.json`
 - `artifacts/onboarding/react.summary.json`
 - `artifacts/onboarding/next.summary.json`
 
@@ -218,6 +227,8 @@ bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke
 Evidence to capture:
 
 - `artifacts/onboarding/vanilla.summary.json`
+- `artifacts/onboarding/worker.summary.json`
+- `artifacts/onboarding/shared_worker.summary.json`
 - `artifacts/onboarding/react.summary.json`
 - `artifacts/onboarding/next.summary.json`
 - latest `target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json`
@@ -460,6 +471,7 @@ Decision table:
 | Surface family | Truthful ceiling today | Green-light conditions | Mandatory no-go / demotion trigger |
 |---|---|---|---|
 | Dedicated-worker direct runtime | may reach `stable` | `support_class=direct_runtime_supported`, `reason_code=supported`, lane health is healthy, and worker artifacts are green in the same window | any worker-only lane-health demotion, missing worker onboarding/consumer evidence, or a regression that forces fallback to the browser main thread |
+| Shared-worker bounded coordinator attach | `guarded canary-only` | fail-closed shared-worker direct-runtime truth remains intact, shared-worker onboarding summaries stay green, and the maintained shared-worker fixture proves attach/reuse/fallback/detach cleanup in the same window | any contradiction that widens direct-runtime claims on the shared-worker host, any missing shared-worker onboarding/consumer evidence, or any attach denial/protocol mismatch/crash path that stops falling back mechanically |
 | `WebTransport` datagrams | `guarded canary-only` | HTTPS/HTTP3 prerequisites hold, diagnostics remain healthy, and docs/tests still point to `WebSocket` / `fetch` as the fallback | `candidate_prerequisite_missing`, `downgrade_to_websocket_or_fetch`, handshake/datagram rejection, or missing fallback guidance |
 | Rust-authored browser path | `preview_only` | maintained fixture evidence is green and the public Rust-callable builder lane actually exists | any attempt to present the lane as public/stable while it remains repository-maintained only |
 | Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `preview_only` | public SDK exports and explicit API contract tests exist | any claim that the shipped Browser Edition SDK already exports these surfaces as stable runtime lanes |

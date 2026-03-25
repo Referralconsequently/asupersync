@@ -151,6 +151,91 @@ fn shared_worker_direct_runtime_is_unshipped_but_bounded_attach_support_is_expli
 }
 
 #[test]
+fn shared_worker_fixture_is_wired_into_primary_docs_and_onboarding_contracts() {
+    assert!(
+        file_exists("scripts/validate_shared_worker_consumer.sh"),
+        "shared-worker validator must stay in-tree"
+    );
+    assert!(
+        file_exists("tests/fixtures/shared-worker-consumer/README.md"),
+        "shared-worker fixture docs must stay in-tree"
+    );
+
+    let onboarding = read_file("scripts/run_browser_onboarding_checks.py");
+    for marker in [
+        "\"shared_worker\": [",
+        "shared_worker.support_matrix",
+        "shared_worker.coordinator_fixture",
+        "validate_shared_worker_consumer.sh",
+    ] {
+        assert!(
+            onboarding.contains(marker),
+            "onboarding runner must preserve shared-worker marker: {marker}"
+        );
+    }
+
+    let wasm_doc = read_file("docs/WASM.md");
+    for marker in [
+        "Shared-worker bounded coordinator attach",
+        "shared-worker-consumer",
+        "validate_shared_worker_consumer.sh",
+    ] {
+        assert!(
+            wasm_doc.contains(marker),
+            "docs/WASM.md must preserve shared-worker fixture marker: {marker}"
+        );
+    }
+
+    let integration = read_file("docs/integration.md");
+    for marker in [
+        "Browser shared worker",
+        "validate_shared_worker_consumer.sh",
+    ] {
+        assert!(
+            integration.contains(marker),
+            "integration guide must preserve shared-worker fixture marker: {marker}"
+        );
+    }
+
+    let canonical_examples = read_file("docs/wasm_canonical_examples.md");
+    for marker in [
+        "shared_worker_attach_baseline",
+        "shared_worker_protocol_mismatch_fallback",
+        "shared-worker-consumer",
+        "validate_shared_worker_consumer.sh",
+    ] {
+        assert!(
+            canonical_examples.contains(marker),
+            "canonical examples doc must preserve shared-worker fixture marker: {marker}"
+        );
+    }
+
+    let evidence_matrix = read_file("docs/wasm_evidence_matrix_contract.md");
+    for marker in [
+        "Guarded shared-worker coordinator lane",
+        "shared_worker_consumer",
+        "validate_shared_worker_consumer.sh",
+    ] {
+        assert!(
+            evidence_matrix.contains(marker),
+            "evidence matrix must preserve shared-worker fixture marker: {marker}"
+        );
+    }
+
+    let troubleshooting = read_file("docs/wasm_troubleshooting_compendium.md");
+    for marker in [
+        "Shared-worker packaged-consumer validation",
+        "artifacts/onboarding/shared_worker.summary.json",
+        "validate_shared_worker_consumer.sh",
+    ] {
+        assert!(
+            troubleshooting.contains(marker),
+            "troubleshooting compendium must preserve shared-worker fixture marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn rust_authored_wasm_consumer_path_exposes_preview_public_builder() {
     // Evidence: the semantic core compiles to wasm32 (BrowserReactor exists,
     // types are target-agnostic), and the crate now exposes a preview public

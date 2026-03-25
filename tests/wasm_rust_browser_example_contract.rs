@@ -110,6 +110,24 @@ fn rust_browser_fixture_frontend_imports_generated_pkg() {
 }
 
 #[test]
+fn rust_browser_fixture_readme_documents_synthetic_unsupported_worker_evidence() {
+    let path = repo_root().join("tests/fixtures/rust-browser-consumer/README.md");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+
+    for marker in [
+        "synthetic service-worker and shared-worker fail-closed ladder snapshots",
+        "guarded advanced-capability snapshots such as `localStorage`, `indexedDB`, and `WebTransport`",
+        "Service-worker and shared-worker snapshots in this fixture are synthetic ladder inspections",
+    ] {
+        assert!(
+            content.contains(marker),
+            "fixture README missing expected marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
     let path = repo_root().join("scripts/validate_rust_browser_consumer.sh");
     assert!(
@@ -138,6 +156,8 @@ fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
         "\"cancel_event_count_is_one\": browser_run[\"cancel_event_count\"] == 1",
         "\"main_thread_selected_lane\": browser_run[\"main_thread_selected_lane\"]",
         "\"main_thread_browser_selection_lane\": browser_run[\"main_thread_browser_selection_lane\"]",
+        "\"service_worker_fail_closed_reason_code\": browser_run[\"service_worker_fail_closed_reason_code\"]",
+        "\"shared_worker_fail_closed_reason_code\": browser_run[\"shared_worker_fail_closed_reason_code\"]",
         "\"downgrade_reason_code\": browser_run[\"downgrade_reason_code\"]",
         "\"downgrade_browser_selection_lane\": browser_run[\"downgrade_browser_selection_lane\"]",
         "\"dedicated_worker_selected_lane\": browser_run[\"dedicated_worker_selected_lane\"]",
@@ -218,6 +238,10 @@ fn rust_browser_fixture_declares_browser_run_check_and_headless_contract() {
         "main_thread_local_storage === true",
         "dedicated_worker_local_storage === false",
         "main_thread_selected_lane",
+        "service_worker_fail_closed_reason_code",
+        "shared_worker_fail_closed_reason_code",
+        "service_worker_direct_runtime_not_shipped",
+        "shared_worker_direct_runtime_not_shipped",
         "main_thread_browser_selection_lane",
         "dedicated_worker_selected_lane",
         "dedicated_worker_browser_selection_lane",

@@ -10,10 +10,11 @@ Define the canonical Browser Edition examples for:
 
 1. Vanilla JS runtime embedding plus durable storage/artifact exercise
 2. Dedicated-worker bootstrap, storage/artifact export handoff, and shutdown coordination
-3. Rust-authored browser fixture workflow with explicit lifecycle/capability boundaries
-4. TypeScript outcome/cancellation modeling
-5. React provider + hook lifecycle patterns
-6. Next.js App Router bootstrap boundaries
+3. Shared-worker coordinator attach/reuse/fallback with explicit downgrade truth
+4. Rust-authored browser fixture workflow with explicit lifecycle/capability boundaries
+5. TypeScript outcome/cancellation modeling
+6. React provider + hook lifecycle patterns
+7. Next.js App Router bootstrap boundaries
 
 Each example must stay deterministic, preserve structured-concurrency invariants,
 and provide replayable commands and artifact paths.
@@ -34,6 +35,7 @@ Every example in this catalog must preserve:
 | --- | --- | --- | --- |
 | Vanilla JS | `vanilla.storage_artifact_bundle`, `vanilla.behavior_loser_drain_replay`, `vanilla.negative_skipped_loser_detection`, `vanilla.timing_mid_computation_drain`, `L6-BUNDLER-VITE` | `tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs`, `scripts/validate_vite_vanilla_consumer.sh` | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `artifacts/onboarding/vanilla.behavior_loser_drain_replay.log`, `artifacts/onboarding/vanilla.negative_skipped_loser_detection.log` |
 | Dedicated Worker | `worker.runtime_support_matrix`, `worker.storage_artifact_diagnostics`, `worker.storage_artifact_export_handoff`, `worker.coordinator_protocol`, `L6-BUNDLER-DEDICATED-WORKER` | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `src/net/worker_channel.rs`, `scripts/validate_dedicated_worker_consumer.sh` | `artifacts/onboarding/worker.runtime_support_matrix.log`, `artifacts/onboarding/worker.storage_artifact_diagnostics.log`, `artifacts/onboarding/worker.coordinator_protocol.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`; the reviewed summary bundle must preserve `scenario_inventory` plus artifact pointers under `artifacts` |
+| Shared Worker | `shared_worker_attach_baseline`, `shared_worker_multi_page_reuse`, `shared_worker_protocol_mismatch_fallback`, `shared_worker_attach_crash_fallback`, `shared_worker_client_detach_cleanup`, `L6-SHARED-WORKER-COORDINATOR` | `tests/wasm_browser_feasibility_matrix.rs`, `scripts/validate_shared_worker_consumer.sh`, `tests/fixtures/shared-worker-consumer/scripts/check-browser-run.mjs` | `artifacts/onboarding/shared_worker.support_matrix.log`, `target/e2e-results/shared_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/shared_worker_consumer/<timestamp>/browser-run.json` |
 | Rust Browser | `RUST-BROWSER-CONSUMER`, `repository_maintained_rust_browser_fixture`, `L6-RUST-BROWSER-CONSUMER` | `tests/wasm_rust_browser_example_contract.rs`, `scripts/validate_rust_browser_consumer.sh` | `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json` |
 | TypeScript | `TS-TYPE-VANILLA`, `TS-TYPE-REACT`, `TS-TYPE-NEXT` | `scripts/check_wasm_typescript_type_model_policy.py` | `artifacts/wasm_typescript_type_model_summary.json`, `artifacts/wasm_typescript_type_model_log.ndjson` |
 | React | `react_ref.task_group_cancel`, `react_ref.retry_after_transient_failure`, `react_ref.bulkhead_isolation`, `react_ref.tracing_hook_transition` | `tests/react_wasm_strictmode_harness.rs` | `artifacts/onboarding/react.behavior_strict_mode_double_invocation.log`, `artifacts/onboarding/react.timing_restart_churn.log` |
@@ -113,6 +115,44 @@ python3 scripts/run_browser_onboarding_checks.py --scenario worker
 PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 ```
 
+## Maintained Shared-Worker Example
+
+Maintained shared-worker coordinator example source:
+
+- `tests/fixtures/shared-worker-consumer`
+- validation harness: `scripts/validate_shared_worker_consumer.sh`
+
+This fixture is the canonical guarded shared-worker example for:
+
+- bounded coordinator attach from browser main-thread or dedicated-worker callers
+- same-origin multi-page reuse without widening direct-runtime claims
+- explicit downgrade on protocol mismatch or crash-before-handshake
+- topology snapshot and client-detach coverage through the public coordinator client
+- deterministic artifact output under `target/e2e-results/shared_worker_consumer/`
+
+The shared-worker summary is expected to retain these contract markers:
+
+- `shared-worker-selection-baseline`
+- `shared-worker-selection-reuse`
+- `shared-worker-selection-protocol-mismatch`
+- `shared-worker-selection-crash-fallback`
+- `shared-worker-coordinator-attach`
+- `shared-worker-coordinator-topology-snapshot`
+- `shared-worker-coordinator-protocol-mismatch`
+- `shared-worker-coordinator-crash-before-handshake`
+- `shared-worker-coordinator-detach`
+
+The reviewed shared-worker bundle must also preserve `scenario_inventory`
+covering attach, reuse, protocol mismatch fallback, crash fallback, and client
+detach cleanup so guarded-lane reviews do not collapse into one smoke marker.
+
+Primary deterministic validation commands:
+
+```bash
+python3 scripts/run_browser_onboarding_checks.py --scenario shared_worker
+PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh
+```
+
 ## Maintained Rust Browser Example
 
 Maintained Rust-authored browser example source:
@@ -181,6 +221,7 @@ Run lane-scoped bundles:
 ```bash
 python3 scripts/run_browser_onboarding_checks.py --scenario vanilla
 python3 scripts/run_browser_onboarding_checks.py --scenario worker
+python3 scripts/run_browser_onboarding_checks.py --scenario shared_worker
 python3 scripts/run_browser_onboarding_checks.py --scenario react
 python3 scripts/run_browser_onboarding_checks.py --scenario next
 ```
@@ -195,6 +236,12 @@ Run the maintained dedicated-worker fixture directly:
 
 ```bash
 PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
+```
+
+Run the maintained shared-worker fixture directly:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh
 ```
 
 Run the maintained Rust-browser fixture directly:

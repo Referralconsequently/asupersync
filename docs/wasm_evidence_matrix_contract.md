@@ -15,9 +15,10 @@ The matrix explicitly covers:
 2. exported ABI-handle safety,
 3. JS/TS package type-surface behavior,
 4. browser host-bridge/runtime behavior,
-5. React/Next adapter lifecycle behavior,
-6. bundled-package installability and consumer bootstrap,
-7. cross-browser compatibility.
+5. guarded shared-worker coordinator attach/reuse/fallback behavior,
+6. React/Next adapter lifecycle behavior,
+7. bundled-package installability and consumer bootstrap,
+8. cross-browser compatibility.
 
 ## Required Evidence Matrix
 
@@ -29,6 +30,7 @@ Every lane below requires deterministic unit and E2E proof plus structured logs.
 | ABI handle safety | unit tests for ownership/borrowing, invalid-handle rejection, close semantics | Rust<->JS ABI bridge smoke tests over generated bindings | browser scenario proving handle lifecycle under cancellation/drain | `abi_version`, `handle_kind`, `handle_id`, `state_before`, `state_after`, `error_code` | ABI test report + failure repro bundle | Missing ABI lifecycle coverage is release-blocking |
 | JS/TS type surface | TS compile/type tests for package exports and diagnostics types | package import tests across supported module modes | minimal consumer app boot with generated `.d.ts` and expected diagnostics | `package_name`, `package_version`, `types_entry`, `bundler`, `node_version` | TS test logs + type-surface manifest | Type mismatch without approved waiver blocks release |
 | Browser host bridge | unit tests for host callbacks/event mapping and fallback paths | integration tests for cancellation/timer/event-loop bridge seams | deterministic browser-run scenarios using packaged artifacts | `browser`, `bridge_event`, `token`, `interest`, `cancel_state`, `trace_pointer` | bridge event log + replay pointers | Host-bridge failures are release-blocking |
+| Guarded shared-worker coordinator lane | unit tests for host-role classification, fail-closed reason codes, and bounded attach diagnostics | integration tests for coordinator selection, downgrade semantics, and scenario inventory preservation | maintained browser-run fixture proving attach, multi-page reuse, protocol mismatch fallback, crash-before-handshake downgrade, and detach cleanup | `host_role`, `lane_id`, `reason_code`, `fallback_lane_id`, `scenario_inventory`, `worker_name`, `reuse_client_ids`, `artifact_root` | `target/e2e-results/shared_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/shared_worker_consumer/<timestamp>/browser-run.json`, onboarding shared-worker NDJSON/summary | Any shared-worker contradiction or missing guarded-lane artifact blocks promotion of that lane |
 | React/Next adapters | unit tests for hook/adaptor lifecycle rules | adapter integration tests for hydration/mount/unmount + cancellation propagation | end-to-end React + Next templates with deterministic assertions | `framework`, `adapter_version`, `route`, `lifecycle_phase`, `cancel_outcome` | framework suite summary + artifact bundle | Missing adapter lifecycle evidence blocks GA |
 | Package installability | unit checks for package metadata/exports integrity | install + build checks in clean temp workspaces | smoke boot of packaged artifacts in supported templates | `registry_source`, `lockfile_digest`, `install_command`, `build_command`, `artifact_digest` | installability report + package digest manifest | Installability regressions block release |
 | Cross-browser compatibility | browser-specific unit checks for known quirks | shared scenario pack run across engine matrix | deterministic E2E runs across Chromium/Firefox/WebKit lanes | `browser_engine`, `browser_version`, `os`, `scenario_id`, `repro_command` | matrix summary JSON + per-browser logs/screenshots | Any unresolved high/critical browser regression blocks release |
@@ -92,6 +94,7 @@ bash ./scripts/run_all_e2e.sh --suite wasm-packaged-bootstrap
 bash ./scripts/run_all_e2e.sh --suite wasm-packaged-cancellation
 bash ./scripts/run_all_e2e.sh --suite wasm-cross-framework
 bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics
+PATH=/usr/bin:$PATH bash ./scripts/validate_shared_worker_consumer.sh
 python3 ./scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json
 ```
 
