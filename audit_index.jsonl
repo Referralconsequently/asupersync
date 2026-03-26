@@ -1210,3 +1210,79 @@
 {"file":"src/trace/streaming.rs","lines":1236,"batch":448,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"O(1) streaming replay, deterministic checkpointing, EventSource adapter, 16 tests"}
 {"file":"src/trace/filter.rs","lines":957,"batch":448,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Correct filter evaluation order, xorshift sampling, builder pattern, 14 tests"}
 {"file":"src/stream/try_stream.rs","lines":856,"batch":448,"date":"2026-03-25","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Clean try-stream combinators, cooperative budgets (1024), PolledAfterCompletion guards, 12 tests"}
+{"file":"src/cx/cap.rs","lines":351,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/cli/signal.rs","lines":352,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/evidence_sink.rs","lines":604,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/observability/analyzer_plugin.rs","lines":1094,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/grpc/interceptor.rs","lines":905,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/combinator/laws.rs","lines":1027,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/protocol/mod.rs","lines":452,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/observability/entry.rs","lines":526,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/distributed/tests.rs","lines":1077,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/jetstream.rs","lines":1734,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/messaging/session/conformance.rs","lines":1721,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/injection.rs","lines":1224,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/grpc/interceptor.rs","lines":905,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/obligation/recovery.rs","lines":827,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/obligation/guarded.rs","lines":821,"batch":376,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/obligation/calm.rs","lines":356,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/grpc/service.rs","lines":350,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/io/stream_adapters.rs","lines":377,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/observability/context.rs","lines":403,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/http/h2/error.rs","lines":417,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/io/write.rs","lines":407,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/observability/mod.rs","lines":424,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/codec/framed_write.rs","lines":366,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/http/h1/listener.rs","lines":1038,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/opportunity.rs","lines":461,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/fs/metadata.rs","lines":280,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/net/quic/config.rs","lines":434,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/channel/deadlock_test.rs","lines":36,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/channel/mpsc_lost_wakeup_test.rs","lines":61,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/cancel/mod.rs","lines":22,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/channel/mod.rs","lines":58,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/database/mod.rs","lines":52,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports, feature-gated"}
+{"file":"src/codec/mod.rs","lines":27,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/trace/compat.rs","lines":1227,"batch":449,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Proper magic/version validation, 64MB size limits, lenient deser with skip, clean migration chain, 20+ tests"}
+{"file":"src/trace/delta_debug.rs","lines":1158,"batch":449,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Standard ddmin with hierarchical extension, BTreeMap determinism, 12 tests"}
+{"file":"src/trace/gf2.rs","lines":824,"batch":449,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Correct bit ops, word-boundary handling, column reduction, non-square persistence_pairs, 18 tests"}
+{"file":"src/trace/replayer.rs","lines":1124,"batch":449,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cursor replay with modes/breakpoints, divergence detection, browser report, EventSource trait, 20+ tests"}
+{"file":"src/trace/minimizer.rs","lines":858,"batch":449,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Scenario-level ddmin, concurrency tree, 3-phase minimization, deterministic, 10 tests"}
+{"file":"src/trace/refinement_firewall.rs","lines":850,"batch":449,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"State machine for runtime invariants, spawn/region/obligation lifecycle, quiescence checks, BTreeMap determinism, 8 tests"}
+{"file":"src/grpc/status.rs","lines":718,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/evidence_sink.rs","lines":604,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/observability/obligation_tracker.rs","lines":631,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/audit/mod.rs","lines":6,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-export"}
+{"file":"src/codec/raptorq.rs","lines":8,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"re-exports"}
+{"file":"src/lab/meta/mod.rs","lines":13,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/http/h1/obs_text_test.rs","lines":16,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"orphaned standalone binary, dead code"}
+{"file":"src/net/sys/mod.rs","lines":16,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"intentional: windows has content, linux/macos are Phase 0 stubs"}
+{"file":"src/net/tcp/mod.rs","lines":23,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/bytes/buf/mod.rs","lines":24,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/messaging/session/mod.rs","lines":24,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/http/h2/mod.rs","lines":27,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports with HPACK aliases"}
+{"file":"src/io/ext/mod.rs","lines":28,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/codec/decoder.rs","lines":34,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Decoder trait with correct decode_eof default"}
+{"file":"src/http/h1/mod.rs","lines":40,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"wasm32-gated server modules"}
+{"file":"src/net/dns/mod.rs","lines":43,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/raptorq/mod.rs","lines":43,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports with test-gated modules"}
+{"file":"src/distributed/mod.rs","lines":46,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/net/quic/mod.rs","lines":55,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/lab/http/mod.rs","lines":56,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/http/mod.rs","lines":58,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"intentional dual h3/h3_native exports"}
+{"file":"src/net/mod.rs","lines":82,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RecvStream alias correctly handled"}
+{"file":"src/obligation/mod.rs","lines":82,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/fs/mod.rs","lines":89,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"platform-gated re-exports"}
+{"file":"src/combinator/mod.rs","lines":95,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports"}
+{"file":"src/io/mod.rs","lines":106,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"wasm32-gated re-exports"}
+{"file":"src/cli/mod.rs","lines":253,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports with prelude and tests"}
+{"file":"src/conformance/mod.rs","lines":649,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"conformance test framework, block_on uses Arc<Mutex<Option>>"}
+{"file":"src/migration/mod.rs","lines":643,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"dual-value migration with correct mode dispatch"}
+{"file":"src/console.rs","lines":1322,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/encoding.rs","lines":1042,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/scenario_runner.rs","lines":1206,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/scenario.rs","lines":1152,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/oracle/mod.rs","lines":1161,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/combinator/laws.rs","lines":1027,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/meta/mutation.rs","lines":1133,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/distributed/tests.rs","lines":1077,"batch":377,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
