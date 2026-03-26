@@ -1355,3 +1355,16 @@
 {"file":"src/observability/collector.rs","lines":190,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ring buffer with capacity 0 guard, level filtering"}
 {"file":"src/observability/level.rs","lines":164,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"derived Ord matches definition order, is_enabled_at correct"}
 {"file":"src/raptorq/builder.rs","lines":329,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"type-state builder pattern, validates config and transport presence"}
+{"file":"src/raptorq/systematic.rs","lines":1939,"batch":322,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Previously audited in session Mar 13b batch 322"}
+{"file":"src/raptorq/test_log_schema.rs","lines":1926,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Previously audited in session Mar 14b batch 369"}
+{"file":"src/types/outcome.rs","lines":1127,"batch":451,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Four-valued result with severity lattice, monotone join, correct left-bias on ties"}
+{"file":"src/types/symbol.rs","lines":801,"batch":451,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RaptorQ symbol types, correct ESI classification, saturating overflow in total_source_symbols"}
+{"file":"src/types/id.rs","lines":784,"batch":451,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Type-safe IDs, correct Time arithmetic with saturating ops, Relaxed ordering for counters"}
+{"file":"src/time/timeout_future.rs","lines":834,"batch":451,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timeout wrapper, fail-closed semantics, future-first priority, dual poll mechanisms"}
+{"file":"src/spork.rs","lines":888,"batch":451,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"SPORK supervision framework, error severity lattice, monotone classification, exhaustive domain tagging"}
+{"file":"src/net/quic/stream.rs","lines":274,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/http/client.rs","lines":248,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/net/quic/error.rs","lines":236,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/mod.rs","lines":169,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/http/h3/client.rs","lines":149,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/lab/http/server.rs","lines":118,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
