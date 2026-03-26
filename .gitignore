@@ -81,7 +81,8 @@ storage.sqlite3-*
 **/.beads/.bv.lock
 **/.beads/.migration-hint-ts
 **/.beads/*.bak_*
-**/.beads/.br_history/issues.*.jsonl
+**/.beads/.br_history/
+**/.beads/*.jsonl.new
 
 # bd obligation patches
 .bd-*.patch
@@ -120,8 +121,12 @@ artifacts/*
 
 # UBS (Ultimate Bug Scanner) output
 ubs_*.txt
+ubs_*.json
+ubs_*.jsonl
 ubs-output*.txt
 *_ubs.txt
+*_ubs.json
+*_ubs.jsonl
 /ubs.txt
 /ubs.json
 /rust-bug-scan.txt
@@ -138,17 +143,21 @@ output.txt
 
 # Backup files
 *.bak
+*.orig
+*.rej
 
 # Cargo expand output
 /expanded.rs
 
 # Ephemeral analysis / audit scratch files
 /all_files.txt
+/all_*_files.txt
+/audit_files.txt
 /audited_files.txt
 /audited_unique.txt
 /newly_audited*.json
 /ubs_src.json
-/append_audit.sh
+/append_audit*.sh
 
 # Stray numbered files (agent scratch)
 /19
@@ -160,6 +169,8 @@ output.txt
 
 # Beads recovery directories (auto-generated crash recovery)
 .beads/recovery*/
+.beads_recovery_*/
+.beads_snapshot_*/
 
 # Root-level scratch test files and their compiled binaries
 /test_*.rs
@@ -211,8 +222,10 @@ __pycache__/
 # Root-level scratch scripts and one-off harnesses
 /find_*.rs
 /gen_*.rs
+/patch.rs
 /fix_*.py
 /parse_*.py
+/parse_*.sh
 /patch_*.py
 /patch_*.sh
 /fix_*.sh
@@ -275,6 +288,8 @@ pnpm-lock.yaml
 
 # Standalone bug reproduction / one-off test harnesses in src/
 src/channel/mpsc_lost_wakeup_test.rs
+src/test_*.rs
+tests/watch_leak.rs
 
 # Root-level scratch .rs files (not matching /test_*.rs pattern)
 /test.rs
@@ -290,6 +305,10 @@ src/channel/mpsc_lost_wakeup_test.rs
 /test_sanitize
 /test_total_source
 /test_unwrap
+/test_lz4_size
+/test_nll
+/test_rustc
+/test_compile.sh
 
 # Root-level test shell scripts (numbered variants)
 /test_script[0-9].sh
