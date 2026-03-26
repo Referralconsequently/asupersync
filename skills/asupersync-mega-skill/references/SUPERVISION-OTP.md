@@ -104,7 +104,7 @@ Important guidance:
 
 - inject registry capability through `AppSpec` / `Cx`,
 - avoid rebuilding a global singleton service locator,
-- resolve named handles explicitly with `release_name()` or `abort_lease()` semantics.
+- resolve named handles explicitly with `stop_and_release()` or `abort_lease()` semantics.
 
 Relevant paths:
 
