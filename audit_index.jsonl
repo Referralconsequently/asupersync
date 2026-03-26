@@ -1350,3 +1350,8 @@
 {"file":"src/observability/mod.rs","lines":424,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/http/h2/error.rs","lines":417,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/io/write.rs","lines":407,"batch":378,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/grpc/status.rs","lines":718,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"gRPC status codes per spec, from_i32 maps unknown to Unknown"}
+{"file":"src/observability/metrics.rs","lines":654,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"histogram atomic float sum via CAS loop, cumulative prometheus export correct"}
+{"file":"src/observability/collector.rs","lines":190,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"ring buffer with capacity 0 guard, level filtering"}
+{"file":"src/observability/level.rs","lines":164,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"derived Ord matches definition order, is_enabled_at correct"}
+{"file":"src/raptorq/builder.rs","lines":329,"batch":379,"date":"2026-03-26","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"type-state builder pattern, validates config and transport presence"}
