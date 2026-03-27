@@ -25,10 +25,16 @@
 //! });
 //! ```
 
+use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
-use std::future::Future;
+use parking_lot::Mutex;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Configuration for conformance tests.
@@ -119,8 +125,8 @@ impl TestConfig {
 ///
 /// Allows waiting for task completion and retrieving the result.
 pub struct TaskHandle<T> {
-    /// The task ID.
-    pub task_id: TaskId,
+    /// The task ID once the runtime has registered the task.
+    task_id: Arc<Mutex<Option<TaskId>>>,
     /// Boxed future that resolves to the task outcome.
     result: Pin<Box<dyn Future<Output = Outcome<T, ()>> + Send>>,
 }
@@ -132,6 +138,16 @@ impl<T> TaskHandle<T> {
         result: impl Future<Output = Outcome<T, ()>> + Send + 'static,
     ) -> Self {
         Self {
+            task_id: Arc::new(Mutex::new(Some(task_id))),
+            result: Box::pin(result),
+        }
+    }
+
+    fn pending(
+        task_id: Arc<Mutex<Option<TaskId>>>,
+        result: impl Future<Output = Outcome<T, ()>> + Send + 'static,
+    ) -> Self {
+        Self {
             task_id,
             result: Box::pin(result),
         }
@@ -139,8 +155,8 @@ impl<T> TaskHandle<T> {
 
     /// Get the task ID.
     #[must_use]
-    pub const fn id(&self) -> TaskId {
-        self.task_id
+    pub fn id(&self) -> Option<TaskId> {
+        *self.task_id.lock()
     }
 }
 
@@ -159,8 +175,8 @@ impl<T> Future for TaskHandle<T> {
 ///
 /// Allows waiting for region quiescence and managing the region lifecycle.
 pub struct RegionHandle {
-    /// The region ID.
-    pub region_id: RegionId,
+    /// The region ID once the runtime has created the region.
+    region_id: Arc<Mutex<Option<RegionId>>>,
     /// Boxed future that resolves when the region closes.
     completion: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
@@ -169,6 +185,16 @@ impl RegionHandle {
     /// Create a new region handle.
     pub fn new(region_id: RegionId, completion: impl Future<Output = ()> + Send + 'static) -> Self {
         Self {
+            region_id: Arc::new(Mutex::new(Some(region_id))),
+            completion: Box::pin(completion),
+        }
+    }
+
+    fn pending(
+        region_id: Arc<Mutex<Option<RegionId>>>,
+        completion: impl Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        Self {
             region_id,
             completion: Box::pin(completion),
         }
@@ -176,8 +202,8 @@ impl RegionHandle {
 
     /// Get the region ID.
     #[must_use]
-    pub const fn id(&self) -> RegionId {
-        self.region_id
+    pub fn id(&self) -> Option<RegionId> {
+        *self.region_id.lock()
     }
 }
 
@@ -269,7 +295,7 @@ pub trait ConformanceTarget: Sized + Send + Sync {
     /// 2. Wait for tasks to reach checkpoints and drain
     /// 3. Run finalizers
     /// 4. Region closes
-    fn cancel(cx: &Cx, region_id: RegionId, reason: CancelReason);
+    fn cancel(cx: &Cx, region: &RegionHandle, reason: CancelReason);
 
     /// Advance virtual time (Lab runtime only).
     ///
@@ -415,6 +441,91 @@ macro_rules! conformance_test {
 /// which provides virtual time and reproducible scheduling.
 pub struct LabRuntimeTarget;
 
+type PendingLabOperation = Box<dyn FnOnce(&mut crate::lab::LabRuntime)>;
+
+#[derive(Clone)]
+struct LabConformanceSession {
+    pending_ops: Rc<RefCell<VecDeque<PendingLabOperation>>>,
+}
+
+thread_local! {
+    static CURRENT_LAB_CONFORMANCE_SESSION: RefCell<Option<LabConformanceSession>> =
+        const { RefCell::new(None) };
+}
+
+struct LabConformanceSessionGuard {
+    prev: Option<LabConformanceSession>,
+}
+
+impl Drop for LabConformanceSessionGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        CURRENT_LAB_CONFORMANCE_SESSION.with(|slot| {
+            *slot.borrow_mut() = prev;
+        });
+    }
+}
+
+impl LabConformanceSession {
+    fn new() -> Self {
+        Self {
+            pending_ops: Rc::new(RefCell::new(VecDeque::new())),
+        }
+    }
+
+    fn current() -> Self {
+        CURRENT_LAB_CONFORMANCE_SESSION.with(|slot| {
+            slot.borrow()
+                .clone()
+                .expect("LabRuntimeTarget operations must run inside LabRuntimeTarget::block_on")
+        })
+    }
+
+    fn enter(&self) -> LabConformanceSessionGuard {
+        let prev = CURRENT_LAB_CONFORMANCE_SESSION.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            let prev = guard.take();
+            *guard = Some(self.clone());
+            prev
+        });
+        LabConformanceSessionGuard { prev }
+    }
+
+    fn enqueue(&self, op: PendingLabOperation) {
+        self.pending_ops.borrow_mut().push_back(op);
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending_ops.borrow().is_empty()
+    }
+
+    fn drain(&self, runtime: &mut crate::lab::LabRuntime) {
+        loop {
+            let next = self.pending_ops.borrow_mut().pop_front();
+            let Some(op) = next else {
+                break;
+            };
+            op(runtime);
+        }
+    }
+}
+
+fn schedule_lab_task(runtime: &crate::lab::LabRuntime, task_id: TaskId, priority: u8) {
+    runtime.scheduler.lock().schedule(task_id, priority);
+}
+
+fn request_lab_region_cancel(
+    runtime: &mut crate::lab::LabRuntime,
+    region_id: RegionId,
+    reason: &CancelReason,
+) {
+    let tasks_to_schedule = runtime.state.cancel_request(region_id, reason, None);
+    let mut scheduler = runtime.scheduler.lock();
+    for (task_id, priority) in tasks_to_schedule {
+        scheduler.schedule_cancel(task_id, priority);
+    }
+}
+
 impl ConformanceTarget for LabRuntimeTarget {
     type Runtime = crate::lab::LabRuntime;
 
@@ -440,9 +551,6 @@ impl ConformanceTarget for LabRuntimeTarget {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        use parking_lot::Mutex;
-        use std::sync::Arc;
-
         // Create root region
         let root_region = runtime.state.create_root_region(Budget::INFINITE);
 
@@ -464,40 +572,138 @@ impl ConformanceTarget for LabRuntimeTarget {
 
         runtime.scheduler.lock().schedule(task_id, 0);
 
-        // Run until quiescent
-        runtime.run_until_quiescent();
+        let session = LabConformanceSession::new();
+        let _session_guard = session.enter();
+
+        loop {
+            session.drain(runtime);
+
+            if runtime.is_quiescent() && !session.has_pending() {
+                break;
+            }
+
+            if let Some(max_steps) = runtime.config().max_steps {
+                if runtime.steps() >= max_steps {
+                    break;
+                }
+            }
+
+            runtime.step_for_test();
+        }
+
+        session.drain(runtime);
 
         // Extract result
         let mut guard = result.lock();
         guard.take().expect("task did not complete")
     }
 
-    fn spawn<T, F>(_cx: &Cx, _budget: Budget, f: F) -> TaskHandle<T>
+    fn spawn<T, F>(cx: &Cx, budget: Budget, f: F) -> TaskHandle<T>
     where
         T: Send + 'static,
         F: Future<Output = T> + Send + 'static,
     {
-        // For Lab runtime, we need access to the runtime state
-        // This is a simplified implementation - real implementation would
-        // use the Cx to access the runtime
-        let task_id = TaskId::new_for_test(0, 0);
+        let session = LabConformanceSession::current();
+        let task_id = Arc::new(Mutex::new(None));
+        let join_cx = cx.clone();
+        let op_cx = cx.clone();
+        let task_id_for_op = Arc::clone(&task_id);
+        let (registration_tx, mut registration_rx) = oneshot::channel();
 
-        // Create a placeholder handle
-        // In a full implementation, this would properly integrate with the runtime
-        TaskHandle::new(task_id, async {
-            let result = f.await;
-            Outcome::Ok(result)
+        session.enqueue(Box::new(move |runtime| {
+            let scope = op_cx.scope_with_budget(budget);
+            let handle = scope
+                .spawn_registered(&mut runtime.state, &op_cx, move |_child_cx| f)
+                .expect("failed to create runtime-backed conformance task");
+            let task_id_value = handle.task_id();
+            *task_id_for_op.lock() = Some(task_id_value);
+
+            let priority = runtime
+                .state
+                .task(task_id_value)
+                .and_then(|record| record.cx_inner.as_ref())
+                .map_or(budget.priority, |inner| inner.read().budget.priority);
+            schedule_lab_task(runtime, task_id_value, priority);
+
+            let _ = registration_tx.send(&op_cx, handle);
+        }));
+
+        TaskHandle::pending(task_id, async move {
+            let mut handle = registration_rx
+                .recv_uninterruptible()
+                .await
+                .expect("conformance task registration dropped before delivery");
+            match handle.join(&join_cx).await {
+                Ok(value) => Outcome::Ok(value),
+                Err(crate::runtime::task_handle::JoinError::Cancelled(reason)) => {
+                    Outcome::Cancelled(reason)
+                }
+                Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
+                    Outcome::Panicked(payload)
+                }
+                Err(crate::runtime::task_handle::JoinError::PolledAfterCompletion) => {
+                    Outcome::Err(())
+                }
+            }
         })
     }
 
-    fn create_region(_cx: &Cx, _budget: Budget) -> RegionHandle {
-        // Simplified implementation
-        let region_id = RegionId::new_for_test(0, 0);
-        RegionHandle::new(region_id, async {})
+    fn create_region(cx: &Cx, budget: Budget) -> RegionHandle {
+        let session = LabConformanceSession::current();
+        let region_id = Arc::new(Mutex::new(None));
+        let region_id_for_op = Arc::clone(&region_id);
+        let op_cx = cx.clone();
+        let (registration_tx, mut registration_rx) = oneshot::channel();
+
+        session.enqueue(Box::new(move |runtime| {
+            let region_id_value = runtime
+                .state
+                .create_child_region(op_cx.region_id(), budget)
+                .expect("failed to create runtime-backed conformance region");
+            let close_notify = runtime
+                .state
+                .region(region_id_value)
+                .expect("created region must exist")
+                .close_notify
+                .clone();
+            *region_id_for_op.lock() = Some(region_id_value);
+            let _ = registration_tx.send(&op_cx, close_notify);
+        }));
+
+        RegionHandle::pending(region_id, async move {
+            let close_notify = registration_rx
+                .recv_uninterruptible()
+                .await
+                .expect("conformance region registration dropped before delivery");
+
+            poll_fn(move |cx| {
+                let mut state = close_notify.lock();
+                if state.closed {
+                    std::task::Poll::Ready(())
+                } else {
+                    if !state
+                        .waker
+                        .as_ref()
+                        .is_some_and(|waker| waker.will_wake(cx.waker()))
+                    {
+                        state.waker = Some(cx.waker().clone());
+                    }
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+        })
     }
 
-    fn cancel(_cx: &Cx, _region_id: RegionId, _reason: CancelReason) {
-        // Implementation would request cancellation through the runtime
+    fn cancel(_cx: &Cx, region: &RegionHandle, reason: CancelReason) {
+        let session = LabConformanceSession::current();
+        let region_id = Arc::clone(&region.region_id);
+
+        session.enqueue(Box::new(move |runtime| {
+            let region_id_value = (*region_id.lock())
+                .expect("conformance region cancel issued before region registration completed");
+            request_lab_region_cancel(runtime, region_id_value, &reason);
+        }));
     }
 
     fn advance_time(runtime: &mut Self::Runtime, duration: Duration) {
@@ -621,14 +827,14 @@ mod tests {
     fn task_handle_id() {
         let tid = TaskId::new_for_test(5, 0);
         let handle = TaskHandle::new(tid, async { Outcome::Ok(42) });
-        assert_eq!(handle.id(), tid);
+        assert_eq!(handle.id(), Some(tid));
     }
 
     #[test]
     fn region_handle_id() {
         let rid = RegionId::new_for_test(3, 0);
         let handle = RegionHandle::new(rid, async {});
-        assert_eq!(handle.id(), rid);
+        assert_eq!(handle.id(), Some(rid));
     }
 
     #[test]
@@ -645,5 +851,47 @@ mod tests {
         let runtime = LabRuntimeTarget::create_runtime(config);
         // Should use default seed 0xDEAD_BEEF when None
         assert_eq!(runtime.config().seed, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn lab_runtime_target_spawn_registers_real_task_handle() {
+        let config = TestConfig::default();
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (task_id, outcome) = LabRuntimeTarget::block_on(&mut runtime, async {
+            let cx = Cx::current().expect("root task should have a current Cx");
+            let handle = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async { 42_u8 });
+
+            assert_eq!(handle.id(), None);
+            crate::runtime::yield_now().await;
+
+            let task_id = handle
+                .id()
+                .expect("task id should be resolved after the first scheduler turn");
+            let outcome = handle.await;
+            (task_id, outcome)
+        });
+
+        assert_ne!(task_id, TaskId::new_for_test(0, 0));
+        assert_eq!(outcome, Outcome::Ok(42));
+    }
+
+    #[test]
+    fn lab_runtime_target_create_region_and_cancel_before_registration_closes_region() {
+        let config = TestConfig::default();
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let region_id = LabRuntimeTarget::block_on(&mut runtime, async {
+            let cx = Cx::current().expect("root task should have a current Cx");
+            let region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
+            let region_id = Arc::clone(&region.region_id);
+            assert_eq!(region.id(), None);
+
+            LabRuntimeTarget::cancel(&cx, &region, CancelReason::user("conformance-test"));
+            region.await;
+            (*region_id.lock()).expect("region id should resolve once the region has been created")
+        });
+
+        assert_ne!(region_id, RegionId::new_for_test(0, 0));
     }
 }
