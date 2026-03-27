@@ -677,6 +677,7 @@ fn browser_package_and_runtime_builder_preserve_service_worker_fail_closed_marke
         "reason: \"service_worker_not_yet_shipped\"",
         "@asupersync/browser does not yet ship direct runtime APIs for service-worker hosts.",
         "Keep service-worker orchestration at the application boundary until this host is promoted.",
+        "if (hostRole === \"service_worker\") {",
         "return \"service_worker\";",
     ] {
         assert!(

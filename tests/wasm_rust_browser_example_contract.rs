@@ -119,6 +119,7 @@ fn rust_browser_fixture_readme_documents_synthetic_unsupported_worker_evidence()
         "synthetic service-worker and shared-worker fail-closed ladder snapshots",
         "guarded advanced-capability snapshots such as `localStorage`, `indexedDB`, and `WebTransport`",
         "Service-worker and shared-worker snapshots in this fixture are synthetic ladder inspections",
+        "`service_worker_fail_closed_reason_code`, `shared_worker_fail_closed_reason_code`, and `downgrade_reason_code`",
     ] {
         assert!(
             content.contains(marker),
@@ -149,6 +150,9 @@ fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
         "npm run build",
         "npm run check:bundle",
         "npm run check:browser -- \"${BROWSER_RUN_FILE}\"",
+        "\"browser_run\": {",
+        "\"status\": browser_run[\"status\"]",
+        "\"support_lane\": browser_run[\"support_lane\"]",
         "\"real_browser_run_ok\": browser_run[\"status\"] == \"ok\"",
         "\"ready_phase_is_ready\": browser_run[\"ready_phase\"] == \"ready\"",
         "\"disposed_phase_is_disposed\": browser_run[\"disposed_phase\"] == \"disposed\"",
@@ -167,6 +171,7 @@ fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
         "\"capabilities_has_webassembly\": browser_run[\"capabilities\"][\"has_webassembly\"] is True",
         "L6-RUST-BROWSER-CONSUMER",
         "asupersync-4l9iw.8",
+        "asupersync-4l9iw.11",
     ] {
         assert!(
             content.contains(needle),

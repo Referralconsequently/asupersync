@@ -870,6 +870,55 @@ fn websocket_url_validation_rejects_empty_and_bad_schemes() {
 }
 
 #[test]
+fn websocket_url_validation_accepts_mixed_case_ws_schemes() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_req = WasmScopeEnterRequest {
+        parent: runtime,
+        label: Some("ws-case-insensitive".to_string()),
+    };
+    let scope_json = scope_enter(to_json(&scope_req), None).expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+
+    for url in ["WSS://example.com/ws", "Ws://example.com/ws"] {
+        let open_json = websocket_open(
+            serde_json::json!({"scope": scope, "url": url}).to_string(),
+            None,
+        )
+        .expect("mixed-case websocket scheme should succeed");
+        let open_outcome: WasmAbiOutcomeEnvelope = parse_json(&open_json);
+        let socket = match open_outcome {
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::Handle(handle),
+            } => handle,
+            other => panic!("expected handle outcome for {url}, got {other:?}"),
+        };
+
+        websocket_cancel(
+            serde_json::json!({
+                "socket": socket,
+                "kind": "cleanup",
+                "message": format!("closing {url}")
+            })
+            .to_string(),
+            None,
+        )
+        .expect("cleanup cancel succeeds");
+    }
+
+    scope_close(scope_json, None).expect("scope_close");
+    runtime_close(runtime_json, None).expect("runtime_close");
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "expected clean diagnostics after mixed-case websocket validation: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn runtime_close_drains_open_scope_task_and_fetch_handles() {
     reset_dispatcher_for_tests();
 

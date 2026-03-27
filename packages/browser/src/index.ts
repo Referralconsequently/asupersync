@@ -182,6 +182,8 @@ export type BrowserRuntimeSupportClass =
 export type BrowserRuntimeContext =
   | "browser_main_thread"
   | "dedicated_worker"
+  | "service_worker"
+  | "shared_worker"
   | "unknown";
 
 export type BrowserRuntimeSupportReason =
@@ -1191,6 +1193,12 @@ function browserRuntimeContext(
   capabilities: BrowserCapabilitySnapshot,
 ): BrowserRuntimeContext {
   const hostRole = browserExecutionHostRole(globalObject, capabilities);
+  if (hostRole === "service_worker") {
+    return "service_worker";
+  }
+  if (hostRole === "shared_worker") {
+    return "shared_worker";
+  }
   if (hostRole === "dedicated_worker") {
     return "dedicated_worker";
   }
@@ -3063,8 +3071,10 @@ export function detectBrowserSharedWorkerCoordinatorSupport(
     reason,
     fallbackTarget,
   );
+  const directRuntimeReason: BrowserRuntimeSupportReason =
+    "shared_worker_not_yet_shipped";
   const directExecutionReasonCode = browserExecutionReasonCodeFromRuntimeSupport(
-    runtimeSupport.reason,
+    directRuntimeReason,
   );
   const message =
     reason === "supported"
@@ -3091,7 +3101,7 @@ export function detectBrowserSharedWorkerCoordinatorSupport(
     runProfile,
     scriptUrl,
     workerName,
-    directRuntimeReason: runtimeSupport.reason,
+    directRuntimeReason,
     directExecutionReasonCode,
     runtimeSupport,
     capabilities: runtimeSupport.capabilities,

@@ -245,12 +245,15 @@ fn normalize_websocket_url(url: &str) -> Result<String, String> {
     if normalized.is_empty() {
         return Err("websocket URL must not be empty".to_string());
     }
-    if !(normalized.starts_with("ws://") || normalized.starts_with("wss://")) {
+    let (scheme, rest) = normalized
+        .split_once("://")
+        .ok_or_else(|| format!("websocket URL must start with ws:// or wss://: {normalized}"))?;
+    if !(scheme.eq_ignore_ascii_case("ws") || scheme.eq_ignore_ascii_case("wss")) {
         return Err(format!(
             "websocket URL must start with ws:// or wss://: {normalized}"
         ));
     }
-    Ok(normalized.to_string())
+    Ok(format!("{}://{rest}", scheme.to_ascii_lowercase()))
 }
 
 const fn websocket_pending_outcome(handle: WasmHandleRef) -> WasmAbiOutcomeEnvelope {

@@ -15,6 +15,7 @@ The validation script:
 - builds the nested Rust crate with `rch exec -- wasm-pack build ...`
 - stages the generated `pkg/` output next to the copied frontend consumer
 - runs a Vite bundle check against the resulting browser artifacts
+- mirrors `browser-run.json` into `summary.json`, including `service_worker_fail_closed_reason_code`, `shared_worker_fail_closed_reason_code`, and `downgrade_reason_code`, so the synthetic unsupported-worker evidence stays visible in the top-level QA artifact
 - runs a real browser matrix that proves:
   - browser main-thread lifecycle + execution-ladder diagnostics
   - dedicated-worker lifecycle + execution-ladder diagnostics

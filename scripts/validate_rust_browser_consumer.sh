@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# beads: asupersync-4l9iw.2, asupersync-4l9iw.8
+# beads: asupersync-4l9iw.2, asupersync-4l9iw.8, asupersync-4l9iw.11
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -93,6 +93,20 @@ summary = {
     "timestamp": timestamp,
     "fixture": "tests/fixtures/rust-browser-consumer",
     "status": "pass",
+    "browser_run": {
+        "status": browser_run["status"],
+        "scenario_id": browser_run["scenario_id"],
+        "support_lane": browser_run["support_lane"],
+        "main_thread_selected_lane": browser_run["main_thread_selected_lane"],
+        "main_thread_browser_selection_lane": browser_run["main_thread_browser_selection_lane"],
+        "service_worker_fail_closed_reason_code": browser_run["service_worker_fail_closed_reason_code"],
+        "shared_worker_fail_closed_reason_code": browser_run["shared_worker_fail_closed_reason_code"],
+        "downgrade_selected_lane": browser_run["downgrade_selected_lane"],
+        "downgrade_browser_selection_lane": browser_run["downgrade_browser_selection_lane"],
+        "downgrade_reason_code": browser_run["downgrade_reason_code"],
+        "dedicated_worker_selected_lane": browser_run["dedicated_worker_selected_lane"],
+        "dedicated_worker_browser_selection_lane": browser_run["dedicated_worker_browser_selection_lane"],
+    },
     "checks": {
         "dist_exists": dist.exists(),
         "index_html_exists": (dist / "index.html").exists(),

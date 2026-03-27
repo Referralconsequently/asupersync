@@ -59,7 +59,9 @@ impl AsupersyncRuntime {
 
 /// Run an async future factory with `Cx` installed on every poll.
 ///
-/// Returns `None` when cancellation is observed before the future completes.
+/// Returns `None` once cancellation is observed before the future completes,
+/// even if the wrapped future reports `Ready` on the first poll after that
+/// cancellation becomes visible to the adapter.
 pub async fn with_tokio_context<F, Fut, T>(cx: &Cx, f: F) -> Option<T>
 where
     F: FnOnce() -> Fut,
@@ -75,14 +77,24 @@ where
 
     poll_fn(move |poll_cx| {
         runtime.enter(|| {
-            if cx.is_cancel_requested() {
+            let cancellation_observed = cx.is_cancel_requested();
+            if cancellation_observed {
                 future.as_mut().request_cancel();
             }
 
             match future.as_mut().poll(poll_cx) {
-                Poll::Ready(
-                    CancelResult::Completed(value) | CancelResult::CancellationIgnored(value),
-                ) => Poll::Ready(Some(value)),
+                Poll::Ready(CancelResult::Completed(value)) => {
+                    if cancellation_observed {
+                        let _ = value;
+                        Poll::Ready(None)
+                    } else {
+                        Poll::Ready(Some(value))
+                    }
+                }
+                Poll::Ready(CancelResult::CancellationIgnored(value)) => {
+                    let _ = value;
+                    Poll::Ready(None)
+                }
                 Poll::Ready(CancelResult::Cancelled) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             }
@@ -108,6 +120,8 @@ mod tests {
     use super::*;
     use asupersync::types::CancelKind;
     use futures_lite::future::block_on;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     #[test]
     fn test_asupersync_runtime_creation() {
@@ -139,6 +153,37 @@ mod tests {
         let cx = Cx::for_testing();
         cx.cancel_fast(CancelKind::User);
         let result = block_on(with_tokio_context(&cx, || async { 42_u8 }));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_with_tokio_context_returns_none_when_cancel_observed_before_ready() {
+        struct CancelThenReady {
+            cx: Cx,
+            polled_once: bool,
+        }
+
+        impl Future for CancelThenReady {
+            type Output = u8;
+
+            fn poll(mut self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<Self::Output> {
+                if self.polled_once {
+                    Poll::Ready(42)
+                } else {
+                    self.polled_once = true;
+                    self.cx.cancel_fast(CancelKind::User);
+                    poll_cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let future_cx = cx.clone();
+        let result = block_on(with_tokio_context(&cx, move || CancelThenReady {
+            cx: future_cx,
+            polled_once: false,
+        }));
         assert_eq!(result, None);
     }
 
