@@ -16,8 +16,8 @@
 //! ```ignore
 //! use asupersync_macros::{scope, spawn, join, race};
 //!
-//! async fn example(cx: &mut Cx) {
-//!     scope!(cx, {
+//! async fn example(cx: &Cx, state: &mut RuntimeState) {
+//!     scope!(cx, state: state, {
 //!         let handle1 = spawn!(async { compute_a().await });
 //!         let handle2 = spawn!(async { compute_b().await });
 //!
@@ -48,12 +48,16 @@ use proc_macro::TokenStream;
 /// scope!(cx, {
 ///     // body with spawned tasks
 /// })
+/// scope!(cx, state: &mut state, {
+///     let _child = spawn!(async { work().await });
+/// })
 /// ```
 ///
 /// # Arguments
 ///
 /// - `cx` - The capability context (`&mut Cx`)
 /// - `body` - A block containing the scope's work
+/// - `state` - Optional runtime state binding used by nested `spawn!` calls
 ///
 /// # Returns
 ///
@@ -62,7 +66,7 @@ use proc_macro::TokenStream;
 /// # Example
 ///
 /// ```ignore
-/// scope!(cx, {
+/// scope!(cx, state: &mut state, {
 ///     spawn!(async { work_a().await });
 ///     spawn!(async { work_b().await });
 ///     // Both tasks are awaited before scope exits

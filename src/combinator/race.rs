@@ -686,13 +686,13 @@ pub fn make_race_all_result<T, E>(
     race_all_to_result(result)
 }
 
-/// Macro for racing multiple futures.
+/// Placeholder macro for builds without the `proc-macros` feature.
 ///
-/// The first future to complete wins.
+/// Enable the `proc-macros` feature to use the real `race!` proc macro from
+/// the crate root (`use asupersync::race;`).
 ///
-/// Note: this macro is currently a placeholder and does **not** implement the
-/// full asupersync race semantics (cancel + drain losers). Use the `Scope`
-/// APIs (`Scope::race`, `Scope::race_all`) when racing spawned tasks.
+/// Without that feature, use the `Scope` APIs (`Scope::race`,
+/// `Scope::race_all`) when racing spawned tasks.
 ///
 /// # Basic Usage
 ///
@@ -718,6 +718,7 @@ pub fn make_race_all_result<T, E>(
 /// 2. All non-winning futures go through the cancellation protocol
 /// 3. `race!` waits for all losers to complete before returning
 /// 4. Losers complete with `Outcome::Cancelled(RaceLost)`
+#[cfg(not(feature = "proc-macros"))]
 #[macro_export]
 macro_rules! race {
     // Biased mode

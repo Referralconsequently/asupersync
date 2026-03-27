@@ -552,9 +552,12 @@ pub fn join2_to_result<T1, T2, E>(
     }
 }
 
-/// Macro for joining multiple futures.
+/// Placeholder macro for builds without the `proc-macros` feature.
 ///
-/// **Not yet implemented as a macro.** Use the functional API instead:
+/// Enable the `proc-macros` feature to use the real `join!` proc macro from
+/// the crate root (`use asupersync::join;`).
+///
+/// Without that feature, use the functional API instead:
 ///
 /// - [`Scope::join`] for two futures
 /// - [`Scope::join_all`] for N futures
@@ -574,6 +577,7 @@ pub fn join2_to_result<T1, T2, E>(
 /// them — a correctness hazard. This `compile_error!` ensures callers migrate
 /// to the functional API, which properly spawns into a child region, waits for
 /// all branches to complete, and aggregates outcomes via the severity lattice.
+#[cfg(not(feature = "proc-macros"))]
 #[macro_export]
 macro_rules! join {
     ($($future:expr),+ $(,)?) => {

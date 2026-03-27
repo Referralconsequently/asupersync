@@ -9,7 +9,9 @@
 //! - `__state: &mut RuntimeState` - The runtime state for task registration
 //! - `__cx: &Cx` - The capability context for creating child contexts
 //!
-//! These are typically provided by the `scope!` macro.
+//! `__cx` is provided by the `scope!` macro. `__state` can be introduced either
+//! by `scope!(..., state: expr, { ... })` or by an explicit ambient
+//! `let __state = ...;` binding when you are using `spawn!` outside that helper.
 //!
 //! # Usage
 //!

@@ -281,12 +281,11 @@ pub use types::{
     wasm_boundary_state_for_cancel_phase,
 };
 
-// Re-export proc macros when the proc-macros feature is enabled
-// Note: join! and race! are not re-exported because they conflict with the
-// existing macro_rules! definitions in combinator/. The proc macro versions
-// will replace those in future tasks (asupersync-mwff, asupersync-hcpl).
+// Re-export proc macros from the crate root when the proc-macros feature is
+// enabled. The fallback compile_error! macro_rules! placeholders in
+// combinator/ are only exported when this feature is disabled.
 #[cfg(feature = "proc-macros")]
-pub use asupersync_macros::{join_all, scope, spawn};
+pub use asupersync_macros::{join, join_all, race, scope, spawn};
 
 // Proc macro versions available with explicit path when needed
 #[cfg(feature = "proc-macros")]

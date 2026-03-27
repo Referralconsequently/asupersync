@@ -1,4 +1,9 @@
 #![allow(missing_docs)]
+#![allow(
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_wraps,
+    clippy::unused_self
+)]
 
 #[cfg(feature = "proc-macros")]
 mod demo {
@@ -39,7 +44,7 @@ mod demo {
             F: FnOnce(MiniCx) -> Fut,
             Fut: Future,
         {
-            let _ = f(MiniCx);
+            std::mem::drop(f(MiniCx));
             Ok(MiniHandle(PhantomData))
         }
     }
@@ -62,7 +67,7 @@ mod demo {
 
 #[cfg(feature = "proc-macros")]
 fn main() {
-    let _ = demo::demo();
+    std::mem::drop(demo::demo());
 }
 
 #[cfg(not(feature = "proc-macros"))]

@@ -2,7 +2,7 @@
 
 #[cfg(feature = "proc-macros")]
 mod demo {
-    use asupersync::proc_macros::join;
+    use asupersync::join;
 
     pub async fn demo() {
         let (a, b): (Result<i32, &'static str>, Result<i32, &'static str>) =
@@ -17,7 +17,7 @@ mod demo {
 
 #[cfg(feature = "proc-macros")]
 fn main() {
-    let _ = demo::demo();
+    std::mem::drop(demo::demo());
 }
 
 #[cfg(not(feature = "proc-macros"))]

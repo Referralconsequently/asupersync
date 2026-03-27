@@ -11,6 +11,11 @@
 //!     // body - `scope` variable is available here
 //! })
 //!
+//! // With explicit runtime state for nested spawn! calls
+//! scope!(cx, state: &mut state, {
+//!     let _child = spawn!(async { 42 });
+//! })
+//!
 //! // With explicit name (for debugging)
 //! scope!(cx, "http_handler", {
 //!     // body
@@ -24,6 +29,11 @@
 //! // With name and budget
 //! scope!(cx, "handler", budget: Budget::deadline(Duration::from_secs(5)), {
 //!     // body
+//! })
+//!
+//! // Options can be combined
+//! scope!(cx, "handler", state: &mut state, budget: Budget::deadline(Duration::from_secs(5)), {
+//!     let _child = spawn!(async { 42 });
 //! })
 //! ```
 
@@ -45,13 +55,18 @@ struct ScopeName(LitStr);
 #[derive(Clone)]
 struct ScopeBudget(Expr);
 
+/// Optional runtime state binding for nested `spawn!` calls.
+#[derive(Clone)]
+struct ScopeState(Expr);
+
 /// Input to the scope! macro with all variants supported.
 ///
 /// Supports:
 /// - `scope!(cx, { body })`
+/// - `scope!(cx, state: expr, { body })`
 /// - `scope!(cx, "name", { body })`
 /// - `scope!(cx, budget: expr, { body })`
-/// - `scope!(cx, "name", budget: expr, { body })`
+/// - `scope!(cx, "name", state: expr, budget: expr, { body })`
 struct ScopeInput {
     /// The capability context expression.
     cx: Expr,
@@ -59,6 +74,8 @@ struct ScopeInput {
     name: Option<ScopeName>,
     /// Optional budget override.
     budget: Option<ScopeBudget>,
+    /// Optional runtime state for nested spawn! calls.
+    state: Option<ScopeState>,
     /// The body block.
     body: syn::Block,
 }
@@ -87,6 +104,7 @@ impl Parse for ScopeInput {
 
         let mut name = None;
         let mut budget = None;
+        let mut state = None;
 
         // Check for optional name (string literal)
         if input.peek(LitStr) {
@@ -101,27 +119,50 @@ impl Parse for ScopeInput {
             })?;
         }
 
-        // Check for optional budget specification
-        if input.peek(Ident) {
+        loop {
+            if !input.peek(Ident) {
+                break;
+            }
+
             let ident: Ident = input.fork().parse()?;
             if ident == "budget" {
-                // Consume the ident
+                if budget.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "duplicate budget: scope! accepts at most one budget: expr option",
+                    ));
+                }
+
                 let _: Ident = input.parse()?;
-                // Expect colon
                 let _colon: Token![:] = input.parse().map_err(|_| {
                     syn::Error::new(input.span(), "expected colon after 'budget': budget: expr")
                 })?;
-                // Parse the budget expression
                 let budget_expr: Expr = input.parse()?;
                 budget = Some(ScopeBudget(budget_expr));
+            } else if ident == "state" {
+                if state.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "duplicate state: scope! accepts at most one state: expr option",
+                    ));
+                }
 
-                let _comma: Token![,] = input.parse().map_err(|_| {
-                    syn::Error::new(
-                        input.span(),
-                        "expected comma after budget: scope!(cx, budget: expr, { body })",
-                    )
+                let _: Ident = input.parse()?;
+                let _colon: Token![:] = input.parse().map_err(|_| {
+                    syn::Error::new(input.span(), "expected colon after 'state': state: expr")
                 })?;
+                let state_expr: Expr = input.parse()?;
+                state = Some(ScopeState(state_expr));
+            } else {
+                break;
             }
+
+            let _comma: Token![,] = input.parse().map_err(|_| {
+                syn::Error::new(
+                    input.span(),
+                    "expected comma after scope option before body block",
+                )
+            })?;
         }
 
         // Parse the body block
@@ -151,6 +192,7 @@ impl Parse for ScopeInput {
             cx,
             name,
             budget,
+            state,
             body,
         })
     }
@@ -207,6 +249,17 @@ fn generate_scope(input: &ScopeInput) -> TokenStream2 {
         }
     };
 
+    let state_binding = match &input.state {
+        Some(ScopeState(state_expr)) => {
+            quote! {
+                let __state = #state_expr;
+            }
+        }
+        None => {
+            quote! {}
+        }
+    };
+
     // Extract just the statements from the body block
     let body_stmts = &body.stmts;
 
@@ -216,6 +269,7 @@ fn generate_scope(input: &ScopeInput) -> TokenStream2 {
             let __cx = &#cx;
             #scope_creation
             #trace_name
+            #state_binding
             async move {
                 let scope = __scope;
                 #(#body_stmts)*
@@ -300,6 +354,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_state_scope() {
+        let input: proc_macro2::TokenStream = quote! { cx, state: &mut state, { let x = 1; } };
+        let parsed: ScopeInput = syn::parse2(input).unwrap();
+        assert!(parsed.name.is_none());
+        assert!(parsed.budget.is_none());
+        assert!(parsed.state.is_some());
+    }
+
+    #[test]
     fn test_parse_named_budget_scope() {
         let input: proc_macro2::TokenStream =
             quote! { cx, "handler", budget: Budget::INFINITE, { let x = 1; } };
@@ -307,6 +370,17 @@ mod tests {
         assert!(parsed.name.is_some());
         assert_eq!(parsed.name.unwrap().0.value(), "handler");
         assert!(parsed.budget.is_some());
+    }
+
+    #[test]
+    fn test_parse_named_state_budget_scope() {
+        let input: proc_macro2::TokenStream =
+            quote! { cx, "handler", state: &mut state, budget: Budget::INFINITE, { let x = 1; } };
+        let parsed: ScopeInput = syn::parse2(input).unwrap();
+        assert!(parsed.name.is_some());
+        assert_eq!(parsed.name.unwrap().0.value(), "handler");
+        assert!(parsed.budget.is_some());
+        assert!(parsed.state.is_some());
     }
 
     #[test]
@@ -346,6 +420,14 @@ mod tests {
     }
 
     #[test]
+    fn test_error_duplicate_state() {
+        let input: proc_macro2::TokenStream =
+            quote! { cx, state: &mut a, state: &mut b, { let x = 1; } };
+        let result: Result<ScopeInput, _> = syn::parse2(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_generate_basic_scope() {
         let input: proc_macro2::TokenStream = quote! { cx, { 42 } };
         let parsed: ScopeInput = syn::parse2(input).unwrap();
@@ -371,6 +453,16 @@ mod tests {
 
         let generated_str = generated.to_string();
         assert!(generated_str.contains("scope_with_budget"));
+    }
+
+    #[test]
+    fn test_generate_scope_with_state_binding() {
+        let input: proc_macro2::TokenStream = quote! { cx, state: &mut state, { 42 } };
+        let parsed: ScopeInput = syn::parse2(input).unwrap();
+        let generated = generate_scope(&parsed);
+
+        let generated_str = generated.to_string();
+        assert!(generated_str.contains("let __state ="));
     }
 
     #[test]

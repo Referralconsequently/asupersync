@@ -1,8 +1,9 @@
 #![allow(missing_docs)]
+#![allow(clippy::trivially_copy_pass_by_ref, clippy::unused_self)]
 
 #[cfg(feature = "proc-macros")]
 mod demo {
-    use asupersync::proc_macros::race;
+    use asupersync::race;
     use std::future::Future;
     use std::pin::Pin;
     use std::time::Duration;
@@ -46,12 +47,16 @@ mod demo {
         let _ = race!(cx, { async { 1 }, async { 2 } });
         let _ = race!(cx, { "fast" => async { 10 }, "slow" => async { 20 } });
         let _ = race!(cx, timeout: Duration::from_secs(1), { async { 3 }, async { 4 } });
+        let _ = race!(cx, timeout: Duration::from_secs(1), {
+            "fast" => async { 30 },
+            "slow" => async { 40 },
+        });
     }
 }
 
 #[cfg(feature = "proc-macros")]
 fn main() {
-    let _ = demo::demo();
+    std::mem::drop(demo::demo());
 }
 
 #[cfg(not(feature = "proc-macros"))]
