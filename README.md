@@ -914,16 +914,24 @@ For structural runtime risk, diagnostics also maintain a spectral health monitor
 `asupersync-macros/` provides proc macros for ergonomic structured concurrency:
 
 ```rust
-scope! {
-    let a = spawn!(worker_a);
-    let b = spawn!(worker_b);
-    join!(a, b)
-}
+use asupersync::{join, race, scope, spawn};
 
-let winner = race!(task_a, task_b);
+scope!(cx, {
+    let a = spawn!(async { worker_a().await });
+    let b = spawn!(async { worker_b().await });
+    join!(a, b)
+});
+
+let winner = race!(cx, {
+    task_a(),
+    task_b(),
+});
 ```
 
-The macros expand to standard Scope/Cx calls with proper region ownership. Compile-fail tests (via `trybuild`) verify that incorrect usage produces clear error messages. See `docs/macro-dsl.md` for the full pattern catalog.
+Enable them with the `proc-macros` feature. The macros expand to standard
+`Scope`/`Cx` calls with proper region ownership. Compile-fail tests (via
+`trybuild`) verify that incorrect usage produces clear error messages. See
+`docs/macro-dsl.md` for the full pattern catalog.
 
 ---
 
