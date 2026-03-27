@@ -9,6 +9,8 @@ use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 
+const NO_SOCKET_ADDRESSES_FOUND: &str = "no socket addresses found";
+
 /// Resolve a hostname to the first available socket address.
 ///
 /// # Cancel Safety
@@ -20,10 +22,8 @@ where
     A: ToSocketAddrs + Send + 'static,
 {
     spawn_blocking_resolve(move || {
-        let mut addrs = addr.to_socket_addrs()?;
-        addrs
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no socket addresses found"))
+        let mut addrs = resolve_socket_addrs(addr)?;
+        Ok(addrs.swap_remove(0))
     })
     .await
 }
@@ -38,7 +38,7 @@ pub async fn lookup_all<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,
 {
-    spawn_blocking_resolve(move || addr.to_socket_addrs().map(std::iter::Iterator::collect)).await
+    spawn_blocking_resolve(move || resolve_socket_addrs(addr)).await
 }
 
 async fn spawn_blocking_resolve<F, T>(f: F) -> io::Result<T>
@@ -56,6 +56,20 @@ where
     // This maintains the original behavior (dedicated thread per lookup) but
     // uses the optimized Waker-based notification mechanism.
     spawn_blocking_on_thread(f).await
+}
+
+fn resolve_socket_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
+where
+    A: ToSocketAddrs,
+{
+    let addrs: Vec<_> = addr.to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            NO_SOCKET_ADDRESSES_FOUND,
+        ));
+    }
+    Ok(addrs)
 }
 
 #[cfg(test)]
@@ -100,6 +114,44 @@ mod tests {
         future::block_on(async {
             let err = lookup_one("127.0.0.1:bogus").await.unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        });
+    }
+
+    #[test]
+    fn lookup_one_rejects_empty_resolution() {
+        struct EmptyAddrs;
+
+        impl ToSocketAddrs for EmptyAddrs {
+            type Iter = std::vec::IntoIter<SocketAddr>;
+
+            fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
+                Ok(Vec::new().into_iter())
+            }
+        }
+
+        future::block_on(async {
+            let err = lookup_one(EmptyAddrs).await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), NO_SOCKET_ADDRESSES_FOUND);
+        });
+    }
+
+    #[test]
+    fn lookup_all_rejects_empty_resolution() {
+        struct EmptyAddrs;
+
+        impl ToSocketAddrs for EmptyAddrs {
+            type Iter = std::vec::IntoIter<SocketAddr>;
+
+            fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
+                Ok(Vec::new().into_iter())
+            }
+        }
+
+        future::block_on(async {
+            let err = lookup_all(EmptyAddrs).await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(err.to_string(), NO_SOCKET_ADDRESSES_FOUND);
         });
     }
 

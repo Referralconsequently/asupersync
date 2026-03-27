@@ -146,7 +146,7 @@ impl ProgressEvent {
     pub fn percentage(&self) -> Option<f64> {
         match (self.current, self.total) {
             (Some(current), Some(total)) if total > 0 => {
-                Some((current as f64 / total as f64) * 100.0)
+                Some((current.min(total) as f64 / total as f64) * 100.0)
             }
             _ => None,
         }
@@ -702,6 +702,14 @@ mod tests {
     }
 
     #[test]
+    fn progress_event_percentage_clamps_above_100() {
+        init_test("progress_event_percentage_clamps_above_100");
+        let ev = ProgressEvent::update(15, 10, "over-complete");
+        assert_eq!(ev.percentage(), Some(100.0));
+        crate::test_complete!("progress_event_percentage_clamps_above_100");
+    }
+
+    #[test]
     fn progress_reporter_with_writer_and_operation() {
         init_test("progress_reporter_with_writer_and_operation");
         let cursor = Cursor::new(Vec::new());
@@ -793,6 +801,25 @@ mod tests {
         reporter.start("pretty test").unwrap();
         reporter.complete("done").unwrap();
         crate::test_complete!("progress_reporter_json_pretty_format");
+    }
+
+    #[test]
+    fn progress_reporter_tsv_clamps_percentage_above_100() {
+        init_test("progress_reporter_tsv_clamps_percentage_above_100");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Tsv, shared);
+        reporter.update(15, 10, "over-complete").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        let line = output.trim_end();
+        crate::assert_with_log!(
+            line.starts_with("Update\t100.0\t"),
+            "tsv percentage is clamped",
+            "prefix `Update\\t100.0\\t`",
+            line
+        );
+        crate::test_complete!("progress_reporter_tsv_clamps_percentage_above_100");
     }
 
     #[test]

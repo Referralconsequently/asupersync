@@ -274,15 +274,42 @@ impl TcpStream {
         timeout_duration: Duration,
         time_getter: fn() -> Time,
     ) -> io::Result<Self> {
-        let connect_future = Box::pin(Self::connect(addr));
-        match future_with_timeout(connect_future, timeout_duration, time_getter).await {
-            Ok(Ok(stream)) => Ok(stream),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "tcp connect timeout",
-            )),
+        let addrs = lookup_all(addr).await?;
+        if addrs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no socket addresses found",
+            ));
         }
+
+        let mut last_err = None;
+        for addr in addrs {
+            let domain = if addr.is_ipv4() {
+                Domain::IPV4
+            } else {
+                Domain::IPV6
+            };
+
+            let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            let connect_future = Box::pin(Self::connect_from_socket(socket, addr));
+            match future_with_timeout(connect_future, timeout_duration, time_getter).await {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(err)) => last_err = Some(err),
+                Err(_) => last_err = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "tcp connect timeout",
+                )),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
     }
 
     #[cfg(target_arch = "wasm32")]

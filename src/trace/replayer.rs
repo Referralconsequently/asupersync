@@ -284,13 +284,15 @@ impl TraceReplayer {
 
     /// Seeks to a specific event index.
     ///
-    /// Returns an error if the index is out of bounds.
+    /// Returns an error if the index is beyond the end of the trace.
+    ///
+    /// Seeking to `event_count()` is allowed and positions the cursor at EOF.
     pub fn seek(&mut self, index: usize) -> Result<(), ReplayError> {
-        if index >= self.trace.len() {
+        if index > self.trace.len() {
             return Err(ReplayError::UnexpectedEnd { index });
         }
         self.current_index = index;
-        self.completed = false;
+        self.completed = index == self.trace.len();
         self.at_breakpoint = false;
         Ok(())
     }
@@ -870,6 +872,36 @@ mod tests {
     }
 
     #[test]
+    fn seek_to_end_positions_cursor_at_eof() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+        ];
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        replayer.seek(replayer.event_count()).unwrap();
+
+        assert_eq!(replayer.current_index(), 2);
+        assert!(replayer.is_completed());
+        assert!(replayer.peek().is_none());
+        assert!(replayer.remaining_events().is_empty());
+        assert!(replayer.next().is_none());
+    }
+
+    #[test]
+    fn seek_to_end_is_valid_for_empty_trace() {
+        let mut replayer = TraceReplayer::new(make_trace(vec![]));
+
+        replayer.seek(0).unwrap();
+
+        assert_eq!(replayer.current_index(), 0);
+        assert!(replayer.is_completed());
+        assert!(replayer.peek().is_none());
+        assert!(replayer.remaining_events().is_empty());
+        assert_eq!(replayer.run().unwrap(), 0);
+    }
+
+    #[test]
     fn verify_past_end_of_trace() {
         let events = vec![ReplayEvent::RngSeed { seed: 42 }];
         let mut replayer = TraceReplayer::new(make_trace(events));
@@ -905,14 +937,13 @@ mod tests {
 
     #[test]
     fn empty_trace_properties() {
-        let replayer = TraceReplayer::new(make_trace(vec![]));
+        let mut replayer = TraceReplayer::new(make_trace(vec![]));
 
         assert_eq!(replayer.event_count(), 0);
         assert!(replayer.remaining_events().is_empty());
         assert!(replayer.peek().is_none());
-        // Note: run() on an empty trace does not terminate because
-        // next() returns None via early `?` without setting completed.
-        // This is a known edge case (empty traces are not typical).
+        assert_eq!(replayer.run().unwrap(), 0);
+        assert!(replayer.is_completed());
     }
 
     #[test]

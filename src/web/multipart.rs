@@ -309,7 +309,7 @@ fn parse_multipart(
     let mut pos = 0;
 
     // Skip preamble: advance to first delimiter.
-    pos = match find_bytes(body, delimiter_bytes, pos) {
+    pos = match find_multipart_delimiter(body, delimiter_bytes, pos) {
         Some(idx) => idx + delimiter_bytes.len(),
         None => {
             return Err(ExtractionError::bad_request(
@@ -349,9 +349,10 @@ fn parse_multipart(
         let body_start = headers_end.1;
 
         // Find next delimiter.
-        let next_delim = find_bytes(body, delimiter_bytes, body_start).ok_or_else(|| {
-            ExtractionError::bad_request("multipart part missing closing boundary")
-        })?;
+        let next_delim =
+            find_multipart_delimiter(body, delimiter_bytes, body_start).ok_or_else(|| {
+                ExtractionError::bad_request("multipart part missing closing boundary")
+            })?;
 
         // Part body ends before the CRLF preceding the delimiter.
         // If the client sent a malformed request where the boundary immediately follows
@@ -423,6 +424,26 @@ fn find_bytes(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
         .windows(needle.len())
         .position(|w| w == needle)
         .map(|p| p + start)
+}
+
+/// Find a multipart boundary delimiter that starts on a line boundary.
+fn find_multipart_delimiter(body: &[u8], delimiter: &[u8], start: usize) -> Option<usize> {
+    let mut search_start = start;
+
+    while let Some(idx) = find_bytes(body, delimiter, search_start) {
+        let at_line_start = idx == 0 || body.get(idx - 1) == Some(&b'\n');
+        let after = idx + delimiter.len();
+        let has_valid_suffix = body.get(after..after + 2) == Some(b"--")
+            || matches!(body.get(after), Some(b'\r' | b'\n'));
+
+        if at_line_start && has_valid_suffix {
+            return Some(idx);
+        }
+
+        search_start = idx + 1;
+    }
+
+    None
 }
 
 /// Find a blank line (CRLFCRLF or LFLF) starting at `pos`.
@@ -708,6 +729,23 @@ mod tests {
         assert_eq!(fields[0].name(), "a");
         assert_eq!(fields[1].name(), "b");
         assert_eq!(fields[2].name(), "c");
+    }
+
+    #[test]
+    fn parse_body_with_embedded_boundary_token_does_not_split_field() {
+        let body = make_multipart_body(
+            "BOUNDARY",
+            &[(
+                "Content-Disposition: form-data; name=\"payload\"",
+                b"value--BOUNDARYstill-body",
+            )],
+        );
+
+        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default()).unwrap();
+
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name(), "payload");
+        assert_eq!(fields[0].body().as_ref(), b"value--BOUNDARYstill-body");
     }
 
     #[test]
