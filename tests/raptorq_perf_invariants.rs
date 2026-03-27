@@ -2622,8 +2622,8 @@ fn e5_probe_contract_keeps_host_vs_selected_profile_architecture_fields_distinct
 #[test]
 fn e5_bench_policy_logs_emit_decision_metadata_fields() {
     assert!(
-        RAPTORQ_BENCH_RS.contains("let payload = serde_json::json!({"),
-        "Track-E bench log surface must serialize structured payloads instead of hand-assembling JSON"
+        RAPTORQ_BENCH_RS.contains("fn track_e_policy_payload("),
+        "Track-E bench log surface must define a shared payload builder for the policy/probe metadata block"
     );
     for required in [
         "decision_artifact_id",
@@ -2638,6 +2638,91 @@ fn e5_bench_policy_logs_emit_decision_metadata_fields() {
         assert!(
             RAPTORQ_BENCH_RS.contains(required),
             "Track-E bench log surface must emit {required}"
+        );
+    }
+}
+
+/// Validate the Track-E policy log and policy probe both route through the
+/// shared payload builder so future metadata additions cannot drift.
+#[test]
+fn e5_policy_log_and_probe_share_common_payload_builder() {
+    let log_start = RAPTORQ_BENCH_RS
+        .find("fn emit_track_e_policy_log(")
+        .expect("bench source must define the Track-E policy log emitter");
+    let probe_start = RAPTORQ_BENCH_RS
+        .find("fn emit_track_e_policy_probe_log(")
+        .expect("bench source must define the Track-E policy probe emitter");
+    let next_fn_after_probe = RAPTORQ_BENCH_RS
+        .find("fn selected_candidate_fields(")
+        .expect("bench source must define the selected-candidate helper after the probe emitter");
+
+    let log_section = &RAPTORQ_BENCH_RS[log_start..probe_start];
+    let probe_section = &RAPTORQ_BENCH_RS[probe_start..next_fn_after_probe];
+
+    assert_eq!(
+        log_section.matches("track_e_policy_payload(").count(),
+        1,
+        "policy log emitter must call the shared payload builder exactly once"
+    );
+    assert_eq!(
+        probe_section.matches("track_e_policy_payload(").count(),
+        1,
+        "policy probe emitter must call the shared payload builder exactly once"
+    );
+}
+
+/// Validate the shared-builder call sites keep the policy-log and probe-log
+/// schema/repro constants distinct for Track-E forensics.
+#[test]
+fn e5_policy_log_and_probe_keep_distinct_schema_and_repro_constants() {
+    let log_start = RAPTORQ_BENCH_RS
+        .find("fn emit_track_e_policy_log(")
+        .expect("bench source must define the Track-E policy log emitter");
+    let probe_start = RAPTORQ_BENCH_RS
+        .find("fn emit_track_e_policy_probe_log(")
+        .expect("bench source must define the Track-E policy probe emitter");
+    let next_fn_after_probe = RAPTORQ_BENCH_RS
+        .find("fn selected_candidate_fields(")
+        .expect("bench source must define the selected-candidate helper after the probe emitter");
+
+    let log_section = &RAPTORQ_BENCH_RS[log_start..probe_start];
+    let probe_section = &RAPTORQ_BENCH_RS[probe_start..next_fn_after_probe];
+
+    for required in [
+        "schema_version: TRACK_E_POLICY_SCHEMA_VERSION",
+        "repro_command: TRACK_E_REPRO_CMD",
+    ] {
+        assert!(
+            log_section.contains(required),
+            "policy log emitter must keep {required} at the shared-builder call site"
+        );
+    }
+    for forbidden in [
+        "schema_version: TRACK_E_POLICY_PROBE_SCHEMA_VERSION",
+        "repro_command: TRACK_E_POLICY_PROBE_REPRO_CMD",
+    ] {
+        assert!(
+            !log_section.contains(forbidden),
+            "policy log emitter must not drift to probe constant {forbidden}"
+        );
+    }
+
+    for required in [
+        "schema_version: TRACK_E_POLICY_PROBE_SCHEMA_VERSION",
+        "repro_command: TRACK_E_POLICY_PROBE_REPRO_CMD",
+    ] {
+        assert!(
+            probe_section.contains(required),
+            "policy probe emitter must keep {required} at the shared-builder call site"
+        );
+    }
+    for forbidden in [
+        "schema_version: TRACK_E_POLICY_SCHEMA_VERSION",
+        "repro_command: TRACK_E_REPRO_CMD",
+    ] {
+        assert!(
+            !probe_section.contains(forbidden),
+            "policy probe emitter must not drift to policy-log constant {forbidden}"
         );
     }
 }

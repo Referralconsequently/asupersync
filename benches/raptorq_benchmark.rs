@@ -14,10 +14,10 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    Gf256, Gf256ProfileFallbackReason, Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot,
-    dual_addmul_kernel_decision_detail, dual_mul_kernel_decision_detail, gf256_add_slice,
-    gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice,
-    gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
+    DualKernelDecisionDetail, Gf256, Gf256ProfileFallbackReason, Gf256ProfilePackId,
+    Gf256ProfilePackManifestSnapshot, dual_addmul_kernel_decision_detail,
+    dual_mul_kernel_decision_detail, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice,
+    gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
 };
 use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
 use asupersync::raptorq::systematic::SystematicEncoder;
@@ -54,6 +54,18 @@ struct Gf256DualPolicyScenario {
     mul_const: u8,
 }
 
+#[derive(Clone, Copy)]
+struct TrackEPolicyPayloadContext<'a> {
+    schema_version: &'a str,
+    scenario_id: &'a str,
+    seed: u64,
+    lane_len_a: usize,
+    lane_len_b: usize,
+    mul_decision: DualKernelDecisionDetail,
+    addmul_decision: DualKernelDecisionDetail,
+    repro_command: &'a str,
+}
+
 fn deterministic_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed.wrapping_add(1);
     let mut out = vec![0u8; len];
@@ -82,21 +94,22 @@ fn gf256_bench_context(scenario: &Gf256BenchScenario, outcome: &str) -> String {
     )
 }
 
-fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
+fn track_e_policy_payload(ctx: TrackEPolicyPayloadContext<'_>) -> serde_json::Value {
     let manifest = gf256_profile_pack_manifest_snapshot();
     let policy = manifest.active_policy;
     let active_profile = manifest.active_profile_metadata;
     let env = manifest.environment_metadata;
     let (tile_bytes, unroll, prefetch_distance, fusion_shape) =
         selected_candidate_fields(&manifest);
-    let mul_detail = dual_mul_kernel_decision_detail(scenario.len, scenario.len);
-    let addmul_detail = dual_addmul_kernel_decision_detail(scenario.len, scenario.len);
-    let payload = serde_json::json!({
-        "schema_version": TRACK_E_POLICY_SCHEMA_VERSION,
+    let total_len = ctx.lane_len_a.saturating_add(ctx.lane_len_b);
+    let lane_ratio = lane_ratio_string(ctx.lane_len_a, ctx.lane_len_b);
+
+    serde_json::json!({
+        "schema_version": ctx.schema_version,
         "manifest_schema_version": manifest.schema_version,
         "profile_schema_version": policy.profile_schema_version,
-        "scenario_id": scenario.scenario_id,
-        "seed": scenario.seed,
+        "scenario_id": ctx.scenario_id,
+        "seed": ctx.seed,
         "kernel": format!("{:?}", policy.kernel),
         "architecture_class": policy.architecture_class.as_str(),
         "profile_pack": policy.profile_pack.as_str(),
@@ -139,25 +152,41 @@ fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
         "addmul_max_total_env_override": policy.override_mask.addmul_max_total_env_override(),
         "addmul_min_lane_env_override": policy.override_mask.addmul_min_lane_env_override(),
         "max_lane_ratio_env_override": policy.override_mask.max_lane_ratio_env_override(),
+        "lane_len_a": ctx.lane_len_a,
+        "lane_len_b": ctx.lane_len_b,
+        "total_len": total_len,
+        "lane_ratio": lane_ratio,
         "mul_window_min": policy.mul_min_total,
         "mul_window_max": policy.mul_max_total,
         "addmul_window_min": policy.addmul_min_total,
         "addmul_window_max": policy.addmul_max_total,
         "addmul_min_lane": policy.addmul_min_lane,
         "max_lane_ratio": policy.max_lane_ratio,
-        "lane_len_a": scenario.len,
-        "lane_len_b": scenario.len,
-        "total_len": scenario.len.saturating_mul(2),
-        "mul_decision": format!("{:?}", mul_detail.decision),
-        "mul_decision_reason": mul_detail.reason.as_str(),
-        "addmul_decision": format!("{:?}", addmul_detail.decision),
-        "addmul_decision_reason": addmul_detail.reason.as_str(),
+        "mul_decision": format!("{:?}", ctx.mul_decision.decision),
+        "mul_decision_reason": ctx.mul_decision.reason.as_str(),
+        "addmul_decision": format!("{:?}", ctx.addmul_decision.decision),
+        "addmul_decision_reason": ctx.addmul_decision.reason.as_str(),
         "criterion_sample_size": TRACK_E_CRITERION_SAMPLE_SIZE,
         "criterion_warm_up_seconds": TRACK_E_CRITERION_WARM_UP_SECONDS,
         "criterion_measurement_seconds": TRACK_E_CRITERION_MEASUREMENT_SECONDS,
         "tail_confidence_proxy": TRACK_E_TAIL_CONFIDENCE_PROXY,
         "artifact_path": TRACK_E_ARTIFACT_PATH,
-        "repro_command": TRACK_E_REPRO_CMD,
+        "repro_command": ctx.repro_command,
+    })
+}
+
+fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
+    let mul_detail = dual_mul_kernel_decision_detail(scenario.len, scenario.len);
+    let addmul_detail = dual_addmul_kernel_decision_detail(scenario.len, scenario.len);
+    let payload = track_e_policy_payload(TrackEPolicyPayloadContext {
+        schema_version: TRACK_E_POLICY_SCHEMA_VERSION,
+        scenario_id: scenario.scenario_id,
+        seed: scenario.seed,
+        lane_len_a: scenario.len,
+        lane_len_b: scenario.len,
+        mul_decision: mul_detail,
+        addmul_decision: addmul_detail,
+        repro_command: TRACK_E_REPRO_CMD,
     });
     eprintln!("{payload}");
 }
@@ -178,82 +207,15 @@ fn emit_track_e_policy_probe_log(
     mul_decision: asupersync::raptorq::gf256::DualKernelDecisionDetail,
     addmul_decision: asupersync::raptorq::gf256::DualKernelDecisionDetail,
 ) {
-    let manifest = gf256_profile_pack_manifest_snapshot();
-    let policy = manifest.active_policy;
-    let active_profile = manifest.active_profile_metadata;
-    let env = manifest.environment_metadata;
-    let (tile_bytes, unroll, prefetch_distance, fusion_shape) =
-        selected_candidate_fields(&manifest);
-    let total = scenario.lane_a_len.saturating_add(scenario.lane_b_len);
-    let lane_ratio = lane_ratio_string(scenario.lane_a_len, scenario.lane_b_len);
-    let payload = serde_json::json!({
-        "schema_version": TRACK_E_POLICY_PROBE_SCHEMA_VERSION,
-        "manifest_schema_version": manifest.schema_version,
-        "profile_schema_version": policy.profile_schema_version,
-        "scenario_id": scenario.scenario_id,
-        "seed": scenario.seed,
-        "kernel": format!("{:?}", policy.kernel),
-        "architecture_class": policy.architecture_class.as_str(),
-        "profile_pack": policy.profile_pack.as_str(),
-        "profile_fallback_reason": policy
-            .fallback_reason
-            .map_or("none", Gf256ProfileFallbackReason::as_str),
-        "rejected_profile_packs": csv_profile_pack_ids(policy.rejected_candidates),
-        "profile_catalog_count": manifest.profile_pack_catalog.len(),
-        "tuning_candidate_catalog_count": manifest.tuning_candidate_catalog.len(),
-        "active_profile_architecture_class": active_profile.architecture_class.as_str(),
-        "target_arch": env.target_arch,
-        "target_os": env.target_os,
-        "target_env": env.target_env,
-        "target_endian": env.target_endian,
-        "target_pointer_width_bits": env.target_pointer_width_bits,
-        "tuning_corpus_id": policy.tuning_corpus_id,
-        "selected_tuning_candidate_id": policy.selected_tuning_candidate_id,
-        "selected_tuning_tile_bytes": tile_bytes,
-        "selected_tuning_unroll": unroll,
-        "selected_tuning_prefetch_distance": prefetch_distance,
-        "selected_tuning_fusion_shape": fusion_shape,
-        "rejected_tuning_candidate_ids": csv_str_ids(policy.rejected_tuning_candidate_ids),
-        "replay_pointer": policy.replay_pointer,
-        "command_bundle": policy.command_bundle,
-        "decision_artifact_id": active_profile.decision_artifact_id,
-        "decision_role": active_profile.decision_role,
-        "decision_evidence_status": active_profile.decision_evidence_status.as_str(),
-        "selected_candidate_summary": active_profile.selected_candidate_summary,
-        "rejected_candidate_set_summary": active_profile.rejected_candidate_set_summary,
-        "selected_mul_delta_vs_baseline_pct": active_profile.selected_mul_delta_vs_baseline_pct,
-        "selected_addmul_delta_vs_baseline_pct":
-            active_profile.selected_addmul_delta_vs_baseline_pct,
-        "selected_targeted_addmul_average_delta_pct":
-            active_profile.selected_targeted_addmul_average_delta_pct,
-        "mode": format!("{:?}", policy.mode),
-        "profile_pack_env_requested": policy.override_mask.profile_pack_env_requested(),
-        "mul_min_total_env_override": policy.override_mask.mul_min_total_env_override(),
-        "mul_max_total_env_override": policy.override_mask.mul_max_total_env_override(),
-        "addmul_min_total_env_override": policy.override_mask.addmul_min_total_env_override(),
-        "addmul_max_total_env_override": policy.override_mask.addmul_max_total_env_override(),
-        "addmul_min_lane_env_override": policy.override_mask.addmul_min_lane_env_override(),
-        "max_lane_ratio_env_override": policy.override_mask.max_lane_ratio_env_override(),
-        "lane_len_a": scenario.lane_a_len,
-        "lane_len_b": scenario.lane_b_len,
-        "total_len": total,
-        "lane_ratio": lane_ratio,
-        "mul_window_min": policy.mul_min_total,
-        "mul_window_max": policy.mul_max_total,
-        "addmul_window_min": policy.addmul_min_total,
-        "addmul_window_max": policy.addmul_max_total,
-        "addmul_min_lane": policy.addmul_min_lane,
-        "max_lane_ratio": policy.max_lane_ratio,
-        "mul_decision": format!("{:?}", mul_decision.decision),
-        "mul_decision_reason": mul_decision.reason.as_str(),
-        "addmul_decision": format!("{:?}", addmul_decision.decision),
-        "addmul_decision_reason": addmul_decision.reason.as_str(),
-        "criterion_sample_size": TRACK_E_CRITERION_SAMPLE_SIZE,
-        "criterion_warm_up_seconds": TRACK_E_CRITERION_WARM_UP_SECONDS,
-        "criterion_measurement_seconds": TRACK_E_CRITERION_MEASUREMENT_SECONDS,
-        "tail_confidence_proxy": TRACK_E_TAIL_CONFIDENCE_PROXY,
-        "artifact_path": TRACK_E_ARTIFACT_PATH,
-        "repro_command": TRACK_E_POLICY_PROBE_REPRO_CMD,
+    let payload = track_e_policy_payload(TrackEPolicyPayloadContext {
+        schema_version: TRACK_E_POLICY_PROBE_SCHEMA_VERSION,
+        scenario_id: scenario.scenario_id,
+        seed: scenario.seed,
+        lane_len_a: scenario.lane_a_len,
+        lane_len_b: scenario.lane_b_len,
+        mul_decision,
+        addmul_decision,
+        repro_command: TRACK_E_POLICY_PROBE_REPRO_CMD,
     });
     eprintln!("{payload}");
 }

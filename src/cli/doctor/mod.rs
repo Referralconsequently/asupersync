@@ -6693,30 +6693,20 @@ fn validate_field_format(
     allowed_outcomes: &[String],
 ) -> Result<(), String> {
     match field.key.as_str() {
-        "run_id" => {
-            if !value.starts_with("run-") || !is_slug_like(value) {
-                return Err("run_id must match run-* slug format".to_string());
-            }
+        "run_id" if !value.starts_with("run-") || !is_slug_like(value) => {
+            return Err("run_id must match run-* slug format".to_string());
         }
-        "scenario_id" => {
-            if !is_slug_like(value) {
-                return Err("scenario_id must be a slug-like identifier".to_string());
-            }
+        "scenario_id" if !is_slug_like(value) => {
+            return Err("scenario_id must be a slug-like identifier".to_string());
         }
-        "trace_id" => {
-            if !value.starts_with("trace-") || !is_slug_like(value) {
-                return Err("trace_id must match trace-* slug format".to_string());
-            }
+        "trace_id" if !value.starts_with("trace-") || !is_slug_like(value) => {
+            return Err("trace_id must match trace-* slug format".to_string());
         }
-        "command_provenance" => {
-            if value.contains('\n') || value.contains('\r') {
-                return Err("command_provenance must be a single-line command".to_string());
-            }
+        "command_provenance" if value.contains('\n') || value.contains('\r') => {
+            return Err("command_provenance must be a single-line command".to_string());
         }
-        "outcome_class" => {
-            if !allowed_outcomes.iter().any(|candidate| candidate == value) {
-                return Err(format!("outcome_class {value} is not supported"));
-            }
+        "outcome_class" if !allowed_outcomes.iter().any(|candidate| candidate == value) => {
+            return Err(format!("outcome_class {value} is not supported"));
         }
         _ => {}
     }
@@ -15578,30 +15568,26 @@ fn validate_advanced_fixture_provenance_assertions(
             ));
         }
         match entry.channel.as_str() {
-            "agent_mail" => {
-                if !entry.message_ref.starts_with("mail-") {
-                    return Err(format!(
-                        "fixture {} collaboration {} agent_mail message_ref must be mail-*",
-                        fixture.fixture_id, entry.entry_id
-                    ));
-                }
+            "agent_mail" if !entry.message_ref.starts_with("mail-") => {
+                return Err(format!(
+                    "fixture {} collaboration {} agent_mail message_ref must be mail-*",
+                    fixture.fixture_id, entry.entry_id
+                ));
             }
-            "beads" => {
-                if !entry.message_ref.starts_with("bv:") && !entry.message_ref.starts_with("beads:")
-                {
-                    return Err(format!(
-                        "fixture {} collaboration {} beads message_ref must be bv:* or beads:*",
-                        fixture.fixture_id, entry.entry_id
-                    ));
-                }
+            "beads"
+                if !entry.message_ref.starts_with("bv:")
+                    && !entry.message_ref.starts_with("beads:") =>
+            {
+                return Err(format!(
+                    "fixture {} collaboration {} beads message_ref must be bv:* or beads:*",
+                    fixture.fixture_id, entry.entry_id
+                ));
             }
-            "frankensuite" => {
-                if !entry.message_ref.starts_with("franken-") {
-                    return Err(format!(
-                        "fixture {} collaboration {} frankensuite message_ref must be franken-*",
-                        fixture.fixture_id, entry.entry_id
-                    ));
-                }
+            "frankensuite" if !entry.message_ref.starts_with("franken-") => {
+                return Err(format!(
+                    "fixture {} collaboration {} frankensuite message_ref must be franken-*",
+                    fixture.fixture_id, entry.entry_id
+                ));
             }
             _ => {}
         }
