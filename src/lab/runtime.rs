@@ -4142,14 +4142,16 @@ mod tests {
         crate::test_utils::init_test_logging();
         crate::test_phase!("contract_auto_crashpack_on_failure");
 
-        let mut runtime = LabRuntime::with_seed(17);
+        let config = LabConfig::new(17).panic_on_leak(false);
+        let mut runtime = LabRuntime::new(config);
         let region = runtime.state.create_root_region(Budget::INFINITE);
         let (task, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
         runtime.scheduler.lock().schedule(task, 0);
-        runtime.run_until_quiescent();
+        // Create the obligation while the task is still live, then run to
+        // quiescence so the task completes without resolving it (intentional leak).
         runtime
             .state
             .create_obligation(
@@ -4159,6 +4161,7 @@ mod tests {
                 Some("intentional leak".to_string()),
             )
             .expect("create obligation");
+        runtime.run_until_quiescent();
 
         let report = runtime.spork_report("failing_app", Vec::new());
         assert!(!report.passed(), "failing run must not report PASS");
@@ -4211,7 +4214,6 @@ mod tests {
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
         runtime.scheduler.lock().schedule(task, 0);
-        runtime.run_until_quiescent();
         runtime
             .state
             .create_obligation(
@@ -4221,6 +4223,7 @@ mod tests {
                 Some("intentional leak".to_string()),
             )
             .expect("create obligation");
+        runtime.run_until_quiescent();
 
         let run = runtime.report();
         let crashpack = runtime
@@ -4250,14 +4253,14 @@ mod tests {
         crate::test_utils::init_test_logging();
         crate::test_phase!("contract_manual_crashpack_not_duplicated_on_failure");
 
-        let mut runtime = LabRuntime::with_seed(18);
+        let config = LabConfig::new(18).panic_on_leak(false);
+        let mut runtime = LabRuntime::new(config);
         let region = runtime.state.create_root_region(Budget::INFINITE);
         let (task, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
         runtime.scheduler.lock().schedule(task, 0);
-        runtime.run_until_quiescent();
         runtime
             .state
             .create_obligation(
@@ -4267,6 +4270,7 @@ mod tests {
                 Some("intentional leak".to_string()),
             )
             .expect("create obligation");
+        runtime.run_until_quiescent();
 
         let report = runtime.spork_report(
             "failing_app_manual",

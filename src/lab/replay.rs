@@ -1889,15 +1889,17 @@ mod tests {
     fn make_spork_report(seed: u64, failing: bool) -> SporkHarnessReport {
         use crate::record::ObligationKind;
 
-        let mut runtime = LabRuntime::with_seed(seed);
+        let config = LabConfig::new(seed).panic_on_leak(false);
+        let mut runtime = LabRuntime::new(config);
         let region = runtime.state.create_root_region(Budget::INFINITE);
         let (task, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
         runtime.scheduler.lock().schedule(task, 0);
-        runtime.run_until_quiescent();
-
+        // Create the obligation while the task is still live so the holder
+        // validation passes.  Running to quiescence afterward leaves the
+        // obligation unresolved (intentional leak → failing report).
         if failing {
             runtime
                 .state
@@ -1909,6 +1911,7 @@ mod tests {
                 )
                 .expect("create failing obligation");
         }
+        runtime.run_until_quiescent();
 
         runtime.spork_report("spork_exploration", Vec::new())
     }
