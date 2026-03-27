@@ -548,7 +548,7 @@ impl std::error::Error for RemoteError {}
 /// - The remote task ID for identification and tracing
 /// - The target node and computation name for debugging
 /// - `join()` to await the remote result
-/// - `abort()` to request cancellation of the remote task
+/// - `abort(&Cx)` to request cancellation of the remote task
 ///
 /// # Region Ownership
 ///
@@ -737,15 +737,38 @@ impl RemoteHandle {
         }
     }
 
-    /// Requests cancellation of the remote task.
+    /// Requests cancellation of the remote task using the caller's remote capability.
     ///
     /// This is a request — the remote node may not stop immediately.
-    /// The cancellation propagates via the remote protocol (Phase 1+).
+    /// The cancellation propagates via the remote protocol when the provided
+    /// context carries an attached [`RemoteRuntime`].
     ///
-    /// In Phase 0, this is a no-op since there is no actual remote node.
-    pub fn abort(&self) {
-        // Phase 0: No remote node to notify.
-        // Phase 1+: Send cancel message via transport.
+    /// If the context does not have a remote capability, or if it is configured
+    /// for deterministic Phase 0 fallback without an attached runtime, this is
+    /// a no-op.
+    pub fn abort(&self, cx: &Cx) {
+        let Some(cap) = cx.remote() else {
+            return;
+        };
+        let Some(runtime) = cap.runtime() else {
+            return;
+        };
+
+        let origin_node = cap.local_node().clone();
+        let reason = cx
+            .cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("remote handle abort"));
+        let envelope = MessageEnvelope::new(
+            origin_node.clone(),
+            cx.logical_now(),
+            RemoteMessage::CancelRequest(CancelRequest {
+                remote_task_id: self.remote_task_id,
+                reason,
+                origin_node,
+            }),
+        );
+
+        let _ = runtime.send_message(&self.node, envelope);
     }
 }
 
@@ -2544,6 +2567,41 @@ mod tests {
     }
 
     #[test]
+    fn remote_handle_abort_with_attached_runtime_sends_cancel_request() {
+        let runtime = Arc::new(CaptureRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        handle.abort(&cx);
+
+        let (destination, envelope) = {
+            let sent = runtime.sent.lock();
+            assert_eq!(sent.len(), 2);
+            sent[1].clone()
+        };
+        assert_eq!(destination.as_str(), "worker-1");
+        assert_eq!(envelope.sender.as_str(), "origin-a");
+        match &envelope.payload {
+            RemoteMessage::CancelRequest(req) => {
+                assert_eq!(req.remote_task_id, handle.remote_task_id());
+                assert_eq!(req.origin_node.as_str(), "origin-a");
+                assert_eq!(req.reason, CancelReason::user("remote handle abort"));
+            }
+            other => unreachable!("expected CancelRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn spawn_remote_send_failure_unregisters_pending_task() {
         let runtime = Arc::new(FailingSendRuntime::default());
         let cap = RemoteCap::new().with_runtime(runtime.clone());
@@ -2865,7 +2923,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_handle_abort_no_panic() {
+    fn remote_handle_abort_without_attached_runtime_is_noop() {
         let cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
         let handle = spawn_remote(
             &cx,
@@ -2875,8 +2933,7 @@ mod tests {
         )
         .unwrap();
 
-        // Phase 0: abort is a no-op, just verify it doesn't panic.
-        handle.abort();
+        handle.abort(&cx);
     }
 
     #[test]

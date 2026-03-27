@@ -655,6 +655,20 @@ pub trait Interceptor: Send + Sync {
 
     /// Intercept a response before it is sent.
     fn intercept_response(&self, response: &mut Response<Bytes>) -> Result<(), Status>;
+
+    /// Intercept a response when the originating request metadata is available.
+    ///
+    /// Interceptors that need request context for response shaping can override
+    /// this method. The default behavior preserves the existing response-only
+    /// interception contract.
+    fn intercept_response_with_request(
+        &self,
+        request: &Request<Bytes>,
+        response: &mut Response<Bytes>,
+    ) -> Result<(), Status> {
+        let _ = request;
+        self.intercept_response(response)
+    }
 }
 
 /// A no-op interceptor that passes through all requests.

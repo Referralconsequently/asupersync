@@ -1168,6 +1168,31 @@ fn grpc_verify_037_grpc_client() {
 fn grpc_verify_038_interceptor_layer_composition() {
     init_test("grpc_verify_038_interceptor_layer_composition");
 
+    #[derive(Debug)]
+    struct ResponseOrderInterceptor {
+        name: &'static str,
+        calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Interceptor for ResponseOrderInterceptor {
+        fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response_with_request(
+            &self,
+            _request: &Request<Bytes>,
+            _response: &mut Response<Bytes>,
+        ) -> Result<(), Status> {
+            self.calls.lock().unwrap().push(self.name);
+            Ok(())
+        }
+    }
+
     let layer = InterceptorLayer::new();
     assert!(layer.is_empty());
     assert_eq!(layer.len(), 0);
@@ -1191,6 +1216,23 @@ fn grpc_verify_038_interceptor_layer_composition() {
     let mut response = Response::new(Bytes::new());
     layer.intercept_response(&mut response).unwrap();
     assert!(response.metadata().get("x-logged").is_some());
+
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let request_aware_layer = InterceptorLayer::new()
+        .layer(ResponseOrderInterceptor {
+            name: "outer",
+            calls: Arc::clone(&calls),
+        })
+        .layer(ResponseOrderInterceptor {
+            name: "inner",
+            calls: Arc::clone(&calls),
+        });
+    let request = Request::new(Bytes::new());
+    let mut response = Response::new(Bytes::new());
+    request_aware_layer
+        .intercept_response_with_request(&request, &mut response)
+        .unwrap();
+    assert_eq!(calls.lock().unwrap().as_slice(), ["inner", "outer"]);
 
     test_complete!("grpc_verify_038_interceptor_layer_composition");
 }
@@ -1383,7 +1425,8 @@ fn grpc_verify_044_logging_interceptor() {
 
 /// GRPC-VERIFY-045: MetadataPropagator marks propagation keys
 ///
-/// Propagator records which keys should be forwarded in a special metadata entry.
+/// Propagator records request keys and can copy the selected values onto a response
+/// when request context is available.
 #[test]
 fn grpc_verify_045_metadata_propagator() {
     init_test("grpc_verify_045_metadata_propagator");
@@ -1406,6 +1449,20 @@ fn grpc_verify_045_metadata_propagator() {
         }
         other => panic!("expected propagate keys, got: {other:?}"),
     }
+
+    let mut response = Response::new(Bytes::new());
+    propagator
+        .intercept_response_with_request(&req, &mut response)
+        .unwrap();
+    match response.metadata().get("x-request-id") {
+        Some(MetadataValue::Ascii(s)) => assert_eq!(s, "req-123"),
+        other => panic!("expected propagated request id, got: {other:?}"),
+    }
+    match response.metadata().get("x-trace-id") {
+        Some(MetadataValue::Ascii(s)) => assert_eq!(s, "trace-456"),
+        other => panic!("expected propagated trace id, got: {other:?}"),
+    }
+    assert!(response.metadata().get("x-missing").is_none());
 
     test_complete!("grpc_verify_045_metadata_propagator");
 }

@@ -120,6 +120,17 @@ impl Interceptor for InterceptorLayer {
         }
         Ok(())
     }
+
+    fn intercept_response_with_request(
+        &self,
+        request: &Request<Bytes>,
+        response: &mut Response<Bytes>,
+    ) -> Result<(), Status> {
+        for interceptor in self.interceptors.iter().rev() {
+            interceptor.intercept_response_with_request(request, response)?;
+        }
+        Ok(())
+    }
 }
 
 /// A function-based interceptor for requests.
@@ -277,6 +288,17 @@ fn bearer_token(auth: &str) -> Option<&str> {
     Some(token)
 }
 
+fn copy_metadata_value(
+    metadata: &mut super::streaming::Metadata,
+    key: &str,
+    value: &MetadataValue,
+) {
+    match value {
+        MetadataValue::Ascii(ascii) => metadata.insert(key, ascii.clone()),
+        MetadataValue::Binary(binary) => metadata.insert_bin(key, binary.clone()),
+    }
+}
+
 /// Interceptor that validates bearer tokens on incoming requests.
 #[derive(Debug)]
 pub struct BearerAuthValidator<F> {
@@ -374,12 +396,29 @@ impl Interceptor for MetadataPropagator {
     }
 
     fn intercept_response(&self, response: &mut Response<Bytes>) -> Result<(), Status> {
-        // Response-side propagation requires access to the original request's
-        // metadata, which the current Interceptor trait does not provide.
-        // Implementing this requires either extending the trait with request
-        // context or using per-request state (e.g., task-local storage).
-        // The request side (intercept_request) handles outbound propagation.
+        // Request-derived propagation requires the originating request. Callers
+        // that need that behavior must use `intercept_response_with_request()`.
         let _ = response;
+        Ok(())
+    }
+
+    fn intercept_response_with_request(
+        &self,
+        request: &Request<Bytes>,
+        response: &mut Response<Bytes>,
+    ) -> Result<(), Status> {
+        let response_metadata = response.metadata_mut();
+        response_metadata.reserve(self.keys.len());
+
+        for key in &self.keys {
+            if response_metadata.get(key).is_some() {
+                continue;
+            }
+            if let Some(value) = request.metadata().get(key) {
+                copy_metadata_value(response_metadata, key, value);
+            }
+        }
+
         Ok(())
     }
 }
@@ -552,6 +591,31 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct ResponseOrderInterceptor {
+        name: &'static str,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Interceptor for ResponseOrderInterceptor {
+        fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response_with_request(
+            &self,
+            _request: &Request<Bytes>,
+            _response: &mut Response<Bytes>,
+        ) -> Result<(), Status> {
+            self.calls.lock().unwrap().push(self.name);
+            Ok(())
+        }
     }
 
     #[test]
@@ -845,6 +909,123 @@ mod tests {
         let logged = response.metadata().get("x-logged").is_some();
         crate::assert_with_log!(logged, "logged header", true, logged);
         crate::test_complete!("logging_interceptor_marks_response");
+    }
+
+    #[test]
+    fn metadata_propagator_copies_selected_request_metadata_to_response() {
+        init_test("metadata_propagator_copies_selected_request_metadata_to_response");
+        let interceptor = metadata_propagator(["x-request-id", "x-trace-id"]);
+
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("x-request-id", "req-123");
+        request.metadata_mut().insert("x-trace-id", "trace-456");
+        request.metadata_mut().insert("x-unrelated", "skip-me");
+
+        let mut response = Response::new(Bytes::new());
+        interceptor
+            .intercept_response_with_request(&request, &mut response)
+            .unwrap();
+
+        let request_id = response.metadata().get("x-request-id");
+        let trace_id = response.metadata().get("x-trace-id");
+        let unrelated = response.metadata().get("x-unrelated");
+
+        let request_id_ok =
+            matches!(request_id, Some(MetadataValue::Ascii(value)) if value == "req-123");
+        let trace_id_ok =
+            matches!(trace_id, Some(MetadataValue::Ascii(value)) if value == "trace-456");
+        crate::assert_with_log!(request_id_ok, "request id propagated", true, request_id_ok);
+        crate::assert_with_log!(trace_id_ok, "trace id propagated", true, trace_id_ok);
+        crate::assert_with_log!(
+            unrelated.is_none(),
+            "unrelated absent",
+            true,
+            unrelated.is_none()
+        );
+        crate::test_complete!("metadata_propagator_copies_selected_request_metadata_to_response");
+    }
+
+    #[test]
+    fn metadata_propagator_response_only_hook_is_requestless_noop() {
+        init_test("metadata_propagator_response_only_hook_is_requestless_noop");
+        let interceptor = metadata_propagator(["x-request-id"]);
+
+        let mut response = Response::new(Bytes::new());
+        interceptor.intercept_response(&mut response).unwrap();
+
+        let propagated = response.metadata().get("x-request-id");
+        crate::assert_with_log!(
+            propagated.is_none(),
+            "response-only hook does not invent request metadata",
+            true,
+            propagated.is_none()
+        );
+        crate::test_complete!("metadata_propagator_response_only_hook_is_requestless_noop");
+    }
+
+    #[test]
+    fn interceptor_layer_request_aware_response_hook_preserves_composition() {
+        init_test("interceptor_layer_request_aware_response_hook_preserves_composition");
+        let layer = InterceptorLayer::new()
+            .layer(logging_interceptor())
+            .layer(metadata_propagator(["x-request-id"]));
+
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("x-request-id", "req-123");
+
+        let mut response = Response::new(Bytes::new());
+        layer
+            .intercept_response_with_request(&request, &mut response)
+            .unwrap();
+
+        let logged = response.metadata().get("x-logged");
+        let request_id = response.metadata().get("x-request-id");
+        let logged_ok = matches!(logged, Some(MetadataValue::Ascii(value)) if value == "true");
+        let request_id_ok =
+            matches!(request_id, Some(MetadataValue::Ascii(value)) if value == "req-123");
+        crate::assert_with_log!(logged_ok, "logging interceptor still runs", true, logged_ok);
+        crate::assert_with_log!(
+            request_id_ok,
+            "request-aware propagation copies metadata",
+            true,
+            request_id_ok
+        );
+        crate::test_complete!(
+            "interceptor_layer_request_aware_response_hook_preserves_composition"
+        );
+    }
+
+    #[test]
+    fn interceptor_layer_request_aware_response_hook_runs_in_reverse_order() {
+        init_test("interceptor_layer_request_aware_response_hook_runs_in_reverse_order");
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let layer = InterceptorLayer::new()
+            .layer(ResponseOrderInterceptor {
+                name: "outer",
+                calls: std::sync::Arc::clone(&calls),
+            })
+            .layer(ResponseOrderInterceptor {
+                name: "inner",
+                calls: std::sync::Arc::clone(&calls),
+            });
+
+        let request = Request::new(Bytes::new());
+        let mut response = Response::new(Bytes::new());
+        layer
+            .intercept_response_with_request(&request, &mut response)
+            .unwrap();
+
+        let calls = calls.lock().unwrap().clone();
+        crate::assert_with_log!(
+            calls == vec!["inner", "outer"],
+            "request-aware response order",
+            vec!["inner", "outer"],
+            calls
+        );
+        crate::test_complete!(
+            "interceptor_layer_request_aware_response_hook_runs_in_reverse_order"
+        );
     }
 
     #[test]

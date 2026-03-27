@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::bytes::{Buf, Bytes, BytesCursor};
+use crate::stream::Stream;
 
 /// A frame of body content: either data or trailers.
 ///
@@ -527,13 +528,17 @@ impl From<Vec<u8>> for Full<BytesCursor> {
 #[derive(Debug)]
 pub struct StreamBody<S> {
     stream: S,
+    done: bool,
 }
 
 impl<S> StreamBody<S> {
     /// Creates a new stream body from the given stream.
     #[must_use]
     pub fn new(stream: S) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            done: false,
+        }
     }
 
     /// Consumes the body and returns the inner stream.
@@ -543,8 +548,43 @@ impl<S> StreamBody<S> {
     }
 }
 
-// Body implementation for StreamBody uses manual polling (no futures::Stream
-// dependency). This is intentional: Asupersync avoids the futures crate.
+impl<S, D, E> Body for StreamBody<S>
+where
+    S: Stream<Item = Result<Frame<D>, E>> + Unpin,
+    D: Buf,
+{
+    type Data = D;
+    type Error = E;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(None) => {
+                self.done = true;
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done || matches!(self.stream.size_hint(), (0, Some(0)))
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        if self.done || matches!(self.stream.size_hint(), (0, Some(0))) {
+            SizeHint::with_exact(0)
+        } else {
+            SizeHint::default()
+        }
+    }
+}
 
 /// A body that collects data from another body.
 ///
@@ -741,6 +781,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream;
     use std::task::Wake;
 
     struct NoopWaker;
@@ -1135,6 +1176,122 @@ mod tests {
         assert!(dbg.contains("StreamBody"), "{dbg}");
         let inner = body.into_inner();
         assert_eq!(inner, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn stream_body_polls_frames_and_fuses_eof() {
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            HeaderName::from_static("x-checksum"),
+            HeaderValue::from_static("abc123"),
+        );
+
+        let stream = stream::iter(vec![
+            Ok::<_, Infallible>(Frame::data(BytesCursor::new(Bytes::from_static(b"abc")))),
+            Ok(Frame::trailers(trailers)),
+        ]);
+        let mut body = StreamBody::new(stream);
+
+        assert!(!body.is_end_stream());
+
+        let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
+            panic!("expected first data frame")
+        };
+        let data = frame.into_data().expect("expected data frame");
+        assert_eq!(data.chunk(), b"abc");
+        assert!(!body.is_end_stream());
+
+        let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
+            panic!("expected trailers frame")
+        };
+        let trailers = frame.into_trailers().expect("expected trailers frame");
+        assert_eq!(
+            trailers
+                .get(&HeaderName::from_static("x-checksum"))
+                .unwrap(),
+            &HeaderValue::from_static("abc123")
+        );
+
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
+        assert!(body.is_end_stream());
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
+    }
+
+    struct PendingThenFrameStream {
+        yielded_pending: bool,
+        yielded_frame: bool,
+    }
+
+    impl Stream for PendingThenFrameStream {
+        type Item = Result<Frame<BytesCursor>, Infallible>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.yielded_pending {
+                self.yielded_pending = true;
+                return Poll::Pending;
+            }
+
+            if !self.yielded_frame {
+                self.yielded_frame = true;
+                return Poll::Ready(Some(Ok(Frame::data(BytesCursor::new(Bytes::from_static(
+                    b"later",
+                ))))));
+            }
+
+            Poll::Ready(None)
+        }
+    }
+
+    #[test]
+    fn stream_body_propagates_pending() {
+        let mut body = StreamBody::new(PendingThenFrameStream {
+            yielded_pending: false,
+            yielded_frame: false,
+        });
+
+        assert!(matches!(poll_body(&mut body), Poll::Pending));
+
+        let Poll::Ready(Some(Ok(frame))) = poll_body(&mut body) else {
+            panic!("expected data frame after pending")
+        };
+        let data = frame.into_data().expect("expected data frame");
+        assert_eq!(data.chunk(), b"later");
+
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
+        assert!(body.is_end_stream());
+    }
+
+    struct ErrorOnceStream {
+        emitted_error: bool,
+    }
+
+    impl Stream for ErrorOnceStream {
+        type Item = Result<Frame<BytesCursor>, &'static str>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.emitted_error {
+                self.emitted_error = true;
+                return Poll::Ready(Some(Err("boom")));
+            }
+
+            Poll::Ready(None)
+        }
+    }
+
+    #[test]
+    fn stream_body_propagates_errors() {
+        let mut body = StreamBody::new(ErrorOnceStream {
+            emitted_error: false,
+        });
+
+        let Poll::Ready(Some(Err(err))) = poll_body(&mut body) else {
+            panic!("expected error frame")
+        };
+        assert_eq!(err, "boom");
+        assert!(!body.is_end_stream());
+
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
+        assert!(body.is_end_stream());
     }
 
     #[test]
