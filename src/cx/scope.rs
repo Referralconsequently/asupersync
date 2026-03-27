@@ -1193,7 +1193,6 @@ impl<P: Policy> Scope<'_, P> {
         let mut ready_results: Vec<Option<Result<T, JoinError>>> = std::iter::repeat_with(|| None)
             .take(futures.len())
             .collect();
-        let mut winner_idx = None;
 
         // Poll every candidate in each round and keep all same-round ready
         // outcomes. This prevents losing loser panic outcomes when multiple
@@ -1211,16 +1210,11 @@ impl<P: Policy> Scope<'_, P> {
                 }
             }
 
-            if let Some(existing) = winner_idx {
-                return std::task::Poll::Ready(existing);
-            }
-
             if newly_ready.is_empty() {
                 std::task::Poll::Pending
             } else {
                 // Fairly select a winner among all that became ready in this round
                 let chosen = newly_ready[cx.random_usize(newly_ready.len())];
-                winner_idx = Some(chosen);
                 std::task::Poll::Ready(chosen)
             }
         })

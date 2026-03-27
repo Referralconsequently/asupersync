@@ -803,7 +803,7 @@ impl Reactor for LabReactor {
                 let LabInner {
                     sockets,
                     pending,
-                    next_sequence,
+                    ref mut next_sequence,
                     chaos,
                     time: _,
                 } = &mut *inner;

@@ -96,11 +96,9 @@ where
         }
 
         if this.queued1.is_some() && this.queued2.is_some() {
-            if let (Some(item1), Some(item2)) = (this.queued1.take(), this.queued2.take()) {
-                Poll::Ready(Some((item1, item2)))
-            } else {
-                unreachable!()
-            }
+            let item1 = this.queued1.take().unwrap();
+            let item2 = this.queued2.take().unwrap();
+            Poll::Ready(Some((item1, item2)))
         } else {
             Poll::Pending
         }

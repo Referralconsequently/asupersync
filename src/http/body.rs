@@ -21,6 +21,7 @@ use std::task::{Context, Poll};
 
 use crate::bytes::{Buf, Bytes, BytesCursor};
 use crate::stream::Stream;
+use crate::util::{DetBuildHasher, DetHashMap};
 
 /// A frame of body content: either data or trailers.
 ///
@@ -113,6 +114,7 @@ impl<T> Frame<T> {
 #[derive(Debug, Clone, Default)]
 pub struct HeaderMap {
     headers: Vec<(HeaderName, HeaderValue)>,
+    positions: DetHashMap<HeaderName, Vec<usize>>,
 }
 
 impl HeaderMap {
@@ -121,6 +123,7 @@ impl HeaderMap {
     pub fn new() -> Self {
         Self {
             headers: Vec::new(),
+            positions: DetHashMap::default(),
         }
     }
 
@@ -129,25 +132,37 @@ impl HeaderMap {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             headers: Vec::with_capacity(capacity),
+            positions: DetHashMap::with_capacity_and_hasher(capacity, DetBuildHasher),
         }
     }
 
     /// Inserts a header into the map.
     pub fn insert(&mut self, name: HeaderName, value: HeaderValue) {
-        // Remove existing header with this name
-        self.headers.retain(|(n, _)| n != &name);
-        self.headers.push((name, value));
+        if let Some(indices) = self.positions.remove(&name) {
+            for index in indices.into_iter().rev() {
+                self.headers.remove(index);
+            }
+            self.rebuild_positions();
+        }
+
+        self.append(name, value);
     }
 
     /// Appends a header to the map (allows duplicates).
     pub fn append(&mut self, name: HeaderName, value: HeaderValue) {
+        let index = self.headers.len();
+        self.positions.entry(name.clone()).or_default().push(index);
         self.headers.push((name, value));
     }
 
     /// Gets the first value for a header name.
     #[must_use]
     pub fn get(&self, name: &HeaderName) -> Option<&HeaderValue> {
-        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        self.positions
+            .get(name)
+            .and_then(|indices| indices.first())
+            .and_then(|index| self.headers.get(*index))
+            .map(|(_, value)| value)
     }
 
     /// Returns an iterator over the headers.
@@ -165,6 +180,13 @@ impl HeaderMap {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.headers.is_empty()
+    }
+
+    fn rebuild_positions(&mut self) {
+        self.positions.clear();
+        for (index, (name, _)) in self.headers.iter().enumerate() {
+            self.positions.entry(name.clone()).or_default().push(index);
+        }
     }
 }
 
@@ -1007,6 +1029,16 @@ mod tests {
     }
 
     #[test]
+    fn header_map_append_get_returns_first_duplicate() {
+        let mut hm = HeaderMap::new();
+        let name = HeaderName::from_static("x-multi");
+        hm.append(name.clone(), HeaderValue::from_static("a"));
+        hm.append(name.clone(), HeaderValue::from_static("b"));
+
+        assert_eq!(hm.get(&name).unwrap().to_str().unwrap(), "a");
+    }
+
+    #[test]
     fn header_map_iter() {
         let mut hm = HeaderMap::new();
         hm.insert(HeaderName::from_static("a"), HeaderValue::from_static("1"));
@@ -1020,6 +1052,26 @@ mod tests {
         let hm = HeaderMap::new();
         let name = HeaderName::from_static("missing");
         assert!(hm.get(&name).is_none());
+    }
+
+    #[test]
+    fn header_map_insert_rebuilds_indices_after_removal() {
+        let mut hm = HeaderMap::new();
+        let a = HeaderName::from_static("a");
+        let b = HeaderName::from_static("b");
+        let c = HeaderName::from_static("c");
+
+        hm.append(a.clone(), HeaderValue::from_static("a1"));
+        hm.append(b.clone(), HeaderValue::from_static("b1"));
+        hm.append(a.clone(), HeaderValue::from_static("a2"));
+        hm.append(c.clone(), HeaderValue::from_static("c1"));
+
+        hm.insert(a.clone(), HeaderValue::from_static("a3"));
+
+        assert_eq!(hm.len(), 3);
+        assert_eq!(hm.get(&a).unwrap().to_str().unwrap(), "a3");
+        assert_eq!(hm.get(&b).unwrap().to_str().unwrap(), "b1");
+        assert_eq!(hm.get(&c).unwrap().to_str().unwrap(), "c1");
     }
 
     #[test]

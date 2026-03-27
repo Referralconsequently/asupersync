@@ -94,11 +94,10 @@ impl<S: Stream> Stream for Peekable<S> {
         let mut this = self.project();
         match this.peeked {
             PeekSlot::Item(_) => {
-                if let PeekSlot::Item(item) = std::mem::replace(this.peeked, PeekSlot::Empty) {
-                    Poll::Ready(Some(item))
-                } else {
+                let PeekSlot::Item(item) = std::mem::replace(this.peeked, PeekSlot::Empty) else {
                     unreachable!()
-                }
+                };
+                Poll::Ready(Some(item))
             }
             PeekSlot::Exhausted => Poll::Ready(None),
             PeekSlot::Empty => {
