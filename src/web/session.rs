@@ -166,7 +166,11 @@ impl SessionStore for MemoryStore {
     }
 
     fn save(&self, id: &str, data: &SessionData) {
-        self.sessions.lock().insert(id.to_string(), data.clone());
+        let mut stored = data.clone();
+        // Reset modified flag so reloaded sessions don't appear pre-modified,
+        // which would cause unnecessary re-saves and Set-Cookie headers.
+        stored.modified = false;
+        self.sessions.lock().insert(id.to_string(), stored);
     }
 
     fn delete(&self, id: &str) {
