@@ -575,6 +575,12 @@ struct PacketBuffer {
     sequence: u8,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncodedPacket {
+    bytes: Vec<u8>,
+    next_sequence: u8,
+}
+
 impl PacketBuffer {
     fn new() -> Self {
         Self {
@@ -636,31 +642,56 @@ impl PacketBuffer {
         self.buf.extend_from_slice(s.as_bytes());
     }
 
-    /// Build packet with 4-byte header.
+    /// Build one logical packet message with 4-byte headers.
     ///
-    /// # Errors
-    ///
-    /// Returns `MySqlError::Protocol` if the payload exceeds
-    /// `MAX_PACKET_SIZE` (16 MiB - 1). MySQL protocol requires large
-    /// payloads to be split across multiple packets, which is not yet
-    /// implemented.
-    fn build_packet(&self) -> Result<Vec<u8>, MySqlError> {
-        let len = self.buf.len();
-        if len > MAX_PACKET_SIZE as usize {
-            return Err(MySqlError::Protocol(format!(
-                "packet payload {len} exceeds MAX_PACKET_SIZE ({MAX_PACKET_SIZE}); \
-                 large-payload splitting is not implemented"
-            )));
+    /// MySQL splits payloads at `MAX_PACKET_SIZE` boundaries and continues
+    /// with incrementing sequence IDs until the last chunk is shorter than
+    /// `MAX_PACKET_SIZE`. An exact-boundary payload therefore needs a
+    /// zero-length terminator packet.
+    fn build_packet(&self) -> Result<EncodedPacket, MySqlError> {
+        let mut sequence = self.sequence;
+        let mut offset = 0usize;
+        let max_payload = MAX_PACKET_SIZE as usize;
+        let payload_len = self.buf.len();
+        let packet_count = if payload_len == 0 {
+            1
+        } else {
+            payload_len / max_payload + 1
+        };
+        let mut result = Vec::with_capacity(payload_len + packet_count * 4);
+
+        loop {
+            let remaining = payload_len.saturating_sub(offset);
+            let chunk_len = remaining.min(max_payload);
+
+            result.push((chunk_len & 0xFF) as u8);
+            result.push(((chunk_len >> 8) & 0xFF) as u8);
+            result.push(((chunk_len >> 16) & 0xFF) as u8);
+            result.push(sequence);
+
+            if chunk_len > 0 {
+                result.extend_from_slice(&self.buf[offset..offset + chunk_len]);
+                offset += chunk_len;
+            }
+
+            sequence = sequence.wrapping_add(1);
+
+            if chunk_len < max_payload {
+                break;
+            }
+
+            if offset == payload_len {
+                // Exact 0xFF_FFFF boundary: emit the required empty terminator.
+                result.extend_from_slice(&[0, 0, 0, sequence]);
+                sequence = sequence.wrapping_add(1);
+                break;
+            }
         }
-        let mut result = Vec::with_capacity(4 + len);
-        // 3 bytes length (little-endian)
-        result.push((len & 0xFF) as u8);
-        result.push(((len >> 8) & 0xFF) as u8);
-        result.push(((len >> 16) & 0xFF) as u8);
-        // 1 byte sequence number
-        result.push(self.sequence);
-        result.extend_from_slice(&self.buf);
-        Ok(result)
+
+        Ok(EncodedPacket {
+            bytes: result,
+            next_sequence: sequence,
+        })
     }
 }
 
@@ -1269,8 +1300,8 @@ impl MySqlConnection {
         buf.write_null_terminated(&handshake.auth_plugin_name);
 
         let packet = buf.build_packet()?;
-        self.write_all(&packet).await?;
-        self.inner.sequence = self.inner.sequence.wrapping_add(1);
+        self.write_all(&packet.bytes).await?;
+        self.inner.sequence = packet.next_sequence;
 
         Ok(())
     }
@@ -1353,8 +1384,8 @@ impl MySqlConnection {
         buf.set_sequence(self.inner.sequence);
         buf.write_bytes(&auth_response);
         let packet = buf.build_packet()?;
-        self.write_all(&packet).await?;
-        self.inner.sequence = self.inner.sequence.wrapping_add(1);
+        self.write_all(&packet.bytes).await?;
+        self.inner.sequence = packet.next_sequence;
 
         // Read final response
         let (data, seq) = self.read_packet().await?;
@@ -1463,10 +1494,10 @@ impl MySqlConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        if let Err(e) = self.write_all(&packet).await {
+        if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
         }
-        self.inner.sequence = 1;
+        self.inner.sequence = packet.next_sequence;
 
         // Read response
         let (data, seq) = match self.read_packet().await {
@@ -1804,10 +1835,10 @@ impl MySqlConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        if let Err(e) = self.write_all(&packet).await {
+        if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
         }
-        self.inner.sequence = 1;
+        self.inner.sequence = packet.next_sequence;
 
         // Read response
         let (data, seq) = match self.read_packet().await {
@@ -1877,10 +1908,10 @@ impl MySqlConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        if let Err(e) = self.write_all(&packet).await {
+        if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
         }
-        self.inner.sequence = 1;
+        self.inner.sequence = packet.next_sequence;
 
         let (data, seq) = match self.read_packet().await {
             Ok(p) => p,
@@ -1923,7 +1954,7 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUIT);
         if let Ok(packet) = buf.build_packet() {
-            let _ = self.write_all(&packet).await;
+            let _ = self.write_all(&packet.bytes).await;
         }
 
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -1966,11 +1997,11 @@ impl MySqlConnection {
         buf.write_bytes(b"ROLLBACK");
         let packet = buf.build_packet()?;
 
-        if let Err(e) = self.write_all(&packet).await {
+        if let Err(e) = self.write_all(&packet.bytes).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             return Err(e);
         }
-        self.inner.sequence = 1;
+        self.inner.sequence = packet.next_sequence;
 
         let (data, seq) = match self.read_packet().await {
             Ok(res) => res,
@@ -2046,19 +2077,29 @@ impl MySqlConnection {
 
     /// Read a complete packet.
     async fn read_packet(&mut self) -> Result<(Vec<u8>, u8), MySqlError> {
-        // Read header (4 bytes)
-        let mut header = [0u8; 4];
-        self.read_exact(&mut header).await?;
+        let mut expected_seq = self.inner.sequence;
+        let mut last_seq = expected_seq;
+        let mut data = Vec::new();
 
-        let (len, seq) = Self::decode_packet_header(header, self.inner.sequence)?;
+        loop {
+            let mut header = [0u8; 4];
+            self.read_exact(&mut header).await?;
 
-        // Read payload
-        let mut data = vec![0u8; len as usize];
-        if len > 0 {
-            self.read_exact(&mut data).await?;
+            let (len, seq) = Self::decode_packet_header(header, expected_seq)?;
+            last_seq = seq;
+
+            if len > 0 {
+                let start = data.len();
+                data.resize(start + len as usize, 0);
+                self.read_exact(&mut data[start..]).await?;
+            }
+
+            expected_seq = expected_seq.wrapping_add(1);
+
+            if len < MAX_PACKET_SIZE {
+                return Ok((data, last_seq));
+            }
         }
-
-        Ok((data, seq))
     }
 
     #[inline]
@@ -2206,6 +2247,50 @@ mod tests {
         }
     }
 
+    fn read_packet_payload_from_wire(payload: Vec<u8>) -> (Vec<u8>, u8) {
+        use futures_lite::future;
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server_payload = payload.clone();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut buf = PacketBuffer::new();
+            buf.set_sequence(0);
+            buf.buf = server_payload;
+            let packet = buf.build_packet().expect("build packet");
+            stream.write_all(&packet.bytes).expect("write packet");
+            stream.flush().expect("flush packet");
+        });
+
+        let result = future::block_on(async move {
+            let stream = crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client");
+            let mut conn = MySqlConnection {
+                inner: MySqlConnectionInner {
+                    stream,
+                    connection_id: 0,
+                    capabilities: 0,
+                    charset: 0,
+                    status_flags: 0,
+                    sequence: 0,
+                    closed: false,
+                    server_version: String::new(),
+                    needs_rollback: false,
+                    max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                },
+            };
+            conn.read_packet().await.expect("read packet")
+        });
+
+        server.join().expect("join server");
+        result
+    }
+
     #[test]
     fn test_connect_options_parse() {
         let opts = MySqlConnectOptions::parse("mysql://user:pass@localhost:3306/mydb").unwrap();
@@ -2284,11 +2369,12 @@ mod tests {
         buf.write_bytes(b"SELECT 1");
 
         let packet = buf.build_packet().unwrap();
-        assert_eq!(packet[0], 9); // length low byte
-        assert_eq!(packet[1], 0); // length mid byte
-        assert_eq!(packet[2], 0); // length high byte
-        assert_eq!(packet[3], 0); // sequence
-        assert_eq!(packet[4], command::COM_QUERY);
+        assert_eq!(packet.bytes[0], 9); // length low byte
+        assert_eq!(packet.bytes[1], 0); // length mid byte
+        assert_eq!(packet.bytes[2], 0); // length high byte
+        assert_eq!(packet.bytes[3], 0); // sequence
+        assert_eq!(packet.bytes[4], command::COM_QUERY);
+        assert_eq!(packet.next_sequence, 1);
     }
 
     #[test]
@@ -2418,7 +2504,8 @@ mod tests {
         buf.set_sequence(5);
         buf.write_byte(0x00);
         let packet = buf.build_packet().unwrap();
-        assert_eq!(packet[3], 5); // sequence byte
+        assert_eq!(packet.bytes[3], 5); // sequence byte
+        assert_eq!(packet.next_sequence, 6);
     }
 
     #[test]
@@ -2431,9 +2518,10 @@ mod tests {
         }
         let packet = buf.build_packet().unwrap();
         // Length should be 256 = 0x100
-        assert_eq!(packet[0], 0x00); // low byte
-        assert_eq!(packet[1], 0x01); // mid byte (256)
-        assert_eq!(packet[2], 0x00); // high byte
+        assert_eq!(packet.bytes[0], 0x00); // low byte
+        assert_eq!(packet.bytes[1], 0x01); // mid byte (256)
+        assert_eq!(packet.bytes[2], 0x00); // high byte
+        assert_eq!(packet.next_sequence, 1);
     }
 
     #[test]
@@ -2655,12 +2743,19 @@ mod tests {
     }
 
     #[test]
-    fn test_build_packet_rejects_oversized_payload() {
+    fn test_build_packet_splits_oversized_payload() {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
-        // Write more than MAX_PACKET_SIZE bytes
-        buf.buf = vec![0x41; MAX_PACKET_SIZE as usize + 1];
-        assert!(buf.build_packet().is_err());
+        buf.buf = vec![0x41; MAX_PACKET_SIZE as usize + 3];
+        let packet = buf.build_packet().unwrap();
+
+        assert_eq!(&packet.bytes[..4], &[0xFF, 0xFF, 0xFF, 0x00]);
+        let second_header_offset = 4 + MAX_PACKET_SIZE as usize;
+        assert_eq!(
+            &packet.bytes[second_header_offset..second_header_offset + 4],
+            &[0x03, 0x00, 0x00, 0x01]
+        );
+        assert_eq!(packet.next_sequence, 2);
     }
 
     #[test]
@@ -2669,7 +2764,31 @@ mod tests {
         buf.set_sequence(0);
         buf.buf = vec![0x41; MAX_PACKET_SIZE as usize];
         let packet = buf.build_packet().unwrap();
-        assert_eq!(packet.len(), 4 + MAX_PACKET_SIZE as usize);
+        assert_eq!(packet.bytes.len(), 8 + MAX_PACKET_SIZE as usize);
+        let terminator_offset = 4 + MAX_PACKET_SIZE as usize;
+        assert_eq!(
+            &packet.bytes[terminator_offset..terminator_offset + 4],
+            &[0x00, 0x00, 0x00, 0x01]
+        );
+        assert_eq!(packet.next_sequence, 2);
+    }
+
+    #[test]
+    fn test_read_packet_reassembles_multi_packet_payload() {
+        let payload = vec![0x5A; MAX_PACKET_SIZE as usize + 3];
+        let (data, seq) = read_packet_payload_from_wire(payload.clone());
+
+        assert_eq!(data, payload);
+        assert_eq!(seq, 1);
+    }
+
+    #[test]
+    fn test_read_packet_reassembles_exact_max_payload_with_terminator() {
+        let payload = vec![0x4B; MAX_PACKET_SIZE as usize];
+        let (data, seq) = read_packet_payload_from_wire(payload.clone());
+
+        assert_eq!(data, payload);
+        assert_eq!(seq, 1);
     }
 
     #[test]

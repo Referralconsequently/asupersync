@@ -77,14 +77,17 @@ where
 
     poll_fn(move |poll_cx| {
         runtime.enter(|| {
-            let cancellation_observed = cx.is_cancel_requested();
-            if cancellation_observed {
+            let cancellation_observed_before_poll = cx.is_cancel_requested();
+            if cancellation_observed_before_poll {
                 future.as_mut().request_cancel();
             }
 
             match future.as_mut().poll(poll_cx) {
                 Poll::Ready(CancelResult::Completed(value)) => {
-                    if cancellation_observed {
+                    // Cancellation can become visible while the wrapped future
+                    // is running this poll. Fail closed if it was observed
+                    // either before or immediately after the poll completes.
+                    if cancellation_observed_before_poll || cx.is_cancel_requested() {
                         let _ = value;
                         Poll::Ready(None)
                     } else {
@@ -183,6 +186,29 @@ mod tests {
         let result = block_on(with_tokio_context(&cx, move || CancelThenReady {
             cx: future_cx,
             polled_once: false,
+        }));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_with_tokio_context_returns_none_when_cancel_requested_during_ready_poll() {
+        struct CancelAndReady {
+            cx: Cx,
+        }
+
+        impl Future for CancelAndReady {
+            type Output = u8;
+
+            fn poll(self: Pin<&mut Self>, _poll_cx: &mut Context<'_>) -> Poll<Self::Output> {
+                self.cx.cancel_fast(CancelKind::User);
+                Poll::Ready(42)
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let future_cx = cx.clone();
+        let result = block_on(with_tokio_context(&cx, move || CancelAndReady {
+            cx: future_cx,
         }));
         assert_eq!(result, None);
     }

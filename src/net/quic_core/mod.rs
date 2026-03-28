@@ -58,8 +58,6 @@ pub enum QuicCoreError {
     DuplicateTransportParameter(u64),
     /// Invalid transport parameter body.
     InvalidTransportParameter(u64),
-    /// Retry long-header packets are not yet supported in this phase.
-    UnsupportedRetryPacket,
 }
 
 impl fmt::Display for QuicCoreError {
@@ -84,7 +82,6 @@ impl fmt::Display for QuicCoreError {
             Self::InvalidTransportParameter(id) => {
                 write!(f, "invalid transport parameter: 0x{id:x}")
             }
-            Self::UnsupportedRetryPacket => write!(f, "retry packet not supported in phase 1"),
         }
     }
 }
@@ -153,6 +150,8 @@ pub enum LongPacketType {
     ZeroRtt,
     /// Handshake packet type.
     Handshake,
+    /// Retry packet type.
+    Retry,
 }
 
 /// Long-header packet (phase-1 subset).
@@ -176,6 +175,21 @@ pub struct LongHeader {
     pub packet_number_len: u8,
 }
 
+/// Retry long-header packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryHeader {
+    /// QUIC version field.
+    pub version: u32,
+    /// Destination connection ID.
+    pub dst_cid: ConnectionId,
+    /// Source connection ID.
+    pub src_cid: ConnectionId,
+    /// Retry token carried by the server.
+    pub token: Vec<u8>,
+    /// Retry integrity tag.
+    pub integrity_tag: [u8; 16],
+}
+
 /// Short-header packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortHeader {
@@ -196,6 +210,8 @@ pub struct ShortHeader {
 pub enum PacketHeader {
     /// Long-header packet.
     Long(LongHeader),
+    /// Retry long-header packet.
+    Retry(RetryHeader),
     /// Short-header packet.
     Short(ShortHeader),
 }
@@ -205,6 +221,10 @@ impl PacketHeader {
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), QuicCoreError> {
         match self {
             Self::Long(h) => encode_long_header(h, out),
+            Self::Retry(h) => {
+                encode_retry_header(h, out);
+                Ok(())
+            }
             Self::Short(h) => encode_short_header(h, out),
         }
     }
@@ -217,7 +237,7 @@ impl PacketHeader {
             return Err(QuicCoreError::UnexpectedEof);
         }
         if input[0] & 0x80 != 0 {
-            decode_long_header(input).map(|(h, n)| (Self::Long(h), n))
+            decode_long_header(input)
         } else {
             decode_short_header(input, short_dcid_len).map(|(h, n)| (Self::Short(h), n))
         }
@@ -449,6 +469,11 @@ fn encode_long_header(header: &LongHeader, out: &mut Vec<u8>) -> Result<(), Quic
         LongPacketType::Initial => 0u8,
         LongPacketType::ZeroRtt => 1u8,
         LongPacketType::Handshake => 2u8,
+        LongPacketType::Retry => {
+            return Err(QuicCoreError::InvalidHeader(
+                "retry packets must use PacketHeader::Retry",
+            ));
+        }
     };
 
     let first = 0b1100_0000u8 | (type_bits << 4) | (pn_len - 1);
@@ -469,6 +494,17 @@ fn encode_long_header(header: &LongHeader, out: &mut Vec<u8>) -> Result<(), Quic
     Ok(())
 }
 
+fn encode_retry_header(header: &RetryHeader, out: &mut Vec<u8>) {
+    out.push(0b1111_0000u8);
+    out.extend_from_slice(&header.version.to_be_bytes());
+    out.push(header.dst_cid.len() as u8);
+    out.extend_from_slice(header.dst_cid.as_bytes());
+    out.push(header.src_cid.len() as u8);
+    out.extend_from_slice(header.src_cid.as_bytes());
+    out.extend_from_slice(&header.token);
+    out.extend_from_slice(&header.integrity_tag);
+}
+
 fn encode_short_header(header: &ShortHeader, out: &mut Vec<u8>) -> Result<(), QuicCoreError> {
     let pn_len = validate_pn_len(header.packet_number_len)?;
     ensure_pn_fits(header.packet_number, pn_len)?;
@@ -486,7 +522,7 @@ fn encode_short_header(header: &ShortHeader, out: &mut Vec<u8>) -> Result<(), Qu
     Ok(())
 }
 
-fn decode_long_header(input: &[u8]) -> Result<(LongHeader, usize), QuicCoreError> {
+fn decode_long_header(input: &[u8]) -> Result<(PacketHeader, usize), QuicCoreError> {
     if input.len() < 6 {
         return Err(QuicCoreError::UnexpectedEof);
     }
@@ -494,19 +530,25 @@ fn decode_long_header(input: &[u8]) -> Result<(LongHeader, usize), QuicCoreError
     if first & 0x40 == 0 {
         return Err(QuicCoreError::InvalidHeader("long header fixed bit unset"));
     }
-    if first & 0x0c != 0 {
+    let packet_type = match (first >> 4) & 0x03 {
+        0 => LongPacketType::Initial,
+        1 => LongPacketType::ZeroRtt,
+        2 => LongPacketType::Handshake,
+        3 => LongPacketType::Retry,
+        _ => unreachable!("2-bit pattern"),
+    };
+    if matches!(packet_type, LongPacketType::Retry) {
+        if first & 0x0f != 0 {
+            return Err(QuicCoreError::InvalidHeader(
+                "retry header reserved bits set",
+            ));
+        }
+    } else if first & 0x0c != 0 {
         return Err(QuicCoreError::InvalidHeader(
             "long header reserved bits set",
         ));
     }
     let pn_len = (first & 0x03) + 1;
-    let packet_type = match (first >> 4) & 0x03 {
-        0 => LongPacketType::Initial,
-        1 => LongPacketType::ZeroRtt,
-        2 => LongPacketType::Handshake,
-        3 => return Err(QuicCoreError::UnsupportedRetryPacket),
-        _ => unreachable!("2-bit pattern"),
-    };
 
     let mut pos = 1usize;
     let version = u32::from_be_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
@@ -521,6 +563,27 @@ fn decode_long_header(input: &[u8]) -> Result<(LongHeader, usize), QuicCoreError
     let scid_len = input[pos] as usize;
     pos += 1;
     let src_cid = read_cid(input, &mut pos, scid_len)?;
+
+    if matches!(packet_type, LongPacketType::Retry) {
+        if input.len().saturating_sub(pos) < 16 {
+            return Err(QuicCoreError::UnexpectedEof);
+        }
+        let token_end = input.len() - 16;
+        let token = input[pos..token_end].to_vec();
+        let integrity_tag = input[token_end..]
+            .try_into()
+            .map_err(|_| QuicCoreError::UnexpectedEof)?;
+        return Ok((
+            PacketHeader::Retry(RetryHeader {
+                version,
+                dst_cid,
+                src_cid,
+                token,
+                integrity_tag,
+            }),
+            input.len(),
+        ));
+    }
 
     let token = if matches!(packet_type, LongPacketType::Initial) {
         let (token_len, consumed) = decode_varint(&input[pos..])?;
@@ -546,7 +609,7 @@ fn decode_long_header(input: &[u8]) -> Result<(LongHeader, usize), QuicCoreError
 
     let packet_number = read_packet_number(input, &mut pos, pn_len)?;
     Ok((
-        LongHeader {
+        PacketHeader::Long(LongHeader {
             packet_type,
             version,
             dst_cid,
@@ -555,7 +618,7 @@ fn decode_long_header(input: &[u8]) -> Result<(LongHeader, usize), QuicCoreError
             payload_length,
             packet_number,
             packet_number_len: pn_len,
-        },
+        }),
         pos,
     ))
 }
@@ -827,11 +890,59 @@ mod tests {
     }
 
     #[test]
-    fn retry_long_packet_rejected() {
-        // Long header with retry type bits (11).
-        let raw = [0b1111_0000, 0, 0, 0, 1, 0, 0];
+    fn retry_header_roundtrip() {
+        let header = PacketHeader::Retry(RetryHeader {
+            version: 0x0000_0001,
+            dst_cid: ConnectionId::new(&[0xaa, 0xbb, 0xcc]).expect("cid"),
+            src_cid: ConnectionId::new(&[0x10, 0x20]).expect("cid"),
+            token: vec![0xde, 0xad, 0xbe, 0xef],
+            integrity_tag: [
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+                0x32, 0x10,
+            ],
+        });
+
+        let mut buf = Vec::new();
+        header.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = PacketHeader::decode(&buf, 0).expect("decode");
+        assert_eq!(decoded, header);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn retry_header_rejects_reserved_bits() {
+        let raw = [
+            0b1111_0001,
+            0,
+            0,
+            0,
+            1,
+            1,
+            0xaa,
+            1,
+            0xbb,
+            0x01,
+            0x23,
+            0x45,
+            0x67,
+            0x89,
+            0xab,
+            0xcd,
+            0xef,
+            0xfe,
+            0xdc,
+            0xba,
+            0x98,
+            0x76,
+            0x54,
+            0x32,
+            0x10,
+        ];
         let err = PacketHeader::decode(&raw, 0).expect_err("should fail");
-        assert_eq!(err, QuicCoreError::UnsupportedRetryPacket);
+        assert_eq!(
+            err,
+            QuicCoreError::InvalidHeader("retry header reserved bits set")
+        );
     }
 
     #[test]
@@ -1077,10 +1188,6 @@ mod tests {
                 QuicCoreError::InvalidTransportParameter(0x03),
                 "invalid transport parameter: 0x3",
             ),
-            (
-                QuicCoreError::UnsupportedRetryPacket,
-                "retry packet not supported in phase 1",
-            ),
         ];
         for (err, expected) in cases {
             assert_eq!(format!("{err}"), expected);
@@ -1221,6 +1328,7 @@ mod tests {
             LongPacketType::Initial,
             LongPacketType::ZeroRtt,
             LongPacketType::Handshake,
+            LongPacketType::Retry,
         ];
         for t in &types {
             let clone = *t;
@@ -1248,11 +1356,9 @@ mod tests {
     fn quic_core_error_debug_clone_eq_display() {
         let e1 = QuicCoreError::UnexpectedEof;
         let e2 = QuicCoreError::VarIntOutOfRange(999);
-        let e3 = QuicCoreError::UnsupportedRetryPacket;
         assert!(format!("{e1:?}").contains("UnexpectedEof"));
         assert!(format!("{e1}").contains("unexpected EOF"));
         assert!(format!("{e2}").contains("varint out of range"));
-        assert!(format!("{e3}").contains("retry packet"));
         assert_eq!(e1.clone(), e1);
         assert_ne!(e1, e2);
         let err: &dyn std::error::Error = &e1;

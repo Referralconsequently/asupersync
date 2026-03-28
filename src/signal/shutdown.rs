@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::{SignalKind, signal};
 use crate::sync::Notify;
 
 /// Internal state shared between controller and receivers.
@@ -14,6 +15,8 @@ use crate::sync::Notify;
 struct ShutdownState {
     /// Tracks whether shutdown has been initiated.
     initiated: AtomicBool,
+    /// Ensures signal listeners are only installed once per controller.
+    signal_listeners_started: AtomicBool,
     /// Notifier for broadcast notifications.
     notify: Notify,
 }
@@ -55,6 +58,7 @@ impl ShutdownController {
         Self {
             state: Arc::new(ShutdownState {
                 initiated: AtomicBool::new(false),
+                signal_listeners_started: AtomicBool::new(false),
                 notify: Notify::new(),
             }),
         }
@@ -76,16 +80,7 @@ impl ShutdownController {
     /// This wakes all receivers that are currently waiting for shutdown.
     /// The shutdown state is persistent - once initiated, it cannot be reset.
     pub fn shutdown(&self) {
-        // Only initiate once.
-        if self
-            .state
-            .initiated
-            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
-            .is_ok()
-        {
-            // Wake all waiters.
-            self.state.notify.notify_waiters();
-        }
+        Self::trigger_shutdown_state(&self.state);
     }
 
     /// Checks if shutdown has been initiated.
@@ -101,18 +96,82 @@ impl ShutdownController {
     ///
     /// # Note
     ///
-    /// In Phase 0, signal handling is not available, so this method
-    /// only sets up the controller for manual shutdown calls.
+    /// The listeners are installed at most once per controller. When a watched
+    /// signal arrives, the controller transitions to shutdown just as if
+    /// [`ShutdownController::shutdown`] had been called manually.
     pub fn listen_for_signals(self: &Arc<Self>) {
-        // Phase 0: Signal handling not available.
-        // In Phase 1, this will:
-        // - Register SIGTERM handler
-        // - Register SIGINT/Ctrl+C handler
-        // - Call self.shutdown() when signal received
-        //
-        // For now, this is a no-op. Applications should call
-        // shutdown() manually or use their own signal handling.
+        if self
+            .state
+            .signal_listeners_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+
+        let state = Arc::downgrade(&self.state);
+        let mut installed = false;
+
+        for kind in watched_signal_kinds() {
+            if Self::spawn_signal_listener(state.clone(), kind).is_ok() {
+                installed = true;
+            }
+        }
+
+        if !installed {
+            self.state
+                .signal_listeners_started
+                .store(false, Ordering::Release);
+        }
     }
+
+    fn trigger_shutdown_state(state: &ShutdownState) {
+        if state
+            .initiated
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            state.notify.notify_waiters();
+        }
+    }
+
+    fn spawn_signal_listener(
+        state: std::sync::Weak<ShutdownState>,
+        kind: SignalKind,
+    ) -> std::io::Result<()> {
+        let mut stream = signal(kind)?;
+        std::thread::Builder::new()
+            .name(format!(
+                "asupersync-shutdown-{}",
+                kind.name().to_ascii_lowercase()
+            ))
+            .spawn(move || {
+                if futures_lite::future::block_on(stream.recv()).is_some()
+                    && let Some(state) = state.upgrade()
+                {
+                    Self::trigger_shutdown_state(&state);
+                }
+            })
+            .map(|_| ())
+    }
+}
+
+#[cfg(unix)]
+fn watched_signal_kinds() -> [SignalKind; 2] {
+    [SignalKind::interrupt(), SignalKind::terminate()]
+}
+
+#[cfg(windows)]
+fn watched_signal_kinds() -> [SignalKind; 3] {
+    [
+        SignalKind::interrupt(),
+        SignalKind::terminate(),
+        SignalKind::quit(),
+    ]
+}
+
+#[cfg(not(any(unix, windows)))]
+fn watched_signal_kinds() -> [SignalKind; 0] {
+    []
 }
 
 impl Default for ShutdownController {
@@ -175,6 +234,8 @@ impl Clone for ShutdownReceiver {
 
 #[cfg(test)]
 mod tests {
+    use super::super::SignalKind;
+    use super::super::signal::inject_test_signal;
     use super::*;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -384,5 +445,60 @@ mod tests {
         let rx_shutdown = receiver.is_shutting_down();
         crate::assert_with_log!(rx_shutdown, "receiver shutting down", true, rx_shutdown);
         crate::test_complete!("controller_clone");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn listen_for_signals_triggers_shutdown() {
+        init_test("listen_for_signals_triggers_shutdown");
+        let controller = Arc::new(ShutdownController::new());
+        let mut receiver = controller.subscribe();
+
+        controller.listen_for_signals();
+        inject_test_signal(SignalKind::terminate()).expect("test signal injection");
+
+        let mut fut = Box::pin(receiver.wait());
+        for _ in 0..50 {
+            if poll_once(&mut fut).is_ready() {
+                let shutting_down = controller.is_shutting_down();
+                crate::assert_with_log!(
+                    shutting_down,
+                    "controller shutting down via signal listener",
+                    true,
+                    shutting_down
+                );
+                crate::test_complete!("listen_for_signals_triggers_shutdown");
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!("signal listener did not trigger shutdown in time");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn listen_for_signals_is_idempotent() {
+        init_test("listen_for_signals_is_idempotent");
+        let controller = Arc::new(ShutdownController::new());
+
+        controller.listen_for_signals();
+        controller.listen_for_signals();
+
+        let started = controller
+            .state
+            .signal_listeners_started
+            .load(Ordering::Acquire);
+        crate::assert_with_log!(started, "signal listeners installed once", true, started);
+
+        controller.shutdown();
+        let shutting_down = controller.is_shutting_down();
+        crate::assert_with_log!(
+            shutting_down,
+            "manual shutdown still works",
+            true,
+            shutting_down
+        );
+        crate::test_complete!("listen_for_signals_is_idempotent");
     }
 }

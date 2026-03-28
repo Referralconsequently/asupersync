@@ -417,6 +417,24 @@ pub fn signal(kind: SignalKind) -> io::Result<Signal> {
     Signal::new(kind).map_err(Into::into)
 }
 
+#[cfg(test)]
+pub(crate) fn inject_test_signal(kind: SignalKind) -> io::Result<()> {
+    #[cfg(any(unix, windows))]
+    {
+        dispatcher_for(kind)
+            .map(|dispatcher| dispatcher.inject(kind))
+            .map_err(Into::into)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("signal injection is unavailable on this platform/build ({kind})"),
+        ))
+    }
+}
+
 /// Creates a stream for SIGINT (Ctrl+C on Unix).
 ///
 /// # Errors
