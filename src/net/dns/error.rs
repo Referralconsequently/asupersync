@@ -14,6 +14,8 @@ pub enum DnsError {
     Timeout,
     /// I/O error during DNS query.
     Io(String),
+    /// DNS packet framing or parsing error.
+    Protocol(String),
     /// Connection failed.
     Connection(String),
     /// Operation was cancelled.
@@ -32,6 +34,7 @@ impl fmt::Display for DnsError {
             Self::NoRecords(host) => write!(f, "no DNS records found for: {host}"),
             Self::Timeout => write!(f, "DNS operation timed out"),
             Self::Io(msg) => write!(f, "DNS I/O error: {msg}"),
+            Self::Protocol(msg) => write!(f, "DNS protocol error: {msg}"),
             Self::Connection(msg) => write!(f, "connection error: {msg}"),
             Self::Cancelled => write!(f, "DNS operation cancelled"),
             Self::InvalidHost(host) => write!(f, "invalid hostname: {host}"),
@@ -63,10 +66,12 @@ mod tests {
             DnsError::NoRecords("example.com".into()),
             DnsError::Timeout,
             DnsError::Io("broken pipe".into()),
+            DnsError::Protocol("bad label".into()),
             DnsError::Connection("refused".into()),
             DnsError::Cancelled,
             DnsError::InvalidHost("???".into()),
             DnsError::ServerError("SERVFAIL".into()),
+            DnsError::Protocol("truncated packet".into()),
             DnsError::NotImplemented("AAAA"),
         ];
 
@@ -74,10 +79,12 @@ mod tests {
             "no DNS records found for: example.com",
             "DNS operation timed out",
             "DNS I/O error: broken pipe",
+            "DNS protocol error: bad label",
             "connection error: refused",
             "DNS operation cancelled",
             "invalid hostname: ???",
             "DNS server error: SERVFAIL",
+            "DNS protocol error: truncated packet",
             "not implemented: AAAA",
         ];
 
