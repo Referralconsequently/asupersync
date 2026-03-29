@@ -1635,10 +1635,7 @@ function browserExecutionSelectedLane(
   if (!runtimeSupport.supported) {
     return BROWSER_UNSUPPORTED_LANE;
   }
-  return (
-    browserExecutionDirectLaneForHostRole(hostRole) ??
-    BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE
-  );
+  return browserExecutionDirectLaneForHostRole(hostRole) ?? BROWSER_UNSUPPORTED_LANE;
 }
 
 function browserExecutionReproCommand(
@@ -1868,6 +1865,8 @@ function buildBrowserExecutionLadder(
   const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
   const directLaneForHost = browserExecutionDirectLaneForHostRole(hostRole);
   const nominalLane = browserExecutionSelectedLane(hostRole, runtimeSupport);
+  const supportedHostWithoutDirectLane =
+    runtimeSupport.supported && directLaneForHost === null;
   const laneHealth = readBrowserLaneHealthSnapshot(
     directLaneForHost ?? nominalLane,
     healthScopeKey,
@@ -1876,6 +1875,7 @@ function buildBrowserExecutionLadder(
   );
   const healthDemotion =
     runtimeSupport.supported &&
+    !supportedHostWithoutDirectLane &&
     directLaneForHost !== null &&
     laneHealth.status === "demoted";
   const selectedLane = healthDemotion
@@ -1885,6 +1885,8 @@ function buildBrowserExecutionLadder(
   const fallbackLaneId = browserExecutionFallbackLane(selectedLane);
   const reasonCode = healthDemotion
     ? "demote_due_to_lane_health"
+    : supportedHostWithoutDirectLane
+      ? "unsupported_runtime_context"
     : runtimeSupport.supported
       ? "supported"
       : browserExecutionReasonCodeFromRuntimeSupport(runtimeSupport.reason);
@@ -1894,6 +1896,13 @@ function buildBrowserExecutionLadder(
   if (healthDemotion && directLaneForHost !== null) {
     message = browserExecutionHealthDemotionMessage(directLaneForHost, laneHealth);
     guidance = browserExecutionHealthDemotionGuidance(directLaneForHost, laneHealth);
+  } else if (supportedHostWithoutDirectLane) {
+    message =
+      `Browser Edition detected ${hostRole} prerequisites but found no truthful direct-runtime lane mapping, so it fail-closed to ${BROWSER_UNSUPPORTED_LANE}.`;
+    guidance = [
+      "Treat lane.unsupported as the truthful terminal fallback until the host role gains an explicit direct-runtime lane mapping.",
+      "Do not silently remap service-worker or shared-worker hosts onto the browser main-thread lane.",
+    ];
   } else if (runtimeSupport.supported) {
     message =
       selectedLane === BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE

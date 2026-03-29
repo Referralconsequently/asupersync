@@ -215,6 +215,22 @@ try {
     handshakeTimeoutMs: "250",
   });
 
+  const churnPage = await context.newPage();
+  const churnState = await runScenario(churnPage, baseUrl, {
+    clientId: "page-three",
+    scenario: "shared-worker-client-churn",
+    expectedClients: "1",
+    workerName: "shared-worker-reuse-cluster",
+  });
+
+  const recoveryPage = await context.newPage();
+  const recoveryState = await runScenario(recoveryPage, baseUrl, {
+    clientId: "crash-recovery",
+    scenario: "shared-worker-crash-recovery",
+    expectedClients: "1",
+    workerName: "shared-worker-crash-cluster",
+  });
+
   assert(
     reuseOneState.selection?.selectedMode === "shared_worker",
     `expected reuse page one to stay on shared_worker, got ${reuseOneState.selection?.selectedMode ?? "missing"}`,
@@ -322,6 +338,70 @@ try {
     `unexpected crash runtime lane: ${crashState.fallback_runtime?.executionLadder?.selectedLane ?? "missing"}`,
   );
 
+  assert(
+    churnState.selection?.selectedMode === "shared_worker",
+    `expected churn scenario to rejoin on shared_worker, got ${churnState.selection?.selectedMode ?? "missing"}`,
+  );
+  assert(
+    churnState.support?.directExecutionReasonCode
+      === "shared_worker_direct_runtime_not_shipped",
+    `unexpected churn direct execution reason: ${churnState.support?.directExecutionReasonCode ?? "missing"}`,
+  );
+  assert(
+    churnState.attach?.requestedLane === SHARED_WORKER_LANE,
+    `unexpected requested lane for churn scenario: ${churnState.attach?.requestedLane ?? "missing"}`,
+  );
+  assert(
+    churnState.topology_snapshot?.clientCount === 1,
+    `expected churn topology to observe one live client after detach cleanup, got ${churnState.topology_snapshot?.clientCount ?? "missing"}`,
+  );
+  assert(
+    Array.isArray(churnState.topology_snapshot?.clientIds)
+      && churnState.topology_snapshot.clientIds.length === 1
+      && churnState.topology_snapshot.clientIds[0] === "page-three",
+    `unexpected churn client ids: ${JSON.stringify(churnState.topology_snapshot?.clientIds ?? null)}`,
+  );
+  assert(
+    churnState.events?.includes("shared-worker-selection-client-churn"),
+    "churn scenario must emit the client-churn evidence marker",
+  );
+  assert(
+    churnState.close_lifecycle_state === "terminated",
+    `expected churn scenario to close into terminated state, got ${churnState.close_lifecycle_state ?? "missing"}`,
+  );
+
+  assert(
+    recoveryState.selection?.selectedMode === "shared_worker",
+    `expected crash recovery scenario to reconnect on shared_worker, got ${recoveryState.selection?.selectedMode ?? "missing"}`,
+  );
+  assert(
+    recoveryState.support?.directExecutionReasonCode
+      === "shared_worker_direct_runtime_not_shipped",
+    `unexpected crash recovery direct execution reason: ${recoveryState.support?.directExecutionReasonCode ?? "missing"}`,
+  );
+  assert(
+    recoveryState.attach?.requestedLane === SHARED_WORKER_LANE,
+    `unexpected requested lane for crash recovery scenario: ${recoveryState.attach?.requestedLane ?? "missing"}`,
+  );
+  assert(
+    recoveryState.topology_snapshot?.clientCount === 1,
+    `expected crash recovery topology to observe one live client, got ${recoveryState.topology_snapshot?.clientCount ?? "missing"}`,
+  );
+  assert(
+    Array.isArray(recoveryState.topology_snapshot?.clientIds)
+      && recoveryState.topology_snapshot.clientIds.length === 1
+      && recoveryState.topology_snapshot.clientIds[0] === "crash-recovery",
+    `unexpected crash recovery client ids: ${JSON.stringify(recoveryState.topology_snapshot?.clientIds ?? null)}`,
+  );
+  assert(
+    recoveryState.events?.includes("shared-worker-selection-crash-recovery"),
+    "crash recovery scenario must emit the crash-recovery evidence marker",
+  );
+  assert(
+    recoveryState.close_lifecycle_state === "terminated",
+    `expected crash recovery scenario to close into terminated state, got ${recoveryState.close_lifecycle_state ?? "missing"}`,
+  );
+
   const scenarioInventory = [
     {
       scenario_id: "shared_worker_attach_baseline",
@@ -353,6 +433,18 @@ try {
       expected_outcome: "browser-side clients close explicitly and report terminated lifecycle state",
       artifact_keys: ["browser_run"],
     },
+    {
+      scenario_id: "shared_worker_client_churn_rejoin",
+      failure_family: "client_churn",
+      expected_outcome: "a fresh same-origin client reattaches cleanly after earlier clients detach",
+      artifact_keys: ["browser_run"],
+    },
+    {
+      scenario_id: "shared_worker_crash_recovery_reconnect",
+      failure_family: "recovery",
+      expected_outcome: "after a crash-before-handshake downgrade, a later attach can start a fresh coordinator on the same worker name",
+      artifact_keys: ["browser_run"],
+    },
   ];
 
   result = {
@@ -380,10 +472,24 @@ try {
     crash_fallback_lane_id: crashState.selection.fallbackLaneId,
     crash_direct_execution_reason_code:
       crashState.support.directExecutionReasonCode,
+    churn_mode: churnState.selection.selectedMode,
+    churn_worker_name: churnState.topology_snapshot.workerName,
+    churn_client_ids: churnState.topology_snapshot.clientIds,
+    churn_attach_count: churnState.topology_snapshot.attachCount,
+    churn_direct_execution_reason_code:
+      churnState.support.directExecutionReasonCode,
+    recovery_mode: recoveryState.selection.selectedMode,
+    recovery_worker_name: recoveryState.topology_snapshot.workerName,
+    recovery_client_ids: recoveryState.topology_snapshot.clientIds,
+    recovery_attach_count: recoveryState.topology_snapshot.attachCount,
+    recovery_direct_execution_reason_code:
+      recoveryState.support.directExecutionReasonCode,
     close_lifecycle_states: [
       reuseOneState.close_lifecycle_state,
       reuseTwoState.close_lifecycle_state,
     ],
+    churn_close_lifecycle_state: churnState.close_lifecycle_state,
+    recovery_close_lifecycle_state: recoveryState.close_lifecycle_state,
     scenario_inventory: scenarioInventory,
   };
 } catch (error) {

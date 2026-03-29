@@ -2,6 +2,7 @@
 
 Fixture bead:
 - `asupersync-n6kwt.6.2` for the maintained SharedWorker bootstrap/reuse/fallback lane
+- `asupersync-n6kwt.6.3` for the bounded browser-run proof of churn and crash-recovery semantics
 
 Purpose:
 - validate the real-browser SharedWorker coordinator helpers against actual same-origin multi-page reuse
@@ -57,6 +58,13 @@ fixture as a smoke test. The current inventory covers:
 - `shared_worker_client_detach_cleanup`
   proves the fixture closes client handles explicitly after the browser-run
   proof instead of leaving ports attached indefinitely
+- `shared_worker_client_churn_rejoin`
+  proves a fresh same-origin client can reattach cleanly after earlier clients
+  detach, without widening the direct-runtime claim
+- `shared_worker_crash_recovery_reconnect`
+  proves that after a crash-before-handshake downgrade, a later attach on the
+  same worker name can start a fresh coordinator and return to the bounded
+  SharedWorker lane
 
 ## Deterministic Validation
 
@@ -73,5 +81,6 @@ target/e2e-results/shared_worker_consumer/
 ```
 
 The canonical validator writes both `summary.json` and `browser-run.json` so
-future regressions can inspect the browser-observed attach, reuse, mismatch,
-and crash-fallback behavior directly.
+future regressions can inspect the browser-observed attach, reuse, client
+churn rejoin, mismatch, crash fallback, and crash-recovery reconnect behavior
+directly.

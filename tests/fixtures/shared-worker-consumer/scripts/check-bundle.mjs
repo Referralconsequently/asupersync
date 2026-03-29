@@ -43,6 +43,8 @@ let sawBaselineMarker = false;
 let sawReuseMarker = false;
 let sawProtocolMismatchMarker = false;
 let sawCrashFallbackMarker = false;
+let sawClientChurnMarker = false;
+let sawCrashRecoveryMarker = false;
 let sawAttachMarker = false;
 let sawTopologyMarker = false;
 let sawCoordinatorProtocolMismatchMarker = false;
@@ -58,6 +60,12 @@ for (const assetPath of jsAssets) {
   );
   sawCrashFallbackMarker ||= content.includes(
     "shared-worker-selection-crash-fallback",
+  );
+  sawClientChurnMarker ||= content.includes(
+    "shared-worker-selection-client-churn",
+  );
+  sawCrashRecoveryMarker ||= content.includes(
+    "shared-worker-selection-crash-recovery",
   );
   sawAttachMarker ||= content.includes("shared-worker-coordinator-attach");
   sawTopologyMarker ||= content.includes(
@@ -89,6 +97,18 @@ if (!sawProtocolMismatchMarker) {
 if (!sawCrashFallbackMarker) {
   throw new Error(
     "Built bundle must retain the shared-worker-selection-crash-fallback marker",
+  );
+}
+
+if (!sawClientChurnMarker) {
+  throw new Error(
+    "Built bundle must retain the shared-worker-selection-client-churn marker",
+  );
+}
+
+if (!sawCrashRecoveryMarker) {
+  throw new Error(
+    "Built bundle must retain the shared-worker-selection-crash-recovery marker",
   );
 }
 
@@ -129,6 +149,8 @@ console.log(
       sawReuseMarker,
       sawProtocolMismatchMarker,
       sawCrashFallbackMarker,
+      sawClientChurnMarker,
+      sawCrashRecoveryMarker,
       sawAttachMarker,
       sawTopologyMarker,
       sawCoordinatorProtocolMismatchMarker,

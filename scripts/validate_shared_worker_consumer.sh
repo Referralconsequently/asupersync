@@ -119,6 +119,8 @@ markers = {
     "reuse_marker": False,
     "protocol_mismatch_marker": False,
     "crash_fallback_marker": False,
+    "client_churn_marker": False,
+    "crash_recovery_marker": False,
     "attach_marker": False,
     "topology_marker": False,
     "coordinator_protocol_mismatch_marker": False,
@@ -135,6 +137,12 @@ for asset in js_assets:
     )
     markers["crash_fallback_marker"] |= (
         "shared-worker-selection-crash-fallback" in content
+    )
+    markers["client_churn_marker"] |= (
+        "shared-worker-selection-client-churn" in content
+    )
+    markers["crash_recovery_marker"] |= (
+        "shared-worker-selection-crash-recovery" in content
     )
     markers["attach_marker"] |= "shared-worker-coordinator-attach" in content
     markers["topology_marker"] |= (
@@ -178,7 +186,19 @@ summary = {
         "crash_reason": browser_run["crash_reason"],
         "crash_fallback_lane_id": browser_run["crash_fallback_lane_id"],
         "crash_direct_execution_reason_code": browser_run["crash_direct_execution_reason_code"],
+        "churn_mode": browser_run["churn_mode"],
+        "churn_worker_name": browser_run["churn_worker_name"],
+        "churn_client_ids": browser_run["churn_client_ids"],
+        "churn_attach_count": browser_run["churn_attach_count"],
+        "churn_direct_execution_reason_code": browser_run["churn_direct_execution_reason_code"],
+        "recovery_mode": browser_run["recovery_mode"],
+        "recovery_worker_name": browser_run["recovery_worker_name"],
+        "recovery_client_ids": browser_run["recovery_client_ids"],
+        "recovery_attach_count": browser_run["recovery_attach_count"],
+        "recovery_direct_execution_reason_code": browser_run["recovery_direct_execution_reason_code"],
         "close_lifecycle_states": browser_run["close_lifecycle_states"],
+        "churn_close_lifecycle_state": browser_run["churn_close_lifecycle_state"],
+        "recovery_close_lifecycle_state": browser_run["recovery_close_lifecycle_state"],
         **markers,
     },
     "scenario_inventory": browser_run["scenario_inventory"],

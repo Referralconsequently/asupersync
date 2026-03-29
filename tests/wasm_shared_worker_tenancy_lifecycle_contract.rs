@@ -1,5 +1,5 @@
-//! Contract checks for the SharedWorker tenancy/lifecycle/downgrade policy
-//! (`asupersync-n6kwt.6.1`).
+//! Contract checks for the SharedWorker tenancy/lifecycle/downgrade policy and
+//! bounded browser-run proof surface (`asupersync-n6kwt.6.3`).
 
 use std::path::{Path, PathBuf};
 
@@ -239,10 +239,34 @@ fn shared_worker_fixture_validator_preserves_fail_closed_direct_runtime_truth() 
         "reuse_page_two_direct_execution_reason_code",
         "mismatch_direct_execution_reason_code",
         "crash_direct_execution_reason_code",
+        "churn_direct_execution_reason_code",
+        "recovery_direct_execution_reason_code",
+        "shared_worker_client_churn_rejoin",
+        "shared_worker_crash_recovery_reconnect",
     ] {
         assert!(
             browser_check.contains(marker) || validator.contains(marker),
             "shared-worker fixture validation surface missing marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn shared_worker_fixture_docs_and_contract_doc_pin_churn_and_recovery_proof() {
+    let fixture_readme = read_file("tests/fixtures/shared-worker-consumer/README.md");
+    let contract_doc = read_file(DOC_PATH);
+
+    for marker in [
+        "asupersync-n6kwt.6.3",
+        "shared_worker_client_churn_rejoin",
+        "shared_worker_crash_recovery_reconnect",
+        "scripts/validate_shared_worker_consumer.sh",
+        "client churn",
+        "crash-recovery reconnect",
+    ] {
+        assert!(
+            fixture_readme.contains(marker) || contract_doc.contains(marker),
+            "shared-worker proof docs missing marker: {marker}"
         );
     }
 }

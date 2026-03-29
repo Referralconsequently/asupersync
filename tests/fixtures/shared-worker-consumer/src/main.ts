@@ -19,6 +19,10 @@ const SHARED_WORKER_SELECTION_PROTOCOL_MISMATCH_MARKER =
   "shared-worker-selection-protocol-mismatch";
 const SHARED_WORKER_SELECTION_CRASH_FALLBACK_MARKER =
   "shared-worker-selection-crash-fallback";
+const SHARED_WORKER_SELECTION_CLIENT_CHURN_MARKER =
+  "shared-worker-selection-client-churn";
+const SHARED_WORKER_SELECTION_CRASH_RECOVERY_MARKER =
+  "shared-worker-selection-crash-recovery";
 
 type FixtureTopologySnapshot = {
   marker: string;
@@ -402,6 +406,12 @@ async function run(): Promise<void> {
   state.topology_snapshot = topologySnapshot;
   if (expectedClients > 1) {
     state.events.push(SHARED_WORKER_SELECTION_REUSE_MARKER);
+  }
+  if (pageScenario === "shared-worker-client-churn") {
+    state.events.push(SHARED_WORKER_SELECTION_CLIENT_CHURN_MARKER);
+  }
+  if (pageScenario === "shared-worker-crash-recovery") {
+    state.events.push(SHARED_WORKER_SELECTION_CRASH_RECOVERY_MARKER);
   }
   state.phase = "shared_worker_complete";
   render();

@@ -1263,6 +1263,57 @@ fn browser_src_index_pins_candidate_reason_precedence_for_health_vs_prerequisite
 }
 
 #[test]
+fn browser_src_index_fail_closes_supported_hosts_without_a_direct_lane_mapping() {
+    let content = read_source("packages/browser/src/index.ts");
+
+    let selected_lane = slice_between(
+        &content,
+        "function browserExecutionSelectedLane(",
+        "\n\nfunction browserExecutionReproCommand(",
+    );
+    assert_markers_in_order(
+        selected_lane,
+        &[
+            "if (!runtimeSupport.supported) {",
+            "return BROWSER_UNSUPPORTED_LANE;",
+            "}",
+            "return browserExecutionDirectLaneForHostRole(hostRole) ?? BROWSER_UNSUPPORTED_LANE;",
+        ],
+        "browserExecutionSelectedLane must fail-close instead of inventing a browser main-thread lane for supported hosts without a direct-runtime mapping",
+    );
+
+    let ladder = slice_between(
+        &content,
+        "function buildBrowserExecutionLadder(",
+        "\nexport function detectBrowserExecutionLadder(",
+    );
+    assert_markers_in_order(
+        ladder,
+        &[
+            "const nominalLane = browserExecutionSelectedLane(hostRole, runtimeSupport);",
+            "const supportedHostWithoutDirectLane =",
+            "runtimeSupport.supported && directLaneForHost === null;",
+            "const healthDemotion =",
+            "!supportedHostWithoutDirectLane &&",
+            "const reasonCode = healthDemotion",
+            "? \"demote_due_to_lane_health\"",
+            ": supportedHostWithoutDirectLane",
+            "? \"unsupported_runtime_context\"",
+            ": runtimeSupport.supported",
+            "? \"supported\"",
+            ": browserExecutionReasonCodeFromRuntimeSupport(runtimeSupport.reason);",
+            "} else if (supportedHostWithoutDirectLane) {",
+            "message =",
+            "found no truthful direct-runtime lane mapping",
+            "guidance = [",
+            "\"Treat lane.unsupported as the truthful terminal fallback until the host role gains an explicit direct-runtime lane mapping.\",",
+            "\"Do not silently remap service-worker or shared-worker hosts onto the browser main-thread lane.\",",
+        ],
+        "buildBrowserExecutionLadder must suppress misleading supported-main-thread fallbacks when a supported host role has no mapped direct-runtime lane",
+    );
+}
+
+#[test]
 fn next_src_index_defines_client_bootstrap_adapter_surface() {
     let content = read_source("packages/next/src/index.ts");
     for marker in [

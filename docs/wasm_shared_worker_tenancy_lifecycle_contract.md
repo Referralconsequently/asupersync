@@ -2,6 +2,7 @@
 
 Contract ID: `wasm-shared-worker-tenancy-lifecycle-v1`  
 Bead: `asupersync-n6kwt.6.1`  
+Validation bead: `asupersync-n6kwt.6.3`  
 Depends on: `asupersync-2jhnk.6.1`
 
 ## Purpose
@@ -204,6 +205,23 @@ Contract validation:
 ```bash
 rch exec -- cargo test --test wasm_shared_worker_tenancy_lifecycle_contract -- --nocapture
 ```
+
+Browser-run proof / artifact bundle:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh
+```
+
+The maintained browser-run validator leaves `summary.json` and
+`browser-run.json` under `target/e2e-results/shared_worker_consumer/<timestamp>/`
+and currently proves:
+
+- same-origin multi-page reuse on one coordinator name,
+- clean rejoin after client churn and explicit detach cleanup,
+- protocol-version mismatch fallback,
+- crash-before-handshake fallback, and
+- reconnect after that crash path by starting a fresh coordinator on the same
+  worker name.
 
 Related host-ladder validation:
 
