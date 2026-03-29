@@ -1294,10 +1294,14 @@ impl ScramAuth {
         let salt = salt.ok_or_else(|| PgError::AuthenticationFailed("missing salt".to_string()))?;
         let iterations = iterations
             .ok_or_else(|| PgError::AuthenticationFailed("missing iterations".to_string()))?;
-        if iterations == 0 {
-            return Err(PgError::AuthenticationFailed(
-                "invalid iterations".to_string(),
-            ));
+        // Reject unreasonable iteration counts to prevent DoS from a malicious
+        // server. Real PostgreSQL uses 4096; anything above 600,000 is suspicious
+        // and would cause multi-second PBKDF2 computation.
+        const MAX_PBKDF2_ITERATIONS: u32 = 600_000;
+        if iterations == 0 || iterations > MAX_PBKDF2_ITERATIONS {
+            return Err(PgError::AuthenticationFailed(format!(
+                "SCRAM iteration count {iterations} outside safe range 1..={MAX_PBKDF2_ITERATIONS}"
+            )));
         }
 
         // Verify server nonce starts with our client nonce
@@ -3031,7 +3035,10 @@ impl PgConnection {
         Ok(())
     }
 
-    /// Write data to the stream using async I/O.
+    /// Write data to the stream using async I/O and flush.
+    ///
+    /// The flush is necessary for TLS streams which may buffer outgoing
+    /// data until explicitly flushed.
     async fn write_all(&mut self, data: &[u8]) -> Result<(), PgError> {
         let mut pos = 0;
         while pos < data.len() {
@@ -3049,6 +3056,9 @@ impl PgConnection {
             }
             pos += written;
         }
+        std::future::poll_fn(|cx| Pin::new(&mut self.inner.stream).poll_flush(cx))
+            .await
+            .map_err(PgError::Io)?;
         Ok(())
     }
 

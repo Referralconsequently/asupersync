@@ -1090,8 +1090,20 @@ impl Drop for SqliteTransaction<'_> {
         if !self.finished {
             // Asynchronously enqueue a rollback via an atomic flag so we don't
             // block the async executor thread waiting for the connection lock.
-            // The next operation spawned on the blocking pool will process the rollback.
+            // We also explicitly spawn a task to drain the rollback immediately if
+            // the connection is otherwise idle, preventing lock starvation for the database.
             self.conn.needs_rollback.store(true, Ordering::Release);
+
+            let inner = Arc::clone(&self.conn.inner);
+            let needs_rollback = Arc::clone(&self.conn.needs_rollback);
+            self.conn.pool.spawn(move || {
+                let guard = inner.lock();
+                if needs_rollback.swap(false, Ordering::AcqRel) {
+                    if let Ok(conn) = guard.get() {
+                        let _ = conn.execute("ROLLBACK", []);
+                    }
+                }
+            });
         }
     }
 }
