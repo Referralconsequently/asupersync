@@ -12,13 +12,13 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct LogCollector {
     inner: Arc<Mutex<CollectorInner>>,
-    min_level: LogLevel,
 }
 
 #[derive(Debug)]
 struct CollectorInner {
     entries: VecDeque<LogEntry>,
     capacity: usize,
+    min_level: LogLevel,
 }
 
 impl LogCollector {
@@ -29,25 +29,24 @@ impl LogCollector {
             inner: Arc::new(Mutex::new(CollectorInner {
                 entries: VecDeque::with_capacity(capacity),
                 capacity,
+                min_level: LogLevel::Info,
             })),
-            min_level: LogLevel::Info,
         }
     }
 
     /// Sets the minimum log level to record.
     #[must_use]
-    pub fn with_min_level(mut self, level: LogLevel) -> Self {
-        self.min_level = level;
+    pub fn with_min_level(self, level: LogLevel) -> Self {
+        self.inner.lock().min_level = level;
         self
     }
 
     /// Logs an entry if it meets the minimum level.
     pub fn log(&self, entry: LogEntry) {
-        if !entry.level().is_enabled_at(self.min_level) {
+        let mut inner = self.inner.lock();
+        if !entry.level().is_enabled_at(inner.min_level) {
             return;
         }
-
-        let mut inner = self.inner.lock();
         if inner.capacity == 0 {
             return;
         }
@@ -100,7 +99,7 @@ impl LogCollector {
     /// Returns the configured minimum level.
     #[must_use]
     pub fn min_level(&self) -> LogLevel {
-        self.min_level
+        self.inner.lock().min_level
     }
 }
 
@@ -186,5 +185,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(collector.len(), 1);
+    }
+
+    #[test]
+    fn test_collector_clone_shares_min_level_configuration() {
+        let collector = LogCollector::new(10).with_min_level(LogLevel::Error);
+        let clone = collector.clone().with_min_level(LogLevel::Warn);
+
+        assert_eq!(collector.min_level(), LogLevel::Warn);
+        collector.log(LogEntry::warn("captured"));
+
+        assert_eq!(clone.len(), 1);
+        assert_eq!(clone.peek()[0].message(), "captured");
     }
 }

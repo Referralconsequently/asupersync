@@ -521,11 +521,28 @@ impl AnalyzerPluginRegistry {
                         continue;
                     }
 
-                    output.findings.sort_unstable_by(|left, right| {
-                        left.finding_id
-                            .cmp(&right.finding_id)
-                            .then(left.severity.cmp(&right.severity))
-                    });
+                    if let Err(err) =
+                        normalize_plugin_findings(&descriptor.plugin_id, &mut output.findings)
+                    {
+                        lifecycle_events.push(PluginLifecycleEvent {
+                            plugin_id: descriptor.plugin_id.clone(),
+                            phase: PluginLifecyclePhase::ContractViolation,
+                            schema_decision: Some(negotiation.decision),
+                            run_id: run_id.clone(),
+                            correlation_id: correlation_id.clone(),
+                            message: err.message.clone(),
+                        });
+                        executions.push(PluginExecutionRecord {
+                            plugin_id: descriptor.plugin_id,
+                            plugin_version: descriptor.plugin_version,
+                            state: PluginExecutionState::Failed,
+                            negotiated_input_schema: Some(selected_schema),
+                            output_schema: Some(output.schema_version),
+                            finding_count: 0,
+                            error_code: Some(err.code),
+                        });
+                        continue;
+                    }
 
                     lifecycle_events.push(PluginLifecycleEvent {
                         plugin_id: descriptor.plugin_id.clone(),
@@ -600,6 +617,13 @@ impl AnalyzerPluginRegistry {
             left.plugin_id
                 .cmp(&right.plugin_id)
                 .then(left.finding.finding_id.cmp(&right.finding.finding_id))
+                .then(left.finding.severity.cmp(&right.finding.severity))
+                .then(left.finding.summary.cmp(&right.finding.summary))
+                .then(
+                    left.finding
+                        .confidence_bps
+                        .cmp(&right.finding.confidence_bps),
+                )
         });
 
         AnalyzerPluginPackReport {
@@ -756,6 +780,33 @@ fn missing_capabilities(
         .copied()
         .filter(|required_capability| !granted.contains(required_capability))
         .collect()
+}
+
+fn normalize_plugin_findings(
+    plugin_id: &str,
+    findings: &mut [AnalyzerFinding],
+) -> Result<(), AnalyzerPluginRunError> {
+    findings.sort_unstable_by(|left, right| {
+        left.finding_id
+            .cmp(&right.finding_id)
+            .then(left.severity.cmp(&right.severity))
+            .then(left.summary.cmp(&right.summary))
+            .then(left.confidence_bps.cmp(&right.confidence_bps))
+    });
+
+    for pair in findings.windows(2) {
+        if pair[0].finding_id == pair[1].finding_id {
+            return Err(AnalyzerPluginRunError::new(
+                "duplicate_finding_id",
+                format!(
+                    "plugin `{plugin_id}` emitted duplicate finding_id `{}`",
+                    pair[0].finding_id
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn is_slug_like(value: &str) -> bool {
@@ -1090,5 +1141,57 @@ mod tests {
         );
         assert!(report.aggregated_findings.is_empty());
         crate::test_complete!("run_pack_skips_missing_capabilities_and_incompatible_schema");
+    }
+
+    #[test]
+    fn run_pack_rejects_duplicate_finding_ids_as_contract_violation() {
+        init_test("run_pack_rejects_duplicate_finding_ids_as_contract_violation");
+        let mut registry = AnalyzerPluginRegistry::new();
+
+        registry
+            .register(Arc::new(TestPlugin {
+                descriptor: descriptor(
+                    "dup-plugin",
+                    vec![AnalyzerSchemaVersion::new(1, 0)],
+                    vec![AnalyzerCapability::WorkspaceRead],
+                ),
+                mode: TestMode::Success(vec![
+                    AnalyzerFinding {
+                        finding_id: "dup-001".to_string(),
+                        severity: AnalyzerSeverity::Warn,
+                        summary: "first duplicate".to_string(),
+                        confidence_bps: 6100,
+                    },
+                    AnalyzerFinding {
+                        finding_id: "dup-001".to_string(),
+                        severity: AnalyzerSeverity::Error,
+                        summary: "second duplicate".to_string(),
+                        confidence_bps: 9200,
+                    },
+                ]),
+            }))
+            .expect("register dup-plugin");
+
+        let report = run_analyzer_plugin_pack_smoke(
+            &registry,
+            &request_with_caps(vec![AnalyzerCapability::WorkspaceRead]),
+        );
+        assert_eq!(report.executions.len(), 1);
+        assert_eq!(report.executions[0].plugin_id, "dup-plugin");
+        assert_eq!(report.executions[0].state, PluginExecutionState::Failed);
+        assert_eq!(
+            report.executions[0].error_code.as_deref(),
+            Some("duplicate_finding_id")
+        );
+        assert!(report.aggregated_findings.is_empty());
+        assert!(
+            report.lifecycle_events.iter().any(|event| {
+                event.plugin_id == "dup-plugin"
+                    && event.phase == PluginLifecyclePhase::ContractViolation
+                    && event.message.contains("duplicate finding_id")
+            }),
+            "duplicate finding ids should surface as a contract violation"
+        );
+        crate::test_complete!("run_pack_rejects_duplicate_finding_ids_as_contract_violation");
     }
 }

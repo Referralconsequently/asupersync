@@ -11,6 +11,7 @@ use core::fmt::Write;
 
 /// Maximum number of fields in a log entry (to bound memory).
 const MAX_FIELDS: usize = 16;
+const FIELD_NAMESPACE_PREFIX: &str = "field.";
 const RESERVED_JSON_FIELDS: [&str; 4] = ["level", "timestamp_ns", "message", "target"];
 
 /// A structured log entry with message, level, and contextual fields.
@@ -214,10 +215,7 @@ impl LogEntry {
 
         for (k, v) in &self.fields {
             s.push_str(",\"");
-            if RESERVED_JSON_FIELDS.contains(&k.as_str()) {
-                s.push_str("field.");
-            }
-            push_json_escaped(&mut s, k);
+            push_json_escaped(&mut s, &json_field_key(k));
             s.push_str("\":\"");
             push_json_escaped(&mut s, v);
             s.push('"');
@@ -259,6 +257,29 @@ impl LogEntry {
 
         self
     }
+}
+
+fn json_field_key(key: &str) -> String {
+    if json_field_key_needs_namespace(key) {
+        format!("{FIELD_NAMESPACE_PREFIX}{key}")
+    } else {
+        key.to_owned()
+    }
+}
+
+fn json_field_key_needs_namespace(key: &str) -> bool {
+    if RESERVED_JSON_FIELDS.contains(&key) {
+        return true;
+    }
+
+    let mut suffix = key;
+    let mut had_namespace = false;
+    while let Some(rest) = suffix.strip_prefix(FIELD_NAMESPACE_PREFIX) {
+        suffix = rest;
+        had_namespace = true;
+    }
+
+    had_namespace && RESERVED_JSON_FIELDS.contains(&suffix)
 }
 
 fn push_json_escaped(out: &mut String, value: &str) {
@@ -418,6 +439,24 @@ mod tests {
         assert!(json.contains("\"field.level\":\"field level\""));
         assert!(json.contains("\"field.target\":\"field target\""));
         assert!(json.contains("\"field.timestamp_ns\":\"field timestamp\""));
+    }
+
+    #[test]
+    fn json_reserved_alias_family_remains_collision_free() {
+        let entry = LogEntry::info("real message")
+            .with_field("message", "field message")
+            .with_field("field.message", "literal alias")
+            .with_field("field.field.message", "double alias");
+
+        let json = entry.format_json();
+
+        assert_eq!(json.matches("\"message\":").count(), 1);
+        assert_eq!(json.matches("\"field.message\":").count(), 1);
+        assert_eq!(json.matches("\"field.field.message\":").count(), 1);
+        assert_eq!(json.matches("\"field.field.field.message\":").count(), 1);
+        assert!(json.contains("\"field.message\":\"field message\""));
+        assert!(json.contains("\"field.field.message\":\"literal alias\""));
+        assert!(json.contains("\"field.field.field.message\":\"double alias\""));
     }
 
     #[test]
