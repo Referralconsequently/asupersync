@@ -658,6 +658,35 @@ impl WalStorageBackend {
         }
         Ok(entry_len)
     }
+
+    fn garbage_collect_segments(&mut self, through_seq: u64) -> Result<(), StreamError> {
+        let mut obsolete_prefix_len = 0usize;
+        while self.segments.len().saturating_sub(obsolete_prefix_len) > 1 {
+            let segment = &self.segments[obsolete_prefix_len];
+            let obsolete = segment
+                .last_seq
+                .is_none_or(|last_seq| last_seq <= through_seq);
+            if !obsolete {
+                break;
+            }
+            obsolete_prefix_len = obsolete_prefix_len.saturating_add(1);
+        }
+
+        if obsolete_prefix_len == 0 {
+            return Ok(());
+        }
+
+        let obsolete = self
+            .segments
+            .drain(0..obsolete_prefix_len)
+            .collect::<Vec<_>>();
+        for segment in obsolete {
+            fs::remove_file(&segment.path)
+                .map_err(|error| StreamError::wal_io("remove_file", &segment.path, &error))?;
+        }
+
+        Ok(())
+    }
 }
 
 impl StorageBackend for WalStorageBackend {
@@ -715,6 +744,7 @@ impl StorageBackend for WalStorageBackend {
         if let Some(segment) = self.segments.last_mut() {
             segment.note_control_entry(bytes);
         }
+        self.garbage_collect_segments(through_seq)?;
         Ok(removed)
     }
 
@@ -2039,7 +2069,12 @@ mod tests {
         assert_eq!(backend.segment_count(), 3);
         let removed = backend.truncate_through(2).expect("truncate through");
         assert_eq!(removed.len(), 2);
-        assert_eq!(backend.segment_count(), 4);
+        assert_eq!(backend.segment_count(), 2);
+        let segment_files = fs::read_dir(&dir)
+            .expect("read wal dir")
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(segment_files, 2);
 
         let reopened = WalStorageBackend::open(config).expect("reopen wal");
         assert!(reopened.get(1).expect("get first").is_none());

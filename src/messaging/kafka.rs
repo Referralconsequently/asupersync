@@ -779,10 +779,20 @@ pub struct RecordMetadata {
     pub timestamp: Option<i64>,
 }
 
+/// Tracks whether the producer is truly idle or still finalizing a broker-side
+/// transaction outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TransactionPhase {
+    #[default]
+    Idle,
+    Active,
+    Finalizing,
+    NeedsAbortRecovery,
+}
+
 #[derive(Debug, Default)]
 struct TransactionalProducerState {
-    active: bool,
-    needs_abort: bool,
+    phase: TransactionPhase,
     #[cfg(feature = "kafka")]
     initialized: bool,
     #[cfg(not(feature = "kafka"))]
@@ -1081,8 +1091,7 @@ impl fmt::Debug for TransactionalProducer {
         let state = self.state.lock();
         f.debug_struct("TransactionalProducer")
             .field("config", &self.config)
-            .field("active", &state.active)
-            .field("needs_abort", &state.needs_abort)
+            .field("phase", &state.phase)
             .finish_non_exhaustive()
     }
 }
@@ -1115,20 +1124,8 @@ impl TransactionalProducer {
     pub async fn begin_transaction(&self, cx: &Cx) -> Result<Transaction<'_>, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.recover_abandoned_transaction(cx).await?;
-        self.ensure_ready_to_begin()?;
         self.ensure_initialized(cx).await?;
-
-        {
-            let mut state = self.state.lock();
-            if state.active {
-                return Err(KafkaError::Transaction(
-                    "transaction already active".to_string(),
-                ));
-            }
-            state.active = true;
-            #[cfg(not(feature = "kafka"))]
-            state.staged_records.clear();
-        }
+        self.activate_transaction()?;
 
         #[cfg(feature = "kafka")]
         if let Err(err) = run_kafka_transaction_op(cx, {
@@ -1137,7 +1134,7 @@ impl TransactionalProducer {
         })
         .await
         {
-            self.mark_transaction_finished(false);
+            self.mark_transaction_idle();
             return Err(err);
         }
 
@@ -1159,53 +1156,75 @@ impl TransactionalProducer {
         &self.config
     }
 
-    fn ensure_ready_to_begin(&self) -> Result<(), KafkaError> {
-        let state = self.state.lock();
-        if state.active {
-            return Err(KafkaError::Transaction(
+    fn activate_transaction(&self) -> Result<(), KafkaError> {
+        let mut state = self.state.lock();
+        match state.phase {
+            TransactionPhase::Idle => {
+                state.phase = TransactionPhase::Active;
+                #[cfg(not(feature = "kafka"))]
+                state.staged_records.clear();
+                drop(state);
+                Ok(())
+            }
+            TransactionPhase::Active => Err(KafkaError::Transaction(
                 "transaction already active".to_string(),
-            ));
-        }
-        if state.needs_abort {
-            return Err(KafkaError::Transaction(
+            )),
+            TransactionPhase::Finalizing => Err(KafkaError::Transaction(
+                "transaction finalization in progress".to_string(),
+            )),
+            TransactionPhase::NeedsAbortRecovery => Err(KafkaError::Transaction(
                 "previous transaction requires abort recovery".to_string(),
-            ));
+            )),
         }
-        drop(state);
-        Ok(())
     }
 
     fn ensure_active_transaction(&self) -> Result<(), KafkaError> {
         let state = self.state.lock();
-        if state.needs_abort {
-            return Err(KafkaError::Transaction(
+        match state.phase {
+            TransactionPhase::Active => Ok(()),
+            TransactionPhase::Idle => {
+                Err(KafkaError::Transaction("no active transaction".to_string()))
+            }
+            TransactionPhase::Finalizing => Err(KafkaError::Transaction(
+                "transaction finalization in progress".to_string(),
+            )),
+            TransactionPhase::NeedsAbortRecovery => Err(KafkaError::Transaction(
                 "transaction is poisoned and must be aborted before reuse".to_string(),
-            ));
+            )),
         }
-        if !state.active {
-            return Err(KafkaError::Transaction("no active transaction".to_string()));
-        }
-        drop(state);
-        Ok(())
     }
 
-    fn mark_transaction_finished(&self, needs_abort: bool) {
+    fn mark_transaction_finalizing(&self) {
         let mut state = self.state.lock();
-        state.active = false;
-        state.needs_abort = needs_abort;
+        if state.phase == TransactionPhase::Active {
+            state.phase = TransactionPhase::Finalizing;
+        }
+    }
+
+    fn mark_transaction_idle(&self) {
+        let mut state = self.state.lock();
+        state.phase = TransactionPhase::Idle;
+        #[cfg(not(feature = "kafka"))]
+        state.staged_records.clear();
+    }
+
+    fn mark_transaction_needs_abort(&self) {
+        let mut state = self.state.lock();
+        state.phase = TransactionPhase::NeedsAbortRecovery;
         #[cfg(not(feature = "kafka"))]
         state.staged_records.clear();
     }
 
     fn mark_transaction_dropped(&self) {
         let mut state = self.state.lock();
-        if !state.active {
-            return;
+        if matches!(
+            state.phase,
+            TransactionPhase::Active | TransactionPhase::Finalizing
+        ) {
+            state.phase = TransactionPhase::NeedsAbortRecovery;
+            #[cfg(not(feature = "kafka"))]
+            state.staged_records.clear();
         }
-        state.active = false;
-        state.needs_abort = true;
-        #[cfg(not(feature = "kafka"))]
-        state.staged_records.clear();
     }
 
     #[cfg(feature = "kafka")]
@@ -1233,7 +1252,7 @@ impl TransactionalProducer {
 
     #[allow(clippy::unused_async)]
     async fn recover_abandoned_transaction(&self, cx: &Cx) -> Result<(), KafkaError> {
-        if !self.state.lock().needs_abort {
+        if self.state.lock().phase != TransactionPhase::NeedsAbortRecovery {
             return Ok(());
         }
 
@@ -1248,12 +1267,7 @@ impl TransactionalProducer {
         })
         .await?;
 
-        let mut state = self.state.lock();
-        state.needs_abort = false;
-        state.active = false;
-        #[cfg(not(feature = "kafka"))]
-        state.staged_records.clear();
-        drop(state);
+        self.mark_transaction_idle();
         Ok(())
     }
 }
@@ -1310,7 +1324,7 @@ impl Transaction<'_> {
         #[cfg(not(feature = "kafka"))]
         {
             let mut state = self.producer.state.lock();
-            if !state.active || state.needs_abort {
+            if state.phase != TransactionPhase::Active {
                 return Err(KafkaError::Transaction(
                     "transaction is not available for sends".to_string(),
                 ));
@@ -1338,7 +1352,7 @@ impl Transaction<'_> {
 
         #[cfg(feature = "kafka")]
         {
-            self.producer.mark_transaction_finished(false);
+            self.producer.mark_transaction_finalizing();
             let result = run_kafka_transaction_op(cx, {
                 let producer = self.producer.producer.clone();
                 let timeout = self.producer.config.transaction_timeout;
@@ -1347,22 +1361,22 @@ impl Transaction<'_> {
             .await;
             self.finished = true;
             if let Err(err) = result {
-                self.producer.mark_transaction_finished(true);
+                self.producer.mark_transaction_needs_abort();
                 return Err(err);
             }
+            self.producer.mark_transaction_idle();
         }
 
         #[cfg(not(feature = "kafka"))]
         {
             let staged = {
                 let mut state = self.producer.state.lock();
-                if !state.active || state.needs_abort {
+                if state.phase != TransactionPhase::Active {
                     return Err(KafkaError::Transaction(
                         "transaction is not active".to_string(),
                     ));
                 }
-                state.active = false;
-                state.needs_abort = false;
+                state.phase = TransactionPhase::Idle;
                 std::mem::take(&mut state.staged_records)
             };
 
@@ -1385,7 +1399,7 @@ impl Transaction<'_> {
 
         #[cfg(feature = "kafka")]
         {
-            self.producer.mark_transaction_finished(false);
+            self.producer.mark_transaction_finalizing();
             let result = run_kafka_transaction_op(cx, {
                 let producer = self.producer.producer.clone();
                 let timeout = self.producer.config.transaction_timeout;
@@ -1394,14 +1408,15 @@ impl Transaction<'_> {
             .await;
             self.finished = true;
             if let Err(err) = result {
-                self.producer.mark_transaction_finished(true);
+                self.producer.mark_transaction_needs_abort();
                 return Err(err);
             }
+            self.producer.mark_transaction_idle();
         }
 
         #[cfg(not(feature = "kafka"))]
         {
-            self.producer.mark_transaction_finished(false);
+            self.producer.mark_transaction_idle();
             self.finished = true;
         }
 
@@ -1802,6 +1817,70 @@ mod tests {
         let producer = TransactionalProducer::new(tc).unwrap();
         assert_eq!(producer.transaction_id(), "tx-4");
         assert_eq!(producer.config().transaction_id, "tx-4");
+    }
+
+    #[test]
+    fn transactional_producer_rejects_begin_while_finalizing() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-finalizing-begin".into());
+        let producer = TransactionalProducer::new(tc).unwrap();
+        producer.state.lock().phase = TransactionPhase::Finalizing;
+
+        let err = producer.activate_transaction().unwrap_err();
+        assert!(
+            matches!(err, KafkaError::Transaction(msg) if msg.contains("finalization in progress"))
+        );
+    }
+
+    #[test]
+    fn transactional_producer_rejects_send_checks_while_finalizing() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-finalizing-send".into());
+        let producer = TransactionalProducer::new(tc).unwrap();
+        producer.state.lock().phase = TransactionPhase::Finalizing;
+
+        let err = producer.ensure_active_transaction().unwrap_err();
+        assert!(
+            matches!(err, KafkaError::Transaction(msg) if msg.contains("finalization in progress"))
+        );
+    }
+
+    #[test]
+    fn transactional_producer_drop_poison_active_and_finalizing_phases() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-drop-phases".into());
+        let producer = TransactionalProducer::new(tc).unwrap();
+
+        producer.state.lock().phase = TransactionPhase::Finalizing;
+        producer.mark_transaction_dropped();
+        assert_eq!(
+            producer.state.lock().phase,
+            TransactionPhase::NeedsAbortRecovery
+        );
+
+        producer.state.lock().phase = TransactionPhase::Active;
+        producer.mark_transaction_dropped();
+        assert_eq!(
+            producer.state.lock().phase,
+            TransactionPhase::NeedsAbortRecovery
+        );
+    }
+
+    #[test]
+    fn dropping_unfinished_transaction_in_finalizing_phase_requires_abort_recovery() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-drop-finalizing".into());
+        let producer = TransactionalProducer::new(tc).unwrap();
+        producer.state.lock().phase = TransactionPhase::Finalizing;
+
+        {
+            let tx = Transaction {
+                producer: &producer,
+                finished: false,
+            };
+            drop(tx);
+        }
+
+        assert_eq!(
+            producer.state.lock().phase,
+            TransactionPhase::NeedsAbortRecovery
+        );
     }
 
     #[cfg(not(feature = "kafka"))]

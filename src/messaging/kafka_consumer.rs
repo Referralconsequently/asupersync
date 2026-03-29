@@ -845,16 +845,14 @@ impl KafkaConsumer {
             loop {
                 cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
-                let state_wait = self.state_notify.notified();
+                let mut state_wait = self.state_notify.notified();
                 let mut sleep = Sleep::new(deadline);
-
-                futures_lite::pin!(state_wait);
 
                 () = std::future::poll_fn(|task_cx| {
                     if Pin::new(&mut sleep).poll(task_cx).is_ready() {
                         return Poll::Ready(());
                     }
-                    if state_wait.as_mut().poll(task_cx).is_ready() {
+                    if Pin::new(&mut state_wait).poll(task_cx).is_ready() {
                         return Poll::Ready(());
                     }
                     Poll::Pending
@@ -883,21 +881,18 @@ impl KafkaConsumer {
             loop {
                 cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
-                let state_wait = self.state_notify.notified();
-                let broker_wait = stub_broker_notify().notified();
+                let mut state_wait = self.state_notify.notified();
+                let mut broker_wait = stub_broker_notify().notified();
                 let mut sleep = Sleep::new(deadline);
-
-                futures_lite::pin!(state_wait);
-                futures_lite::pin!(broker_wait);
 
                 () = std::future::poll_fn(|task_cx| {
                     if Pin::new(&mut sleep).poll(task_cx).is_ready() {
                         return Poll::Ready(());
                     }
-                    if state_wait.as_mut().poll(task_cx).is_ready() {
+                    if Pin::new(&mut state_wait).poll(task_cx).is_ready() {
                         return Poll::Ready(());
                     }
-                    if broker_wait.as_mut().poll(task_cx).is_ready() {
+                    if Pin::new(&mut broker_wait).poll(task_cx).is_ready() {
                         return Poll::Ready(());
                     }
                     Poll::Pending
