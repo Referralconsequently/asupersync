@@ -406,6 +406,9 @@ impl WasmReadableStreamSource {
 #[cfg(target_arch = "wasm32")]
 impl Drop for WasmReadableStreamSource {
     fn drop(&mut self) {
+        if !self.done {
+            self.cancel_with_reason("dropped");
+        }
         self.reader.release_lock();
     }
 }

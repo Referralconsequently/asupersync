@@ -901,17 +901,20 @@ impl Connection {
             .as_millis();
         if elapsed >= self.rst_rate_limit.rst_window_ms {
             // Reset the window.
-            self.rst_stream_count = 1;
+            self.rst_stream_count = 0;
             self.rst_stream_window_start = (self.time_getter)();
-        } else {
-            self.rst_stream_count += 1;
-            if self.rst_stream_count > self.rst_rate_limit.max_rst_streams {
-                return Err(H2Error::connection(
-                    ErrorCode::EnhanceYourCalm,
-                    "RST_STREAM flood detected",
-                ));
-            }
         }
+
+        // Fail closed at the configured limit instead of incrementing first.
+        // This preserves the "N allowed, N+1 rejected" contract even when the
+        // configured ceiling is `u32::MAX`, where a direct increment would wrap.
+        if self.rst_stream_count >= self.rst_rate_limit.max_rst_streams {
+            return Err(H2Error::connection(
+                ErrorCode::EnhanceYourCalm,
+                "RST_STREAM flood detected",
+            ));
+        }
+        self.rst_stream_count += 1;
 
         if let Some(stream) = self.streams.get_mut(frame.stream_id) {
             stream.reset(frame.error_code);
@@ -3404,6 +3407,33 @@ mod tests {
         conn.process_frame(rst)
             .expect("rate-limit window should reset");
         assert_eq!(conn.rst_stream_count, 1);
+    }
+
+    #[test]
+    fn rst_stream_rate_limit_rejects_after_u32_max_without_wrapping() {
+        let mut conn =
+            Connection::server(Settings::default()).rst_stream_rate_limit(RstStreamRateLimit {
+                max_rst_streams: u32::MAX,
+                rst_window_ms: DEFAULT_RST_STREAM_RATE_WINDOW_MS,
+            });
+        conn.state = ConnectionState::Open;
+
+        for stream_id in [1, 3] {
+            let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+            conn.process_frame(headers).unwrap();
+        }
+
+        conn.rst_stream_count = u32::MAX - 1;
+
+        let rst = Frame::RstStream(RstStreamFrame::new(1, ErrorCode::Cancel));
+        conn.process_frame(rst)
+            .expect("u32::MAXth RST_STREAM should still be allowed");
+        assert_eq!(conn.rst_stream_count, u32::MAX);
+
+        let overflow_attempt = Frame::RstStream(RstStreamFrame::new(3, ErrorCode::Cancel));
+        let err = conn.process_frame(overflow_attempt).unwrap_err();
+        assert_eq!(err.code, ErrorCode::EnhanceYourCalm);
+        assert_eq!(conn.rst_stream_count, u32::MAX);
     }
 
     /// Regression: HEADERS on a stream with invalid parity must NOT bump

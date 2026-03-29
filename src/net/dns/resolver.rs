@@ -32,6 +32,7 @@ use crate::net::TcpStream;
 use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
 use crate::time::{Elapsed, Sleep};
 use crate::types::Time;
+use crate::util::{EntropySource, OsEntropy};
 
 /// DNS resolver configuration.
 #[derive(Debug, Clone)]
@@ -951,7 +952,6 @@ fn decode_dns_name_inner(
 
     let mut labels = Vec::new();
     let mut offset = start;
-    let mut consumed = None;
 
     loop {
         let len = *packet
@@ -966,8 +966,7 @@ fn decode_dns_name_inner(
             if !suffix.is_empty() {
                 labels.push(suffix);
             }
-            let consumed_offset = consumed.unwrap_or(offset + 2);
-            return Ok((labels.join("."), consumed_offset));
+            return Ok((labels.join("."), offset + 2));
         }
         if len & 0xC0 != 0 {
             return Err(DnsError::Protocol("invalid DNS label encoding".to_string()));
@@ -975,7 +974,7 @@ fn decode_dns_name_inner(
 
         offset += 1;
         if len == 0 {
-            return Ok((labels.join("."), consumed.unwrap_or(offset)));
+            return Ok((labels.join("."), offset));
         }
 
         let end = offset + usize::from(len);
@@ -986,7 +985,6 @@ fn decode_dns_name_inner(
             .map_err(|_| DnsError::Protocol("DNS label is not UTF-8".to_string()))?;
         labels.push(label.to_string());
         offset = end;
-        consumed = Some(offset);
     }
 }
 
@@ -1137,21 +1135,11 @@ fn parse_dns_response(packet: &[u8], expected_id: u16) -> Result<ParsedDnsRespon
     })
 }
 
-fn dns_query_id(
-    name: &str,
-    query_type: DnsQueryType,
-    attempt: u32,
-    nameserver_index: usize,
-) -> u16 {
-    let mut hash = u32::from(query_type.code())
-        .wrapping_mul(16_777_619)
-        .wrapping_add(attempt)
-        .wrapping_add(nameserver_index as u32);
-    for byte in canonical_dns_name(name).bytes() {
-        hash = hash.wrapping_mul(16_777_619) ^ u32::from(byte);
-    }
-    let folded = ((hash >> 16) as u16) ^ (hash as u16);
-    if folded == 0 { 0xA5A5 } else { folded }
+fn dns_query_id(entropy: &dyn EntropySource) -> u16 {
+    let mut bytes = [0u8; 2];
+    entropy.fill_bytes(&mut bytes);
+    let query_id = u16::from_be_bytes(bytes);
+    if query_id == 0 { 0xA5A5 } else { query_id }
 }
 
 fn per_attempt_timeout(total_timeout: Duration, attempts: usize) -> Duration {
@@ -1323,8 +1311,8 @@ impl Resolver {
         let attempts = nameservers.len().saturating_mul(retries as usize + 1);
         let mut last_error = None;
 
-        for attempt in 0..=retries {
-            for (nameserver_index, nameserver) in nameservers.iter().copied().enumerate() {
+        for _attempt in 0..=retries {
+            for nameserver in nameservers.iter().copied() {
                 let remaining = timeout
                     .checked_sub(started.elapsed())
                     .unwrap_or(Duration::ZERO);
@@ -1333,7 +1321,7 @@ impl Resolver {
                 }
 
                 let query_timeout = per_attempt_timeout(remaining, attempts).min(remaining);
-                let query_id = dns_query_id(name, query_type, attempt, nameserver_index);
+                let query_id = dns_query_id(&OsEntropy);
                 let query = build_dns_query(name, query_type, query_id)?;
 
                 match query_nameserver(nameserver, &query, query_id, query_timeout) {
@@ -1700,6 +1688,103 @@ mod tests {
         let query_name = decode_dns_name(request, &mut offset).expect("decode question name");
         let qtype = u16::from_be_bytes([request[offset], request[offset + 1]]);
         (query_name, offset + 4, qtype)
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedEntropy([u8; 2]);
+
+    impl EntropySource for FixedEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            for (index, byte) in dest.iter_mut().enumerate() {
+                *byte = self.0[index % self.0.len()];
+            }
+        }
+
+        fn next_u64(&self) -> u64 {
+            let mut bytes = [0u8; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fork(&self, _task_id: crate::types::TaskId) -> Arc<dyn EntropySource> {
+            Arc::new(*self)
+        }
+
+        fn source_id(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    #[test]
+    fn dns_query_id_uses_entropy_bytes() {
+        init_test("dns_query_id_uses_entropy_bytes");
+
+        let query_id = dns_query_id(&FixedEntropy([0x12, 0x34]));
+        crate::assert_with_log!(query_id == 0x1234, "query id", 0x1234, query_id);
+
+        crate::test_complete!("dns_query_id_uses_entropy_bytes");
+    }
+
+    #[test]
+    fn dns_query_id_remaps_zero() {
+        init_test("dns_query_id_remaps_zero");
+
+        let query_id = dns_query_id(&FixedEntropy([0x00, 0x00]));
+        crate::assert_with_log!(query_id == 0xA5A5, "query id", 0xA5A5, query_id);
+
+        crate::test_complete!("dns_query_id_remaps_zero");
+    }
+
+    #[test]
+    fn decode_dns_name_consumes_zero_terminator() {
+        init_test("decode_dns_name_consumes_zero_terminator");
+
+        let query =
+            build_dns_query("example.test", DnsQueryType::A, 0x1234).expect("build DNS query");
+        let mut offset = 12usize;
+        let name = decode_dns_name(&query, &mut offset).expect("decode DNS name");
+        crate::assert_with_log!(name == "example.test", "decoded name", "example.test", name);
+        let qtype = read_u16(&query, &mut offset).expect("read qtype");
+        crate::assert_with_log!(
+            qtype == DnsQueryType::A.code(),
+            "qtype after name",
+            DnsQueryType::A.code(),
+            qtype
+        );
+
+        crate::test_complete!("decode_dns_name_consumes_zero_terminator");
+    }
+
+    #[test]
+    fn decode_dns_name_consumes_compression_pointer_bytes() {
+        init_test("decode_dns_name_consumes_compression_pointer_bytes");
+
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("example.test", &mut packet).expect("encode base name");
+        let alias_offset = packet.len();
+        packet.push(3);
+        packet.extend_from_slice(b"www");
+        packet.extend_from_slice(&[0xC0, 0x0C]);
+        packet.extend_from_slice(&DnsQueryType::A.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+
+        let mut offset = alias_offset;
+        let name = decode_dns_name(&packet, &mut offset).expect("decode compressed DNS name");
+        crate::assert_with_log!(
+            name == "www.example.test",
+            "decoded compressed name",
+            "www.example.test",
+            name
+        );
+        let qtype = read_u16(&packet, &mut offset).expect("read qtype after pointer");
+        crate::assert_with_log!(
+            qtype == DnsQueryType::A.code(),
+            "qtype after compressed name",
+            DnsQueryType::A.code(),
+            qtype
+        );
+
+        crate::test_complete!("decode_dns_name_consumes_compression_pointer_bytes");
     }
 
     fn set_test_time(nanos: u64) {

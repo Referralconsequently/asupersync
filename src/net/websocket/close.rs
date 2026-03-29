@@ -107,7 +107,7 @@ impl CloseReason {
             1 => Err(WsError::InvalidClosePayload),
             _ => {
                 let code_raw = u16::from_be_bytes([payload[0], payload[1]]);
-                if !CloseCode::is_valid_code(code_raw) {
+                if !CloseCode::is_valid_received_code(code_raw) {
                     return Err(WsError::InvalidClosePayload);
                 }
                 let code = CloseCode::from_u16(code_raw);
