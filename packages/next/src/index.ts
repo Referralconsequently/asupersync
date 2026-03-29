@@ -642,8 +642,9 @@ export function createNextBootstrapStateError(
 
 export function detectNextRuntimeSupport(
   target: NextRuntimeTarget = "client",
+  globalObject: Record<string, unknown> | undefined = undefined,
 ): NextRuntimeSupportDiagnostics {
-  const browserDiagnostics = detectBrowserRuntimeSupport();
+  const browserDiagnostics = detectBrowserRuntimeSupport(globalObject);
   if (target !== "client") {
     const isServerTarget = target === "server";
     return {
@@ -677,6 +678,21 @@ export function detectNextRuntimeSupport(
           "Import @asupersync/next from client components only.",
           ...browserDiagnostics.guidance,
         ],
+  };
+}
+
+function nextClientBrowserRuntimeOptions(
+  options: NextClientBootstrapOptions,
+): BrowserRuntimeOptions {
+  return {
+    wasmInput: options.wasmInput,
+    consumerVersion: options.consumerVersion,
+    eagerInit: options.eagerInit,
+    globalObject: options.globalObject,
+    preferredLane: options.preferredLane,
+    healthPolicy: options.healthPolicy,
+    healthScopeKey: options.healthScopeKey,
+    now: options.now,
   };
 }
 
@@ -976,7 +992,10 @@ export class NextClientBootstrapAdapter {
   }
 
   async initializeRuntime(): Promise<BrowserOutcome<RegionHandle>> {
-    assertNextRuntimeSupport("client");
+    assertNextRuntimeSupport(
+      "client",
+      detectNextRuntimeSupport("client", this.options.globalObject),
+    );
 
     if (this.snapshotState.phase === "runtime_ready" && this.scope) {
       return OutcomeFactory.ok(this.scope);
@@ -1003,11 +1022,9 @@ export class NextClientBootstrapAdapter {
     const from = this.captureTransitionPoint();
     this.snapshotState.runtimeInitAttempts += 1;
 
-    const runtime = await createBrowserRuntime({
-      wasmInput: this.options.wasmInput,
-      consumerVersion: this.options.consumerVersion,
-      eagerInit: this.options.eagerInit,
-    });
+    const runtime = await createBrowserRuntime(
+      nextClientBrowserRuntimeOptions(this.options),
+    );
     if (runtime.outcome !== "ok") {
       this.markRuntimeFailure(formatOutcomeFailure(runtime), from);
       return runtime;

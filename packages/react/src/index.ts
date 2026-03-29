@@ -65,8 +65,10 @@ export interface ReactScopeState {
 export const REACT_UNSUPPORTED_RUNTIME_CODE =
   "ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME";
 
-export function detectReactRuntimeSupport(): ReactRuntimeSupportDiagnostics {
-  const browserDiagnostics = detectBrowserRuntimeSupport();
+export function detectReactRuntimeSupport(
+  globalObject: Record<string, unknown> | undefined = undefined,
+): ReactRuntimeSupportDiagnostics {
+  const browserDiagnostics = detectBrowserRuntimeSupport(globalObject);
   return {
     ...browserDiagnostics,
     packageName: "@asupersync/react",
@@ -130,7 +132,7 @@ export function ReactRuntimeProvider({
   const [error, setError] = useState<Error | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [diagnostics, setDiagnostics] = useState<ReactRuntimeSupportDiagnostics>(
-    () => detectReactRuntimeSupport(),
+    () => detectReactRuntimeSupport(runtimeOptions?.globalObject),
   );
   const runtimeRef = useRef<BrowserRuntime | null>(null);
   const epochRef = useRef(0);
@@ -140,7 +142,7 @@ export function ReactRuntimeProvider({
   }, []);
 
   useEffect(() => {
-    const diagnosticsSnapshot = detectReactRuntimeSupport();
+    const diagnosticsSnapshot = detectReactRuntimeSupport(runtimeOptions?.globalObject);
     setDiagnostics(diagnosticsSnapshot);
 
     const previousRuntime = runtimeRef.current;
