@@ -834,10 +834,9 @@ impl BrowserExecutionProbe {
                     has_document: true,
                     has_window: true,
                 },
-                storage: BrowserStorageCapabilities {
-                    has_indexed_db: false,
-                    has_local_storage: false,
-                },
+                storage: browser_storage_capabilities_for_host_role(
+                    BrowserExecutionHostRole::BrowserMainThread,
+                ),
                 transport: BrowserTransportCapabilities {
                     has_web_socket: true,
                     has_web_transport: false,
@@ -863,10 +862,9 @@ impl BrowserExecutionProbe {
                     has_document: false,
                     has_window: false,
                 },
-                storage: BrowserStorageCapabilities {
-                    has_indexed_db: false,
-                    has_local_storage: false,
-                },
+                storage: browser_storage_capabilities_for_host_role(
+                    BrowserExecutionHostRole::DedicatedWorker,
+                ),
                 transport: BrowserTransportCapabilities {
                     has_web_socket: true,
                     has_web_transport: false,
@@ -892,10 +890,9 @@ impl BrowserExecutionProbe {
                     has_document: false,
                     has_window: false,
                 },
-                storage: BrowserStorageCapabilities {
-                    has_indexed_db: false,
-                    has_local_storage: false,
-                },
+                storage: browser_storage_capabilities_for_host_role(
+                    BrowserExecutionHostRole::ServiceWorker,
+                ),
                 transport: BrowserTransportCapabilities {
                     has_web_socket: true,
                     has_web_transport: false,
@@ -921,16 +918,36 @@ impl BrowserExecutionProbe {
                     has_document: false,
                     has_window: false,
                 },
-                storage: BrowserStorageCapabilities {
-                    has_indexed_db: false,
-                    has_local_storage: false,
-                },
+                storage: browser_storage_capabilities_for_host_role(
+                    BrowserExecutionHostRole::SharedWorker,
+                ),
                 transport: BrowserTransportCapabilities {
                     has_web_socket: true,
                     has_web_transport: false,
                 },
             },
         }
+    }
+}
+
+const fn browser_storage_capabilities_for_host_role(
+    host_role: BrowserExecutionHostRole,
+) -> BrowserStorageCapabilities {
+    match host_role {
+        BrowserExecutionHostRole::BrowserMainThread => BrowserStorageCapabilities {
+            has_indexed_db: true,
+            has_local_storage: true,
+        },
+        BrowserExecutionHostRole::DedicatedWorker
+        | BrowserExecutionHostRole::ServiceWorker
+        | BrowserExecutionHostRole::SharedWorker => BrowserStorageCapabilities {
+            has_indexed_db: true,
+            has_local_storage: false,
+        },
+        BrowserExecutionHostRole::NonBrowserOrUnknown => BrowserStorageCapabilities {
+            has_indexed_db: false,
+            has_local_storage: false,
+        },
     }
 }
 
@@ -3459,10 +3476,7 @@ mod tests {
                     has_document,
                     has_window,
                 },
-                storage: BrowserStorageCapabilities {
-                    has_indexed_db: false,
-                    has_local_storage: false,
-                },
+                storage: browser_storage_capabilities_for_host_role(host_role),
                 transport: BrowserTransportCapabilities {
                     has_web_socket: true,
                     has_web_transport: false,
@@ -3517,6 +3531,14 @@ mod tests {
             selected_candidate.lane_id,
             BrowserExecutionLane::BrowserMainThreadDirectRuntime,
             "selected candidate should match the selected lane"
+        );
+        assert!(
+            diagnostics.capabilities.storage.has_indexed_db,
+            "main-thread probe should surface IndexedDB availability in ladder diagnostics"
+        );
+        assert!(
+            diagnostics.capabilities.storage.has_local_storage,
+            "main-thread probe should surface localStorage availability in ladder diagnostics"
         );
     }
 
@@ -3686,6 +3708,14 @@ mod tests {
             BrowserRuntimeContext::ServiceWorker,
             "runtime-support diagnostics must preserve the explicit service-worker runtime context"
         );
+        assert!(
+            diagnostics.capabilities.storage.has_indexed_db,
+            "service-worker probe should surface truthful IndexedDB support even while direct runtime stays fail-closed"
+        );
+        assert!(
+            !diagnostics.capabilities.storage.has_local_storage,
+            "service-worker probe should keep localStorage unavailable"
+        );
     }
 
     #[test]
@@ -3723,6 +3753,29 @@ mod tests {
             diagnostics.runtime_support.runtime_context,
             BrowserRuntimeContext::SharedWorker,
             "runtime-support diagnostics must preserve the explicit shared-worker runtime context"
+        );
+        assert!(
+            diagnostics.capabilities.storage.has_indexed_db,
+            "shared-worker probe should surface truthful IndexedDB support even while direct runtime stays fail-closed"
+        );
+        assert!(
+            !diagnostics.capabilities.storage.has_local_storage,
+            "shared-worker probe should keep localStorage unavailable"
+        );
+    }
+
+    #[test]
+    fn browser_execution_ladder_preserves_truthful_worker_storage_snapshots() {
+        let dedicated = RuntimeBuilder::new()
+            .inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::dedicated_worker());
+
+        assert!(
+            dedicated.capabilities.storage.has_indexed_db,
+            "dedicated-worker probe should surface IndexedDB availability"
+        );
+        assert!(
+            !dedicated.capabilities.storage.has_local_storage,
+            "dedicated-worker probe should keep localStorage unavailable"
         );
     }
 

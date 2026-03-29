@@ -138,6 +138,24 @@ impl TaskDetails {
                 | TaskStateInfo::Finalizing { .. }
         )
     }
+
+    /// Returns true if the task matches the inspector's stuck-task heuristic.
+    ///
+    /// Prefer explicit last-poll idle time when it is available. When the
+    /// runtime cannot provide wall-clock last-poll metadata yet, only classify
+    /// old tasks that have never been polled as potentially stuck so
+    /// long-lived waiting tasks are not misreported just because they are old.
+    #[must_use]
+    pub fn is_potentially_stuck(&self, age_threshold: Duration) -> bool {
+        if self.is_terminal() || self.wake_pending {
+            return false;
+        }
+
+        self.time_since_last_poll.map_or_else(
+            || self.age > age_threshold && self.poll_count == 0,
+            |idle_for| idle_for > age_threshold,
+        )
+    }
 }
 
 /// Simplified task state for inspection (matches TaskState but serializable).
@@ -537,8 +555,10 @@ impl TaskInspector {
 
     /// Find tasks that haven't been polled recently (potentially stuck).
     ///
-    /// Note: This is heuristic-based since we don't track wall-clock poll times.
-    /// It uses task age and poll count to estimate activity.
+    /// Note: This is heuristic-based because wall-clock last-poll tracking is
+    /// not always available. When explicit idle time is unavailable, the
+    /// inspector only flags aged tasks that have never been polled, avoiding
+    /// false positives for long-lived waiting tasks.
     #[must_use]
     pub fn find_stuck_tasks(&self, age_threshold: Duration) -> Vec<TaskDetails> {
         debug!(
@@ -549,10 +569,7 @@ impl TaskInspector {
         let stuck: Vec<_> = self
             .list_active_tasks()
             .into_iter()
-            .filter(|t| {
-                // Heuristic: old tasks with no polls might be stuck
-                t.age > age_threshold && !t.wake_pending
-            })
+            .filter(|task| task.is_potentially_stuck(age_threshold))
             .collect();
 
         if !stuck.is_empty() {
@@ -604,7 +621,7 @@ impl TaskInspector {
                 TaskStateInfo::Completed { .. } => completed += 1,
             }
 
-            if task.age > stuck_threshold && !task.is_terminal() && !task.wake_pending {
+            if task.is_potentially_stuck(stuck_threshold) {
                 stuck_count += 1;
             }
         }
@@ -1058,6 +1075,46 @@ mod tests {
     }
 
     #[test]
+    fn task_details_stuck_heuristic_ignores_old_polled_task_without_idle_metadata() {
+        let details = TaskDetails {
+            id: TaskId::testing_default(),
+            region_id: RegionId::testing_default(),
+            state: TaskStateInfo::Running,
+            phase: TaskPhase::Running,
+            poll_count: 3,
+            polls_remaining: 97,
+            created_at: Time::ZERO,
+            age: Duration::from_secs(90),
+            time_since_last_poll: None,
+            wake_pending: false,
+            obligations: vec![],
+            waiters: vec![],
+        };
+
+        assert!(!details.is_potentially_stuck(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn task_details_stuck_heuristic_uses_idle_metadata_when_available() {
+        let details = TaskDetails {
+            id: TaskId::testing_default(),
+            region_id: RegionId::testing_default(),
+            state: TaskStateInfo::Running,
+            phase: TaskPhase::Running,
+            poll_count: 3,
+            polls_remaining: 97,
+            created_at: Time::ZERO,
+            age: Duration::from_secs(90),
+            time_since_last_poll: Some(Duration::from_secs(45)),
+            wake_pending: false,
+            obligations: vec![],
+            waiters: vec![],
+        };
+
+        assert!(details.is_potentially_stuck(Duration::from_secs(30)));
+    }
+
+    #[test]
     fn wire_snapshot_round_trip_and_schema() {
         let summary = TaskSummaryWire {
             total_tasks: 2,
@@ -1226,6 +1283,26 @@ mod tests {
 
         let wire = inspector.wire_snapshot();
         assert_eq!(wire.generated_at, Time::from_secs(65));
+    }
+
+    #[test]
+    fn inspector_does_not_flag_old_polled_tasks_without_last_poll_duration() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        let task = state.task_mut(task_id).expect("task record");
+        task.state = TaskState::Running;
+        task.increment_polls();
+        state.now = Time::from_secs(65);
+
+        let inspector = TaskInspector::new(Arc::new(state), None);
+        let details = inspector.inspect_task(task_id).expect("task exists");
+        assert_eq!(details.poll_count, 1);
+        assert!(!details.is_potentially_stuck(Duration::from_secs(30)));
+        assert!(inspector.find_stuck_tasks_default().is_empty());
+        assert_eq!(inspector.summary().stuck_count, 0);
     }
 
     #[test]

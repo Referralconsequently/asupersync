@@ -990,16 +990,21 @@ impl Scheduler {
             out.reserve(steal_count - out.capacity());
         }
 
-        for _ in 0..steal_count {
-            if let Some(entry) = self.ready_lane.pop() {
-                self.scheduled.remove(entry.task);
-                out.push((entry.task, entry.priority));
-            } else {
+        let mut stolen = 0;
+        // Pop up to steal_count valid entries. Stale entries (already
+        // removed from `scheduled` by cancel/remove) are silently
+        // discarded — consistent with every other pop_* method.
+        while stolen < steal_count {
+            let Some(entry) = self.ready_lane.pop() else {
                 break;
+            };
+            if self.scheduled.remove(entry.task) {
+                out.push((entry.task, entry.priority));
+                stolen += 1;
             }
         }
 
-        out.len()
+        stolen
     }
 
     /// Returns true if the cancel lane has pending tasks.
