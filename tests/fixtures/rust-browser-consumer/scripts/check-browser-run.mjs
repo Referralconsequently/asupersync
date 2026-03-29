@@ -429,6 +429,14 @@ try {
     serviceWorkerFailClosed?.runtime_support_reason === "service_worker_not_yet_shipped",
     `service-worker runtime support reason drifted: ${serviceWorkerFailClosed?.runtime_support_reason ?? "missing"}`,
   );
+  assert(
+    serviceWorkerFailClosed?.capabilities?.storage?.has_indexed_db === true,
+    `service-worker fail-closed ladder must still surface IndexedDB availability, got ${serviceWorkerFailClosed?.capabilities?.storage?.has_indexed_db ?? "missing"}`,
+  );
+  assert(
+    serviceWorkerFailClosed?.capabilities?.storage?.has_local_storage === false,
+    `service-worker fail-closed ladder must keep localStorage unavailable, got ${serviceWorkerFailClosed?.capabilities?.storage?.has_local_storage ?? "missing"}`,
+  );
 
   assertLadder("shared-worker fail-closed ladder", sharedWorkerFailClosed, {
     supported: false,
@@ -441,6 +449,14 @@ try {
   assert(
     sharedWorkerFailClosed?.runtime_support_reason === "shared_worker_not_yet_shipped",
     `shared-worker runtime support reason drifted: ${sharedWorkerFailClosed?.runtime_support_reason ?? "missing"}`,
+  );
+  assert(
+    sharedWorkerFailClosed?.capabilities?.storage?.has_indexed_db === true,
+    `shared-worker fail-closed ladder must still surface IndexedDB availability, got ${sharedWorkerFailClosed?.capabilities?.storage?.has_indexed_db ?? "missing"}`,
+  );
+  assert(
+    sharedWorkerFailClosed?.capabilities?.storage?.has_local_storage === false,
+    `shared-worker fail-closed ladder must keep localStorage unavailable, got ${sharedWorkerFailClosed?.capabilities?.storage?.has_local_storage ?? "missing"}`,
   );
 
   assertLadder("dedicated-worker ladder", workerLadder, {

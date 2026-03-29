@@ -94,3 +94,23 @@ fn react_validation_script_exists_and_references_required_steps() {
         );
     }
 }
+
+#[test]
+fn react_adapter_threads_runtime_options_global_object_into_support_diagnostics() {
+    let path = repo_root().join("packages/react/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+
+    for marker in [
+        "export function detectReactRuntimeSupport(",
+        "globalObject: Record<string, unknown> | undefined = undefined,",
+        "const browserDiagnostics = detectBrowserRuntimeSupport(globalObject);",
+        "() => detectReactRuntimeSupport(runtimeOptions?.globalObject),",
+        "const diagnosticsSnapshot = detectReactRuntimeSupport(runtimeOptions?.globalObject);",
+    ] {
+        assert!(
+            content.contains(marker),
+            "React adapter source must preserve runtimeOptions/globalObject diagnostics alignment marker: {marker}"
+        );
+    }
+}

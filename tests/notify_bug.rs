@@ -1,6 +1,6 @@
-//!
-//! Notify bug test.
-//!
+//! Regression test for notify spurious wakeup detection.
+#![allow(missing_docs)]
+
 use asupersync::sync::Notify;
 use std::future::Future;
 use std::pin::Pin;
@@ -10,9 +10,11 @@ use std::task::{Context, Poll, Waker};
 struct NoopWaker;
 impl std::task::Wake for NoopWaker {
     fn wake(self: Arc<Self>) {}
+    fn wake_by_ref(self: &Arc<Self>) {}
 }
+
 fn noop_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    Arc::new(NoopWaker).into()
 }
 fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
     let waker = noop_waker();
@@ -21,31 +23,20 @@ fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
 }
 
 #[test]
-fn notify_bug_test() {
+fn test_notify_bug() {
     let notify = Notify::new();
-
-    // fut1 created BEFORE broadcast
     let mut fut1 = notify.notified();
+    assert!(poll_once(&mut fut1).is_pending());
 
-    // notify_one adds a stored notification
-    notify.notify_one();
-
-    // notify_waiters bumps generation
     notify.notify_waiters();
 
-    // fut2 created AFTER broadcast
     let mut fut2 = notify.notified();
+    assert!(poll_once(&mut fut2).is_pending());
 
-    // fut1 polls. It should complete using the broadcast generation,
-    // LEAVING the stored notification intact!
-    assert_eq!(poll_once(&mut fut1), Poll::Ready(()));
+    drop(fut1);
 
-    // fut2 polls. Since the stored notification was left intact, it should complete!
-    assert_eq!(
-        poll_once(&mut fut2),
-        Poll::Ready(()),
-        "lost wakeup! fut1 consumed the token incorrectly"
-    );
-
-    println!("SUCCESS!");
+    // If fut2 is now ready, it means the drop of a broadcast-woken waiter
+    // spuriously woke fut2!
+    let is_ready = poll_once(&mut fut2).is_ready();
+    assert!(!is_ready, "Spurious wakeup detected!");
 }

@@ -1058,6 +1058,7 @@ fn readme_pins_deferred_service_and_shared_worker_direct_runtime_truth() {
         "See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,",
         "| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |",
         "| Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |",
+        "what remains deferred (service/shared worker direct runtime), the preview public Rust-to-WASM `RuntimeBuilder::browser()` lane",
     ] {
         assert!(
             content.contains(marker),

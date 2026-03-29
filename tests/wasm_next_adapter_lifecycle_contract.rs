@@ -161,6 +161,29 @@ fn next_source_pins_bootstrap_lifecycle_transition_guards() {
 }
 
 #[test]
+fn next_source_preserves_browser_runtime_options_through_client_bootstrap() {
+    let content = read_next_source();
+    for marker in [
+        "export function detectNextRuntimeSupport(",
+        "globalObject: Record<string, unknown> | undefined = undefined,",
+        "const browserDiagnostics = detectBrowserRuntimeSupport(globalObject);",
+        "function nextClientBrowserRuntimeOptions(",
+        "globalObject: options.globalObject,",
+        "preferredLane: options.preferredLane,",
+        "healthPolicy: options.healthPolicy,",
+        "healthScopeKey: options.healthScopeKey,",
+        "now: options.now,",
+        "detectNextRuntimeSupport(\"client\", this.options.globalObject)",
+        "nextClientBrowserRuntimeOptions(this.options)",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next client-bootstrap BrowserRuntimeOptions marker missing: {marker}"
+        );
+    }
+}
+
+#[test]
 fn next_source_pins_bootstrap_and_bridge_log_field_shape() {
     let content = read_next_source();
     for marker in [

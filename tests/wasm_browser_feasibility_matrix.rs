@@ -158,6 +158,38 @@ fn shared_worker_direct_runtime_is_unshipped_but_bounded_attach_support_is_expli
 }
 
 #[test]
+fn worker_docs_distinguish_fail_closed_direct_runtime_from_bounded_package_helpers() {
+    let census = read_file("docs/wasm_api_surface_census.md");
+    for marker in [
+        "Direct runtime remains fail-closed; bounded package-level broker/coordinator support exists",
+        "detectBrowserServiceWorkerBrokerSupport()",
+        "BrowserServiceWorkerBrokerStore",
+        "detectBrowserSharedWorkerCoordinatorSupport()",
+        "createBrowserSharedWorkerCoordinatorSelection()",
+        "Keep direct runtime creation out of these hosts themselves",
+    ] {
+        assert!(
+            census.contains(marker),
+            "wasm_api_surface_census.md must preserve worker docs marker: {marker}"
+        );
+    }
+
+    let topology = read_file("docs/wasm_typescript_package_topology.md");
+    for marker in [
+        "No direct-runtime package surface; bounded broker/coordinator helpers exist",
+        "detectBrowserServiceWorkerBrokerSupport()",
+        "BrowserServiceWorkerBrokerStore",
+        "detectBrowserSharedWorkerCoordinatorSupport()",
+        "createBrowserSharedWorkerCoordinatorSelection()",
+    ] {
+        assert!(
+            topology.contains(marker),
+            "wasm_typescript_package_topology.md must preserve worker package marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn shared_worker_fixture_is_wired_into_primary_docs_and_onboarding_contracts() {
     assert!(
         file_exists("scripts/validate_shared_worker_consumer.sh"),
@@ -1418,11 +1450,11 @@ fn browser_sdk_support_classes_are_exactly_two() {
 }
 
 #[test]
-fn browser_sdk_runtime_contexts_are_exactly_three() {
-    // The browser SDK recognizes exactly: browser_main_thread,
-    // dedicated_worker, unknown. Execution-ladder candidates may name
-    // additional host roles, but the direct runtime-context taxonomy must
-    // remain narrow until a deliberate promotion bead changes it.
+fn browser_sdk_runtime_contexts_preserve_explicit_service_and_shared_worker_hosts() {
+    // The browser SDK now preserves explicit service_worker/shared_worker
+    // runtime-context values for truthful fail-closed diagnostics while
+    // keeping direct-runtime support limited to browser_main_thread and
+    // dedicated_worker.
     let src = read_file("packages/browser/src/index.ts");
     let context_block = src
         .split("export type BrowserRuntimeContext =")
@@ -1432,13 +1464,14 @@ fn browser_sdk_runtime_contexts_are_exactly_three() {
     assert!(
         context_block.contains("\"browser_main_thread\"")
             && context_block.contains("\"dedicated_worker\"")
+            && context_block.contains("\"service_worker\"")
+            && context_block.contains("\"shared_worker\"")
             && context_block.contains("\"unknown\""),
-        "browser SDK must declare exactly three runtime contexts"
+        "browser SDK must preserve the full runtime-context taxonomy"
     );
     assert!(
-        !context_block.contains("\"service_worker\"")
-            && !context_block.contains("\"shared_worker\""),
-        "browser SDK must NOT silently add service/shared worker direct runtime contexts"
+        !context_block.contains("\"non_browser_or_unknown\""),
+        "browser SDK must not confuse host-role labels with runtime-context labels"
     );
 }
 
