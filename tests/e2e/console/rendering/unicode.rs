@@ -202,3 +202,58 @@ fn e2e_unicode_boundary_characters() {
 
     crate::test_complete!("e2e_unicode_boundary_characters");
 }
+
+#[test]
+fn e2e_unicode_width_zero_width_scalars() {
+    init_console_test("e2e_unicode_width_zero_width_scalars");
+
+    crate::assert_with_log!(
+        char_width('\u{200D}') == 0,
+        "zwj width",
+        0usize,
+        char_width('\u{200D}')
+    );
+    crate::assert_with_log!(
+        char_width('\u{FE0F}') == 0,
+        "variation selector width",
+        0usize,
+        char_width('\u{FE0F}')
+    );
+
+    crate::test_complete!("e2e_unicode_width_zero_width_scalars");
+}
+
+#[test]
+fn e2e_unicode_str_width_emoji_clusters() {
+    init_console_test("e2e_unicode_str_width_emoji_clusters");
+
+    crate::assert_with_log!(
+        str_width("👨‍👩‍👧‍👦") == 2,
+        "family emoji width",
+        2usize,
+        str_width("👨‍👩‍👧‍👦")
+    );
+    crate::assert_with_log!(
+        str_width("❤️") == 2,
+        "heart emoji width",
+        2usize,
+        str_width("❤️")
+    );
+    crate::assert_with_log!(
+        str_width("1️⃣") == 2,
+        "keycap width",
+        2usize,
+        str_width("1️⃣")
+    );
+
+    crate::test_complete!("e2e_unicode_str_width_emoji_clusters");
+}
+
+#[test]
+fn e2e_unicode_str_width_flag_pairs() {
+    init_console_test("e2e_unicode_str_width_flag_pairs");
+
+    crate::assert_with_log!(str_width("🇺🇸") == 2, "flag width", 2usize, str_width("🇺🇸"));
+
+    crate::test_complete!("e2e_unicode_str_width_flag_pairs");
+}

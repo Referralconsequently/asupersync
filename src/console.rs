@@ -576,6 +576,9 @@ pub fn char_width(ch: char) -> usize {
     if ch.is_ascii() {
         return 1;
     }
+    if is_zero_width(ch) {
+        return 0;
+    }
     if is_combining(ch) {
         return 0;
     }
@@ -588,7 +591,96 @@ pub fn char_width(ch: char) -> usize {
 /// Compute display width of a string.
 #[must_use]
 pub fn str_width(value: &str) -> usize {
-    value.chars().map(char_width).sum()
+    let mut width = 0;
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if is_zero_width(ch) {
+            continue;
+        }
+
+        if is_regional_indicator(ch) {
+            if chars.peek().copied().is_some_and(is_regional_indicator) {
+                let _ = chars.next();
+                width += 2;
+                continue;
+            }
+
+            width += char_width(ch);
+            continue;
+        }
+
+        let mut cluster_width = char_width(ch);
+        let mut cluster_tail = ch;
+        let mut saw_joiner = false;
+        let mut saw_emoji_modifier = false;
+        let mut saw_emoji_presentation = false;
+        let mut saw_keycap = false;
+
+        while let Some(next) = chars.peek().copied() {
+            if is_combining(next) {
+                if next == '\u{20E3}' && is_keycap_base(ch) {
+                    saw_keycap = true;
+                }
+                let _ = chars.next();
+                continue;
+            }
+
+            if is_variation_selector(next) {
+                if next == '\u{FE0F}' && is_emoji_presentation_candidate(cluster_tail) {
+                    saw_emoji_presentation = true;
+                }
+                let _ = chars.next();
+                continue;
+            }
+
+            if is_emoji_modifier(next) {
+                saw_emoji_modifier = true;
+                let _ = chars.next();
+                continue;
+            }
+
+            if is_zero_width_joiner(next) {
+                saw_joiner = true;
+                let _ = chars.next();
+                let Some(joined) = chars.next() else {
+                    break;
+                };
+                cluster_width = cluster_width.max(char_width(joined));
+                cluster_tail = joined;
+                continue;
+            }
+
+            break;
+        }
+
+        if saw_keycap
+            || (saw_emoji_presentation && is_emoji_presentation_candidate(cluster_tail))
+            || (saw_emoji_modifier && is_emoji_presentation_candidate(cluster_tail))
+            || (saw_joiner
+                && (is_emoji_presentation_candidate(ch)
+                    || is_emoji_presentation_candidate(cluster_tail)
+                    || cluster_width == 2))
+        {
+            cluster_width = cluster_width.max(2);
+        }
+
+        width += cluster_width;
+    }
+
+    width
+}
+
+fn is_zero_width(ch: char) -> bool {
+    is_zero_width_joiner(ch) || is_variation_selector(ch)
+}
+
+fn is_zero_width_joiner(ch: char) -> bool {
+    ch == '\u{200D}'
+}
+
+fn is_variation_selector(ch: char) -> bool {
+    matches!(ch as u32, 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
 }
 
 fn is_combining(ch: char) -> bool {
@@ -600,6 +692,22 @@ fn is_combining(ch: char) -> bool {
             | 0x20D0..=0x20FF
             | 0xFE20..=0xFE2F
     )
+}
+
+fn is_emoji_modifier(ch: char) -> bool {
+    matches!(ch as u32, 0x1F3FB..=0x1F3FF)
+}
+
+fn is_regional_indicator(ch: char) -> bool {
+    matches!(ch as u32, 0x1F1E6..=0x1F1FF)
+}
+
+fn is_emoji_presentation_candidate(ch: char) -> bool {
+    matches!(ch as u32, 0x2600..=0x27BF | 0x1F000..=0x1FAFF)
+}
+
+fn is_keycap_base(ch: char) -> bool {
+    ch.is_ascii_digit() || matches!(ch, '#' | '*')
 }
 
 fn is_wide(ch: char) -> bool {
@@ -1099,6 +1207,55 @@ mod tests {
             char_width(ch)
         );
         crate::test_complete!("unicode_width_combining");
+    }
+
+    #[test]
+    fn unicode_width_zero_width_scalars() {
+        init_test("unicode_width_zero_width_scalars");
+        crate::assert_with_log!(
+            char_width('\u{200D}') == 0,
+            "zwj width",
+            0usize,
+            char_width('\u{200D}')
+        );
+        crate::assert_with_log!(
+            char_width('\u{FE0F}') == 0,
+            "vs16 width",
+            0usize,
+            char_width('\u{FE0F}')
+        );
+        crate::test_complete!("unicode_width_zero_width_scalars");
+    }
+
+    #[test]
+    fn unicode_str_width_emoji_clusters() {
+        init_test("unicode_str_width_emoji_clusters");
+        crate::assert_with_log!(
+            str_width("👨‍👩‍👧‍👦") == 2,
+            "family emoji width",
+            2usize,
+            str_width("👨‍👩‍👧‍👦")
+        );
+        crate::assert_with_log!(
+            str_width("❤️") == 2,
+            "heart emoji width",
+            2usize,
+            str_width("❤️")
+        );
+        crate::assert_with_log!(
+            str_width("1️⃣") == 2,
+            "keycap width",
+            2usize,
+            str_width("1️⃣")
+        );
+        crate::test_complete!("unicode_str_width_emoji_clusters");
+    }
+
+    #[test]
+    fn unicode_str_width_flag_pair() {
+        init_test("unicode_str_width_flag_pair");
+        crate::assert_with_log!(str_width("🇺🇸") == 2, "flag width", 2usize, str_width("🇺🇸"));
+        crate::test_complete!("unicode_str_width_flag_pair");
     }
 
     #[test]
