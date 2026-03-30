@@ -1434,6 +1434,8 @@ impl Drop for Transaction<'_> {
 mod tests {
     use super::*;
     #[cfg(feature = "kafka")]
+    use futures_lite::future;
+    #[cfg(feature = "kafka")]
     use std::sync::Arc;
     #[cfg(feature = "kafka")]
     use std::task::{Context, Wake, Waker};
@@ -2141,5 +2143,56 @@ mod tests {
             receiver.as_mut().poll(&mut task_cx),
             Poll::Ready(Err(KafkaError::PolledAfterCompletion))
         ));
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn run_kafka_blocking_uses_pool_when_available() {
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+
+        let thread_name = future::block_on(async {
+            run_kafka_blocking(&cx, || {
+                std::thread::current()
+                    .name()
+                    .unwrap_or("unnamed")
+                    .to_string()
+            })
+            .await
+        });
+
+        assert!(
+            thread_name.contains("-blocking-"),
+            "expected pool-backed kafka blocking work to run on a blocking-pool thread, got {thread_name}"
+        );
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn run_kafka_blocking_offloads_even_without_pool() {
+        let cx = Cx::for_testing();
+        let current_id = std::thread::current().id();
+
+        let (thread_id, thread_name) = future::block_on(async {
+            run_kafka_blocking(&cx, || {
+                (
+                    std::thread::current().id(),
+                    std::thread::current()
+                        .name()
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                )
+            })
+            .await
+        });
+
+        assert_ne!(
+            thread_id, current_id,
+            "kafka blocking helper should use a dedicated thread even when the runtime has no blocking pool"
+        );
+        assert_eq!(
+            thread_name, "asupersync-blocking",
+            "expected kafka blocking helper to use the dedicated blocking-thread fallback"
+        );
     }
 }

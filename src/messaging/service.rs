@@ -2362,6 +2362,41 @@ pub struct ServiceAdmission {
     pub certificate: RequestCertificate,
 }
 
+/// Typed input for import-side request transfer through a service boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportTransferRequest {
+    /// Callee that will receive the transferred request.
+    pub callee: String,
+    /// Destination subject after import-side morphism translation.
+    pub target_subject: Subject,
+    /// Human-readable morphism identifier recorded in obligation lineage.
+    pub morphism_name: String,
+    /// Optional reply-space override requested for the imported call.
+    pub requested_reply_space: Option<super::ir::ReplySpaceRule>,
+    /// Timestamp attached to the transfer event.
+    pub transferred_at: Time,
+}
+
+impl ImportTransferRequest {
+    /// Construct an import-transfer request bundle.
+    #[must_use]
+    pub fn new(
+        callee: impl Into<String>,
+        target_subject: Subject,
+        morphism_name: impl Into<String>,
+        requested_reply_space: Option<super::ir::ReplySpaceRule>,
+        transferred_at: Time,
+    ) -> Self {
+        Self {
+            callee: callee.into(),
+            target_subject,
+            morphism_name: morphism_name.into(),
+            requested_reply_space,
+            transferred_at,
+        }
+    }
+}
+
 /// Unified FABRIC-native service boundary.
 ///
 /// This composes one namespace-bound request subject, one validated service
@@ -2491,21 +2526,24 @@ impl FabricServiceBoundary {
         &self,
         admission: &ServiceAdmission,
         obligation: &mut ServiceObligation,
-        callee: impl Into<String>,
-        target_subject: Subject,
-        morphism_name: impl Into<String>,
+        request: ImportTransferRequest,
         morphism: &Morphism,
-        requested_reply_space: Option<super::ir::ReplySpaceRule>,
-        transferred_at: Time,
     ) -> Result<ImportPlan, ServiceBoundaryError> {
+        let ImportTransferRequest {
+            callee,
+            target_subject,
+            morphism_name,
+            requested_reply_space,
+            transferred_at,
+        } = request;
         self.ensure_transfer_request_matches(admission, obligation)?;
-        self.ensure_transfer_mobility(&admission.validated, &target_subject)?;
-        self.ensure_morphism_target(morphism, &target_subject)?;
+        Self::ensure_transfer_mobility(&admission.validated, &target_subject)?;
+        Self::ensure_morphism_target(morphism, &target_subject)?;
         let plan = self.compile_import_plan(morphism, requested_reply_space)?;
         obligation.transfer(
-            callee.into(),
+            callee,
             target_subject.as_str(),
-            morphism_name.into(),
+            morphism_name,
             transferred_at,
         )?;
         Ok(plan)
@@ -2544,7 +2582,6 @@ impl FabricServiceBoundary {
     }
 
     fn ensure_morphism_target(
-        &self,
         morphism: &Morphism,
         target_subject: &Subject,
     ) -> Result<(), ServiceBoundaryError> {
@@ -2559,7 +2596,6 @@ impl FabricServiceBoundary {
     }
 
     fn ensure_transfer_mobility(
-        &self,
         validated: &ValidatedServiceRequest,
         target_subject: &Subject,
     ) -> Result<(), ServiceBoundaryError> {
@@ -3792,14 +3828,16 @@ mod tests {
             .transfer_request_via_import(
                 &admission,
                 &mut obligation,
-                "orders-edge",
-                Subject::new("tenant.acme.service.edge-orders.lookup"),
-                "import/orders->edge",
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    Some(ReplySpaceRule::DedicatedPrefix {
+                        prefix: "tenant.acme.service.edge-orders.lookup".to_owned(),
+                    }),
+                    Time::from_nanos(3),
+                ),
                 &authoritative_import_morphism(),
-                Some(ReplySpaceRule::DedicatedPrefix {
-                    prefix: "tenant.acme.service.edge-orders.lookup".to_owned(),
-                }),
-                Time::from_nanos(3),
             )
             .expect("transfer through import plan");
 
@@ -3873,12 +3911,14 @@ mod tests {
             .transfer_request_via_import(
                 &admission,
                 &mut obligation,
-                "orders-edge",
-                Subject::new("tenant.acme.service.edge-orders.lookup"),
-                "import/orders->edge",
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
                 &authoritative_import_morphism(),
-                None,
-                Time::from_nanos(3),
             )
             .expect_err("pinned mobility should fail closed");
 
@@ -3929,12 +3969,14 @@ mod tests {
             .transfer_request_via_import(
                 &admission,
                 &mut obligation,
-                "orders-edge",
-                Subject::new("tenant.acme.service.wrong.lookup"),
-                "import/orders->edge",
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.wrong.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
                 &authoritative_import_morphism(),
-                None,
-                Time::from_nanos(3),
             )
             .expect_err("target outside morphism destination should fail closed");
 
@@ -3985,12 +4027,14 @@ mod tests {
             .transfer_request_via_import(
                 &admission,
                 &mut obligation,
-                "orders-edge",
-                Subject::new("tenant.acme.service.edge-orders.lookup"),
-                "import/orders->edge",
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
                 &authoritative_import_morphism(),
-                None,
-                Time::from_nanos(3),
             )
             .expect_err("mismatched admission should fail closed");
 
@@ -4042,12 +4086,14 @@ mod tests {
             .transfer_request_via_import(
                 &admission,
                 &mut obligation,
-                "orders-edge",
-                Subject::new("tenant.acme.service.edge-orders.lookup"),
-                "import/orders->edge",
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
                 &authoritative_import_morphism(),
-                None,
-                Time::from_nanos(3),
             )
             .expect_err("obligation outside boundary should fail closed");
 

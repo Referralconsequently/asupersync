@@ -874,6 +874,16 @@ pub enum ProtocolContractValidationError {
     /// Compensation path names must be unique.
     #[error("duplicate compensation path `{0}`")]
     DuplicateCompensationPath(String),
+    /// Compensation paths must progress forward along one ordered branch.
+    #[error("compensation path `{name}` must stay ordered; `{path}` does not extend `{previous}`")]
+    InvalidCompensationSequenceOrder {
+        /// The compensation path name.
+        name: String,
+        /// The previous step in the declared recovery sequence.
+        previous: SessionPath,
+        /// The step that failed to extend the previous step.
+        path: SessionPath,
+    },
     /// Cutoff path names must be present.
     #[error("cutoff path name must not be empty")]
     EmptyCutoffPathName,
@@ -902,6 +912,16 @@ pub enum ProtocolContractValidationError {
     /// Cutoff path names must be unique.
     #[error("duplicate cutoff path `{0}`")]
     DuplicateCutoffPath(String),
+    /// Cutoff paths must progress forward along one ordered branch.
+    #[error("cutoff path `{name}` must stay ordered; `{path}` does not extend `{previous}`")]
+    InvalidCutoffSequenceOrder {
+        /// The cutoff path name.
+        name: String,
+        /// The previous step in the declared recovery sequence.
+        previous: SessionPath,
+        /// The step that failed to extend the previous step.
+        path: SessionPath,
+    },
     /// Projection should succeed once the structural contract checks are green.
     #[error("projection invariant failed: {0}")]
     ProjectionInvariant(String),
@@ -1000,6 +1020,15 @@ fn validate_recovery_paths(
                 });
             }
         }
+        if let Some((previous, path)) = first_unordered_recovery_step(&compensation.path) {
+            return Err(
+                ProtocolContractValidationError::InvalidCompensationSequenceOrder {
+                    name: compensation.name.clone(),
+                    previous,
+                    path,
+                },
+            );
+        }
     }
     Ok(())
 }
@@ -1037,12 +1066,36 @@ fn validate_cutoff_paths(
                 });
             }
         }
+        if let Some((previous, path)) = first_unordered_recovery_step(&cutoff.path) {
+            return Err(
+                ProtocolContractValidationError::InvalidCutoffSequenceOrder {
+                    name: cutoff.name.clone(),
+                    previous,
+                    path,
+                },
+            );
+        }
     }
     Ok(())
 }
 
 fn is_addressable_session_path(path: &SessionPath, valid_paths: &BTreeSet<SessionPath>) -> bool {
     path != &SessionPath::root() && valid_paths.contains(path)
+}
+
+fn first_unordered_recovery_step(path: &[SessionPath]) -> Option<(SessionPath, SessionPath)> {
+    path.windows(2).find_map(|window| {
+        let [previous, next] = window else {
+            return None;
+        };
+        (!is_strict_session_path_extension(previous, next))
+            .then(|| (previous.clone(), next.clone()))
+    })
+}
+
+fn is_strict_session_path_extension(previous: &SessionPath, next: &SessionPath) -> bool {
+    next.segments().len() > previous.segments().len()
+        && next.segments().starts_with(previous.segments())
 }
 
 #[cfg(test)]
@@ -1398,6 +1451,80 @@ mod tests {
                 name: "graceful".to_owned(),
                 path: SessionPath::root(),
             })
+        );
+    }
+
+    #[test]
+    fn compensation_path_must_progress_forward() {
+        let client = RoleName::from("client");
+        let server = RoleName::from("server");
+        let request = MessageType::new("request", client.clone(), server.clone(), "Req");
+        let response = MessageType::new("response", server.clone(), client.clone(), "Resp");
+
+        let mut contract = ProtocolContract::new(
+            "unordered_compensation",
+            SchemaVersion::new(1, 0, 0),
+            vec![client.clone(), server.clone()],
+            GlobalSessionType::new(SessionType::send(
+                request,
+                SessionType::receive(response, SessionType::End),
+            )),
+        );
+        contract.compensation_paths.push(CompensationPath::new(
+            "rollback",
+            path(&["send:request"]),
+            vec![
+                path(&["send:request", "receive:response", "end"]),
+                path(&["send:request", "receive:response"]),
+            ],
+        ));
+
+        assert_eq!(
+            contract.validate(),
+            Err(
+                ProtocolContractValidationError::InvalidCompensationSequenceOrder {
+                    name: "rollback".to_owned(),
+                    previous: path(&["send:request", "receive:response", "end"]),
+                    path: path(&["send:request", "receive:response"]),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cutoff_path_must_progress_forward() {
+        let client = RoleName::from("client");
+        let server = RoleName::from("server");
+        let request = MessageType::new("request", client.clone(), server.clone(), "Req");
+        let response = MessageType::new("response", server.clone(), client.clone(), "Resp");
+
+        let mut contract = ProtocolContract::new(
+            "unordered_cutoff",
+            SchemaVersion::new(1, 0, 0),
+            vec![client.clone(), server.clone()],
+            GlobalSessionType::new(SessionType::send(
+                request,
+                SessionType::receive(response, SessionType::End),
+            )),
+        );
+        contract.cutoff_paths.push(CutoffPath::new(
+            "graceful",
+            path(&["send:request"]),
+            vec![
+                path(&["send:request", "receive:response", "end"]),
+                path(&["send:request", "receive:response"]),
+            ],
+        ));
+
+        assert_eq!(
+            contract.validate(),
+            Err(
+                ProtocolContractValidationError::InvalidCutoffSequenceOrder {
+                    name: "graceful".to_owned(),
+                    previous: path(&["send:request", "receive:response", "end"]),
+                    path: path(&["send:request", "receive:response"]),
+                }
+            )
         );
     }
 }

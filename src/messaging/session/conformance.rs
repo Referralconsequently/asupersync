@@ -50,6 +50,27 @@ impl StepMetadata {
             cutoff_paths: self.cutoff_paths.clone(),
         }
     }
+
+    fn into_check_record(
+        self,
+        role: RoleName,
+        path: SessionPath,
+        expectation: ConformanceExpectation,
+        observed: ConformanceObserved,
+        observed_at: Option<Time>,
+    ) -> ConformanceCheckRecord {
+        ConformanceCheckRecord {
+            role,
+            path,
+            expectation,
+            observed,
+            observed_at,
+            evidence_checkpoints: self.evidence_checkpoints,
+            timeout: self.timeout,
+            compensation_paths: self.compensation_paths,
+            cutoff_paths: self.cutoff_paths,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +79,19 @@ struct AnnotatedLocalBranch {
     path: SessionPath,
     metadata: StepMetadata,
     continuation: AnnotatedLocalType,
+}
+
+impl AnnotatedLocalBranch {
+    fn into_check_record(
+        self,
+        role: RoleName,
+        expectation: ConformanceExpectation,
+        observed: ConformanceObserved,
+        observed_at: Option<Time>,
+    ) -> ConformanceCheckRecord {
+        self.metadata
+            .into_check_record(role, self.path, expectation, observed, observed_at)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +231,153 @@ fn aggregate_branch_evidence(
         compensation_paths,
         cutoff_paths,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageStepKind {
+    Send,
+    Receive,
+}
+
+impl MessageStepKind {
+    fn expectation(self, message: MessageType) -> ConformanceExpectation {
+        match self {
+            Self::Send => ConformanceExpectation::Send { message },
+            Self::Receive => ConformanceExpectation::Receive { message },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchStepKind {
+    Choice,
+    Observe,
+}
+
+impl BranchStepKind {
+    fn expectation(self, labels: Vec<Label>) -> ConformanceExpectation {
+        match self {
+            Self::Choice => ConformanceExpectation::ChooseBranch { labels },
+            Self::Observe => ConformanceExpectation::ObserveBranch { labels },
+        }
+    }
+}
+
+struct ObserveRequest<'a> {
+    contract_name: &'a str,
+    role: &'a RoleName,
+    message: Option<&'a MessageType>,
+    label: Option<&'a Label>,
+    observed: &'a ConformanceObserved,
+    observed_at: Option<Time>,
+}
+
+impl ObserveRequest<'_> {
+    fn unexpected(
+        &self,
+        expected: ConformanceExpectation,
+        evidence: ConformanceViolationEvidence,
+    ) -> Box<ConformanceViolation> {
+        Box::new(ConformanceViolation::UnexpectedObservation {
+            contract_name: self.contract_name.to_owned(),
+            role: self.role.clone(),
+            expected,
+            observed: self.observed.clone(),
+            evidence: Box::new(evidence),
+        })
+    }
+}
+
+fn observation_time(state: &RoleConformanceState, observed_at: Option<Time>) -> Time {
+    observed_at.unwrap_or(state.entered_at)
+}
+
+fn check_observation_timeout(
+    state: &RoleConformanceState,
+    contract_name: &str,
+    role: &RoleName,
+    now: Option<Time>,
+) -> Result<(), Box<ConformanceViolation>> {
+    let Some(now) = now else {
+        return Ok(());
+    };
+    let Some(timeout) = state.current.timeout_budget() else {
+        return Ok(());
+    };
+    let elapsed_nanos = now.duration_since(state.entered_at);
+    let timeout_nanos = duration_to_nanos(timeout);
+    if elapsed_nanos > timeout_nanos {
+        return Err(Box::new(ConformanceViolation::Timeout {
+            contract_name: contract_name.to_owned(),
+            role: role.clone(),
+            expected: state.current.expectation(),
+            elapsed: Duration::from_nanos(elapsed_nanos),
+            evidence: Box::new(state.current.violation_evidence(contract_name, role)),
+        }));
+    }
+    Ok(())
+}
+
+fn observe_message_step(
+    state: &mut RoleConformanceState,
+    request: &ObserveRequest<'_>,
+    kind: MessageStepKind,
+    path: SessionPath,
+    metadata: StepMetadata,
+    expected_message: &MessageType,
+    next: AnnotatedLocalType,
+) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
+    let expectation = kind.expectation(expected_message.clone());
+    if request.label.is_some() || request.message != Some(expected_message) {
+        return Err(request.unexpected(
+            expectation,
+            metadata.to_violation_evidence(request.contract_name, request.role, path),
+        ));
+    }
+    let record = metadata.into_check_record(
+        request.role.clone(),
+        path,
+        expectation,
+        request.observed.clone(),
+        request.observed_at,
+    );
+    let entered_at = observation_time(state, request.observed_at);
+    state.advance_to(next, entered_at);
+    Ok(record)
+}
+
+fn observe_branch_step(
+    state: &mut RoleConformanceState,
+    request: &ObserveRequest<'_>,
+    kind: BranchStepKind,
+    branches: &[AnnotatedLocalBranch],
+) -> Result<ConformanceCheckRecord, Box<ConformanceViolation>> {
+    let expectation =
+        kind.expectation(branches.iter().map(|branch| branch.label.clone()).collect());
+    let aggregate_evidence =
+        || aggregate_branch_evidence(request.contract_name, request.role, &branches);
+    if request.message.is_some() {
+        return Err(request.unexpected(expectation, aggregate_evidence()));
+    }
+    let Some(observed_label) = request.label else {
+        return Err(request.unexpected(expectation, aggregate_evidence()));
+    };
+    let Some(branch) = branches
+        .iter()
+        .find(|branch| &branch.label == observed_label)
+    else {
+        return Err(request.unexpected(expectation, aggregate_evidence()));
+    };
+    let record = branch.metadata.clone().into_check_record(
+        request.role.clone(),
+        branch.path.clone(),
+        expectation,
+        request.observed.clone(),
+        request.observed_at,
+    );
+    let entered_at = observation_time(state, request.observed_at);
+    state.advance_to(branch.continuation.clone(), entered_at);
+    Ok(record)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -938,11 +1119,12 @@ impl ConformanceMonitor {
             }
             Err(violation) => {
                 let path = violation_path(violation.as_ref());
+                let root_path = SessionPath::root();
                 trace_conformance_check(
                     cx,
                     &self.contract_name,
                     role,
-                    path.as_ref().unwrap_or(&SessionPath::root()),
+                    path.as_ref().unwrap_or(&root_path),
                     "violation",
                     &ConformanceObserved::from_inputs(message, label),
                 );
@@ -990,7 +1172,6 @@ impl ConformanceMonitor {
                 role: role.clone(),
             })
         })?;
-
         if role_state.is_complete() {
             return Err(Box::new(ConformanceViolation::AlreadyComplete {
                 contract_name,
@@ -999,23 +1180,16 @@ impl ConformanceMonitor {
             }));
         }
 
-        if let Some(now) = now {
-            if let Some(timeout) = role_state.current.timeout_budget() {
-                let elapsed_nanos = now.duration_since(role_state.entered_at);
-                let timeout_nanos = duration_to_nanos(timeout);
-                if elapsed_nanos > timeout_nanos {
-                    return Err(Box::new(ConformanceViolation::Timeout {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected: role_state.current.expectation(),
-                        elapsed: Duration::from_nanos(elapsed_nanos),
-                        evidence: Box::new(
-                            role_state.current.violation_evidence(&contract_name, role),
-                        ),
-                    }));
-                }
-            }
-        }
+        check_observation_timeout(role_state, &contract_name, role, now)?;
+
+        let request = ObserveRequest {
+            contract_name: &contract_name,
+            role,
+            message,
+            label,
+            observed: &observed,
+            observed_at: now,
+        };
 
         let record = match role_state.current.clone() {
             AnnotatedLocalType::Send {
@@ -1023,206 +1197,34 @@ impl ConformanceMonitor {
                 metadata,
                 message: expected_message,
                 next,
-            } => {
-                if label.is_some() || message != Some(&expected_message) {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected: ConformanceExpectation::Send {
-                            message: expected_message,
-                        },
-                        observed,
-                        evidence: Box::new(metadata.to_violation_evidence(
-                            &contract_name,
-                            role,
-                            path,
-                        )),
-                    }));
-                }
-                let record = ConformanceCheckRecord {
-                    role: role.clone(),
-                    path,
-                    expectation: ConformanceExpectation::Send {
-                        message: expected_message,
-                    },
-                    observed,
-                    observed_at: now,
-                    evidence_checkpoints: metadata.evidence_checkpoints.clone(),
-                    timeout: metadata.timeout,
-                    compensation_paths: metadata.compensation_paths.clone(),
-                    cutoff_paths: metadata.cutoff_paths.clone(),
-                };
-                role_state.advance_to(*next, now.unwrap_or(role_state.entered_at));
-                record
-            }
+            } => observe_message_step(
+                role_state,
+                &request,
+                MessageStepKind::Send,
+                path,
+                metadata,
+                &expected_message,
+                *next,
+            )?,
             AnnotatedLocalType::Receive {
                 path,
                 metadata,
                 message: expected_message,
                 next,
-            } => {
-                if label.is_some() || message != Some(&expected_message) {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected: ConformanceExpectation::Receive {
-                            message: expected_message,
-                        },
-                        observed,
-                        evidence: Box::new(metadata.to_violation_evidence(
-                            &contract_name,
-                            role,
-                            path,
-                        )),
-                    }));
-                }
-                let record = ConformanceCheckRecord {
-                    role: role.clone(),
-                    path,
-                    expectation: ConformanceExpectation::Receive {
-                        message: expected_message,
-                    },
-                    observed,
-                    observed_at: now,
-                    evidence_checkpoints: metadata.evidence_checkpoints.clone(),
-                    timeout: metadata.timeout,
-                    compensation_paths: metadata.compensation_paths.clone(),
-                    cutoff_paths: metadata.cutoff_paths.clone(),
-                };
-                role_state.advance_to(*next, now.unwrap_or(role_state.entered_at));
-                record
-            }
+            } => observe_message_step(
+                role_state,
+                &request,
+                MessageStepKind::Receive,
+                path,
+                metadata,
+                &expected_message,
+                *next,
+            )?,
             AnnotatedLocalType::Choice { branches } => {
-                let expected = ConformanceExpectation::ChooseBranch {
-                    labels: branches.iter().map(|branch| branch.label.clone()).collect(),
-                };
-                let Some(observed_label) = label else {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected,
-                        observed,
-                        evidence: Box::new(aggregate_branch_evidence(
-                            &contract_name,
-                            role,
-                            &branches,
-                        )),
-                    }));
-                };
-                if message.is_some() {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected,
-                        observed,
-                        evidence: Box::new(aggregate_branch_evidence(
-                            &contract_name,
-                            role,
-                            &branches,
-                        )),
-                    }));
-                }
-                let Some(branch) = branches
-                    .iter()
-                    .find(|branch| &branch.label == observed_label)
-                    .cloned()
-                else {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected,
-                        observed,
-                        evidence: Box::new(aggregate_branch_evidence(
-                            &contract_name,
-                            role,
-                            &branches,
-                        )),
-                    }));
-                };
-                let record = ConformanceCheckRecord {
-                    role: role.clone(),
-                    path: branch.path.clone(),
-                    expectation: ConformanceExpectation::ChooseBranch {
-                        labels: branches
-                            .iter()
-                            .map(|candidate| candidate.label.clone())
-                            .collect(),
-                    },
-                    observed,
-                    observed_at: now,
-                    evidence_checkpoints: branch.metadata.evidence_checkpoints.clone(),
-                    timeout: branch.metadata.timeout,
-                    compensation_paths: branch.metadata.compensation_paths.clone(),
-                    cutoff_paths: branch.metadata.cutoff_paths.clone(),
-                };
-                role_state.advance_to(branch.continuation, now.unwrap_or(role_state.entered_at));
-                record
+                observe_branch_step(role_state, &request, BranchStepKind::Choice, &branches)?
             }
             AnnotatedLocalType::Branch { branches } => {
-                let expected = ConformanceExpectation::ObserveBranch {
-                    labels: branches.iter().map(|branch| branch.label.clone()).collect(),
-                };
-                let Some(observed_label) = label else {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected,
-                        observed,
-                        evidence: Box::new(aggregate_branch_evidence(
-                            &contract_name,
-                            role,
-                            &branches,
-                        )),
-                    }));
-                };
-                if message.is_some() {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected,
-                        observed,
-                        evidence: Box::new(aggregate_branch_evidence(
-                            &contract_name,
-                            role,
-                            &branches,
-                        )),
-                    }));
-                }
-                let Some(branch) = branches
-                    .iter()
-                    .find(|branch| &branch.label == observed_label)
-                    .cloned()
-                else {
-                    return Err(Box::new(ConformanceViolation::UnexpectedObservation {
-                        contract_name: contract_name.clone(),
-                        role: role.clone(),
-                        expected,
-                        observed,
-                        evidence: Box::new(aggregate_branch_evidence(
-                            &contract_name,
-                            role,
-                            &branches,
-                        )),
-                    }));
-                };
-                let record = ConformanceCheckRecord {
-                    role: role.clone(),
-                    path: branch.path.clone(),
-                    expectation: ConformanceExpectation::ObserveBranch {
-                        labels: branches
-                            .iter()
-                            .map(|candidate| candidate.label.clone())
-                            .collect(),
-                    },
-                    observed,
-                    observed_at: now,
-                    evidence_checkpoints: branch.metadata.evidence_checkpoints.clone(),
-                    timeout: branch.metadata.timeout,
-                    compensation_paths: branch.metadata.compensation_paths.clone(),
-                    cutoff_paths: branch.metadata.cutoff_paths.clone(),
-                };
-                role_state.advance_to(branch.continuation, now.unwrap_or(role_state.entered_at));
-                record
+                observe_branch_step(role_state, &request, BranchStepKind::Observe, &branches)?
             }
             AnnotatedLocalType::End { .. }
             | AnnotatedLocalType::Recurse { .. }
