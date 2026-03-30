@@ -1227,6 +1227,7 @@ fn send_tcp_dns_query(
     stream
         .read_exact(&mut packet)
         .map_err(|err| dns_io_error(&err))?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     parse_dns_response(&packet, expected_id)
 }
 

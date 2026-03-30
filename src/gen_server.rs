@@ -885,7 +885,7 @@ impl<S: GenServer> GenServerHandle<S> {
         }
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let reply_permit = reply_tx.reserve(cx);
+        let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
         let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
@@ -1277,7 +1277,7 @@ impl<S: GenServer> GenServerRef<S> {
         }
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let reply_permit = reply_tx.reserve(cx);
+        let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
         let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
@@ -1567,7 +1567,7 @@ async fn run_gen_server_loop<S: GenServer>(
                 request: _,
                 reply_permit,
             } => {
-                let _aborted: AbortedProof<SendPermit> = reply_permit.abort();
+                let _aborted = reply_permit.abort();
                 cx.trace("gen_server::drain_abort_call");
             }
             Envelope::Cast { msg } => {

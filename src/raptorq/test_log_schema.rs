@@ -507,18 +507,22 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
         "run_id",
         "repro_command",
     ] {
-        match value.get(*field).and_then(|v| v.as_str()) {
-            Some("") => {
+        match value.get(*field) {
+            Some(raw) if raw.as_str().is_some_and(|text| text.trim().is_empty()) => {
                 violations.push(format!("required field '{field}' is empty"));
             }
-            Some(_) => {}
+            Some(raw) if raw.as_str().is_some() => {}
+            Some(raw) if raw.is_null() => {
+                violations.push(format!("missing required field: {field}"));
+            }
+            Some(_) => violations.push(format!("{field} must be a string")),
             None => violations.push(format!("missing required field: {field}")),
         }
     }
 
     // Profile must be one of the valid values
     if let Some(profile) = value.get("profile").and_then(|v| v.as_str()) {
-        if !VALID_PROFILES.contains(&profile) {
+        if !profile.trim().is_empty() && !VALID_PROFILES.contains(&profile) {
             violations.push(format!(
                 "invalid profile '{profile}': expected one of {VALID_PROFILES:?}"
             ));
@@ -527,7 +531,7 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
 
     // Repro command must include rch exec
     if let Some(cmd) = value.get("repro_command").and_then(|v| v.as_str()) {
-        if !cmd.contains("rch exec --") {
+        if !cmd.trim().is_empty() && !cmd.contains("rch exec --") {
             violations
                 .push("repro_command must include 'rch exec --' for remote execution".to_string());
         }
@@ -830,7 +834,7 @@ fn validate_required_string_field(
     violations: &mut Vec<String>,
 ) {
     match parent.get(field) {
-        Some(value) if value.as_str().is_some_and(|text| !text.is_empty()) => {}
+        Some(value) if value.as_str().is_some_and(|text| !text.trim().is_empty()) => {}
         Some(value) if value.is_null() => {
             violations.push(format!("{path}.{field} is missing or null"));
         }
@@ -1690,6 +1694,61 @@ mod tests {
             violations.iter().any(|v| v.contains("invalid profile")),
             "should flag invalid profile: {violations:?}"
         );
+    }
+
+    #[test]
+    fn validate_e2e_log_rejects_whitespace_only_required_fields() {
+        let mut entry = valid_e2e_log_value();
+        entry["scenario"] = json!("   ");
+        entry["scenario_id"] = json!("\t");
+        entry["replay_id"] = json!(" ");
+        entry["profile"] = json!("  ");
+        entry["unit_sentinel"] = json!("   ");
+        entry["assertion_id"] = json!(" ");
+        entry["run_id"] = json!("  ");
+        entry["repro_command"] = json!("   ");
+
+        let violations = validate_e2e_log_json(&entry.to_string());
+        for field in [
+            "scenario",
+            "scenario_id",
+            "replay_id",
+            "profile",
+            "unit_sentinel",
+            "assertion_id",
+            "run_id",
+            "repro_command",
+        ] {
+            assert!(
+                violations.iter().any(|violation| {
+                    violation.contains(&format!("required field '{field}' is empty"))
+                }),
+                "should flag whitespace-only {field}: {violations:?}"
+            );
+        }
+        assert!(
+            !violations
+                .iter()
+                .any(|violation| violation.contains("must include 'rch exec --'")),
+            "whitespace-only repro_command should be reported as empty, not as missing rch exec: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_e2e_log_rejects_whitespace_only_nested_required_strings() {
+        let mut entry = valid_e2e_log_value();
+        entry["loss"]["kind"] = json!("   ");
+        entry["proof"]["outcome"] = json!("\t");
+
+        let violations = validate_e2e_log_json(&entry.to_string());
+        for field in ["loss.kind", "proof.outcome"] {
+            assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation == &format!("{field} must be a non-empty string")),
+                "should reject whitespace-only {field}: {violations:?}"
+            );
+        }
     }
 
     #[test]

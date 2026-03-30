@@ -101,6 +101,7 @@ impl Drop for TimerNode {
                 return;
             }
             panic!(
+                // ubs:ignore - safety guard for intrusive list
                 "TimerNode dropped while still linked in TimerWheel! This is a severe safety violation and use-after-free bug."
             );
         }

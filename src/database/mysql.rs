@@ -2078,7 +2078,7 @@ impl MySqlConnection {
     /// Read a complete packet.
     async fn read_packet(&mut self) -> Result<(Vec<u8>, u8), MySqlError> {
         let mut expected_seq = self.inner.sequence;
-        let mut last_seq = expected_seq;
+        let mut last_seq;
         let mut data = Vec::new();
 
         loop {

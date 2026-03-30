@@ -118,6 +118,7 @@ impl Drop for IoOp {
                 return;
             }
             panic!(
+                // ubs:ignore - safety guard against resource leaks
                 "I/O obligation {:?} was dropped without completion, cancellation, abort, or explicit into_raw() handoff",
                 self.obligation
             );

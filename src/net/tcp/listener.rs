@@ -23,7 +23,7 @@ use std::time::Duration;
 const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(4);
 const REARMED_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const REARMED_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(32);
-const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(25);
+const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(50);
 
 fn listener_now() -> Time {
     Cx::current()
@@ -611,7 +611,7 @@ mod tests {
         );
 
         set_test_time(
-            Duration::from_millis(50)
+            Duration::from_millis(60)
                 .as_nanos()
                 .min(u128::from(u64::MAX)) as u64,
         );
@@ -665,7 +665,7 @@ mod tests {
         );
 
         clock.advance(
-            Duration::from_millis(50)
+            Duration::from_millis(60)
                 .as_nanos()
                 .min(u128::from(u64::MAX)) as u64,
         );

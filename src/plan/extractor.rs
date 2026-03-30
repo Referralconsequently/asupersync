@@ -6,7 +6,7 @@
 
 use super::certificate::{CertificateVersion, PlanHash};
 use super::{EClassId, EGraph, ENode, PlanDag, PlanId, PlanNode};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ===========================================================================
 // Cost model
@@ -129,6 +129,8 @@ pub struct Extractor<'a> {
     costs: BTreeMap<EClassId, PlanCost>,
     /// Best e-node for each class.
     best_node: BTreeMap<EClassId, ENode>,
+    /// Classes currently being costed; revisiting one indicates a cyclic candidate.
+    computing: BTreeSet<EClassId>,
 }
 
 impl<'a> Extractor<'a> {
@@ -138,6 +140,7 @@ impl<'a> Extractor<'a> {
             egraph,
             costs: BTreeMap::new(),
             best_node: BTreeMap::new(),
+            computing: BTreeSet::new(),
         }
     }
 
@@ -152,8 +155,15 @@ impl<'a> Extractor<'a> {
         // Build the plan DAG from the best nodes
         let mut dag = PlanDag::new();
         let mut id_map: BTreeMap<EClassId, PlanId> = BTreeMap::new();
+        let canonical_root = self.egraph.canonical_id(root);
+        assert!(
+            self.best_node.contains_key(&canonical_root),
+            "extractor found no acyclic extraction candidate for root class {}",
+            canonical_root.index()
+        );
+        let mut building = BTreeSet::new();
 
-        let dag_root = self.build_plan_node(root, &mut dag, &mut id_map);
+        let dag_root = self.build_plan_node(root, &mut dag, &mut id_map, &mut building);
         dag.set_root(dag_root);
 
         let cost = self
@@ -181,12 +191,20 @@ impl<'a> Extractor<'a> {
             return cost;
         }
 
+        // Merges can create cyclic e-classes. Treat them as non-extractable
+        // candidates so a cheaper acyclic alternative in the same class can win.
+        if !self.computing.insert(canonical) {
+            return PlanCost::UNKNOWN;
+        }
+
         // Get all nodes in this class (resolved from arena)
         let Some(nodes) = self.egraph.class_nodes_cloned(canonical) else {
+            self.computing.remove(&canonical);
             return PlanCost::ZERO;
         };
 
         if nodes.is_empty() {
+            self.computing.remove(&canonical);
             self.costs.insert(canonical, PlanCost::ZERO);
             return PlanCost::ZERO;
         }
@@ -202,6 +220,9 @@ impl<'a> Extractor<'a> {
 
         for node in nodes {
             let cost = self.node_cost(&node);
+            if cost == PlanCost::UNKNOWN {
+                continue;
+            }
             if cost.total() < best_cost.total()
                 || (cost.total() == best_cost.total() && best.is_none())
             {
@@ -210,6 +231,7 @@ impl<'a> Extractor<'a> {
             }
         }
 
+        self.computing.remove(&canonical);
         self.costs.insert(canonical, best_cost);
         if let Some(node) = best {
             self.best_node.insert(canonical, node);
@@ -266,12 +288,18 @@ impl<'a> Extractor<'a> {
         id: EClassId,
         dag: &mut PlanDag,
         id_map: &mut BTreeMap<EClassId, PlanId>,
+        building: &mut BTreeSet<EClassId>,
     ) -> PlanId {
         let canonical = self.egraph.canonical_id(id);
 
         if let Some(&plan_id) = id_map.get(&canonical) {
             return plan_id;
         }
+        assert!(
+            building.insert(canonical),
+            "cyclic extraction candidate survived cost selection for class {}",
+            canonical.index()
+        );
 
         let node = self
             .best_node
@@ -284,23 +312,24 @@ impl<'a> Extractor<'a> {
             ENode::Join { children } => {
                 let child_ids: Vec<PlanId> = children
                     .iter()
-                    .map(|c| self.build_plan_node(*c, dag, id_map))
+                    .map(|c| self.build_plan_node(*c, dag, id_map, building))
                     .collect();
                 dag.join(child_ids)
             }
             ENode::Race { children } => {
                 let child_ids: Vec<PlanId> = children
                     .iter()
-                    .map(|c| self.build_plan_node(*c, dag, id_map))
+                    .map(|c| self.build_plan_node(*c, dag, id_map, building))
                     .collect();
                 dag.race(child_ids)
             }
             ENode::Timeout { child, duration } => {
-                let child_id = self.build_plan_node(*child, dag, id_map);
+                let child_id = self.build_plan_node(*child, dag, id_map, building);
                 dag.timeout(child_id, *duration)
             }
         };
 
+        building.remove(&canonical);
         id_map.insert(canonical, plan_id);
         plan_id
     }
@@ -591,6 +620,31 @@ mod tests {
         assert!(cert.verify(&dag).is_ok());
         // The flat join is cheaper (fewer allocations)
         assert_eq!(cert.cost.allocations, 4); // 3 leaves + 1 join
+    }
+
+    #[test]
+    fn extract_merge_with_cyclic_enode_prefers_acyclic_candidate() {
+        init_test();
+        let mut eg = EGraph::new();
+        let leaf = eg.add_leaf("a");
+        let recursive_join = eg.add_join(vec![leaf]);
+
+        // Rebuild canonicalizes the join into Join([leaf]), so this merge creates
+        // a class containing both an acyclic leaf and a self-referential join.
+        eg.merge(leaf, recursive_join);
+
+        let mut extractor = Extractor::new(&mut eg);
+        let (dag, cert) = extractor.extract(leaf);
+
+        assert!(cert.verify(&dag).is_ok());
+        assert_eq!(dag.nodes.len(), 1);
+        assert_eq!(cert.cost, PlanCost::LEAF);
+
+        let root = dag.root().expect("root");
+        assert!(matches!(
+            dag.node(root),
+            Some(PlanNode::Leaf { label }) if label == "a"
+        ));
     }
 
     #[test]

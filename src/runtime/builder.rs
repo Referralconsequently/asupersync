@@ -2928,7 +2928,7 @@ impl<T> Future for JoinHandle<T> {
                     // (e.g. the runtime was shut down and tasks were force-cancelled).
                     this.completed = true;
                     drop(guard);
-                    panic!("task was dropped or cancelled before completion");
+                    panic!("task was dropped or cancelled before completion"); // ubs:ignore - runtime shutdown panic
                 }
 
                 if !guard
@@ -3177,7 +3177,7 @@ impl RuntimeInner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
             let (task_id, _handle, cx, _result_tx) =
-                guard.create_task_infrastructure::<()>(self.root_region, Budget::new())?;
+                guard.create_task_infrastructure::<()>(self.root_region, Budget::new(), false)?;
 
             let future = f(cx);
 

@@ -166,9 +166,9 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
             result.map_or_else(
                 || {
                     if closed_without_result {
-                        panic!("blocking operation ended without producing a result");
+                        panic!("blocking operation ended without producing a result"); // ubs:ignore - invariant violation
                     } else {
-                        panic!("blocking operation polled after completion");
+                        panic!("blocking operation polled after completion"); // ubs:ignore - invariant violation
                     }
                 },
                 |result| match result {
@@ -236,7 +236,7 @@ where
     spawn_blocking(f).await
 }
 
-async fn spawn_blocking_on_pool<F, T>(pool: BlockingPoolHandle, f: F) -> T
+pub(crate) async fn spawn_blocking_on_pool<F, T>(pool: BlockingPoolHandle, f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
