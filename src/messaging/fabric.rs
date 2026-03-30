@@ -210,10 +210,10 @@ impl FabricCellBufferState {
         }
     }
 
-    const fn from_buffer_len(buffer_len: usize, capacity: usize) -> Self {
-        if buffer_len == 0 {
+    const fn from_occupied_len(occupied_len: usize, capacity: usize) -> Self {
+        if occupied_len == 0 {
             Self::Empty
-        } else if buffer_len >= capacity {
+        } else if occupied_len >= capacity {
             Self::Backpressured
         } else {
             Self::Buffered
@@ -227,6 +227,7 @@ struct FabricCellRuntime {
     durable_capsule: RecoverableDataCapsule,
     _route_guard: SubscriptionGuard,
     buffer: VecDeque<FabricBufferedMessage>,
+    reserved_slots: usize,
     state: FabricCellBufferState,
 }
 
@@ -237,7 +238,26 @@ impl FabricCellRuntime {
             cell,
             _route_guard: route_guard,
             buffer: VecDeque::new(),
+            reserved_slots: 0,
             state: FabricCellBufferState::Empty,
+        }
+    }
+
+    fn occupied_len(&self) -> usize {
+        self.buffer.len() + self.reserved_slots
+    }
+
+    fn refresh_state(
+        &mut self,
+        capacity: usize,
+    ) -> Option<(CellId, FabricCellBufferState, FabricCellBufferState)> {
+        let next_state = FabricCellBufferState::from_occupied_len(self.occupied_len(), capacity);
+        if self.state == next_state {
+            None
+        } else {
+            let from_state = self.state;
+            self.state = next_state;
+            Some((self.cell.cell_id, from_state, next_state))
         }
     }
 }
@@ -492,51 +512,76 @@ impl FabricState {
             delivery_class,
         };
 
+        let mut full_cell = None;
         for cell_key in &routed_cells {
-            let full_cell = {
-                let Some(cell) = self.cells.get_mut(cell_key) else {
-                    return Err(AsupersyncError::new(ErrorKind::RoutingFailed)
-                        .with_message(format!("missing fabric cell runtime for {cell_key}")));
-                };
-
-                if cell.buffer.len() < capacity {
-                    None
-                } else {
-                    let cell_id = cell.cell.cell_id;
-                    let queued_messages = cell.buffer.len();
-                    let from_state = cell.state;
-                    if from_state != FabricCellBufferState::Backpressured {
-                        cell.state = FabricCellBufferState::Backpressured;
-                        trace_fabric_cell_state_transition(
-                            cx,
-                            cell_id,
-                            Some(from_state),
-                            FabricCellBufferState::Backpressured,
-                            "buffer capacity exhausted",
-                        );
-                    }
-                    let error = AsupersyncError::new(ErrorKind::ChannelFull).with_message(
-                        format!(
-                            "fabric cell {cell_id} is backpressured at capacity {capacity} for subject {}",
-                            subject.as_str()
-                        ),
-                    );
-                    let decision = FabricRetryDecision::new(
-                        cell_id,
-                        subject.as_str(),
-                        delivery_class,
-                        queued_messages,
-                        capacity,
-                    )
-                    .evaluate();
-                    Some((decision, error))
-                }
+            let Some(cell) = self.cells.get(cell_key) else {
+                return Err(AsupersyncError::new(ErrorKind::RoutingFailed)
+                    .with_message(format!("missing fabric cell runtime for {cell_key}")));
             };
 
-            if let Some((decision, error)) = full_cell {
-                self.push_decision(cx, decision);
-                return Err(error);
+            let occupied_messages = cell.occupied_len();
+            if occupied_messages >= capacity {
+                full_cell = Some((
+                    cell_key.clone(),
+                    cell.cell.cell_id,
+                    occupied_messages,
+                    cell.state,
+                ));
+                break;
             }
+        }
+
+        if let Some((cell_key, cell_id, queued_messages, from_state)) = full_cell {
+            if from_state != FabricCellBufferState::Backpressured {
+                let cell = self
+                    .cells
+                    .get_mut(&cell_key)
+                    .expect("full routed cell must exist for publish");
+                cell.state = FabricCellBufferState::Backpressured;
+                trace_fabric_cell_state_transition(
+                    cx,
+                    cell_id,
+                    Some(from_state),
+                    FabricCellBufferState::Backpressured,
+                    "buffer capacity exhausted",
+                );
+            }
+            let error = AsupersyncError::new(ErrorKind::ChannelFull).with_message(format!(
+                "fabric cell {cell_id} is backpressured at capacity {capacity} for subject {}",
+                subject.as_str()
+            ));
+            let decision = FabricRetryDecision::new(
+                cell_id,
+                subject.as_str(),
+                delivery_class,
+                queued_messages,
+                capacity,
+            )
+            .evaluate();
+            self.push_decision(cx, decision);
+            return Err(error);
+        }
+
+        let mut transitions = Vec::new();
+        for cell_key in &routed_cells {
+            let cell = self
+                .cells
+                .get_mut(cell_key)
+                .expect("prepared routed cell must exist for reservation");
+            cell.reserved_slots += 1;
+            if let Some(transition) = cell.refresh_state(capacity) {
+                transitions.push(transition);
+            }
+        }
+
+        for (cell_id, from_state, to_state) in transitions {
+            trace_fabric_cell_state_transition(
+                cx,
+                cell_id,
+                Some(from_state),
+                to_state,
+                "publish slot reserved",
+            );
         }
 
         Ok(PreparedFabricPublish {
@@ -546,12 +591,51 @@ impl FabricState {
         })
     }
 
+    fn release_prepared_publish(
+        &mut self,
+        cx: Option<&Cx>,
+        prepared: PreparedFabricPublish,
+        reason: &str,
+    ) {
+        let PreparedFabricPublish {
+            routed_cells,
+            capacity,
+            ..
+        } = prepared;
+        let mut transitions = Vec::new();
+
+        for cell_key in routed_cells {
+            let cell = self
+                .cells
+                .get_mut(&cell_key)
+                .expect("prepared routed cell must exist for release");
+            cell.reserved_slots = cell
+                .reserved_slots
+                .checked_sub(1)
+                .expect("prepared publish release must match a reserved slot");
+            if let Some(transition) = cell.refresh_state(capacity) {
+                transitions.push(transition);
+            }
+        }
+
+        if let Some(cx) = cx {
+            for (cell_id, from_state, to_state) in transitions {
+                trace_fabric_cell_state_transition(cx, cell_id, Some(from_state), to_state, reason);
+            }
+        }
+    }
+
     fn apply_prepared_publish(&mut self, cx: &Cx, prepared: PreparedFabricPublish) {
+        let PreparedFabricPublish {
+            routed_cells,
+            message,
+            capacity,
+        } = prepared;
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         let local_candidates = self.local_candidates.clone();
 
-        for cell_key in prepared.routed_cells {
+        for cell_key in routed_cells {
             let mut transition = None;
 
             {
@@ -559,27 +643,26 @@ impl FabricState {
                     .cells
                     .get_mut(&cell_key)
                     .expect("prepared routed cell must exist for publish");
+                cell.reserved_slots = cell
+                    .reserved_slots
+                    .checked_sub(1)
+                    .expect("prepared publish must consume a reserved slot");
                 cell.buffer.push_back(FabricBufferedMessage {
                     sequence,
-                    message: prepared.message.clone(),
+                    message: message.clone(),
                 });
-                if prepared.message.delivery_class == DeliveryClass::DurableOrdered {
+                if message.delivery_class == DeliveryClass::DurableOrdered {
                     if let Err(error) = cell.durable_capsule.record_publish(
                         &cell.cell,
                         &local_candidates,
                         sequence,
-                        &prepared.message,
+                        &message,
                     ) {
                         trace_data_capsule_publish_error(cx, cell.cell.cell_id, sequence, &error);
                     }
                 }
 
-                let next_state =
-                    FabricCellBufferState::from_buffer_len(cell.buffer.len(), prepared.capacity);
-                if cell.state != next_state {
-                    transition = Some((cell.cell.cell_id, cell.state, next_state));
-                    cell.state = next_state;
-                }
+                transition = cell.refresh_state(capacity);
             }
 
             if let Some((cell_id, from_state, to_state)) = transition {
@@ -631,13 +714,10 @@ impl FabricState {
                 cell.buffer.pop_front();
             }
 
-            let next_state = FabricCellBufferState::from_buffer_len(cell.buffer.len(), capacity);
-            if cell.state != next_state {
-                let from_state = cell.state;
-                cell.state = next_state;
+            if let Some((cell_id, from_state, next_state)) = cell.refresh_state(capacity) {
                 trace_fabric_cell_state_transition(
                     cx,
-                    cell.cell.cell_id,
+                    cell_id,
                     Some(from_state),
                     next_state,
                     "buffer retention pruned",
@@ -1752,6 +1832,13 @@ impl PublishPermit<'_> {
     /// obligation token.
     pub fn abort(mut self, cx: &Cx) {
         self.abort_obligation(cx.now(), ObligationAbortReason::Explicit);
+        if let Some(prepared) = self.prepared.take() {
+            self.state.lock().release_prepared_publish(
+                Some(cx),
+                prepared,
+                "publish reservation released",
+            );
+        }
         trace_publish_abort(
             cx,
             &self.subject,
@@ -1759,7 +1846,6 @@ impl PublishPermit<'_> {
             self.obligation_id,
             "explicit",
         );
-        self.prepared = None;
         self.consumed = true;
     }
 
@@ -1789,7 +1875,13 @@ impl Drop for PublishPermit<'_> {
             // Silent abort — the slot is released and the obligation (if any)
             // is aborted deterministically instead of leaking into drain.
             self.abort_obligation(self.drop_abort_time(), ObligationAbortReason::Explicit);
-            self.prepared = None;
+            if let Some(prepared) = self.prepared.take() {
+                self.state.lock().release_prepared_publish(
+                    None,
+                    prepared,
+                    "publish reservation released",
+                );
+            }
         }
     }
 }
@@ -2269,7 +2361,7 @@ impl Fabric {
             .evaluate();
             state.push_decision(cx, decision);
         }
-        let mut obligation = ServiceObligation::allocate(
+        let mut obligation = match ServiceObligation::allocate(
             ledger,
             admission.certificate.request_id.clone(),
             admission.certificate.caller.clone(),
@@ -2280,18 +2372,35 @@ impl Fabric {
             cx.region_id(),
             now,
             admission.validated.timeout,
-        )
-        .map_err(|error| fabric_input_error(error.to_string()))?;
+        ) {
+            Ok(obligation) => obligation,
+            Err(error) => {
+                state.release_prepared_publish(
+                    Some(cx),
+                    prepared_publish,
+                    "certified publish reservation released",
+                );
+                return Err(fabric_input_error(error.to_string()));
+            }
+        };
 
-        let commit = obligation
-            .commit_with_reply(
-                ledger,
-                now,
-                payload.clone(),
-                delivery_boundary,
-                receipt_required,
-            )
-            .map_err(|error| fabric_input_error(error.to_string()))?;
+        let commit = match obligation.commit_with_reply(
+            ledger,
+            now,
+            payload.clone(),
+            delivery_boundary,
+            receipt_required,
+        ) {
+            Ok(commit) => commit,
+            Err(error) => {
+                state.release_prepared_publish(
+                    Some(cx),
+                    prepared_publish,
+                    "certified publish reservation released",
+                );
+                return Err(fabric_input_error(error.to_string()));
+            }
+        };
         let reply_certificate =
             ReplyCertificate::from_commit(&commit, callee, now, service_latency);
         debug_assert!(reply_certificate.validate().is_ok());
@@ -10126,6 +10235,52 @@ mod tests {
     }
 
     #[test]
+    fn reserve_publish_holds_cell_capacity_until_abort() {
+        run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-capacity-abort")
+                .await
+                .expect("connect");
+            fabric.state.lock().cell_buffer_capacity = 1;
+
+            let permit = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                .await
+                .expect("reserve");
+
+            let err = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                .await
+                .expect_err("outstanding permit should hold cell capacity");
+            assert_eq!(err.kind(), ErrorKind::ChannelFull);
+
+            let cell_key = canonical_cell_key("orders.created");
+            {
+                let state = fabric.state.lock();
+                let cell = state.cells.get(&cell_key).expect("cell runtime");
+                assert_eq!(cell.buffer.len(), 0);
+                assert_eq!(cell.reserved_slots, 1);
+                assert_eq!(cell.state, FabricCellBufferState::Backpressured);
+            }
+
+            permit.abort(&cx);
+
+            {
+                let state = fabric.state.lock();
+                let cell = state.cells.get(&cell_key).expect("cell runtime");
+                assert_eq!(cell.buffer.len(), 0);
+                assert_eq!(cell.reserved_slots, 0);
+                assert_eq!(cell.state, FabricCellBufferState::Empty);
+            }
+
+            let _permit = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                .await
+                .expect("abort should release reserved capacity");
+        });
+    }
+
+    #[test]
     fn reserve_publish_drop_delivers_nothing() {
         run_test_with_cx(|cx| async move {
             grant_publish(&cx, "orders.>");
@@ -10154,6 +10309,44 @@ mod tests {
                 "orders.other",
                 "dropped permit must not deliver its message"
             );
+        });
+    }
+
+    #[test]
+    fn reserve_publish_drop_releases_reserved_capacity() {
+        run_test_with_cx(|cx| async move {
+            grant_publish(&cx, "orders.created");
+            let fabric = Fabric::connect(&cx, "node1:4222/two-phase-capacity-drop")
+                .await
+                .expect("connect");
+            fabric.state.lock().cell_buffer_capacity = 1;
+
+            {
+                let _permit = fabric
+                    .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                    .await
+                    .expect("reserve");
+
+                let err = fabric
+                    .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                    .await
+                    .expect_err("outstanding permit should hold cell capacity");
+                assert_eq!(err.kind(), ErrorKind::ChannelFull);
+            }
+
+            let cell_key = canonical_cell_key("orders.created");
+            {
+                let state = fabric.state.lock();
+                let cell = state.cells.get(&cell_key).expect("cell runtime");
+                assert_eq!(cell.buffer.len(), 0);
+                assert_eq!(cell.reserved_slots, 0);
+                assert_eq!(cell.state, FabricCellBufferState::Empty);
+            }
+
+            let _permit = fabric
+                .reserve_publish(&cx, "orders.created", DeliveryClass::EphemeralInteractive)
+                .await
+                .expect("drop should release reserved capacity");
         });
     }
 
