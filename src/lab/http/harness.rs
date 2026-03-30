@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use super::server::VirtualServer;
+use crate::bytes::Bytes;
 use crate::lab::config::LabConfig;
 use crate::lab::runtime::LabRuntime;
 use crate::types::Time;
@@ -10,8 +12,66 @@ use crate::web::extract::Request;
 use crate::web::response::Response;
 use crate::web::router::Router;
 
-use super::client::VirtualClient;
-use super::server::VirtualServer;
+/// A traced client bound to a [`TestHarness`].
+///
+/// Requests sent through this client use the harness's deterministic batch RNG
+/// and are recorded in the harness request trace.
+pub struct TestHarnessClient<'a> {
+    harness: &'a mut TestHarness,
+}
+
+impl TestHarnessClient<'_> {
+    /// Send a GET request and record it in the harness trace.
+    #[must_use]
+    pub fn get(&mut self, path: &str) -> Response {
+        self.harness.get(path)
+    }
+
+    /// Send a POST request with a binary body and record it in the harness trace.
+    pub fn post(&mut self, path: &str, body: impl Into<Bytes>) -> Response {
+        let mut req = Request::new("POST", path);
+        req.body = body.into();
+        req.headers.insert(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        );
+        self.harness.send_traced(req)
+    }
+
+    /// Send a POST request with a JSON body and record it in the harness trace.
+    #[must_use]
+    pub fn post_json(&mut self, path: &str, json: &str) -> Response {
+        let mut req = Request::new("POST", path);
+        req.body = Bytes::from(json.to_string());
+        req.headers
+            .insert("content-type".to_string(), "application/json".to_string());
+        self.harness.send_traced(req)
+    }
+
+    /// Send a PUT request with a body and record it in the harness trace.
+    pub fn put(&mut self, path: &str, body: impl Into<Bytes>) -> Response {
+        let mut req = Request::new("PUT", path);
+        req.body = body.into();
+        self.harness.send_traced(req)
+    }
+
+    /// Send a DELETE request and record it in the harness trace.
+    #[must_use]
+    pub fn delete(&mut self, path: &str) -> Response {
+        self.harness.send_traced(Request::new("DELETE", path))
+    }
+
+    /// Send a batch of GET requests using the harness RNG and trace recorder.
+    pub fn get_batch(&mut self, paths: &[&str]) -> Vec<Response> {
+        self.harness.get_batch(paths)
+    }
+
+    /// Send a custom request and record it in the harness trace.
+    #[must_use]
+    pub fn send(&mut self, req: Request) -> Response {
+        self.harness.send_traced(req)
+    }
+}
 
 /// Integrated test harness for deterministic HTTP testing.
 ///
@@ -66,10 +126,13 @@ impl TestHarness {
         Self::new(LabConfig::new(seed), router)
     }
 
-    /// Get a client bound to the virtual server.
+    /// Get a traced client bound to the harness.
+    ///
+    /// Requests sent through this client are recorded in [`RequestTrace`] and
+    /// batched GETs use the harness's deterministic RNG ordering.
     #[must_use]
-    pub fn client(&self) -> VirtualClient<'_> {
-        VirtualClient::new(&self.server)
+    pub fn client(&mut self) -> TestHarnessClient<'_> {
+        TestHarnessClient { harness: self }
     }
 
     /// Send a GET request and record it in the trace.
@@ -412,6 +475,48 @@ mod tests {
             assert_eq!(r1.status, r2.status);
             assert_eq!(r1.body, r2.body);
         }
+    }
+
+    #[test]
+    fn harness_client_records_trace() {
+        let mut harness = TestHarness::with_seed(42, test_router());
+
+        let resp = harness.client().get("/health");
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(harness.trace().len(), 1);
+        assert_eq!(harness.trace()[0].path, "/health");
+    }
+
+    #[test]
+    fn harness_client_batch_is_traced_and_seeded() {
+        let router = Router::new()
+            .route("/a", get(FnHandler::new(|| "a")))
+            .route("/b", get(FnHandler::new(|| "b")))
+            .route("/c", get(FnHandler::new(|| "c")));
+
+        let mut h1 = TestHarness::with_seed(99, router);
+
+        let router2 = Router::new()
+            .route("/a", get(FnHandler::new(|| "a")))
+            .route("/b", get(FnHandler::new(|| "b")))
+            .route("/c", get(FnHandler::new(|| "c")));
+
+        let mut h2 = TestHarness::with_seed(99, router2);
+
+        let batch1 = h1.client().get_batch(&["/a", "/b", "/c"]);
+        let batch2 = h2.client().get_batch(&["/a", "/b", "/c"]);
+
+        assert_eq!(batch1.len(), batch2.len());
+        for (r1, r2) in batch1.iter().zip(batch2.iter()) {
+            assert_eq!(r1.status, r2.status);
+            assert_eq!(r1.body, r2.body);
+        }
+
+        let trace_paths_1: Vec<&str> = h1.trace().iter().map(|entry| entry.path.as_str()).collect();
+        let trace_paths_2: Vec<&str> = h2.trace().iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(trace_paths_1, trace_paths_2);
+        assert_eq!(trace_paths_1.len(), 3);
     }
 
     #[test]

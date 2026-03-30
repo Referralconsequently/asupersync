@@ -43,6 +43,15 @@ use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// Maximum number of observed polls a task may remain in `CancelRequested`
+/// before the oracle reports a missing acknowledgement.
+///
+/// `CHECKPOINT-MASKED` can consume at most one unit of mask depth per cancel
+/// checkpoint, after which the next checkpoint must acknowledge cancellation.
+/// If the oracle observes more polls than this bound while the task remains in
+/// `CancelRequested`, cancellation is no longer making bounded progress.
+const CANCEL_ACK_POLL_BOUND: u32 = crate::types::MAX_MASK_DEPTH + 1;
+
 /// A violation of the cancellation protocol invariant.
 #[derive(Debug, Clone)]
 pub enum CancellationProtocolViolation {
@@ -677,6 +686,36 @@ impl CancellationProtocolOracle {
         violations
     }
 
+    /// Checks for tasks that stay in `CancelRequested` beyond the bounded
+    /// acknowledgement window.
+    fn check_cancel_acknowledged(&self) -> Vec<CancellationProtocolViolation> {
+        let mut violations = Vec::new();
+
+        let mut tasks: Vec<TaskId> = self.tasks.keys().copied().collect();
+        tasks.sort();
+        for task in tasks {
+            let Some(record) = self.tasks.get(&task) else {
+                continue;
+            };
+            let Some(cancel) = record.cancel_request.as_ref() else {
+                continue;
+            };
+
+            if !cancel.acknowledged
+                && record.current_state == TaskStateKind::CancelRequested
+                && cancel.polls_since > CANCEL_ACK_POLL_BOUND
+            {
+                violations.push(CancellationProtocolViolation::CancelNotAcknowledged {
+                    task,
+                    requested_at: cancel.requested_at,
+                    polls_since_request: cancel.polls_since,
+                });
+            }
+        }
+
+        violations
+    }
+
     /// Checks all invariants and returns the first violation, if any.
     ///
     /// # Errors
@@ -691,6 +730,12 @@ impl CancellationProtocolOracle {
 
         // Check cancel propagation
         self.check_cancel_propagation()?;
+
+        // Check that cancel requests are acknowledged within bounded polls.
+        let ack_violations = self.check_cancel_acknowledged();
+        if let Some(v) = ack_violations.first() {
+            return Err(v.clone());
+        }
 
         // Check that cancelled tasks completed
         let task_violations = self.check_cancelled_tasks_completed();
@@ -714,6 +759,9 @@ impl CancellationProtocolOracle {
                 all.push(v);
             }
         }
+
+        // Add acknowledgement-bound violations.
+        all.extend(self.check_cancel_acknowledged());
 
         // Add completion violations
         all.extend(self.check_cancelled_tasks_completed());
@@ -1189,6 +1237,123 @@ mod tests {
         );
         crate::assert_with_log!(not_completed, "cancel not completed", true, not_completed);
         crate::test_complete!("cancelled_task_not_completed_detected");
+    }
+
+    #[test]
+    fn cancel_not_acknowledged_detected_after_bounded_polls() {
+        init_test("cancel_not_acknowledged_detected_after_bounded_polls");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        let reason = CancelReason::timeout();
+        let cleanup_budget = Budget::INFINITE;
+
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason,
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+
+        for _ in 0..=CANCEL_ACK_POLL_BOUND {
+            oracle.on_task_poll(task);
+        }
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        let not_acknowledged = matches!(
+            violation,
+            CancellationProtocolViolation::CancelNotAcknowledged {
+                polls_since_request,
+                ..
+            } if polls_since_request == CANCEL_ACK_POLL_BOUND + 1
+        );
+        crate::assert_with_log!(
+            not_acknowledged,
+            "cancel not acknowledged",
+            true,
+            not_acknowledged
+        );
+        crate::test_complete!("cancel_not_acknowledged_detected_after_bounded_polls");
+    }
+
+    #[test]
+    fn cancel_acknowledgement_at_bound_remains_valid() {
+        init_test("cancel_acknowledgement_at_bound_remains_valid");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        let reason = CancelReason::timeout();
+        let cleanup_budget = Budget::INFINITE;
+
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+
+        for _ in 0..CANCEL_ACK_POLL_BOUND {
+            oracle.on_task_poll(task);
+        }
+
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(200),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Finalizing {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(300),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Finalizing {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Completed(Outcome::Cancelled(reason)),
+            Time::from_nanos(400),
+        );
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("cancel_acknowledgement_at_bound_remains_valid");
     }
 
     #[test]

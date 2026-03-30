@@ -28,7 +28,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::lab::http::{VirtualServer, VirtualClient, TestHarness};
+//! use asupersync::lab::http::TestHarness;
 //! use asupersync::lab::LabConfig;
 //! use asupersync::web::{Router, get};
 //! use asupersync::web::handler::FnHandler;
@@ -41,6 +41,7 @@
 //! // Single request
 //! let resp = harness.client().get("/health");
 //! assert_eq!(resp.status.as_u16(), 200);
+//! assert_eq!(harness.trace().len(), 1);
 //!
 //! // Deterministic concurrent requests
 //! let responses = harness.client().get_batch(&["/a", "/b", "/c"]);
@@ -52,5 +53,5 @@ mod harness;
 mod server;
 
 pub use client::{RequestBuilder, VirtualClient};
-pub use harness::{RequestTrace, TestHarness, TraceEntry};
+pub use harness::{RequestTrace, TestHarness, TestHarnessClient, TraceEntry};
 pub use server::VirtualServer;

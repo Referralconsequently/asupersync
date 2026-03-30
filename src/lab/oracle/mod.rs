@@ -278,9 +278,24 @@ impl OracleSuite {
         self.task_leak.reset();
         self.obligation_leak.snapshot_from_state(state, now);
         self.quiescence.reset();
+        self.finalizer.reset();
         self.region_tree.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.snapshot_from_state(state, now);
+
+        for event in state.finalizer_history() {
+            match *event {
+                crate::runtime::state::FinalizerHistoryEvent::Registered { id, region, time } => {
+                    self.finalizer.on_register(FinalizerId(id), region, time);
+                }
+                crate::runtime::state::FinalizerHistoryEvent::Ran { id, time } => {
+                    self.finalizer.on_run(FinalizerId(id), time);
+                }
+                crate::runtime::state::FinalizerHistoryEvent::RegionClosed { region, time } => {
+                    self.finalizer.on_region_close(region, time);
+                }
+            }
+        }
 
         let mut regions: BTreeMap<crate::types::RegionId, RegionSnapshot> = BTreeMap::new();
         let mut children: BTreeMap<crate::types::RegionId, Vec<crate::types::RegionId>> =
@@ -938,6 +953,41 @@ mod tests {
         let empty = violations.is_empty();
         crate::assert_with_log!(empty, "suite clean", true, empty);
         crate::test_complete!("oracle_suite_default_is_clean");
+    }
+
+    #[test]
+    fn hydrate_temporal_from_state_replays_finalizer_history() {
+        init_test("hydrate_temporal_from_state_replays_finalizer_history");
+        let mut state = crate::runtime::RuntimeState::new();
+        let region = state.create_root_region(crate::types::Budget::INFINITE);
+
+        state.now = Time::from_nanos(10);
+        let registered = state.register_sync_finalizer(region, || {});
+        crate::assert_with_log!(registered, "registered", true, registered);
+
+        state.now = Time::from_nanos(20);
+        state.record_finalizer_close_for_test(region);
+
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, state.now);
+
+        let violation = suite
+            .finalizer
+            .check()
+            .expect_err("missing finalizer run should survive report hydration");
+        crate::assert_with_log!(
+            violation.region == region,
+            "region",
+            region,
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.unrun_finalizers == vec![FinalizerId(0)],
+            "unrun finalizers",
+            vec![FinalizerId(0)],
+            violation.unrun_finalizers
+        );
+        crate::test_complete!("hydrate_temporal_from_state_replays_finalizer_history");
     }
 
     // Pure data-type tests (wave 16 – CyanBarn)

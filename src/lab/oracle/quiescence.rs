@@ -95,12 +95,28 @@ impl QuiescenceOracle {
 
         if let Some(p) = parent {
             self.region_children.entry(p).or_default().push(region);
+            if let Some(&close_time) = self.closed_regions.get(&p) {
+                self.violations.push(QuiescenceViolation {
+                    region: p,
+                    live_children: vec![region],
+                    live_tasks: Vec::new(),
+                    close_time,
+                });
+            }
         }
     }
 
     /// Records a task spawn event.
     pub fn on_spawn(&mut self, task: TaskId, region: RegionId) {
         self.region_tasks.entry(region).or_default().push(task);
+        if let Some(&close_time) = self.closed_regions.get(&region) {
+            self.violations.push(QuiescenceViolation {
+                region,
+                live_children: Vec::new(),
+                live_tasks: vec![task],
+                close_time,
+            });
+        }
     }
 
     /// Records a task completion event.
@@ -336,6 +352,71 @@ mod tests {
             violation.live_children
         );
         crate::test_complete!("multiple_children_all_must_close");
+    }
+
+    #[test]
+    fn child_created_after_parent_close_is_violation() {
+        init_test("child_created_after_parent_close_is_violation");
+        let mut oracle = QuiescenceOracle::new();
+
+        oracle.on_region_create(region(0), None);
+        oracle.on_region_close(region(0), t(100));
+        oracle.on_region_create(region(1), Some(region(0)));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
+
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.live_children == vec![region(1)],
+            "live_children",
+            vec![region(1)],
+            violation.live_children
+        );
+        let tasks_empty = violation.live_tasks.is_empty();
+        crate::assert_with_log!(tasks_empty, "tasks empty", true, tasks_empty);
+        crate::test_complete!("child_created_after_parent_close_is_violation");
+    }
+
+    #[test]
+    fn task_spawned_after_region_close_is_violation_even_if_it_completes_later() {
+        init_test("task_spawned_after_region_close_is_violation_even_if_it_completes_later");
+        let mut oracle = QuiescenceOracle::new();
+
+        oracle.on_region_create(region(0), None);
+        oracle.on_region_close(region(0), t(100));
+        oracle.on_spawn(task(1), region(0));
+        oracle.on_task_complete(task(1));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "err", true, err);
+
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.live_tasks == vec![task(1)],
+            "live_tasks",
+            vec![task(1)],
+            violation.live_tasks
+        );
+        let children_empty = violation.live_children.is_empty();
+        crate::assert_with_log!(children_empty, "children empty", true, children_empty);
+        crate::test_complete!(
+            "task_spawned_after_region_close_is_violation_even_if_it_completes_later"
+        );
     }
 
     #[test]
