@@ -1659,6 +1659,29 @@ pub struct DistributedSupervisionPlan {
     pub evidence_hooks: Vec<DistributedEvidenceHook>,
 }
 
+#[derive(Debug)]
+struct DistributedNodeCompilationPass {
+    nodes: Vec<CompiledDistributedSupervisionNode>,
+    mailbox_routes: Vec<DistributedMailboxRoute>,
+    registry_leases: Vec<DistributedRegistryLeasePlan>,
+    evidence_hooks: Vec<DistributedEvidenceHook>,
+}
+
+#[derive(Debug)]
+struct DistributedNodeArtifacts {
+    compiled_node: CompiledDistributedSupervisionNode,
+    mailbox_route: DistributedMailboxRoute,
+    registry_lease: DistributedRegistryLeasePlan,
+    evidence_hook: DistributedEvidenceHook,
+}
+
+#[derive(Debug)]
+struct DistributedRelationCompilationPass {
+    monitor_plans: Vec<DistributedMonitorPlan>,
+    link_plans: Vec<DistributedLinkPlan>,
+    failover_handoffs: Vec<DistributedFailoverHandoffContract>,
+}
+
 /// Deterministic compiler for distributed supervision plans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DistributedSupervisionCompiler;
@@ -1669,187 +1692,250 @@ impl DistributedSupervisionCompiler {
     pub fn compile(
         nodes: &[DistributedSupervisionNodeSpec],
     ) -> Result<DistributedSupervisionPlan, FederationError> {
-        if nodes.is_empty() {
-            return Err(FederationError::EmptyDistributedSupervisionGraph);
-        }
-
-        let mut by_id = BTreeMap::new();
-        for node in nodes {
-            if by_id
-                .insert(node.node_id.as_str().to_owned(), node)
-                .is_some()
-            {
-                return Err(FederationError::DuplicateDistributedSupervisionNode {
-                    node_id: node.node_id.as_str().to_owned(),
-                });
-            }
-            if node.mailbox_capacity == 0 {
-                return Err(FederationError::ZeroMailboxCapacity);
-            }
-            for morphism in node
-                .export_morphisms
-                .iter()
-                .chain(node.import_morphisms.iter())
-            {
-                morphism.validate()?;
-            }
-        }
-
-        let mut compiled_nodes = Vec::new();
-        let mut mailbox_routes = Vec::new();
-        let mut registry_leases = Vec::new();
-        let mut evidence_hooks = Vec::new();
-
-        for node in by_id.values() {
-            let mailbox_subject = node.mailbox_subject()?;
-            let mailbox_pattern = SubjectPattern::from(&mailbox_subject);
-            let exported_mailbox_subject =
-                apply_morphisms_to_subject(&mailbox_subject, &node.export_morphisms)?;
-            let imported_mailbox_subject =
-                apply_morphisms_to_subject(&mailbox_subject, &node.import_morphisms)?;
-            let supervision_strategy = node.restart_envelope.to_supervision_strategy()?;
-            let lease_subject = system_subject_pattern(
-                SystemSubjectFamily::Route,
-                &["registry-lease", node.mailbox_component.as_str()],
-            )?;
-            let replay_subject = system_subject_pattern(
-                SystemSubjectFamily::Replay,
-                &["supervision", node.mailbox_component.as_str()],
-            )?;
-
-            compiled_nodes.push(CompiledDistributedSupervisionNode {
-                node_id: node.node_id.clone(),
-                failure_domain: node.failure_domain.as_str().to_owned(),
-                mailbox_capacity: node.mailbox_capacity,
-                mailbox_subject: mailbox_pattern.clone(),
-                exported_mailbox_subject: exported_mailbox_subject.clone(),
-                imported_mailbox_subject: imported_mailbox_subject.clone(),
-                supervision_strategy: supervision_strategy.clone(),
-            });
-
-            mailbox_routes.push(DistributedMailboxRoute {
-                node_id: node.node_id.clone(),
-                mailbox_subject: mailbox_pattern,
-                exported_mailbox_subject,
-                imported_mailbox_subject,
-                export_classes: node.export_morphisms.iter().map(|m| m.class).collect(),
-                import_classes: node.import_morphisms.iter().map(|m| m.class).collect(),
-            });
-
-            registry_leases.push(DistributedRegistryLeasePlan {
-                node_id: node.node_id.clone(),
-                failure_domain: node.failure_domain.as_str().to_owned(),
-                registry_subject: node.registry_subject(),
-                lease_subject,
-                lease_ttl: node.restart_envelope.lease_ttl(),
-            });
-
-            evidence_hooks.push(DistributedEvidenceHook {
-                node_id: node.node_id.clone(),
-                observability_subject: node.observability_subject()?,
-                replay_subject,
-                family: SystemSubjectFamily::Replay,
-            });
-        }
-
-        let mut monitor_plans = Vec::new();
-        let mut link_plans = Vec::new();
-        let mut failover_handoffs = Vec::new();
-        let mut link_pairs = BTreeSet::new();
-
-        for node in by_id.values() {
-            for target_id in dedup_node_targets(&node.monitor_targets) {
-                let target = resolve_distributed_target(&by_id, node, &target_id, "monitor")?;
-                monitor_plans.push(DistributedMonitorPlan {
-                    watcher: node.node_id.clone(),
-                    monitored: target.node_id.clone(),
-                    notification_subject: system_subject_pattern(
-                        SystemSubjectFamily::Drain,
-                        &[
-                            "monitor",
-                            node.mailbox_component.as_str(),
-                            target.mailbox_component.as_str(),
-                        ],
-                    )?,
-                    monitored_mailbox_subject: SubjectPattern::from(&target.mailbox_subject()?),
-                });
-            }
-
-            for target_id in dedup_node_targets(&node.link_targets) {
-                let target = resolve_distributed_target(&by_id, node, &target_id, "link")?;
-                let (left, right) = canonical_node_pair(&node.node_id, &target.node_id);
-                if link_pairs.insert((left.as_str().to_owned(), right.as_str().to_owned())) {
-                    link_plans.push(DistributedLinkPlan {
-                        left_node: left.clone(),
-                        right_node: right.clone(),
-                        control_subject: system_subject_pattern(
-                            SystemSubjectFamily::Drain,
-                            &["link", node_component(&left)?, node_component(&right)?],
-                        )?,
-                        family: SystemSubjectFamily::Drain,
-                    });
-                }
-            }
-
-            for target_id in dedup_node_targets(&node.failover_targets) {
-                let target =
-                    resolve_distributed_target(&by_id, node, &target_id, "failover_target")?;
-                if node.failure_domain == target.failure_domain {
-                    return Err(FederationError::FailoverTargetSameFailureDomain {
-                        node_id: node.node_id.as_str().to_owned(),
-                        target: target.node_id.as_str().to_owned(),
-                        failure_domain: node.failure_domain.as_str().to_owned(),
-                    });
-                }
-
-                failover_handoffs.push(DistributedFailoverHandoffContract {
-                    source_node: node.node_id.clone(),
-                    target_node: target.node_id.clone(),
-                    source_failure_domain: node.failure_domain.as_str().to_owned(),
-                    target_failure_domain: target.failure_domain.as_str().to_owned(),
-                    handoff_subject: system_subject_pattern(
-                        SystemSubjectFamily::Drain,
-                        &[
-                            "handoff",
-                            node.mailbox_component.as_str(),
-                            target.mailbox_component.as_str(),
-                        ],
-                    )?,
-                    drain_subject: system_subject_pattern(
-                        SystemSubjectFamily::Drain,
-                        &[
-                            "failover",
-                            node.mailbox_component.as_str(),
-                            target.mailbox_component.as_str(),
-                        ],
-                    )?,
-                    registry_lease_subject: system_subject_pattern(
-                        SystemSubjectFamily::Route,
-                        &["registry-lease", target.mailbox_component.as_str()],
-                    )?,
-                    evidence_subject: system_subject_pattern(
-                        SystemSubjectFamily::Replay,
-                        &[
-                            "failover",
-                            node.mailbox_component.as_str(),
-                            target.mailbox_component.as_str(),
-                        ],
-                    )?,
-                    target_strategy: target.restart_envelope.to_supervision_strategy()?,
-                });
-            }
-        }
+        let by_id = build_distributed_supervision_index(nodes)?;
+        let node_pass = compile_distributed_nodes(&by_id)?;
+        let relation_pass = compile_distributed_relations(&by_id)?;
 
         Ok(DistributedSupervisionPlan {
-            nodes: compiled_nodes,
-            mailbox_routes,
-            monitor_plans,
-            link_plans,
-            registry_leases,
-            failover_handoffs,
-            evidence_hooks,
+            nodes: node_pass.nodes,
+            mailbox_routes: node_pass.mailbox_routes,
+            monitor_plans: relation_pass.monitor_plans,
+            link_plans: relation_pass.link_plans,
+            registry_leases: node_pass.registry_leases,
+            failover_handoffs: relation_pass.failover_handoffs,
+            evidence_hooks: node_pass.evidence_hooks,
         })
     }
+}
+
+fn build_distributed_supervision_index(
+    nodes: &[DistributedSupervisionNodeSpec],
+) -> Result<BTreeMap<String, &DistributedSupervisionNodeSpec>, FederationError> {
+    if nodes.is_empty() {
+        return Err(FederationError::EmptyDistributedSupervisionGraph);
+    }
+
+    let mut by_id = BTreeMap::new();
+    for node in nodes {
+        if by_id
+            .insert(node.node_id.as_str().to_owned(), node)
+            .is_some()
+        {
+            return Err(FederationError::DuplicateDistributedSupervisionNode {
+                node_id: node.node_id.as_str().to_owned(),
+            });
+        }
+        if node.mailbox_capacity == 0 {
+            return Err(FederationError::ZeroMailboxCapacity);
+        }
+        for morphism in node
+            .export_morphisms
+            .iter()
+            .chain(node.import_morphisms.iter())
+        {
+            morphism.validate()?;
+        }
+    }
+
+    Ok(by_id)
+}
+
+fn compile_distributed_nodes(
+    by_id: &BTreeMap<String, &DistributedSupervisionNodeSpec>,
+) -> Result<DistributedNodeCompilationPass, FederationError> {
+    let mut pass = DistributedNodeCompilationPass {
+        nodes: Vec::new(),
+        mailbox_routes: Vec::new(),
+        registry_leases: Vec::new(),
+        evidence_hooks: Vec::new(),
+    };
+
+    for node in by_id.values().copied() {
+        let artifacts = compile_distributed_node_artifacts(node)?;
+        pass.nodes.push(artifacts.compiled_node);
+        pass.mailbox_routes.push(artifacts.mailbox_route);
+        pass.registry_leases.push(artifacts.registry_lease);
+        pass.evidence_hooks.push(artifacts.evidence_hook);
+    }
+
+    Ok(pass)
+}
+
+fn compile_distributed_node_artifacts(
+    node: &DistributedSupervisionNodeSpec,
+) -> Result<DistributedNodeArtifacts, FederationError> {
+    let mailbox_subject = node.mailbox_subject()?;
+    let mailbox_pattern = SubjectPattern::from(&mailbox_subject);
+    let exported_mailbox_subject =
+        apply_morphisms_to_subject(&mailbox_subject, &node.export_morphisms)?;
+    let imported_mailbox_subject =
+        apply_morphisms_to_subject(&mailbox_subject, &node.import_morphisms)?;
+    let supervision_strategy = node.restart_envelope.to_supervision_strategy()?;
+    let lease_subject = system_subject_pattern(
+        SystemSubjectFamily::Route,
+        &["registry-lease", node.mailbox_component.as_str()],
+    )?;
+    let replay_subject = system_subject_pattern(
+        SystemSubjectFamily::Replay,
+        &["supervision", node.mailbox_component.as_str()],
+    )?;
+
+    Ok(DistributedNodeArtifacts {
+        compiled_node: CompiledDistributedSupervisionNode {
+            node_id: node.node_id.clone(),
+            failure_domain: node.failure_domain.as_str().to_owned(),
+            mailbox_capacity: node.mailbox_capacity,
+            mailbox_subject: mailbox_pattern.clone(),
+            exported_mailbox_subject: exported_mailbox_subject.clone(),
+            imported_mailbox_subject: imported_mailbox_subject.clone(),
+            supervision_strategy,
+        },
+        mailbox_route: DistributedMailboxRoute {
+            node_id: node.node_id.clone(),
+            mailbox_subject: mailbox_pattern,
+            exported_mailbox_subject,
+            imported_mailbox_subject,
+            export_classes: node.export_morphisms.iter().map(|m| m.class).collect(),
+            import_classes: node.import_morphisms.iter().map(|m| m.class).collect(),
+        },
+        registry_lease: DistributedRegistryLeasePlan {
+            node_id: node.node_id.clone(),
+            failure_domain: node.failure_domain.as_str().to_owned(),
+            registry_subject: node.registry_subject(),
+            lease_subject,
+            lease_ttl: node.restart_envelope.lease_ttl(),
+        },
+        evidence_hook: DistributedEvidenceHook {
+            node_id: node.node_id.clone(),
+            observability_subject: node.observability_subject()?,
+            replay_subject,
+            family: SystemSubjectFamily::Replay,
+        },
+    })
+}
+
+fn compile_distributed_relations(
+    by_id: &BTreeMap<String, &DistributedSupervisionNodeSpec>,
+) -> Result<DistributedRelationCompilationPass, FederationError> {
+    let mut pass = DistributedRelationCompilationPass {
+        monitor_plans: Vec::new(),
+        link_plans: Vec::new(),
+        failover_handoffs: Vec::new(),
+    };
+    let mut link_pairs = BTreeSet::new();
+
+    for node in by_id.values().copied() {
+        extend_monitor_plans(&mut pass.monitor_plans, by_id, node)?;
+        extend_link_plans(&mut pass.link_plans, &mut link_pairs, by_id, node)?;
+        extend_failover_handoffs(&mut pass.failover_handoffs, by_id, node)?;
+    }
+
+    Ok(pass)
+}
+
+fn extend_monitor_plans(
+    monitor_plans: &mut Vec<DistributedMonitorPlan>,
+    by_id: &BTreeMap<String, &DistributedSupervisionNodeSpec>,
+    node: &DistributedSupervisionNodeSpec,
+) -> Result<(), FederationError> {
+    for target_id in dedup_node_targets(&node.monitor_targets) {
+        let target = resolve_distributed_target(by_id, node, &target_id, "monitor")?;
+        monitor_plans.push(DistributedMonitorPlan {
+            watcher: node.node_id.clone(),
+            monitored: target.node_id.clone(),
+            notification_subject: system_subject_pattern(
+                SystemSubjectFamily::Drain,
+                &[
+                    "monitor",
+                    node.mailbox_component.as_str(),
+                    target.mailbox_component.as_str(),
+                ],
+            )?,
+            monitored_mailbox_subject: SubjectPattern::from(&target.mailbox_subject()?),
+        });
+    }
+
+    Ok(())
+}
+
+fn extend_link_plans(
+    link_plans: &mut Vec<DistributedLinkPlan>,
+    link_pairs: &mut BTreeSet<(String, String)>,
+    by_id: &BTreeMap<String, &DistributedSupervisionNodeSpec>,
+    node: &DistributedSupervisionNodeSpec,
+) -> Result<(), FederationError> {
+    for target_id in dedup_node_targets(&node.link_targets) {
+        let target = resolve_distributed_target(by_id, node, &target_id, "link")?;
+        let (left, right) = canonical_node_pair(&node.node_id, &target.node_id);
+        if link_pairs.insert((left.as_str().to_owned(), right.as_str().to_owned())) {
+            link_plans.push(DistributedLinkPlan {
+                left_node: left.clone(),
+                right_node: right.clone(),
+                control_subject: system_subject_pattern(
+                    SystemSubjectFamily::Drain,
+                    &["link", node_component(&left)?, node_component(&right)?],
+                )?,
+                family: SystemSubjectFamily::Drain,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn extend_failover_handoffs(
+    failover_handoffs: &mut Vec<DistributedFailoverHandoffContract>,
+    by_id: &BTreeMap<String, &DistributedSupervisionNodeSpec>,
+    node: &DistributedSupervisionNodeSpec,
+) -> Result<(), FederationError> {
+    for target_id in dedup_node_targets(&node.failover_targets) {
+        let target = resolve_distributed_target(by_id, node, &target_id, "failover_target")?;
+        if node.failure_domain == target.failure_domain {
+            return Err(FederationError::FailoverTargetSameFailureDomain {
+                node_id: node.node_id.as_str().to_owned(),
+                target: target.node_id.as_str().to_owned(),
+                failure_domain: node.failure_domain.as_str().to_owned(),
+            });
+        }
+
+        failover_handoffs.push(DistributedFailoverHandoffContract {
+            source_node: node.node_id.clone(),
+            target_node: target.node_id.clone(),
+            source_failure_domain: node.failure_domain.as_str().to_owned(),
+            target_failure_domain: target.failure_domain.as_str().to_owned(),
+            handoff_subject: system_subject_pattern(
+                SystemSubjectFamily::Drain,
+                &[
+                    "handoff",
+                    node.mailbox_component.as_str(),
+                    target.mailbox_component.as_str(),
+                ],
+            )?,
+            drain_subject: system_subject_pattern(
+                SystemSubjectFamily::Drain,
+                &[
+                    "failover",
+                    node.mailbox_component.as_str(),
+                    target.mailbox_component.as_str(),
+                ],
+            )?,
+            registry_lease_subject: system_subject_pattern(
+                SystemSubjectFamily::Route,
+                &["registry-lease", target.mailbox_component.as_str()],
+            )?,
+            evidence_subject: system_subject_pattern(
+                SystemSubjectFamily::Replay,
+                &[
+                    "failover",
+                    node.mailbox_component.as_str(),
+                    target.mailbox_component.as_str(),
+                ],
+            )?,
+            target_strategy: target.restart_envelope.to_supervision_strategy()?,
+        });
+    }
+
+    Ok(())
 }
 
 fn apply_morphisms_to_subject(
