@@ -520,20 +520,22 @@ impl RegionRecord {
         inner.children.retain(|&c| c != child);
     }
 
-    /// Adds a task to this region.
-    ///
-    /// Returns `Ok(())` if the task was added or already present, or an
-    /// admission error if the region is closed or at capacity.
-    pub fn add_task(&self, task: TaskId) -> Result<(), AdmissionError> {
+    fn add_task_internal(
+        &self,
+        task: TaskId,
+        bypass_task_limit_in_finalizing: bool,
+    ) -> Result<(), AdmissionError> {
         // Optimistic check
-        if !self.state.load().can_accept_work() {
+        let state = self.state.load();
+        if !state.can_accept_work() {
             return Err(AdmissionError::Closed);
         }
 
         let mut inner = self.inner.write();
 
         // Double check
-        if !self.state.load().can_accept_work() {
+        let state = self.state.load();
+        if !state.can_accept_work() {
             return Err(AdmissionError::Closed);
         }
 
@@ -541,19 +543,38 @@ impl RegionRecord {
             return Ok(());
         }
 
-        if let Some(limit) = inner.limits.max_tasks {
-            if inner.tasks.len() >= limit {
-                return Err(AdmissionError::LimitReached {
-                    kind: AdmissionKind::Task,
-                    limit,
-                    live: inner.tasks.len(),
-                });
+        let bypass_limit = bypass_task_limit_in_finalizing && state == RegionState::Finalizing;
+        if !bypass_limit {
+            if let Some(limit) = inner.limits.max_tasks {
+                if inner.tasks.len() >= limit {
+                    return Err(AdmissionError::LimitReached {
+                        kind: AdmissionKind::Task,
+                        limit,
+                        live: inner.tasks.len(),
+                    });
+                }
             }
         }
 
         inner.tasks.push(task);
         drop(inner);
         Ok(())
+    }
+
+    /// Adds a task to this region.
+    ///
+    /// Returns `Ok(())` if the task was added or already present, or an
+    /// admission error if the region is closed or at capacity.
+    pub fn add_task(&self, task: TaskId) -> Result<(), AdmissionError> {
+        self.add_task_internal(task, false)
+    }
+
+    /// Adds a cleanup task to this region.
+    ///
+    /// Required same-region cleanup work in `Finalizing` must still be able to
+    /// run even if `max_tasks` would otherwise reject new normal tasks.
+    pub fn add_cleanup_task(&self, task: TaskId) -> Result<(), AdmissionError> {
+        self.add_task_internal(task, true)
     }
 
     /// Removes a task from this region.
@@ -1526,6 +1547,28 @@ mod tests {
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         assert!(region.add_task(task).is_ok());
         assert!(region.try_reserve_obligation().is_ok());
+    }
+
+    #[test]
+    fn cleanup_task_bypasses_task_limit_when_finalizing() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_tasks: Some(0),
+            ..RegionLimits::unlimited()
+        });
+        region.begin_close(None);
+        assert!(region.begin_finalize());
+
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        assert_eq!(
+            region.add_task(task),
+            Err(AdmissionError::LimitReached {
+                kind: AdmissionKind::Task,
+                limit: 0,
+                live: 0,
+            })
+        );
+        assert!(region.add_cleanup_task(task).is_ok());
     }
 
     #[test]

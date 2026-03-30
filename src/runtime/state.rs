@@ -49,6 +49,25 @@ use std::time::Duration;
 
 static NEXT_RUNTIME_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
+type BoxedAsyncFinalizer = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FinalizerHistoryEvent {
+    Registered {
+        id: u64,
+        region: RegionId,
+        time: Time,
+    },
+    Ran {
+        id: u64,
+        time: Time,
+    },
+    RegionClosed {
+        region: RegionId,
+        time: Time,
+    },
+}
+
 /// Errors that can occur when spawning a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
@@ -136,16 +155,13 @@ impl TaskCompletionKind {
 }
 
 struct MaskedFinalizer {
-    inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    inner: BoxedAsyncFinalizer,
     cx_inner: Arc<parking_lot::RwLock<CxInner>>,
     entered: bool,
 }
 
 impl MaskedFinalizer {
-    fn new(
-        inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
-        cx_inner: Arc<parking_lot::RwLock<CxInner>>,
-    ) -> Self {
+    fn new(inner: BoxedAsyncFinalizer, cx_inner: Arc<parking_lot::RwLock<CxInner>>) -> Self {
         Self {
             inner,
             cx_inner,
@@ -358,6 +374,14 @@ pub struct RuntimeState {
     /// distinguish "closed and cleaned up" from "never existed in this state".
     recently_closed_regions: HashSet<RegionId>,
     recently_closed_region_order: VecDeque<RegionId>,
+    /// Finalizer ids pending per region, mirroring the runtime's LIFO stack.
+    pending_finalizer_ids: HashMap<RegionId, Vec<u64>>,
+    /// Async finalizer tasks mapped back to the logical finalizer they are running.
+    async_finalizer_tasks: HashMap<TaskId, u64>,
+    /// Append-only finalizer lifecycle history for post-run oracle hydration.
+    finalizer_history: Vec<FinalizerHistoryEvent>,
+    /// Monotonic id source for finalizer registrations.
+    next_finalizer_id: u64,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -391,6 +415,13 @@ impl std::fmt::Debug for RuntimeState {
                 "recently_closed_region_order_count",
                 &self.recently_closed_region_order.len(),
             )
+            .field(
+                "pending_finalizer_regions",
+                &self.pending_finalizer_ids.len(),
+            )
+            .field("async_finalizer_tasks", &self.async_finalizer_tasks.len())
+            .field("finalizer_history_len", &self.finalizer_history.len())
+            .field("next_finalizer_id", &self.next_finalizer_id)
             .finish()
     }
 }
@@ -433,6 +464,10 @@ impl RuntimeState {
             finalizing_regions: Vec::new(),
             recently_closed_regions: HashSet::new(),
             recently_closed_region_order: VecDeque::new(),
+            pending_finalizer_ids: HashMap::new(),
+            async_finalizer_tasks: HashMap::new(),
+            finalizer_history: Vec::new(),
+            next_finalizer_id: 0,
         }
     }
 
@@ -888,6 +923,7 @@ impl RuntimeState {
         &mut self,
         region: RegionId,
         budget: Budget,
+        cleanup_task: bool,
     ) -> Result<
         (
             TaskId,
@@ -915,7 +951,12 @@ impl RuntimeState {
 
         // Add task to the region's task list
         if let Some(region_record) = self.regions.get(region.arena_index()) {
-            if let Err(err) = region_record.add_task(task_id) {
+            let admission = if cleanup_task {
+                region_record.add_cleanup_task(task_id)
+            } else {
+                region_record.add_task(task_id)
+            };
+            if let Err(err) = admission {
                 // Rollback task creation
                 let _ = self.remove_task(task_id);
                 return Err(match err {
@@ -1016,7 +1057,8 @@ impl RuntimeState {
     {
         use crate::runtime::task_handle::JoinError;
 
-        let (task_id, handle, cx, result_tx) = self.create_task_infrastructure(region, budget)?;
+        let (task_id, handle, cx, result_tx) =
+            self.create_task_infrastructure(region, budget, false)?;
 
         // Wrap the future to send the result through the channel
         let wrapped_future = async move {
@@ -1991,6 +2033,10 @@ impl RuntimeState {
             }
         }
 
+        if let Some(finalizer_id) = self.async_finalizer_tasks.remove(&task_id) {
+            self.record_finalizer_run(finalizer_id);
+        }
+
         // Trace task completion
         debug!(
             task_id = ?task_id,
@@ -2047,14 +2093,26 @@ impl RuntimeState {
         }
 
         for region_id in regions_to_process {
-            let Some(finalizer) = self.run_sync_finalizers(region_id) else {
+            let Some((finalizer_id, finalizer)) = self.run_sync_finalizers_tracked(region_id)
+            else {
                 continue;
             };
             let Finalizer::Async(future) = finalizer else {
                 continue;
             };
-            if let Some((task_id, priority)) = self.spawn_finalizer_task(region_id, future) {
-                scheduled.push((task_id, priority));
+            match self.spawn_finalizer_task(region_id, finalizer_id, future) {
+                Ok((task_id, priority)) => scheduled.push((task_id, priority)),
+                Err(future) => {
+                    // Preserve the async barrier when task admission fails so
+                    // the region cannot close with cleanup silently dropped.
+                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                        region.add_finalizer(Finalizer::Async(future));
+                    }
+                    self.pending_finalizer_ids
+                        .entry(region_id)
+                        .or_default()
+                        .push(finalizer_id);
+                }
             }
         }
 
@@ -2064,14 +2122,17 @@ impl RuntimeState {
     fn spawn_finalizer_task(
         &mut self,
         region_id: RegionId,
-        future: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
-    ) -> Option<(TaskId, u8)> {
+        finalizer_id: u64,
+        future: BoxedAsyncFinalizer,
+    ) -> Result<(TaskId, u8), BoxedAsyncFinalizer> {
         let deadline = self.now.saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
         let budget = finalizer_budget().with_deadline(deadline);
 
-        let (task_id, _handle, cx, result_tx) = self
-            .create_task_infrastructure::<()>(region_id, budget)
-            .ok()?;
+        let Ok((task_id, _handle, cx, result_tx)) =
+            self.create_task_infrastructure::<()>(region_id, budget, true)
+        else {
+            return Err(future);
+        };
         let cx_inner = Arc::clone(&cx.inner);
         let masked = MaskedFinalizer::new(future, cx_inner);
 
@@ -2090,7 +2151,8 @@ impl RuntimeState {
             record.wake_state.notify();
         }
 
-        Some((task_id, budget.priority))
+        self.async_finalizer_tasks.insert(task_id, finalizer_id);
+        Ok((task_id, budget.priority))
     }
 
     // =========================================================================
@@ -2113,16 +2175,22 @@ impl RuntimeState {
     where
         F: FnOnce() + Send + 'static,
     {
-        let Some(region) = self.regions.get(region_id.arena_index()) else {
-            return false;
-        };
-
-        // Reject registration once the region has begun closing or is terminal
-        if region.state().is_closing() || region.state().is_terminal() {
+        let accepts_finalizers = self
+            .regions
+            .get(region_id.arena_index())
+            .is_some_and(|region| !region.state().is_closing() && !region.state().is_terminal());
+        if !accepts_finalizers {
             return false;
         }
 
-        region.add_finalizer(Finalizer::Sync(Box::new(f)));
+        let finalizer_id = self.allocate_finalizer_id();
+        {
+            let Some(region) = self.regions.get(region_id.arena_index()) else {
+                return false;
+            };
+            region.add_finalizer(Finalizer::Sync(Box::new(f)));
+        }
+        self.record_finalizer_registration(finalizer_id, region_id);
         true
     }
 
@@ -2142,17 +2210,75 @@ impl RuntimeState {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let Some(region) = self.regions.get(region_id.arena_index()) else {
-            return false;
-        };
-
-        // Reject registration once the region has begun closing or is terminal
-        if region.state().is_closing() || region.state().is_terminal() {
+        let accepts_finalizers = self
+            .regions
+            .get(region_id.arena_index())
+            .is_some_and(|region| !region.state().is_closing() && !region.state().is_terminal());
+        if !accepts_finalizers {
             return false;
         }
 
-        region.add_finalizer(Finalizer::Async(Box::pin(future)));
+        let finalizer_id = self.allocate_finalizer_id();
+        {
+            let Some(region) = self.regions.get(region_id.arena_index()) else {
+                return false;
+            };
+            region.add_finalizer(Finalizer::Async(Box::pin(future)));
+        }
+        self.record_finalizer_registration(finalizer_id, region_id);
         true
+    }
+
+    fn allocate_finalizer_id(&mut self) -> u64 {
+        let id = self.next_finalizer_id;
+        self.next_finalizer_id += 1;
+        id
+    }
+
+    fn record_finalizer_registration(&mut self, id: u64, region: RegionId) {
+        self.pending_finalizer_ids
+            .entry(region)
+            .or_default()
+            .push(id);
+        self.finalizer_history
+            .push(FinalizerHistoryEvent::Registered {
+                id,
+                region,
+                time: self.now,
+            });
+    }
+
+    fn record_finalizer_run(&mut self, id: u64) {
+        self.finalizer_history
+            .push(FinalizerHistoryEvent::Ran { id, time: self.now });
+    }
+
+    fn record_finalizer_close(&mut self, region: RegionId) {
+        self.pending_finalizer_ids.remove(&region);
+        self.finalizer_history
+            .push(FinalizerHistoryEvent::RegionClosed {
+                region,
+                time: self.now,
+            });
+    }
+
+    fn pop_tracked_finalizer(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
+        let finalizer = {
+            let region = self.regions.get(region_id.arena_index())?;
+            region.pop_finalizer()?
+        };
+        let (id, empty_after_pop) = {
+            let ids = self
+                .pending_finalizer_ids
+                .get_mut(&region_id)
+                .expect("finalizer id tracking missing for region");
+            let id = ids.pop().expect("finalizer id stack out of sync");
+            (id, ids.is_empty())
+        };
+        if empty_after_pop {
+            self.pending_finalizer_ids.remove(&region_id);
+        }
+        Some((id, finalizer))
     }
 
     /// Pops the next finalizer from a region's finalizer stack.
@@ -2163,8 +2289,8 @@ impl RuntimeState {
     /// # Returns
     /// The next finalizer to run, or `None` if all finalizers have been executed.
     pub fn pop_region_finalizer(&mut self, region_id: RegionId) -> Option<Finalizer> {
-        let region = self.regions.get(region_id.arena_index())?;
-        region.pop_finalizer()
+        self.pop_tracked_finalizer(region_id)
+            .map(|(_, finalizer)| finalizer)
     }
 
     /// Returns the number of pending finalizers for a region.
@@ -2193,8 +2319,13 @@ impl RuntimeState {
     /// # Returns
     /// An async finalizer that needs to be scheduled, or `None` if the stack is empty.
     pub fn run_sync_finalizers(&mut self, region_id: RegionId) -> Option<Finalizer> {
+        self.run_sync_finalizers_tracked(region_id)
+            .map(|(_, finalizer)| finalizer)
+    }
+
+    fn run_sync_finalizers_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
         loop {
-            let finalizer = self.pop_region_finalizer(region_id)?;
+            let (finalizer_id, finalizer) = self.pop_tracked_finalizer(region_id)?;
 
             match finalizer {
                 Finalizer::Sync(f) => {
@@ -2205,10 +2336,11 @@ impl RuntimeState {
                         // Log but continue — a panicking finalizer must not
                         // block region close or skip sibling finalizers.
                     }
+                    self.record_finalizer_run(finalizer_id);
                 }
                 Finalizer::Async(_) => {
                     // Stop and return the async barrier
-                    return Some(finalizer);
+                    return Some((finalizer_id, finalizer));
                 }
             }
         }
@@ -2321,10 +2453,16 @@ impl RuntimeState {
                 crate::record::region::RegionState::Finalizing => {
                     // Run sync finalizers (requires mut self).
                     // If we hit an async finalizer, reinsert it and wait for a scheduler.
-                    if let Some(async_finalizer) = self.run_sync_finalizers(region_id) {
+                    if let Some((finalizer_id, async_finalizer)) =
+                        self.run_sync_finalizers_tracked(region_id)
+                    {
                         if let Some(region) = self.regions.get(region_id.arena_index()) {
                             region.add_finalizer(async_finalizer);
                         }
+                        self.pending_finalizer_ids
+                            .entry(region_id)
+                            .or_default()
+                            .push(finalizer_id);
                         break; // Async finalizer pending; stop advancing
                     }
 
@@ -2367,6 +2505,7 @@ impl RuntimeState {
                             {
                                 self.finalizing_regions.swap_remove(pos);
                             }
+                            self.record_finalizer_close(region_id);
                             // Emit RegionCloseComplete trace event (pairs
                             // with RegionCloseBegin emitted in cancel_request).
                             self.record_trace_event(|seq| {
@@ -2422,6 +2561,15 @@ impl RuntimeState {
                 self.recently_closed_regions.remove(&evicted);
             }
         }
+    }
+
+    pub(crate) fn finalizer_history(&self) -> &[FinalizerHistoryEvent] {
+        &self.finalizer_history
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_finalizer_close_for_test(&mut self, region: RegionId) {
+        self.record_finalizer_close(region);
     }
 }
 
@@ -4872,6 +5020,188 @@ mod tests {
         let empty = state.region_finalizers_empty(region);
         crate::assert_with_log!(empty, "finalizers cleared", true, empty);
         crate::test_complete!("run_sync_finalizers_executes_and_returns_async");
+    }
+
+    #[test]
+    fn finalizer_history_tracks_sync_registration_run_and_close() {
+        init_test("finalizer_history_tracks_sync_registration_run_and_close");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        state.now = Time::from_nanos(10);
+        let registered = state.register_sync_finalizer(region, || {});
+        crate::assert_with_log!(registered, "registered", true, registered);
+
+        state.now = Time::from_nanos(20);
+        let pending_async = state.run_sync_finalizers(region);
+        crate::assert_with_log!(
+            pending_async.is_none(),
+            "no async barrier",
+            true,
+            pending_async.is_none()
+        );
+
+        state.now = Time::from_nanos(30);
+        state.record_finalizer_close_for_test(region);
+
+        crate::assert_with_log!(
+            state.finalizer_history
+                == vec![
+                    FinalizerHistoryEvent::Registered {
+                        id: 0,
+                        region,
+                        time: Time::from_nanos(10),
+                    },
+                    FinalizerHistoryEvent::Ran {
+                        id: 0,
+                        time: Time::from_nanos(20),
+                    },
+                    FinalizerHistoryEvent::RegionClosed {
+                        region,
+                        time: Time::from_nanos(30),
+                    },
+                ],
+            "finalizer history",
+            "registered -> ran -> closed",
+            format!("{:?}", state.finalizer_history)
+        );
+        crate::test_complete!("finalizer_history_tracks_sync_registration_run_and_close");
+    }
+
+    #[test]
+    fn task_completed_records_async_finalizer_run_history() {
+        init_test("task_completed_records_async_finalizer_run_history");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        state.now = Time::from_nanos(10);
+        let registered = state.register_async_finalizer(region, async {});
+        crate::assert_with_log!(registered, "registered", true, registered);
+
+        let region_record = state
+            .regions
+            .get_mut(region.arena_index())
+            .expect("region missing");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+        state.finalizing_regions.push(region);
+
+        state.now = Time::from_nanos(20);
+        let scheduled = state.drain_ready_async_finalizers();
+        crate::assert_with_log!(
+            scheduled.len() == 1,
+            "scheduled len",
+            1usize,
+            scheduled.len()
+        );
+        let task_id = scheduled[0].0;
+
+        let task = state
+            .task_mut(task_id)
+            .expect("async finalizer task missing");
+        task.complete(Outcome::Ok(()));
+
+        state.now = Time::from_nanos(30);
+        let _ = state.task_completed(task_id);
+
+        crate::assert_with_log!(
+            state.finalizer_history
+                == vec![
+                    FinalizerHistoryEvent::Registered {
+                        id: 0,
+                        region,
+                        time: Time::from_nanos(10),
+                    },
+                    FinalizerHistoryEvent::Ran {
+                        id: 0,
+                        time: Time::from_nanos(30),
+                    },
+                    FinalizerHistoryEvent::RegionClosed {
+                        region,
+                        time: Time::from_nanos(30),
+                    },
+                ],
+            "finalizer history",
+            "registered -> ran -> closed",
+            format!("{:?}", state.finalizer_history)
+        );
+        crate::test_complete!("task_completed_records_async_finalizer_run_history");
+    }
+
+    #[test]
+    fn drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit() {
+        init_test("drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let set_limits = state.set_region_limits(
+            region,
+            RegionLimits {
+                max_tasks: Some(0),
+                ..RegionLimits::unlimited()
+            },
+        );
+        crate::assert_with_log!(set_limits, "limits set", true, set_limits);
+
+        let registered = state.register_async_finalizer(region, async {});
+        crate::assert_with_log!(registered, "registered", true, registered);
+
+        let region_record = state
+            .regions
+            .get_mut(region.arena_index())
+            .expect("region missing");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+        state.finalizing_regions.push(region);
+
+        let scheduled = state.drain_ready_async_finalizers();
+        crate::assert_with_log!(
+            scheduled.len() == 1,
+            "async finalizer task scheduled even when normal task limit is zero",
+            1usize,
+            scheduled.len()
+        );
+        let task_id = scheduled[0].0;
+        crate::assert_with_log!(
+            state.region_finalizer_count(region) == 0,
+            "async finalizer moved from barrier stack into running cleanup task",
+            0usize,
+            state.region_finalizer_count(region)
+        );
+        crate::assert_with_log!(
+            !state.can_region_complete_close(region),
+            "region must remain uncloseable while async cleanup task is still running",
+            false,
+            state.can_region_complete_close(region)
+        );
+        state
+            .task_mut(task_id)
+            .expect("async finalizer task missing")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task_id);
+        crate::assert_with_log!(
+            state.finalizer_history
+                == vec![
+                    FinalizerHistoryEvent::Registered {
+                        id: 0,
+                        region,
+                        time: Time::ZERO,
+                    },
+                    FinalizerHistoryEvent::Ran {
+                        id: 0,
+                        time: Time::ZERO,
+                    },
+                    FinalizerHistoryEvent::RegionClosed {
+                        region,
+                        time: Time::ZERO,
+                    },
+                ],
+            "history records cleanup execution and close once the finalizer task finishes",
+            "registered -> ran -> closed",
+            format!("{:?}", state.finalizer_history)
+        );
+        crate::test_complete!(
+            "drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit"
+        );
     }
 
     #[test]
