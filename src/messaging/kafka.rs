@@ -25,7 +25,6 @@
 //! - Uncommitted transactions abort on cancellation
 
 use crate::cx::Cx;
-use crate::runtime::spawn_blocking::{spawn_blocking, spawn_blocking_on_thread};
 #[cfg(not(feature = "kafka"))]
 use crate::sync::Notify;
 use parking_lot::Mutex;
@@ -422,18 +421,17 @@ fn build_producer(
         .map_err(|err| map_rdkafka_error(&err, None))
 }
 
-#[allow(clippy::future_not_send)]
+#[cfg(feature = "kafka")]
 async fn run_kafka_blocking<F, T>(cx: &Cx, f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    if cx.blocking_pool_handle().is_some() {
-        let _guard = Cx::set_current(Some(cx.clone()));
-        return spawn_blocking(f).await;
+    if let Some(pool) = cx.blocking_pool_handle() {
+        return crate::runtime::spawn_blocking::spawn_blocking_on_pool(pool, f).await;
     }
 
-    spawn_blocking_on_thread(f).await
+    crate::runtime::spawn_blocking::spawn_blocking_on_thread(f).await
 }
 
 #[cfg(feature = "kafka")]

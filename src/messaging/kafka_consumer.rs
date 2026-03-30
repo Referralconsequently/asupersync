@@ -303,6 +303,8 @@ pub struct KafkaConsumer {
     broker_ops: Option<Arc<Mutex<()>>>,
     #[cfg(test)]
     rebalance_after_open_hook: Mutex<Option<Arc<RebalanceAfterOpenHook>>>,
+    #[cfg(all(test, not(feature = "kafka")))]
+    poll_before_wait_hook: Mutex<Option<Arc<PollBeforeWaitHook>>>,
 }
 
 impl fmt::Debug for KafkaConsumer {
@@ -331,6 +333,23 @@ struct ConsumerState {
 struct RebalanceAfterOpenHook {
     arrived: std::sync::Barrier,
     release: std::sync::Barrier,
+}
+
+#[cfg(all(test, not(feature = "kafka")))]
+#[derive(Debug)]
+struct PollBeforeWaitHook {
+    arrived: std::sync::Barrier,
+    release: std::sync::Barrier,
+}
+
+#[cfg(all(test, not(feature = "kafka")))]
+impl PollBeforeWaitHook {
+    fn new() -> Self {
+        Self {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -558,6 +577,8 @@ impl KafkaConsumer {
             broker_ops,
             #[cfg(test)]
             rebalance_after_open_hook: Mutex::new(None),
+            #[cfg(all(test, not(feature = "kafka")))]
+            poll_before_wait_hook: Mutex::new(None),
         })
     }
 
@@ -572,6 +593,11 @@ impl KafkaConsumer {
     #[cfg(test)]
     fn install_rebalance_after_open_hook(&self, hook: Arc<RebalanceAfterOpenHook>) {
         *self.rebalance_after_open_hook.lock() = Some(hook);
+    }
+
+    #[cfg(all(test, not(feature = "kafka")))]
+    fn install_poll_before_wait_hook(&self, hook: Arc<PollBeforeWaitHook>) {
+        *self.poll_before_wait_hook.lock() = Some(hook);
     }
 
     /// Subscribe to a set of topics.
@@ -848,6 +874,12 @@ impl KafkaConsumer {
                 let mut state_wait = self.state_notify.notified();
                 let mut sleep = Sleep::new(deadline);
 
+                self.ensure_open()?;
+                self.ensure_has_subscription()?;
+                if crate::time::wall_now() >= deadline {
+                    return Ok(None);
+                }
+
                 () = std::future::poll_fn(|task_cx| {
                     if Pin::new(&mut sleep).poll(task_cx).is_ready() {
                         return Poll::Ready(());
@@ -858,12 +890,6 @@ impl KafkaConsumer {
                     Poll::Pending
                 })
                 .await;
-
-                self.ensure_open()?;
-                self.ensure_has_subscription()?;
-                if crate::time::wall_now() >= deadline {
-                    return Ok(None);
-                }
             }
         }
 
@@ -881,9 +907,26 @@ impl KafkaConsumer {
             loop {
                 cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
+                #[cfg(all(test, not(feature = "kafka")))]
+                let poll_before_wait_hook = self.poll_before_wait_hook.lock().clone();
+                #[cfg(all(test, not(feature = "kafka")))]
+                if let Some(hook) = poll_before_wait_hook {
+                    hook.arrived.wait();
+                    hook.release.wait();
+                }
+
                 let mut state_wait = self.state_notify.notified();
                 let mut broker_wait = stub_broker_notify().notified();
                 let mut sleep = Sleep::new(deadline);
+
+                self.ensure_open()?;
+                self.ensure_has_subscription()?;
+                if let Some(record) = self.try_poll_local_record()? {
+                    return Ok(Some(record));
+                }
+                if crate::time::wall_now() >= deadline {
+                    return Ok(None);
+                }
 
                 () = std::future::poll_fn(|task_cx| {
                     if Pin::new(&mut sleep).poll(task_cx).is_ready() {
@@ -898,15 +941,6 @@ impl KafkaConsumer {
                     Poll::Pending
                 })
                 .await;
-
-                self.ensure_open()?;
-                self.ensure_has_subscription()?;
-                if let Some(record) = self.try_poll_local_record()? {
-                    return Ok(Some(record));
-                }
-                if crate::time::wall_now() >= deadline {
-                    return Ok(None);
-                }
             }
         }
     }
@@ -1269,6 +1303,8 @@ mod tests {
     #[cfg(feature = "kafka")]
     use rdkafka::topic_partition_list::Offset;
     use std::sync::Arc;
+    #[cfg(not(feature = "kafka"))]
+    use std::time::Instant;
 
     #[cfg(not(feature = "kafka"))]
     fn reset_stub_broker() {
@@ -2026,6 +2062,57 @@ mod tests {
             consumer.subscribe(&cx, &[topic]).await.unwrap();
             let err = consumer.poll(&cx, Duration::ZERO).await.unwrap_err();
             assert!(matches!(err, KafkaError::Config(msg) if msg.contains("no offset available")));
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn consumer_poll_rechecks_brokerless_records_after_waiter_registration() {
+        run_test_with_cx(|cx| async move {
+            reset_stub_broker();
+            let topic = "consumer-poll-rechecks-brokerless-records-after-waiter-registration";
+            let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let consumer = Arc::new(
+                KafkaConsumer::new(
+                    ConsumerConfig::new(vec!["localhost:9092".to_string()], "group-recheck")
+                        .auto_offset_reset(AutoOffsetReset::Earliest),
+                )
+                .unwrap(),
+            );
+            consumer.subscribe(&cx, &[topic]).await.unwrap();
+
+            let hook = Arc::new(PollBeforeWaitHook::new());
+            consumer.install_poll_before_wait_hook(Arc::clone(&hook));
+
+            let poll_consumer = Arc::clone(&consumer);
+            let poll_cx = cx.clone();
+            let started = Instant::now();
+            let handle = std::thread::spawn(move || {
+                futures_lite::future::block_on(poll_consumer.poll(&poll_cx, Duration::from_secs(1)))
+            });
+
+            hook.arrived.wait();
+            producer
+                .send(&cx, topic, Some(b"k"), b"wake", Some(0))
+                .await
+                .unwrap();
+            hook.release.wait();
+
+            let record = handle
+                .join()
+                .expect("poll thread panicked")
+                .unwrap()
+                .expect("poll should return the brokerless record without sleeping until timeout");
+
+            assert_eq!(record.topic, topic);
+            assert_eq!(record.partition, 0);
+            assert_eq!(record.offset, 0);
+            assert_eq!(record.key.as_deref(), Some(&b"k"[..]));
+            assert_eq!(record.payload, b"wake");
+            assert!(
+                started.elapsed() < Duration::from_millis(400),
+                "poll should recheck immediately after waiter registration instead of idling until timeout"
+            );
         });
     }
 }

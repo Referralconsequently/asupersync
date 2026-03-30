@@ -78,7 +78,7 @@ impl<T> TrackedSender<T> {
         &'a self,
         cx: &'a Cx,
     ) -> Result<TrackedPermit<'a, T>, mpsc::SendError<()>> {
-        let permit: crate::channel::mpsc::SendPermit<'_, T> = self.inner.reserve(cx).await?;
+        let permit = self.inner.reserve(cx).await?;
         let obligation = ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)");
         Ok(TrackedPermit { permit, obligation })
     }
@@ -96,13 +96,15 @@ impl<T> TrackedSender<T> {
         cx: &Cx,
         value: T,
     ) -> Result<CommittedProof<SendPermit>, mpsc::SendError<T>> {
-        let permit: TrackedPermit<'_, T> = match self.reserve(cx).await {
+        let permit = match self.reserve(cx).await {
             Ok(p) => p,
             Err(mpsc::SendError::Disconnected(())) => {
                 return Err(mpsc::SendError::Disconnected(value));
             }
             Err(mpsc::SendError::Full(())) => return Err(mpsc::SendError::Full(value)),
-            Err(mpsc::SendError::Cancelled(())) => return Err(mpsc::SendError::Cancelled(value)),
+            Err(mpsc::SendError::Cancelled(())) => {
+                return Err(mpsc::SendError::Cancelled(value));
+            }
         };
         permit.try_send(value)
     }
