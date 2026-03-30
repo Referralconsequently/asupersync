@@ -121,6 +121,7 @@ pub struct Resolver {
     config: ResolverConfig,
     cache: Arc<DnsCache>,
     time_getter: fn() -> Time,
+    entropy: Arc<dyn EntropySource>,
 }
 
 impl Resolver {
@@ -138,6 +139,7 @@ impl Resolver {
             config,
             cache,
             time_getter: crate::time::wall_now,
+            entropy: Arc::new(OsEntropy),
         }
     }
 
@@ -152,7 +154,15 @@ impl Resolver {
             config,
             cache,
             time_getter,
+            entropy: Arc::new(OsEntropy),
         }
+    }
+
+    /// Overrides the entropy source.
+    #[must_use]
+    pub fn with_entropy(mut self, entropy: Arc<dyn EntropySource>) -> Self {
+        self.entropy = entropy;
+        self
     }
 
     /// Returns the time source used for resolver timeout decisions.
@@ -254,9 +264,16 @@ impl Resolver {
         }
         let host = host.to_string();
         let nameservers = self.effective_nameservers();
+        let entropy = Arc::clone(&self.entropy);
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
-            Self::query_ip_with_nameservers_sync(&host, &nameservers, retries, timeout)
+            Self::query_ip_with_nameservers_sync(
+                &host,
+                &nameservers,
+                retries,
+                timeout,
+                entropy.as_ref(),
+            )
         }));
 
         self.timeout_future(timeout, lookup)
@@ -441,6 +458,7 @@ impl Resolver {
         let nameservers = self.effective_nameservers();
         let retries = self.config.retries;
         let timeout = self.config.timeout;
+        let entropy = Arc::clone(&self.entropy);
         if timeout.is_zero() {
             return Err(DnsError::Timeout);
         }
@@ -452,6 +470,7 @@ impl Resolver {
                 &nameservers,
                 retries,
                 timeout,
+                entropy.as_ref(),
             )?;
             let mut records = Vec::new();
             for answer in answers {
@@ -484,13 +503,20 @@ impl Resolver {
         let nameservers = self.effective_nameservers();
         let retries = self.config.retries;
         let timeout = self.config.timeout;
+        let entropy = Arc::clone(&self.entropy);
         if timeout.is_zero() {
             return Err(DnsError::Timeout);
         }
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
-            let answers =
-                Self::query_records_sync(&name, DnsQueryType::Srv, &nameservers, retries, timeout)?;
+            let answers = Self::query_records_sync(
+                &name,
+                DnsQueryType::Srv,
+                &nameservers,
+                retries,
+                timeout,
+                entropy.as_ref(),
+            )?;
             let mut records = Vec::new();
             for answer in answers {
                 if let DnsRecordData::Srv {
@@ -526,13 +552,20 @@ impl Resolver {
         let nameservers = self.effective_nameservers();
         let retries = self.config.retries;
         let timeout = self.config.timeout;
+        let entropy = Arc::clone(&self.entropy);
         if timeout.is_zero() {
             return Err(DnsError::Timeout);
         }
 
         let lookup = Box::pin(spawn_blocking_dns(move || {
-            let answers =
-                Self::query_records_sync(&name, DnsQueryType::Txt, &nameservers, retries, timeout)?;
+            let answers = Self::query_records_sync(
+                &name,
+                DnsQueryType::Txt,
+                &nameservers,
+                retries,
+                timeout,
+                entropy.as_ref(),
+            )?;
             let mut records = Vec::new();
             for answer in answers {
                 if let DnsRecordData::Txt(text) = answer.data {
@@ -587,6 +620,7 @@ impl Clone for Resolver {
             config: self.config.clone(),
             cache: Arc::clone(&self.cache),
             time_getter: self.time_getter,
+            entropy: Arc::clone(&self.entropy),
         }
     }
 }
@@ -1279,6 +1313,12 @@ fn select_records_for_query(
     }
 }
 
+struct SyncDnsQueryContext<'a> {
+    timeout: Duration,
+    started: Instant,
+    entropy: &'a dyn EntropySource,
+}
+
 impl Resolver {
     fn query_records_sync(
         name: &str,
@@ -1286,9 +1326,14 @@ impl Resolver {
         nameservers: &[SocketAddr],
         retries: u32,
         timeout: Duration,
+        entropy: &dyn EntropySource,
     ) -> Result<Vec<DnsAnswer>, DnsError> {
-        let started = Instant::now();
-        Self::query_records_inner_sync(name, query_type, nameservers, retries, timeout, started, 0)
+        let context = SyncDnsQueryContext {
+            timeout,
+            started: Instant::now(),
+            entropy,
+        };
+        Self::query_records_inner_sync(name, query_type, nameservers, retries, &context, 0)
     }
 
     fn query_records_inner_sync(
@@ -1296,8 +1341,7 @@ impl Resolver {
         query_type: DnsQueryType,
         nameservers: &[SocketAddr],
         retries: u32,
-        timeout: Duration,
-        started: Instant,
+        context: &SyncDnsQueryContext<'_>,
         cname_depth: usize,
     ) -> Result<Vec<DnsAnswer>, DnsError> {
         if nameservers.is_empty() {
@@ -1314,15 +1358,16 @@ impl Resolver {
 
         for _attempt in 0..=retries {
             for nameserver in nameservers.iter().copied() {
-                let remaining = timeout
-                    .checked_sub(started.elapsed())
+                let remaining = context
+                    .timeout
+                    .checked_sub(context.started.elapsed())
                     .unwrap_or(Duration::ZERO);
                 if remaining.is_zero() {
                     return Err(DnsError::Timeout);
                 }
 
                 let query_timeout = per_attempt_timeout(remaining, attempts).min(remaining);
-                let query_id = dns_query_id(&OsEntropy);
+                let query_id = dns_query_id(context.entropy);
                 let query = build_dns_query(name, query_type, query_id)?;
 
                 match query_nameserver(nameserver, &query, query_id, query_timeout) {
@@ -1335,8 +1380,7 @@ impl Resolver {
                                     query_type,
                                     nameservers,
                                     retries,
-                                    timeout,
-                                    started,
+                                    context,
                                     cname_depth + 1,
                                 );
                             }
@@ -1369,8 +1413,13 @@ impl Resolver {
         nameservers: &[SocketAddr],
         retries: u32,
         timeout: Duration,
+        entropy: &dyn EntropySource,
     ) -> Result<LookupIp, DnsError> {
-        let started = Instant::now();
+        let context = SyncDnsQueryContext {
+            timeout,
+            started: Instant::now(),
+            entropy,
+        };
         let mut addresses = Vec::new();
         let mut ttl = None;
         let mut last_error = None;
@@ -1381,8 +1430,7 @@ impl Resolver {
                 query_type,
                 nameservers,
                 retries,
-                timeout,
-                started,
+                &context,
                 0,
             ) {
                 Ok(records) => {
