@@ -12,7 +12,10 @@ use super::control::MembershipRecord;
 use super::explain::{DataPlaneDecisionKind, ExplainDecisionSpec, ExplainPlan};
 use super::ir::{CostVector, RetentionPolicy, SubjectFamily};
 use super::policy::SemanticServiceClass;
-use super::service::{ReplyCertificate, RequestCertificate, ServiceAdmission, ServiceObligation};
+use super::service::{
+    ReplyCertificate, RequestCertificate, ServiceAdmission, ServiceObligation,
+    ServiceObligationError,
+};
 pub use super::subject::{Subject, SubjectPattern, SubjectPatternError, SubjectToken};
 use super::subject::{Sublist, SubscriptionGuard, SubscriptionId};
 use crate::config::EncodingConfig as RaptorQEncodingConfig;
@@ -636,9 +639,7 @@ impl FabricState {
         let local_candidates = self.local_candidates.clone();
 
         for cell_key in routed_cells {
-            let mut transition = None;
-
-            {
+            let transition = {
                 let cell = self
                     .cells
                     .get_mut(&cell_key)
@@ -662,8 +663,8 @@ impl FabricState {
                     }
                 }
 
-                transition = cell.refresh_state(capacity);
-            }
+                cell.refresh_state(capacity)
+            };
 
             if let Some((cell_id, from_state, to_state)) = transition {
                 trace_fabric_cell_state_transition(
@@ -1115,25 +1116,160 @@ const fn delivery_class_rank(class: DeliveryClass) -> u8 {
     }
 }
 
-fn evaluate_fabric_decision(
+struct FabricDecisionEvaluationInput<'a> {
     kind: FabricDecisionKind,
     cell_id: CellId,
-    subject: &str,
+    subject: &'a str,
     delivery_class: DeliveryClass,
     annotations: BTreeMap<String, String>,
+}
+
+fn evaluate_fabric_decision(
+    input: FabricDecisionEvaluationInput<'_>,
     contract: &StaticActionDecisionContract,
-    posterior: Posterior,
-    ctx: EvalContext,
+    posterior: &Posterior,
+    ctx: &EvalContext,
 ) -> FabricDecisionRecord {
-    let outcome = evaluate(contract, &posterior, &ctx);
+    let outcome = evaluate(contract, posterior, ctx);
     FabricDecisionRecord {
-        kind,
-        cell_id,
-        subject: subject.to_owned(),
-        delivery_class,
-        annotations,
+        kind: input.kind,
+        cell_id: input.cell_id,
+        subject: input.subject.to_owned(),
+        delivery_class: input.delivery_class,
+        annotations: input.annotations,
         audit: outcome.audit_entry,
     }
+}
+
+fn validate_certified_request_admission(
+    admission: &ServiceAdmission,
+) -> Result<DeliveryClass, String> {
+    admission
+        .certificate
+        .validate()
+        .map_err(|error| error.to_string())?;
+
+    let delivery_class = admission.validated.delivery_class;
+    if delivery_class < DeliveryClass::ObligationBacked {
+        return Err(format!(
+            "certified fabric request requires obligation-backed or stronger delivery class, got {delivery_class}"
+        ));
+    }
+    if admission.certificate.delivery_class != delivery_class {
+        return Err(format!(
+            "service admission delivery class {delivery_class} does not match certificate {}",
+            admission.certificate.delivery_class
+        ));
+    }
+    if admission.certificate.timeout != admission.validated.timeout {
+        return Err("service admission timeout does not match certificate timeout".to_string());
+    }
+
+    Ok(delivery_class)
+}
+
+fn build_certified_request_capabilities(
+    subject: SubjectPattern,
+) -> (FabricCapability, FabricCapability) {
+    let publish_capability = FabricCapability::Publish { subject };
+    let subscribe_capability = FabricCapability::Subscribe {
+        subject: match &publish_capability {
+            FabricCapability::Publish { subject } => subject.clone(),
+            _ => unreachable!("certified request constructs publish capability"),
+        },
+    };
+    (publish_capability, subscribe_capability)
+}
+
+fn enforce_certified_request_capabilities(
+    state: &mut FabricState,
+    cx: &Cx,
+    delivery_class: DeliveryClass,
+    publish_capability: &FabricCapability,
+    subscribe_capability: &FabricCapability,
+) -> Option<AsupersyncError> {
+    let FabricCapability::Publish {
+        subject: publish_subject,
+    } = publish_capability
+    else {
+        unreachable!("certified request constructs publish capability")
+    };
+    let FabricCapability::Subscribe {
+        subject: subscribe_subject,
+    } = subscribe_capability
+    else {
+        unreachable!("certified request constructs subscribe capability")
+    };
+
+    if let Err(error) =
+        state.enforce_capability(cx, publish_subject, delivery_class, publish_capability)
+    {
+        return Some(error);
+    }
+    state
+        .enforce_capability(cx, subscribe_subject, delivery_class, subscribe_capability)
+        .err()
+}
+
+fn release_certified_publish_reservation(
+    state: &mut FabricState,
+    cx: &Cx,
+    prepared_publish: PreparedFabricPublish,
+) {
+    state.release_prepared_publish(
+        Some(cx),
+        prepared_publish,
+        "certified publish reservation released",
+    );
+}
+
+struct CertifiedReplyBuild<'a> {
+    obligation: &'a mut ServiceObligation,
+    ledger: &'a mut ObligationLedger,
+    callee: &'a str,
+    payload: &'a [u8],
+    now: Time,
+    service_latency: Duration,
+    delivery_boundary: AckKind,
+    receipt_required: bool,
+}
+
+struct CertifiedReplyArtifacts {
+    reply_certificate: ReplyCertificate,
+    delivery_receipt: Option<FabricReplyDelivery>,
+}
+
+fn build_certified_reply_artifacts(
+    input: &mut CertifiedReplyBuild<'_>,
+) -> Result<CertifiedReplyArtifacts, ServiceObligationError> {
+    let commit = input.obligation.commit_with_reply(
+        input.ledger,
+        input.now,
+        input.payload.to_vec(),
+        input.delivery_boundary,
+        input.receipt_required,
+    )?;
+    let reply_certificate = ReplyCertificate::from_commit(
+        &commit,
+        input.callee.to_owned(),
+        input.now,
+        input.service_latency,
+    );
+    debug_assert!(reply_certificate.validate().is_ok());
+
+    let delivery_receipt = commit.reply_obligation.map(|reply_obligation| {
+        let receipt = reply_obligation.commit_delivery(input.ledger, input.now);
+        FabricReplyDelivery {
+            obligation_id: receipt.obligation_id,
+            delivery_boundary: receipt.delivery_boundary,
+            receipt_required: receipt.receipt_required,
+        }
+    });
+
+    Ok(CertifiedReplyArtifacts {
+        reply_certificate,
+        delivery_receipt,
+    })
 }
 
 fn trace_fabric_decision_recorded(cx: &Cx, record: &FabricDecisionRecord) {
@@ -1257,24 +1393,27 @@ impl FabricRoutingDecision {
             snapshot.e_process(),
             snapshot.ci_width(),
         );
+        let posterior = snapshot.posterior();
         evaluate_fabric_decision(
-            FabricDecisionKind::Routing,
-            self.cell_id,
-            &self.subject,
-            self.delivery_class,
-            BTreeMap::from([
-                (
-                    "routed_cell_count".to_owned(),
-                    self.routed_cell_keys.len().to_string(),
-                ),
-                (
-                    "routed_cell_keys".to_owned(),
-                    self.routed_cell_keys.join(","),
-                ),
-            ]),
+            FabricDecisionEvaluationInput {
+                kind: FabricDecisionKind::Routing,
+                cell_id: self.cell_id,
+                subject: &self.subject,
+                delivery_class: self.delivery_class,
+                annotations: BTreeMap::from([
+                    (
+                        "routed_cell_count".to_owned(),
+                        self.routed_cell_keys.len().to_string(),
+                    ),
+                    (
+                        "routed_cell_keys".to_owned(),
+                        self.routed_cell_keys.join(","),
+                    ),
+                ]),
+            },
             &contract,
-            snapshot.posterior(),
-            ctx,
+            &posterior,
+            &ctx,
         )
     }
 }
@@ -1397,21 +1536,24 @@ impl FabricRetryDecision {
             snapshot.e_process(),
             snapshot.ci_width(),
         );
+        let posterior = snapshot.posterior();
         evaluate_fabric_decision(
-            FabricDecisionKind::Retry,
-            self.cell_id,
-            &self.subject,
-            self.delivery_class,
-            BTreeMap::from([
-                (
-                    "queued_messages".to_owned(),
-                    self.queued_messages.to_string(),
-                ),
-                ("capacity".to_owned(), self.capacity.to_string()),
-            ]),
+            FabricDecisionEvaluationInput {
+                kind: FabricDecisionKind::Retry,
+                cell_id: self.cell_id,
+                subject: &self.subject,
+                delivery_class: self.delivery_class,
+                annotations: BTreeMap::from([
+                    (
+                        "queued_messages".to_owned(),
+                        self.queued_messages.to_string(),
+                    ),
+                    ("capacity".to_owned(), self.capacity.to_string()),
+                ]),
+            },
             &contract,
-            snapshot.posterior(),
-            ctx,
+            &posterior,
+            &ctx,
         )
     }
 }
@@ -1532,24 +1674,27 @@ impl FabricCapabilityDecision {
             snapshot.e_process(),
             snapshot.ci_width(),
         );
+        let posterior = snapshot.posterior();
         evaluate_fabric_decision(
-            FabricDecisionKind::Capability,
-            self.cell_id,
-            &self.subject,
-            self.delivery_class,
-            BTreeMap::from([
-                (
-                    "requested_capability".to_owned(),
-                    self.requested_capability.clone(),
-                ),
-                (
-                    "granted_capability_count".to_owned(),
-                    self.granted_capability_count.to_string(),
-                ),
-            ]),
+            FabricDecisionEvaluationInput {
+                kind: FabricDecisionKind::Capability,
+                cell_id: self.cell_id,
+                subject: &self.subject,
+                delivery_class: self.delivery_class,
+                annotations: BTreeMap::from([
+                    (
+                        "requested_capability".to_owned(),
+                        self.requested_capability.clone(),
+                    ),
+                    (
+                        "granted_capability_count".to_owned(),
+                        self.granted_capability_count.to_string(),
+                    ),
+                ]),
+            },
             &contract,
-            snapshot.posterior(),
-            ctx,
+            &posterior,
+            &ctx,
         )
     }
 }
@@ -1672,28 +1817,31 @@ impl FabricDeliveryClassEscalation {
             snapshot.e_process(),
             snapshot.ci_width(),
         );
+        let posterior = snapshot.posterior();
         evaluate_fabric_decision(
-            FabricDecisionKind::DeliveryClassEscalation,
-            self.cell_id,
-            &self.subject,
-            self.selected_delivery_class,
-            BTreeMap::from([
-                (
-                    "requested_delivery_class".to_owned(),
-                    self.requested_delivery_class.to_string(),
-                ),
-                (
-                    "minimum_delivery_class".to_owned(),
-                    self.minimum_delivery_class.to_string(),
-                ),
-                (
-                    "selected_delivery_class".to_owned(),
-                    self.selected_delivery_class.to_string(),
-                ),
-            ]),
+            FabricDecisionEvaluationInput {
+                kind: FabricDecisionKind::DeliveryClassEscalation,
+                cell_id: self.cell_id,
+                subject: &self.subject,
+                delivery_class: self.selected_delivery_class,
+                annotations: BTreeMap::from([
+                    (
+                        "requested_delivery_class".to_owned(),
+                        self.requested_delivery_class.to_string(),
+                    ),
+                    (
+                        "minimum_delivery_class".to_owned(),
+                        self.minimum_delivery_class.to_string(),
+                    ),
+                    (
+                        "selected_delivery_class".to_owned(),
+                        self.selected_delivery_class.to_string(),
+                    ),
+                ]),
+            },
             &contract,
-            snapshot.posterior(),
-            ctx,
+            &posterior,
+            &ctx,
         )
     }
 }
@@ -2291,63 +2439,28 @@ impl Fabric {
         receipt_required: bool,
     ) -> Result<FabricCertifiedReply, AsupersyncError> {
         fabric_checkpoint(cx, "request_certified")?;
-        admission
-            .certificate
-            .validate()
-            .map_err(|error| fabric_input_error(error.to_string()))?;
-
-        let delivery_class = admission.validated.delivery_class;
-        if delivery_class < DeliveryClass::ObligationBacked {
-            return Err(fabric_input_error(format!(
-                "certified fabric request requires obligation-backed or stronger delivery class, got {delivery_class}"
-            )));
-        }
-        if admission.certificate.delivery_class != delivery_class {
-            return Err(fabric_input_error(format!(
-                "service admission delivery class {delivery_class} does not match certificate {}",
-                admission.certificate.delivery_class
-            )));
-        }
-        if admission.certificate.timeout != admission.validated.timeout {
-            return Err(fabric_input_error(
-                "service admission timeout does not match certificate timeout",
-            ));
-        }
+        let delivery_class =
+            validate_certified_request_admission(admission).map_err(fabric_input_error)?;
 
         let callee = callee.into();
         let subject = parse_subject(&admission.certificate.subject)?;
-        let publish_capability = FabricCapability::Publish {
-            subject: parse_subject_pattern(subject.as_str())?,
-        };
-        let subscribe_capability = FabricCapability::Subscribe {
-            subject: match &publish_capability {
-                FabricCapability::Publish { subject } => subject.clone(),
-                _ => unreachable!("certified request constructs publish capability"),
-            },
-        };
+        let publish_subject_pattern = parse_subject_pattern(subject.as_str())?;
+        let (publish_capability, subscribe_capability) =
+            build_certified_request_capabilities(publish_subject_pattern);
         let payload = payload.into();
         let now = cx.now();
         let service_latency =
             Duration::from_nanos(now.duration_since(admission.certificate.issued_at));
         let mut state = self.state.lock();
-        state.enforce_capability(
+        if let Some(error) = enforce_certified_request_capabilities(
+            &mut state,
             cx,
-            match &publish_capability {
-                FabricCapability::Publish { subject } => subject,
-                _ => unreachable!("certified request constructs publish capability"),
-            },
             delivery_class,
             &publish_capability,
-        )?;
-        state.enforce_capability(
-            cx,
-            match &subscribe_capability {
-                FabricCapability::Subscribe { subject } => subject,
-                _ => unreachable!("certified request constructs subscribe capability"),
-            },
-            delivery_class,
             &subscribe_capability,
-        )?;
+        ) {
+            return Err(error);
+        }
         let prepared_publish =
             state.prepare_publish_message(cx, &subject, payload.clone(), delivery_class)?;
         if let Some(cell_id) = state.primary_cell_id_for_routed_keys(&prepared_publish.routed_cells)
@@ -2375,44 +2488,30 @@ impl Fabric {
         ) {
             Ok(obligation) => obligation,
             Err(error) => {
-                state.release_prepared_publish(
-                    Some(cx),
-                    prepared_publish,
-                    "certified publish reservation released",
-                );
+                release_certified_publish_reservation(&mut state, cx, prepared_publish);
                 return Err(fabric_input_error(error.to_string()));
             }
         };
-
-        let commit = match obligation.commit_with_reply(
+        let mut reply_build = CertifiedReplyBuild {
+            obligation: &mut obligation,
             ledger,
+            callee: &callee,
+            payload: &payload,
             now,
-            payload.clone(),
+            service_latency,
             delivery_boundary,
             receipt_required,
-        ) {
-            Ok(commit) => commit,
+        };
+        let CertifiedReplyArtifacts {
+            reply_certificate,
+            delivery_receipt,
+        } = match build_certified_reply_artifacts(&mut reply_build) {
+            Ok(artifacts) => artifacts,
             Err(error) => {
-                state.release_prepared_publish(
-                    Some(cx),
-                    prepared_publish,
-                    "certified publish reservation released",
-                );
+                release_certified_publish_reservation(&mut state, cx, prepared_publish);
                 return Err(fabric_input_error(error.to_string()));
             }
         };
-        let reply_certificate =
-            ReplyCertificate::from_commit(&commit, callee, now, service_latency);
-        debug_assert!(reply_certificate.validate().is_ok());
-
-        let delivery_receipt = commit.reply_obligation.map(|reply_obligation| {
-            let receipt = reply_obligation.commit_delivery(ledger, now);
-            FabricReplyDelivery {
-                obligation_id: receipt.obligation_id,
-                delivery_boundary: receipt.delivery_boundary,
-                receipt_required: receipt.receipt_required,
-            }
-        });
 
         state.apply_prepared_publish(cx, prepared_publish);
         drop(state);
