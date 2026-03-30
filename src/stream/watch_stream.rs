@@ -47,8 +47,14 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
             return Poll::Ready(None);
         }
 
-        // First poll: return current value immediately
+        // Keep the initial snapshot path consistent with the change-wait path:
+        // a pre-requested cancellation terminates the stream instead of yielding
+        // one last snapshot.
         if !this.has_seen_initial {
+            if this.cx.checkpoint().is_err() {
+                this.terminated = true;
+                return Poll::Ready(None);
+            }
             this.has_seen_initial = true;
             // The initial snapshot counts as observed by this stream.
             return Poll::Ready(Some(this.inner.borrow_and_update_clone()));
@@ -136,6 +142,37 @@ mod tests {
         let still_none = matches!(poll, Poll::Ready(None));
         crate::assert_with_log!(still_none, "stream remains terminated", true, still_none);
         crate::test_complete!("watch_stream_none_is_terminal_after_cancel");
+    }
+
+    #[test]
+    fn watch_stream_new_none_is_terminal_after_cancel_before_initial_snapshot() {
+        init_test("watch_stream_new_none_is_terminal_after_cancel_before_initial_snapshot");
+        let cx: Cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let (tx, rx) = watch::channel(0);
+        let mut stream = WatchStream::new(cx.clone(), rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let first_none = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(first_none, "first poll none", true, first_none);
+
+        cx.set_cancel_requested(false);
+        let send_result = tx.send(1);
+        crate::assert_with_log!(
+            send_result.is_ok(),
+            "send after cancel clear succeeds",
+            true,
+            send_result.is_ok()
+        );
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let still_none = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(still_none, "stream remains terminated", true, still_none);
+        crate::test_complete!(
+            "watch_stream_new_none_is_terminal_after_cancel_before_initial_snapshot"
+        );
     }
 
     #[test]

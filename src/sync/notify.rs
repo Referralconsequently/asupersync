@@ -416,27 +416,10 @@ impl Notified<'_> {
                 new_gen != self.initial_generation
             };
 
-            let (was_notified, notified_generation) = if index < waiters.entries.len() {
-                let entry = &waiters.entries[index];
-                (entry.notified, entry.generation)
-            } else {
-                (false, self.initial_generation)
-            };
-
             if is_gen_changed {
                 waiters.remove(index);
                 self.waiter_index = None;
-                let needs_post_broadcast_baton =
-                    was_notified && notified_generation == self.initial_generation;
-                if needs_post_broadcast_baton {
-                    // This waiter already consumed an earlier `notify_one`, and a later
-                    // broadcast covered the original waiter set. Forward that in-flight
-                    // baton only to waiters that arrived after the broadcast.
-                    Notify::pass_baton_if_waiter_exists(waiters);
-                } else {
-                    drop(waiters);
-                }
-
+                drop(waiters);
                 return self.mark_done();
             }
 
@@ -692,15 +675,15 @@ mod tests {
         // broadcast wakes B.
         notify.notify_waiters();
 
-        // C starts waiting after the broadcast and should inherit the original
-        // notify_one baton when A consumes readiness via poll.
+        // C starts waiting after the broadcast.
         let mut waiter_c = notify.notified();
         assert!(poll_once(&mut waiter_c).is_pending());
 
         assert!(poll_once(&mut waiter_a).is_ready());
+        assert!(poll_once(&mut waiter_b).is_ready());
         assert!(
-            poll_once(&mut waiter_c).is_ready(),
-            "Waiter C should receive the passed baton after A consumes readiness"
+            poll_once(&mut waiter_c).is_pending(),
+            "Waiter C should remain pending since A consumed the notify_one baton"
         );
 
         crate::test_complete!("notify_one_lost_if_followed_by_broadcast_and_poll");
