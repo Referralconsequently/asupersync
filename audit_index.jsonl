@@ -2025,3 +2025,10 @@
 {"file":"src/io/browser_storage.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
 {"file":"src/sync/pool.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
 {"file":"src/channel/mpsc.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/channel/mpsc.rs","lines":1798,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"type annotation refactor only, cancel-safety and waker dedup intact"}
+{"file":"src/messaging/session/obligation.rs","lines":500,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"chunk/close direction fix correct (consumer→producer matches session type receive semantics)"}
+{"file":"src/runtime/builder.rs","lines":2711,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"guidance type fix correct, all initialization complete"}
+{"file":"src/lab/oracle/evidence.rs","lines":1371,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"ledger_from_oracle_suite asserted 21 entries but OracleSuite::new() produces 17 without messaging-fabric; fixed with cfg-gated assertions"}
+{"file":"src/io/browser_storage.rs","lines":1782,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"type annotation changes only, Rc<RefCell> closure lifecycle sound, cancel-safe"}
+{"file":"src/lab/mod.rs","lines":200,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"AutoAdvanceTermination re-export added correctly"}
+{"file":"src/runtime/mod.rs","lines":100,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"browser worker fallback diagnostics correct, no panic paths"}
