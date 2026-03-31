@@ -457,23 +457,32 @@ impl<M: ConnectionManager> DbPool<M> {
 
     /// Return a connection to the pool, preserving its original creation time.
     fn return_connection(&self, conn: M::Connection, created_at: Instant) {
-        let mut inner = self.inner.lock();
-        if inner.closed {
-            inner.total = inner.total.saturating_sub(1);
-            self.manager.disconnect(conn);
-            return;
+        let conn_to_disconnect = {
+            let mut inner = self.inner.lock();
+            if inner.closed {
+                inner.total = inner.total.saturating_sub(1);
+                Some(conn)
+            } else {
+                inner.idle.push_back(IdleConnection {
+                    conn,
+                    created_at,
+                    last_used: Instant::now(),
+                });
+                None
+            }
+        };
+
+        if let Some(c) = conn_to_disconnect {
+            self.manager.disconnect(c);
         }
-        inner.idle.push_back(IdleConnection {
-            conn,
-            created_at,
-            last_used: Instant::now(),
-        });
     }
 
     /// Discard a connection (don't return to pool).
     fn discard_connection(&self, conn: M::Connection) {
-        let mut inner = self.inner.lock();
-        inner.total = inner.total.saturating_sub(1);
+        {
+            let mut inner = self.inner.lock();
+            inner.total = inner.total.saturating_sub(1);
+        }
         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
         self.manager.disconnect(conn);
     }

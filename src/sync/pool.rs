@@ -619,8 +619,8 @@ impl Default for PoolConfig {
             min_size: 1,
             max_size: 10,
             acquire_timeout: Duration::from_secs(30),
-            idle_timeout: Duration::from_mins(10),
-            max_lifetime: Duration::from_hours(1),
+            idle_timeout: Duration::from_secs(10 * 60),
+            max_lifetime: Duration::from_secs(1 * 3600),
             // Health check defaults
             health_check_on_acquire: false,
             health_check_interval: None,
@@ -1367,9 +1367,8 @@ where
             if let Some(idle) = state.idle.pop_front() {
                 state.active += 1;
                 state.total_acquisitions += 1;
-                if waiter_id.is_some() && pos < state.waiters.len() {
-                    state.waiters.remove(pos);
-                }
+                // Waiter is NOT removed here. It is removed in `acquire` upon success,
+                // or remains in queue if health check fails to preserve FIFO.
                 Some((idle.resource, idle.created_at))
             } else {
                 None
@@ -1666,6 +1665,7 @@ where
                     let id = cleanup.waiter_id.take();
                     if let Some(id) = id {
                         self.return_wakers.lock().retain(|(wid, _)| *wid != id);
+                        self.remove_waiter(id);
                     }
 
                     let acquire_duration =
@@ -2546,15 +2546,15 @@ mod tests {
             config.acquire_timeout
         );
         crate::assert_with_log!(
-            config.idle_timeout == Duration::from_mins(10),
+            config.idle_timeout == Duration::from_secs(10 * 60),
             "idle_timeout",
-            Duration::from_mins(10),
+            Duration::from_secs(10 * 60),
             config.idle_timeout
         );
         crate::assert_with_log!(
-            config.max_lifetime == Duration::from_hours(1),
+            config.max_lifetime == Duration::from_secs(1 * 3600),
             "max_lifetime",
-            Duration::from_hours(1),
+            Duration::from_secs(1 * 3600),
             config.max_lifetime
         );
         crate::test_complete!("pool_config_default");
@@ -2565,28 +2565,28 @@ mod tests {
         init_test("pool_config_builder");
         let config = PoolConfig::with_max_size(20)
             .min_size(5)
-            .acquire_timeout(Duration::from_mins(1))
-            .idle_timeout(Duration::from_mins(5))
-            .max_lifetime(Duration::from_mins(30));
+            .acquire_timeout(Duration::from_secs(1 * 60))
+            .idle_timeout(Duration::from_secs(5 * 60))
+            .max_lifetime(Duration::from_secs(30 * 60));
 
         crate::assert_with_log!(config.min_size == 5, "min_size", 5usize, config.min_size);
         crate::assert_with_log!(config.max_size == 20, "max_size", 20usize, config.max_size);
         crate::assert_with_log!(
-            config.acquire_timeout == Duration::from_mins(1),
+            config.acquire_timeout == Duration::from_secs(1 * 60),
             "acquire_timeout",
-            Duration::from_mins(1),
+            Duration::from_secs(1 * 60),
             config.acquire_timeout
         );
         crate::assert_with_log!(
-            config.idle_timeout == Duration::from_mins(5),
+            config.idle_timeout == Duration::from_secs(5 * 60),
             "idle_timeout",
-            Duration::from_mins(5),
+            Duration::from_secs(5 * 60),
             config.idle_timeout
         );
         crate::assert_with_log!(
-            config.max_lifetime == Duration::from_mins(30),
+            config.max_lifetime == Duration::from_secs(30 * 60),
             "max_lifetime",
-            Duration::from_mins(30),
+            Duration::from_secs(30 * 60),
             config.max_lifetime
         );
         crate::test_complete!("pool_config_builder");
@@ -3640,7 +3640,7 @@ mod tests {
     fn warmup_created_timestamps_follow_time_getter() {
         init_test("warmup_created_timestamps_follow_time_getter");
 
-        set_test_pool_time_offset(Duration::from_hours(24));
+        set_test_pool_time_offset(Duration::from_secs(24 * 3600));
 
         let config = PoolConfig::with_max_size(4)
             .warmup_connections(1)
@@ -3903,11 +3903,11 @@ mod tests {
 
         let config = PoolConfig::with_max_size(5)
             .health_check_on_acquire(true)
-            .health_check_interval(Some(Duration::from_mins(1)))
+            .health_check_interval(Some(Duration::from_secs(1 * 60)))
             .evict_unhealthy(false);
 
         assert!(config.health_check_on_acquire);
-        assert_eq!(config.health_check_interval, Some(Duration::from_mins(1)));
+        assert_eq!(config.health_check_interval, Some(Duration::from_secs(1 * 60)));
         assert!(!config.evict_unhealthy);
 
         crate::test_complete!("pool_config_health_check_builder");

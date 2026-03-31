@@ -353,9 +353,14 @@ impl RegionSnapshot {
         let tasks = 4 + self.tasks.len() * 10; // count + per-task (8+1+1)
         let children = 4 + self.children.len() * 8;
         let finalizer = 4;
-        let budget = 3 + 8 + 4 + 8; // worst case all present
-        let cancel = 5 + self.cancel_reason.as_ref().map_or(0, String::len);
-        let parent = 9; // worst case
+        let budget = 1
+            + self.budget.deadline_nanos.map_or(0, |_| 8)
+            + 1
+            + self.budget.polls_remaining.map_or(0, |_| 4)
+            + 1
+            + self.budget.cost_remaining.map_or(0, |_| 8);
+        let cancel = 1 + self.cancel_reason.as_ref().map_or(0, |s| 4 + s.len());
+        let parent = 1 + self.parent.map_or(0, |_| 8);
         let metadata = 4 + self.metadata.len();
 
         header
