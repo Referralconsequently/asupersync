@@ -17,7 +17,7 @@
 //! use std::time::Duration;
 //!
 //! let tracker = ObligationTracker::new(state.clone(), console);
-//! let leaks = tracker.find_potential_leaks(Duration::from_secs(60));
+//! let leaks = tracker.find_potential_leaks(Duration::from_mins(1));
 //! if !leaks.is_empty() {
 //!     for leak in &leaks {
 //!         println!("Potential leak: {} held by {:?}", leak.type_name, leak.holder_task);
@@ -51,7 +51,7 @@ pub struct ObligationTrackerConfig {
 impl Default for ObligationTrackerConfig {
     fn default() -> Self {
         Self {
-            leak_age_threshold: Duration::from_secs(60),
+            leak_age_threshold: Duration::from_mins(1),
             periodic_checks: false,
             check_interval: Duration::from_secs(30),
         }
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = ObligationTrackerConfig::default();
-        assert_eq!(config.leak_age_threshold, Duration::from_secs(60));
+        assert_eq!(config.leak_age_threshold, Duration::from_mins(1));
         assert!(!config.periodic_checks);
         assert_eq!(config.check_interval, Duration::from_secs(30));
     }
@@ -568,7 +568,7 @@ mod tests {
             "Lease".to_string(),
             TypeSummary {
                 count: 5,
-                oldest_age: Duration::from_secs(60),
+                oldest_age: Duration::from_mins(1),
                 primary_holder: Some("task-1".into()),
             },
         );

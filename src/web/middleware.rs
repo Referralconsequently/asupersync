@@ -101,7 +101,7 @@ impl Default for CorsPolicy {
             ],
             allow_headers: vec!["*".to_string()],
             expose_headers: Vec::new(),
-            max_age: Some(Duration::from_secs(600)),
+            max_age: Some(Duration::from_mins(10)),
             allow_credentials: false,
         }
     }

@@ -37,8 +37,8 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_entries: 10_000,
-            min_ttl: Duration::from_secs(60),
-            max_ttl: Duration::from_secs(86_400), // 24 hours
+            min_ttl: Duration::from_mins(1),
+            max_ttl: Duration::from_hours(24), // 24 hours
             negative_ttl: Duration::from_secs(30),
         }
     }
@@ -386,7 +386,7 @@ mod tests {
     fn cache_config_debug_clone_default() {
         let def = CacheConfig::default();
         assert_eq!(def.max_entries, 10_000);
-        assert_eq!(def.min_ttl, Duration::from_secs(60));
+        assert_eq!(def.min_ttl, Duration::from_mins(1));
         assert_eq!(def.negative_ttl, Duration::from_secs(30));
         let dbg = format!("{def:?}");
         assert!(dbg.contains("CacheConfig"), "{dbg}");
@@ -679,7 +679,7 @@ mod tests {
     fn cache_ttl_clamping() {
         init_test("cache_ttl_clamping");
         let config = CacheConfig {
-            min_ttl: Duration::from_secs(60),
+            min_ttl: Duration::from_mins(1),
             max_ttl: Duration::from_secs(3600),
             ..Default::default()
         };

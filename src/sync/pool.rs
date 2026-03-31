@@ -619,8 +619,8 @@ impl Default for PoolConfig {
             min_size: 1,
             max_size: 10,
             acquire_timeout: Duration::from_secs(30),
-            idle_timeout: Duration::from_secs(600),
-            max_lifetime: Duration::from_secs(3600),
+            idle_timeout: Duration::from_mins(10),
+            max_lifetime: Duration::from_hours(1),
             // Health check defaults
             health_check_on_acquire: false,
             health_check_interval: None,
@@ -2547,15 +2547,15 @@ mod tests {
             config.acquire_timeout
         );
         crate::assert_with_log!(
-            config.idle_timeout == Duration::from_secs(600),
+            config.idle_timeout == Duration::from_mins(10),
             "idle_timeout",
-            Duration::from_secs(600),
+            Duration::from_mins(10),
             config.idle_timeout
         );
         crate::assert_with_log!(
-            config.max_lifetime == Duration::from_secs(3600),
+            config.max_lifetime == Duration::from_hours(1),
             "max_lifetime",
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
             config.max_lifetime
         );
         crate::test_complete!("pool_config_default");
