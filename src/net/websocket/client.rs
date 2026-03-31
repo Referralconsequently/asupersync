@@ -28,7 +28,7 @@ use super::handshake::{ClientHandshake, HandshakeError, HttpResponse, WsUrl};
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
 use crate::cx::Cx;
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::util::{EntropySource, OsEntropy};
 use std::io;
@@ -604,6 +604,7 @@ where
             }
         }
 
+        self.io.shutdown().await.map_err(WsError::Io)?;
         Ok(())
     }
 
@@ -1055,13 +1056,13 @@ mod tests {
         let config = WebSocketConfig::new()
             .max_frame_size(1024)
             .max_message_size(4096)
-            .ping_interval(Some(Duration::from_secs(1 * 60)))
+            .ping_interval(Some(Duration::from_secs(60)))
             .protocol("chat")
             .nodelay(false);
 
         assert_eq!(config.max_frame_size, 1024);
         assert_eq!(config.max_message_size, 4096);
-        assert_eq!(config.ping_interval, Some(Duration::from_secs(1 * 60)));
+        assert_eq!(config.ping_interval, Some(Duration::from_secs(60)));
         assert_eq!(config.protocols, vec!["chat".to_string()]);
         assert!(!config.nodelay);
     }
