@@ -1985,3 +1985,7 @@
 {"file":"src/channel/watch.rs","lines":0,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: poll_changed extraction, eager waiter cleanup in ChangedFuture::drop"}
 {"file":"src/database/postgres.rs","lines":0,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: SCRAM DoS cap, Box TLS, flush write_all, build_bind_msg infallible"}
 {"file":"src/database/sqlite.rs","lines":0,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: eager rollback spawn in transaction Drop"}
+{"file":"src/net/dns/resolver.rs","lines":988,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Agent HIGH finding was FALSE POSITIVE - Instant::now + elapsed() correctly shares timeout across AAAA+A queries"}
+{"file":"src/messaging/kafka.rs","lines":1569,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Agent HIGH finding was FALSE POSITIVE - ensure_initialized is lock-guarded and idempotent"}
+{"file":"src/messaging/kafka_consumer.rs","lines":1072,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Agent MEDIUM finding was FALSE POSITIVE - kafka test path uses rdkafka consumer not local records"}
+{"file":"src/http/body.rs","lines":0,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Agent LOW findings verified - documentation gaps only, no functional bugs"}
