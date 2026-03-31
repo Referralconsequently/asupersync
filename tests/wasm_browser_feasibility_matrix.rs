@@ -114,6 +114,9 @@ fn service_worker_direct_runtime_is_unshipped_but_bounded_broker_support_is_expl
         "runtime_context: BrowserRuntimeContext::ServiceWorker",
         "Some(\"ServiceWorkerGlobalScope\") => BrowserExecutionHostRole::ServiceWorker",
         "BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped",
+        "inspect_browser_service_worker_broker_support_for_probe",
+        "wasm-service-worker-broker-contract-v1",
+        "lane.browser.service_worker.broker",
     ] {
         assert!(
             builder_src.contains(marker),
@@ -149,6 +152,9 @@ fn shared_worker_direct_runtime_is_unshipped_but_bounded_attach_support_is_expli
         "runtime_context: BrowserRuntimeContext::SharedWorker",
         "Some(\"SharedWorkerGlobalScope\") => BrowserExecutionHostRole::SharedWorker",
         "BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped",
+        "inspect_browser_shared_worker_coordinator_support_for_probe",
+        "wasm-shared-worker-tenancy-lifecycle-v1",
+        "lane.browser.shared_worker.coordinator",
     ] {
         assert!(
             builder_src.contains(marker),

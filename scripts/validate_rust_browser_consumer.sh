@@ -18,7 +18,7 @@ mkdir -p "${RUN_DIR}"
 WORK_DIR="$(mktemp -d "${RUN_DIR}/work.XXXXXX")"
 PKG_DIR="${WORK_DIR}/pkg"
 CONSUMER_DIR="${WORK_DIR}/consumer"
-CARGO_TARGET_DIR="${RUN_DIR}/cargo-target"
+CARGO_WRAPPER="${WORK_DIR}/cargo-rch"
 
 require_cmd() {
   local cmd="$1"
@@ -43,9 +43,17 @@ if [[ ! -f "${CRATE_DIR}/Cargo.toml" ]]; then
   exit 1
 fi
 
+cat > "${CARGO_WRAPPER}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${REPO_ROOT}"
+exec rch exec -- cargo "\$@"
+EOF
+chmod +x "${CARGO_WRAPPER}"
+
 (
   cd "${REPO_ROOT}"
-  rch exec -- env CARGO_TARGET_DIR="${CARGO_TARGET_DIR}" wasm-pack build "${CRATE_DIR}" \
+  CARGO="${CARGO_WRAPPER}" wasm-pack build "${CRATE_DIR}" \
     --target web \
     --dev \
     --out-dir "${PKG_DIR}" \
@@ -101,6 +109,9 @@ summary = {
         "main_thread_browser_selection_lane": browser_run["main_thread_browser_selection_lane"],
         "service_worker_fail_closed_reason_code": browser_run["service_worker_fail_closed_reason_code"],
         "shared_worker_fail_closed_reason_code": browser_run["shared_worker_fail_closed_reason_code"],
+        "service_worker_broker_reason": browser_run["service_worker_broker_reason"],
+        "shared_worker_coordinator_main_thread_reason": browser_run["shared_worker_coordinator_main_thread_reason"],
+        "shared_worker_coordinator_dedicated_worker_reason": browser_run["shared_worker_coordinator_dedicated_worker_reason"],
         "downgrade_selected_lane": browser_run["downgrade_selected_lane"],
         "downgrade_browser_selection_lane": browser_run["downgrade_browser_selection_lane"],
         "downgrade_reason_code": browser_run["downgrade_reason_code"],
@@ -135,6 +146,9 @@ summary = {
         "main_thread_preferred_worker_reason_code": browser_run["main_thread_preferred_worker_reason_code"],
         "service_worker_fail_closed_reason_code": browser_run["service_worker_fail_closed_reason_code"],
         "shared_worker_fail_closed_reason_code": browser_run["shared_worker_fail_closed_reason_code"],
+        "service_worker_broker_reason": browser_run["service_worker_broker_reason"],
+        "shared_worker_coordinator_main_thread_reason": browser_run["shared_worker_coordinator_main_thread_reason"],
+        "shared_worker_coordinator_dedicated_worker_reason": browser_run["shared_worker_coordinator_dedicated_worker_reason"],
         "downgrade_selected_lane": browser_run["downgrade_selected_lane"],
         "downgrade_browser_selection_lane": browser_run["downgrade_browser_selection_lane"],
         "downgrade_reason_code": browser_run["downgrade_reason_code"],

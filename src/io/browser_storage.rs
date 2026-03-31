@@ -1356,7 +1356,7 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
         let resolve_success = resolve.clone();
         let reject_success = reject.clone();
         let success_callbacks = callbacks.clone();
-        let on_success = Closure::new(move |_event: Event| {
+        let on_success: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_request_handlers(&success_cleanup);
             let _ = success_callbacks.borrow_mut().take();
             match success_request.result() {
@@ -1373,7 +1373,7 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
         let error_cleanup = request.clone();
         let reject_error = reject.clone();
         let error_callbacks = callbacks.clone();
-        let on_error = Closure::new(move |_event: Event| {
+        let on_error: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_request_handlers(&error_cleanup);
             let _ = error_callbacks.borrow_mut().take();
             let error = error_request
@@ -1405,7 +1405,7 @@ async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, Strin
         let resolve_success = resolve.clone();
         let reject_success = reject.clone();
         let success_callbacks = callbacks.clone();
-        let on_success = Closure::new(move |_event: Event| {
+        let on_success: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&success_cleanup);
             let _ = success_callbacks.borrow_mut().take();
             match success_request.result() {
@@ -1422,7 +1422,7 @@ async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, Strin
         let error_cleanup = request.clone();
         let reject_error = reject.clone();
         let error_callbacks = callbacks.clone();
-        let on_error = Closure::new(move |_event: Event| {
+        let on_error: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&error_cleanup);
             let _ = error_callbacks.borrow_mut().take();
             let error = error_request
@@ -1435,7 +1435,7 @@ async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, Strin
         let blocked_cleanup = request.clone();
         let reject_blocked = reject.clone();
         let blocked_callbacks = callbacks.clone();
-        let on_blocked = Closure::new(move |_event: Event| {
+        let on_blocked: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&blocked_cleanup);
             let _ = blocked_callbacks.borrow_mut().take();
             let _ = reject_blocked.call1(
@@ -1465,7 +1465,7 @@ async fn await_transaction(transaction: &IdbTransaction) -> Result<(), String> {
         let complete_cleanup = transaction.clone();
         let resolve_complete = resolve.clone();
         let complete_callbacks = callbacks.clone();
-        let on_complete = Closure::new(move |_event: Event| {
+        let on_complete: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_transaction_handlers(&complete_cleanup);
             let _ = complete_callbacks.borrow_mut().take();
             let _ = resolve_complete.call0(&JsValue::UNDEFINED);
@@ -1474,7 +1474,7 @@ async fn await_transaction(transaction: &IdbTransaction) -> Result<(), String> {
         let error_cleanup = transaction.clone();
         let reject_error = reject.clone();
         let error_callbacks = callbacks.clone();
-        let on_error = Closure::new(move |_event: Event| {
+        let on_error: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_transaction_handlers(&error_cleanup);
             let _ = error_callbacks.borrow_mut().take();
             let _ = reject_error.call1(
@@ -1486,7 +1486,7 @@ async fn await_transaction(transaction: &IdbTransaction) -> Result<(), String> {
         let abort_cleanup = transaction.clone();
         let reject_abort = reject.clone();
         let abort_callbacks = callbacks.clone();
-        let on_abort = Closure::new(move |_event: Event| {
+        let on_abort: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_transaction_handlers(&abort_cleanup);
             let _ = abort_callbacks.borrow_mut().take();
             let _ = reject_abort.call1(

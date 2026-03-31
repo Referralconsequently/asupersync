@@ -574,6 +574,172 @@ pub struct BrowserRuntimeSupportDiagnostics {
     pub capabilities: BrowserCapabilitySnapshot,
 }
 
+const BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID: &str = "wasm-service-worker-broker-contract-v1";
+const BROWSER_SERVICE_WORKER_BROKER_LANE: &str = "lane.browser.service_worker.broker";
+const BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID: &str =
+    "wasm-shared-worker-tenancy-lifecycle-v1";
+const BROWSER_SHARED_WORKER_COORDINATOR_LANE: &str = "lane.browser.shared_worker.coordinator";
+
+/// Truthful fallback targets for bounded browser worker helper surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserWorkerFallbackTarget {
+    /// Downgrade to the dedicated-worker direct-runtime lane.
+    DedicatedWorkerDirectRuntime,
+    /// Downgrade to the browser main-thread direct-runtime lane.
+    BrowserMainThreadDirectRuntime,
+    /// Downgrade to an application-owned bridge-only fallback.
+    BridgeFallback,
+}
+
+impl BrowserWorkerFallbackTarget {
+    /// Stable string label aligned with the Browser Edition package surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DedicatedWorkerDirectRuntime => "lane.browser.dedicated_worker.direct_runtime",
+            Self::BrowserMainThreadDirectRuntime => "lane.browser.main_thread.direct_runtime",
+            Self::BridgeFallback => "bridge_fallback",
+        }
+    }
+
+    const fn fallback_lane_id(self) -> Option<BrowserExecutionLane> {
+        match self {
+            Self::DedicatedWorkerDirectRuntime => {
+                Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime)
+            }
+            Self::BrowserMainThreadDirectRuntime => {
+                Some(BrowserExecutionLane::BrowserMainThreadDirectRuntime)
+            }
+            Self::BridgeFallback => None,
+        }
+    }
+}
+
+/// Reason codes for service-worker broker host-class preflight diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserServiceWorkerBrokerSupportReason {
+    /// The current host supports the bounded broker surface.
+    Supported,
+    /// The current host is not a service-worker-like host.
+    ServiceWorkerApiMissing,
+    /// The current host lacks the durable store required by the default restartable profile.
+    DurableStoreUnavailableForRestartableProfile,
+}
+
+impl BrowserServiceWorkerBrokerSupportReason {
+    /// Stable string label aligned with the Browser Edition package surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::ServiceWorkerApiMissing => "service_worker_api_missing",
+            Self::DurableStoreUnavailableForRestartableProfile => {
+                "durable_store_unavailable_for_restartable_profile"
+            }
+        }
+    }
+}
+
+/// Host-class preflight diagnostics for the bounded service-worker broker surface.
+///
+/// Unlike the JS helper, this Rust preview surface does not try to mirror every
+/// registration/admission field. It only reports the host-class facts that the
+/// Rust browser builder can inspect truthfully without widening the shipped
+/// direct-runtime contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserServiceWorkerBrokerSupportDiagnostics {
+    /// Whether the current host satisfies the bounded broker preflight.
+    pub supported: bool,
+    /// Stable bounded broker contract id.
+    pub contract_id: &'static str,
+    /// Stable bounded broker lane id.
+    pub requested_lane: &'static str,
+    /// Truthful first downgrade target when broker admission is unavailable.
+    pub fallback_target: BrowserWorkerFallbackTarget,
+    /// Truthful first downgrade lane, if it maps to a direct-runtime lane.
+    pub fallback_lane_id: Option<BrowserExecutionLane>,
+    /// Ordered downgrade targets for this helper surface.
+    pub downgrade_order: Vec<BrowserWorkerFallbackTarget>,
+    /// Browser host-role classification.
+    pub host_role: BrowserExecutionHostRole,
+    /// Browser runtime context classification.
+    pub runtime_context: BrowserRuntimeContext,
+    /// Host-class support reason.
+    pub reason: BrowserServiceWorkerBrokerSupportReason,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Operator guidance.
+    pub guidance: Vec<String>,
+    /// Underlying direct-runtime support reason for the current host.
+    pub direct_runtime_reason: BrowserRuntimeSupportReason,
+    /// Underlying execution-ladder reason for the current host.
+    pub direct_execution_reason_code: BrowserExecutionReasonCode,
+    /// Underlying runtime-support diagnostics for the current host.
+    pub runtime_support: BrowserRuntimeSupportDiagnostics,
+    /// Capability snapshot copied from runtime support diagnostics.
+    pub capabilities: BrowserCapabilitySnapshot,
+}
+
+/// Reason codes for shared-worker coordinator caller-side preflight diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserSharedWorkerCoordinatorSupportReason {
+    /// The current caller host supports the bounded coordinator surface.
+    Supported,
+    /// The current caller host cannot attach to the bounded coordinator surface.
+    SharedWorkerApiMissing,
+}
+
+impl BrowserSharedWorkerCoordinatorSupportReason {
+    /// Stable string label aligned with the Browser Edition package surface.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::SharedWorkerApiMissing => "shared_worker_api_missing",
+        }
+    }
+}
+
+/// Host-class preflight diagnostics for the bounded shared-worker coordinator surface.
+///
+/// This remains intentionally narrower than the JS helper. The Rust preview
+/// surface only reports whether the current caller host is a truthful place to
+/// start a bounded coordinator attach flow; full same-origin script resolution
+/// and admission checks remain on the JS helper surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserSharedWorkerCoordinatorSupportDiagnostics {
+    /// Whether the current caller host satisfies the bounded coordinator preflight.
+    pub supported: bool,
+    /// Stable bounded coordinator contract id.
+    pub contract_id: &'static str,
+    /// Stable bounded coordinator lane id.
+    pub requested_lane: &'static str,
+    /// Truthful first downgrade target when coordinator attach is unavailable.
+    pub fallback_target: BrowserWorkerFallbackTarget,
+    /// Truthful first downgrade lane, if it maps to a direct-runtime lane.
+    pub fallback_lane_id: Option<BrowserExecutionLane>,
+    /// Ordered downgrade targets for this helper surface.
+    pub downgrade_order: Vec<BrowserWorkerFallbackTarget>,
+    /// Browser host-role classification for the caller host.
+    pub host_role: BrowserExecutionHostRole,
+    /// Browser runtime context classification for the caller host.
+    pub runtime_context: BrowserRuntimeContext,
+    /// Caller-side support reason.
+    pub reason: BrowserSharedWorkerCoordinatorSupportReason,
+    /// Human-readable explanation.
+    pub message: String,
+    /// Operator guidance.
+    pub guidance: Vec<String>,
+    /// Direct-runtime reason for the shared-worker host itself.
+    pub direct_runtime_reason: BrowserRuntimeSupportReason,
+    /// Execution-ladder reason for the shared-worker host itself.
+    pub direct_execution_reason_code: BrowserExecutionReasonCode,
+    /// Underlying runtime-support diagnostics for the caller host.
+    pub runtime_support: BrowserRuntimeSupportDiagnostics,
+    /// Capability snapshot copied from runtime support diagnostics.
+    pub capabilities: BrowserCapabilitySnapshot,
+}
+
 /// Browser execution host-role classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserExecutionHostRole {
@@ -1066,11 +1232,17 @@ fn browser_runtime_support_not_yet_shipped(
     let (message, guidance) = match reason {
         BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped => (
             "Rust Browser Edition does not yet ship a service-worker direct-runtime lane.",
-            "Use the maintained browser fixture or a bridge-oriented surface instead of treating service workers as a direct runtime lane.",
+            &[
+                "Keep Rust Browser Edition runtime creation out of service-worker hosts; the direct-runtime lane is intentionally fail-closed today.",
+                "Use the bounded service-worker broker helpers for registration, durable handoff, and fallback orchestration instead of widening the direct-runtime claim.",
+            ][..],
         ),
         BrowserRuntimeSupportReason::SharedWorkerNotYetShipped => (
             "Rust Browser Edition does not yet ship a shared-worker direct-runtime lane.",
-            "Use the maintained browser fixture or a bridge-oriented surface instead of treating shared workers as a direct runtime lane.",
+            &[
+                "Keep Rust Browser Edition runtime creation out of shared-worker hosts; the direct-runtime lane is intentionally fail-closed today.",
+                "Use the bounded shared-worker coordinator helpers from a browser main-thread or dedicated-worker caller instead of widening the direct-runtime claim.",
+            ][..],
         ),
         BrowserRuntimeSupportReason::MissingGlobalThis
         | BrowserRuntimeSupportReason::UnsupportedRuntimeContext
@@ -1085,7 +1257,7 @@ fn browser_runtime_support_not_yet_shipped(
         BrowserRuntimeSupportClass::Unsupported,
         reason,
         message,
-        &[guidance],
+        guidance,
     )
 }
 
@@ -1514,6 +1686,165 @@ fn build_browser_execution_ladder_from_probe(
         downgrade_order: browser_execution_downgrade_order(host_role),
         repro_command: browser_execution_repro_command(),
         candidates,
+        runtime_support,
+        capabilities,
+    }
+}
+
+fn browser_service_worker_broker_downgrade_order() -> Vec<BrowserWorkerFallbackTarget> {
+    vec![
+        BrowserWorkerFallbackTarget::DedicatedWorkerDirectRuntime,
+        BrowserWorkerFallbackTarget::BrowserMainThreadDirectRuntime,
+        BrowserWorkerFallbackTarget::BridgeFallback,
+    ]
+}
+
+fn browser_shared_worker_coordinator_downgrade_order(
+    host_role: BrowserExecutionHostRole,
+) -> Vec<BrowserWorkerFallbackTarget> {
+    let mut targets = Vec::new();
+    if host_role == BrowserExecutionHostRole::DedicatedWorker {
+        targets.push(BrowserWorkerFallbackTarget::DedicatedWorkerDirectRuntime);
+    }
+    if host_role == BrowserExecutionHostRole::BrowserMainThread {
+        targets.push(BrowserWorkerFallbackTarget::BrowserMainThreadDirectRuntime);
+    }
+    if !targets.contains(&BrowserWorkerFallbackTarget::DedicatedWorkerDirectRuntime) {
+        targets.push(BrowserWorkerFallbackTarget::DedicatedWorkerDirectRuntime);
+    }
+    if !targets.contains(&BrowserWorkerFallbackTarget::BrowserMainThreadDirectRuntime) {
+        targets.push(BrowserWorkerFallbackTarget::BrowserMainThreadDirectRuntime);
+    }
+    targets.push(BrowserWorkerFallbackTarget::BridgeFallback);
+    targets
+}
+
+fn browser_service_worker_broker_support_from_probe(
+    probe: BrowserExecutionProbe,
+) -> BrowserServiceWorkerBrokerSupportDiagnostics {
+    let runtime_support = browser_runtime_support_from_probe(probe);
+    let capabilities = runtime_support.capabilities;
+    let downgrade_order = browser_service_worker_broker_downgrade_order();
+    let fallback_target = downgrade_order[0];
+    let direct_runtime_reason = runtime_support.reason;
+    let direct_execution_reason_code =
+        browser_execution_reason_from_support(&runtime_support, probe.host_role);
+    let (supported, reason, message, guidance) = if probe.host_role
+        != BrowserExecutionHostRole::ServiceWorker
+    {
+        (
+            false,
+            BrowserServiceWorkerBrokerSupportReason::ServiceWorkerApiMissing,
+            "Rust Browser Edition service-worker broker preflight only admits service-worker hosts."
+                .to_string(),
+            vec![
+                "Call the bounded broker surface only from a service-worker entrypoint."
+                    .to_string(),
+                format!(
+                    "Keep direct BrowserRuntime creation on {} or {} when broker admission is unavailable.",
+                    BrowserExecutionLane::DedicatedWorkerDirectRuntime.as_str(),
+                    BrowserExecutionLane::BrowserMainThreadDirectRuntime.as_str()
+                ),
+            ],
+        )
+    } else if !probe.capabilities.storage.has_indexed_db {
+        (
+            false,
+            BrowserServiceWorkerBrokerSupportReason::DurableStoreUnavailableForRestartableProfile,
+            "Rust Browser Edition service-worker broker preflight found no durable store for the default restartable broker profile."
+                .to_string(),
+            vec![
+                "Restore IndexedDB-backed durability before claiming restartable broker progress."
+                    .to_string(),
+                "Downgrade explicitly instead of pretending restartability without a durable substrate."
+                    .to_string(),
+            ],
+        )
+    } else {
+        (
+            true,
+            BrowserServiceWorkerBrokerSupportReason::Supported,
+            "Rust Browser Edition service-worker broker preflight found a bounded broker host surface; direct runtime creation remains fail-closed and work must hand off explicitly."
+                .to_string(),
+            vec![
+                "Keep direct BrowserRuntime creation out of the service-worker host itself."
+                    .to_string(),
+                "Treat registration-scope and capability-manifest checks as explicit broker admission work on the JS helper surface."
+                    .to_string(),
+            ],
+        )
+    };
+
+    BrowserServiceWorkerBrokerSupportDiagnostics {
+        supported,
+        contract_id: BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
+        requested_lane: BROWSER_SERVICE_WORKER_BROKER_LANE,
+        fallback_target,
+        fallback_lane_id: fallback_target.fallback_lane_id(),
+        downgrade_order,
+        host_role: probe.host_role,
+        runtime_context: runtime_support.runtime_context,
+        reason,
+        message,
+        guidance,
+        direct_runtime_reason,
+        direct_execution_reason_code,
+        runtime_support,
+        capabilities,
+    }
+}
+
+fn browser_shared_worker_coordinator_support_from_probe(
+    probe: BrowserExecutionProbe,
+) -> BrowserSharedWorkerCoordinatorSupportDiagnostics {
+    let runtime_support = browser_runtime_support_from_probe(probe);
+    let capabilities = runtime_support.capabilities;
+    let downgrade_order = browser_shared_worker_coordinator_downgrade_order(probe.host_role);
+    let fallback_target = downgrade_order[0];
+    let direct_runtime_reason = BrowserRuntimeSupportReason::SharedWorkerNotYetShipped;
+    let direct_execution_reason_code =
+        BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped;
+    let (supported, reason, message, guidance) = match probe.host_role {
+        BrowserExecutionHostRole::BrowserMainThread | BrowserExecutionHostRole::DedicatedWorker => (
+            true,
+            BrowserSharedWorkerCoordinatorSupportReason::Supported,
+            "Rust Browser Edition shared-worker coordinator preflight found a truthful caller host; direct BrowserRuntime creation inside the shared-worker host remains fail-closed."
+                .to_string(),
+            vec![
+                "Call the bounded shared-worker coordinator only from a browser main-thread or dedicated-worker caller."
+                    .to_string(),
+                "Treat same-origin script resolution, admission tuple checks, and protocol negotiation as explicit JS helper responsibilities."
+                    .to_string(),
+            ],
+        ),
+        _ => (
+            false,
+            BrowserSharedWorkerCoordinatorSupportReason::SharedWorkerApiMissing,
+            "Rust Browser Edition shared-worker coordinator preflight only admits browser main-thread or dedicated-worker callers."
+                .to_string(),
+            vec![
+                "Move the coordinator attach flow into a browser main-thread or dedicated-worker caller before expecting a bounded coordinator surface."
+                    .to_string(),
+                "Keep direct BrowserRuntime creation fail-closed inside the shared-worker host itself."
+                    .to_string(),
+            ],
+        ),
+    };
+
+    BrowserSharedWorkerCoordinatorSupportDiagnostics {
+        supported,
+        contract_id: BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
+        requested_lane: BROWSER_SHARED_WORKER_COORDINATOR_LANE,
+        fallback_target,
+        fallback_lane_id: fallback_target.fallback_lane_id(),
+        downgrade_order,
+        host_role: probe.host_role,
+        runtime_context: runtime_support.runtime_context,
+        reason,
+        message,
+        guidance,
+        direct_runtime_reason,
+        direct_execution_reason_code,
         runtime_support,
         capabilities,
     }
@@ -2327,6 +2658,52 @@ impl RuntimeBuilder {
     ) -> BrowserExecutionLadderDiagnostics {
         let _ = self;
         build_browser_execution_ladder_from_probe(Some(preferred_lane), probe)
+    }
+
+    /// Inspect bounded service-worker broker host-class diagnostics for the current host.
+    ///
+    /// This stays intentionally narrower than the JS helper surface: it only
+    /// reports the truthful host-class facts that the Rust browser builder can
+    /// inspect locally without widening the shipped direct-runtime contract.
+    #[must_use]
+    pub fn inspect_browser_service_worker_broker_support(
+        &self,
+    ) -> BrowserServiceWorkerBrokerSupportDiagnostics {
+        let _ = self;
+        browser_service_worker_broker_support_from_probe(detect_browser_execution_probe())
+    }
+
+    /// Inspect bounded service-worker broker host-class diagnostics for a supplied probe.
+    #[must_use]
+    pub fn inspect_browser_service_worker_broker_support_for_probe(
+        &self,
+        probe: BrowserExecutionProbe,
+    ) -> BrowserServiceWorkerBrokerSupportDiagnostics {
+        let _ = self;
+        browser_service_worker_broker_support_from_probe(probe)
+    }
+
+    /// Inspect bounded shared-worker coordinator caller-side diagnostics for the current host.
+    ///
+    /// This reports whether the current caller host is a truthful place to
+    /// start a bounded coordinator attach flow while preserving the fail-closed
+    /// shared-worker direct-runtime truth.
+    #[must_use]
+    pub fn inspect_browser_shared_worker_coordinator_support(
+        &self,
+    ) -> BrowserSharedWorkerCoordinatorSupportDiagnostics {
+        let _ = self;
+        browser_shared_worker_coordinator_support_from_probe(detect_browser_execution_probe())
+    }
+
+    /// Inspect bounded shared-worker coordinator caller-side diagnostics for a supplied probe.
+    #[must_use]
+    pub fn inspect_browser_shared_worker_coordinator_support_for_probe(
+        &self,
+        probe: BrowserExecutionProbe,
+    ) -> BrowserSharedWorkerCoordinatorSupportDiagnostics {
+        let _ = self;
+        browser_shared_worker_coordinator_support_from_probe(probe)
     }
 
     /// Provide a reactor for runtime I/O integration.
@@ -3716,6 +4093,66 @@ mod tests {
             !diagnostics.capabilities.storage.has_local_storage,
             "service-worker probe should keep localStorage unavailable"
         );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("service-worker broker")),
+            "service-worker guidance should point callers at the bounded broker helpers"
+        );
+    }
+
+    #[test]
+    fn browser_service_worker_broker_support_is_explicit_for_service_worker_probe() {
+        let diagnostics = RuntimeBuilder::new()
+            .inspect_browser_service_worker_broker_support_for_probe(
+                BrowserExecutionProbe::service_worker(),
+            );
+
+        assert!(
+            diagnostics.supported,
+            "service-worker broker support must be explicit for a truthful service-worker probe"
+        );
+        assert_eq!(
+            diagnostics.contract_id, BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID,
+            "service-worker broker contract id must stay stable"
+        );
+        assert_eq!(
+            diagnostics.requested_lane, BROWSER_SERVICE_WORKER_BROKER_LANE,
+            "service-worker broker lane id must stay stable"
+        );
+        assert_eq!(
+            diagnostics.fallback_target,
+            BrowserWorkerFallbackTarget::DedicatedWorkerDirectRuntime,
+            "service-worker broker should prefer the dedicated-worker fallback first"
+        );
+        assert_eq!(
+            diagnostics.fallback_lane_id,
+            Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime),
+            "service-worker broker should map its first fallback to the dedicated-worker lane"
+        );
+        assert_eq!(
+            diagnostics.reason,
+            BrowserServiceWorkerBrokerSupportReason::Supported,
+            "service-worker broker reason must remain supported on the truthful host"
+        );
+        assert_eq!(
+            diagnostics.direct_runtime_reason,
+            BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped,
+            "service-worker broker must preserve the fail-closed direct-runtime truth"
+        );
+        assert_eq!(
+            diagnostics.direct_execution_reason_code,
+            BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped,
+            "service-worker broker must preserve the fail-closed direct execution reason"
+        );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("registration-scope")),
+            "service-worker broker guidance should preserve explicit broker-admission boundaries"
+        );
     }
 
     #[test]
@@ -3761,6 +4198,117 @@ mod tests {
         assert!(
             !diagnostics.capabilities.storage.has_local_storage,
             "shared-worker probe should keep localStorage unavailable"
+        );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("shared-worker coordinator")),
+            "shared-worker guidance should point callers at the bounded coordinator helpers"
+        );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("browser main-thread or dedicated-worker")),
+            "shared-worker guidance should preserve the truthful caller boundary"
+        );
+    }
+
+    #[test]
+    fn browser_shared_worker_coordinator_support_is_explicit_for_supported_callers() {
+        let main_thread = RuntimeBuilder::new()
+            .inspect_browser_shared_worker_coordinator_support_for_probe(
+                BrowserExecutionProbe::browser_main_thread(),
+            );
+        let dedicated_worker = RuntimeBuilder::new()
+            .inspect_browser_shared_worker_coordinator_support_for_probe(
+                BrowserExecutionProbe::dedicated_worker(),
+            );
+
+        assert!(
+            main_thread.supported,
+            "browser main thread must remain a truthful shared-worker coordinator caller"
+        );
+        assert_eq!(
+            main_thread.contract_id, BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
+            "shared-worker coordinator contract id must stay stable"
+        );
+        assert_eq!(
+            main_thread.requested_lane, BROWSER_SHARED_WORKER_COORDINATOR_LANE,
+            "shared-worker coordinator lane id must stay stable"
+        );
+        assert_eq!(
+            main_thread.fallback_target,
+            BrowserWorkerFallbackTarget::BrowserMainThreadDirectRuntime,
+            "browser main-thread callers should preserve their current lane as the first truthful fallback"
+        );
+        assert_eq!(
+            main_thread.fallback_lane_id,
+            Some(BrowserExecutionLane::BrowserMainThreadDirectRuntime),
+            "browser main-thread callers should map the first fallback to the current direct-runtime lane"
+        );
+        assert_eq!(
+            main_thread.reason,
+            BrowserSharedWorkerCoordinatorSupportReason::Supported,
+            "browser main-thread callers must preserve the bounded coordinator support reason"
+        );
+        assert_eq!(
+            main_thread.direct_runtime_reason,
+            BrowserRuntimeSupportReason::SharedWorkerNotYetShipped,
+            "caller-side coordinator diagnostics must preserve the shared-worker fail-closed truth"
+        );
+        assert_eq!(
+            main_thread.direct_execution_reason_code,
+            BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped,
+            "caller-side coordinator diagnostics must preserve the shared-worker execution reason"
+        );
+        assert!(
+            main_thread
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("same-origin")),
+            "shared-worker coordinator guidance should preserve explicit JS attach prerequisites"
+        );
+
+        assert!(
+            dedicated_worker.supported,
+            "dedicated-worker callers must remain truthful shared-worker coordinator callers"
+        );
+        assert_eq!(
+            dedicated_worker.fallback_target,
+            BrowserWorkerFallbackTarget::DedicatedWorkerDirectRuntime,
+            "dedicated-worker callers should preserve their current lane as the first truthful fallback"
+        );
+        assert_eq!(
+            dedicated_worker.fallback_lane_id,
+            Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime),
+            "dedicated-worker callers should map the first fallback to the current direct-runtime lane"
+        );
+    }
+
+    #[test]
+    fn browser_shared_worker_coordinator_support_rejects_shared_worker_host() {
+        let diagnostics = RuntimeBuilder::new()
+            .inspect_browser_shared_worker_coordinator_support_for_probe(
+                BrowserExecutionProbe::shared_worker(),
+            );
+
+        assert!(
+            !diagnostics.supported,
+            "shared-worker coordinator preflight must reject the shared-worker host itself"
+        );
+        assert_eq!(
+            diagnostics.reason,
+            BrowserSharedWorkerCoordinatorSupportReason::SharedWorkerApiMissing,
+            "shared-worker coordinator preflight must preserve the unsupported-caller reason"
+        );
+        assert!(
+            diagnostics
+                .guidance
+                .iter()
+                .any(|entry| entry.contains("browser main-thread or dedicated-worker")),
+            "shared-worker coordinator rejection guidance must preserve the truthful caller boundary"
         );
     }
 

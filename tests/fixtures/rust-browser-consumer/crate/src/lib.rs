@@ -3,9 +3,11 @@
 use asupersync::runtime::builder::{
     BrowserCapabilitySnapshot, BrowserExecutionHostRole, BrowserExecutionLadderDiagnostics,
     BrowserExecutionLane, BrowserExecutionLaneCandidate, BrowserExecutionLaneKind,
-    BrowserExecutionProbe,
-    BrowserExecutionReasonCode, BrowserRuntimeContext, BrowserRuntimeSupportClass,
-    BrowserRuntimeSupportReason, RuntimeBuilder,
+    BrowserExecutionProbe, BrowserExecutionReasonCode, BrowserRuntimeContext,
+    BrowserRuntimeSupportClass, BrowserRuntimeSupportReason,
+    BrowserServiceWorkerBrokerSupportDiagnostics, BrowserServiceWorkerBrokerSupportReason,
+    BrowserSharedWorkerCoordinatorSupportDiagnostics, BrowserSharedWorkerCoordinatorSupportReason,
+    BrowserWorkerFallbackTarget, RuntimeBuilder,
 };
 use asupersync::types::{
     ReactProviderConfig, ReactProviderPhase, ReactProviderState, WasmAbiOutcomeEnvelope,
@@ -100,9 +102,30 @@ struct BrowserRuntimeSelectionSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct BrowserWorkerSupportSummary {
+    supported: bool,
+    contract_id: &'static str,
+    requested_lane: &'static str,
+    fallback_target: &'static str,
+    fallback_lane_id: Option<&'static str>,
+    host_role: &'static str,
+    runtime_context: &'static str,
+    reason: &'static str,
+    direct_runtime_reason: &'static str,
+    direct_execution_reason_code: &'static str,
+    downgrade_order: Vec<&'static str>,
+    message: String,
+    guidance: Vec<String>,
+    capabilities: BrowserCapabilitySummary,
+}
+
+#[derive(Debug, Serialize)]
 struct UnsupportedWorkerLaddersSummary {
     service_worker: BrowserExecutionLadderSummary,
     shared_worker: BrowserExecutionLadderSummary,
+    service_worker_broker: BrowserWorkerSupportSummary,
+    shared_worker_coordinator_main_thread: BrowserWorkerSupportSummary,
+    shared_worker_coordinator_dedicated_worker: BrowserWorkerSupportSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,6 +200,22 @@ fn support_class_str(support_class: BrowserRuntimeSupportClass) -> &'static str 
     support_class.as_str()
 }
 
+fn worker_fallback_target_str(target: BrowserWorkerFallbackTarget) -> &'static str {
+    target.as_str()
+}
+
+fn service_worker_broker_support_reason_str(
+    reason: BrowserServiceWorkerBrokerSupportReason,
+) -> &'static str {
+    reason.as_str()
+}
+
+fn shared_worker_coordinator_support_reason_str(
+    reason: BrowserSharedWorkerCoordinatorSupportReason,
+) -> &'static str {
+    reason.as_str()
+}
+
 fn browser_capability_summary(snapshot: BrowserCapabilitySnapshot) -> BrowserCapabilitySummary {
     BrowserCapabilitySummary {
         execution_api: BrowserExecutionApiSnapshot {
@@ -237,15 +276,85 @@ fn browser_execution_ladder_summary(
     }
 }
 
+fn browser_service_worker_broker_support_summary(
+    diagnostics: BrowserServiceWorkerBrokerSupportDiagnostics,
+) -> BrowserWorkerSupportSummary {
+    BrowserWorkerSupportSummary {
+        supported: diagnostics.supported,
+        contract_id: diagnostics.contract_id,
+        requested_lane: diagnostics.requested_lane,
+        fallback_target: worker_fallback_target_str(diagnostics.fallback_target),
+        fallback_lane_id: diagnostics.fallback_lane_id.map(lane_str),
+        host_role: host_role_str(diagnostics.host_role),
+        runtime_context: runtime_context_str(diagnostics.runtime_context),
+        reason: service_worker_broker_support_reason_str(diagnostics.reason),
+        direct_runtime_reason: runtime_support_reason_str(diagnostics.direct_runtime_reason),
+        direct_execution_reason_code: reason_code_str(diagnostics.direct_execution_reason_code),
+        downgrade_order: diagnostics
+            .downgrade_order
+            .into_iter()
+            .map(worker_fallback_target_str)
+            .collect(),
+        message: diagnostics.message,
+        guidance: diagnostics.guidance,
+        capabilities: browser_capability_summary(diagnostics.capabilities),
+    }
+}
+
+fn browser_shared_worker_coordinator_support_summary(
+    diagnostics: BrowserSharedWorkerCoordinatorSupportDiagnostics,
+) -> BrowserWorkerSupportSummary {
+    BrowserWorkerSupportSummary {
+        supported: diagnostics.supported,
+        contract_id: diagnostics.contract_id,
+        requested_lane: diagnostics.requested_lane,
+        fallback_target: worker_fallback_target_str(diagnostics.fallback_target),
+        fallback_lane_id: diagnostics.fallback_lane_id.map(lane_str),
+        host_role: host_role_str(diagnostics.host_role),
+        runtime_context: runtime_context_str(diagnostics.runtime_context),
+        reason: shared_worker_coordinator_support_reason_str(diagnostics.reason),
+        direct_runtime_reason: runtime_support_reason_str(diagnostics.direct_runtime_reason),
+        direct_execution_reason_code: reason_code_str(diagnostics.direct_execution_reason_code),
+        downgrade_order: diagnostics
+            .downgrade_order
+            .into_iter()
+            .map(worker_fallback_target_str)
+            .collect(),
+        message: diagnostics.message,
+        guidance: diagnostics.guidance,
+        capabilities: browser_capability_summary(diagnostics.capabilities),
+    }
+}
+
 fn unsupported_worker_ladders_summary() -> UnsupportedWorkerLaddersSummary {
     let builder = RuntimeBuilder::new();
     UnsupportedWorkerLaddersSummary {
-        service_worker: browser_execution_ladder_summary(
-            builder.inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::service_worker()),
-        ),
+        service_worker:
+            browser_execution_ladder_summary(
+                builder.inspect_browser_execution_ladder_for_probe(
+                    BrowserExecutionProbe::service_worker(),
+                ),
+            ),
         shared_worker: browser_execution_ladder_summary(
-            builder.inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::shared_worker()),
+            builder
+                .inspect_browser_execution_ladder_for_probe(BrowserExecutionProbe::shared_worker()),
         ),
+        service_worker_broker: browser_service_worker_broker_support_summary(
+            builder.inspect_browser_service_worker_broker_support_for_probe(
+                BrowserExecutionProbe::service_worker(),
+            ),
+        ),
+        shared_worker_coordinator_main_thread: browser_shared_worker_coordinator_support_summary(
+            builder.inspect_browser_shared_worker_coordinator_support_for_probe(
+                BrowserExecutionProbe::browser_main_thread(),
+            ),
+        ),
+        shared_worker_coordinator_dedicated_worker:
+            browser_shared_worker_coordinator_support_summary(
+                builder.inspect_browser_shared_worker_coordinator_support_for_probe(
+                    BrowserExecutionProbe::dedicated_worker(),
+                ),
+            ),
     }
 }
 

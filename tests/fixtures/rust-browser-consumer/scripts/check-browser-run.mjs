@@ -211,6 +211,53 @@ function assertBrowserSelection(label, selection, expected) {
   }
 }
 
+function assertWorkerSupport(label, support, expected) {
+  assert(
+    support?.supported === expected.supported,
+    `${label} supported flag drifted`,
+  );
+  assert(
+    support?.contract_id === expected.contract_id,
+    `${label} contract id drifted: ${support?.contract_id ?? "missing"}`,
+  );
+  assert(
+    support?.requested_lane === expected.requested_lane,
+    `${label} requested lane drifted: ${support?.requested_lane ?? "missing"}`,
+  );
+  assert(
+    support?.fallback_target === expected.fallback_target,
+    `${label} fallback target drifted: ${support?.fallback_target ?? "missing"}`,
+  );
+  assert(
+    support?.fallback_lane_id === expected.fallback_lane_id,
+    `${label} fallback lane id drifted: ${support?.fallback_lane_id ?? "missing"}`,
+  );
+  assert(
+    support?.host_role === expected.host_role,
+    `${label} host role drifted: ${support?.host_role ?? "missing"}`,
+  );
+  assert(
+    support?.runtime_context === expected.runtime_context,
+    `${label} runtime context drifted: ${support?.runtime_context ?? "missing"}`,
+  );
+  assert(
+    support?.reason === expected.reason,
+    `${label} reason drifted: ${support?.reason ?? "missing"}`,
+  );
+  assert(
+    support?.direct_runtime_reason === expected.direct_runtime_reason,
+    `${label} direct runtime reason drifted: ${support?.direct_runtime_reason ?? "missing"}`,
+  );
+  assert(
+    support?.direct_execution_reason_code === expected.direct_execution_reason_code,
+    `${label} direct execution reason drifted: ${support?.direct_execution_reason_code ?? "missing"}`,
+  );
+  assert(
+    Array.isArray(support?.downgrade_order),
+    `${label} downgrade order must remain an array`,
+  );
+}
+
 function startStaticServer() {
   const server = http.createServer((request, response) => {
     try {
@@ -320,6 +367,11 @@ try {
   const unsupportedWorkerLadders = mainThreadLifecycle?.unsupported_worker_ladders;
   const serviceWorkerFailClosed = unsupportedWorkerLadders?.service_worker;
   const sharedWorkerFailClosed = unsupportedWorkerLadders?.shared_worker;
+  const serviceWorkerBroker = unsupportedWorkerLadders?.service_worker_broker;
+  const sharedWorkerCoordinatorMainThread =
+    unsupportedWorkerLadders?.shared_worker_coordinator_main_thread;
+  const sharedWorkerCoordinatorDedicatedWorker =
+    unsupportedWorkerLadders?.shared_worker_coordinator_dedicated_worker;
 
   assertLifecycle("main-thread lifecycle", mainThreadLifecycle, {
     has_window: true,
@@ -459,6 +511,60 @@ try {
     `shared-worker fail-closed ladder must keep localStorage unavailable, got ${sharedWorkerFailClosed?.capabilities?.storage?.has_local_storage ?? "missing"}`,
   );
 
+  assertWorkerSupport("service-worker broker support", serviceWorkerBroker, {
+    supported: true,
+    contract_id: "wasm-service-worker-broker-contract-v1",
+    requested_lane: "lane.browser.service_worker.broker",
+    fallback_target: DEDICATED_WORKER_LANE,
+    fallback_lane_id: DEDICATED_WORKER_LANE,
+    host_role: "service_worker",
+    runtime_context: "service_worker",
+    reason: "supported",
+    direct_runtime_reason: "service_worker_not_yet_shipped",
+    direct_execution_reason_code: "service_worker_direct_runtime_not_shipped",
+  });
+  assert(
+    serviceWorkerBroker?.capabilities?.storage?.has_indexed_db === true,
+    `service-worker broker support must still surface IndexedDB availability, got ${serviceWorkerBroker?.capabilities?.storage?.has_indexed_db ?? "missing"}`,
+  );
+  assert(
+    serviceWorkerBroker?.capabilities?.storage?.has_local_storage === false,
+    `service-worker broker support must keep localStorage unavailable, got ${serviceWorkerBroker?.capabilities?.storage?.has_local_storage ?? "missing"}`,
+  );
+
+  assertWorkerSupport(
+    "shared-worker coordinator main-thread support",
+    sharedWorkerCoordinatorMainThread,
+    {
+      supported: true,
+      contract_id: "wasm-shared-worker-tenancy-lifecycle-v1",
+      requested_lane: "lane.browser.shared_worker.coordinator",
+      fallback_target: MAIN_THREAD_LANE,
+      fallback_lane_id: MAIN_THREAD_LANE,
+      host_role: "browser_main_thread",
+      runtime_context: "browser_main_thread",
+      reason: "supported",
+      direct_runtime_reason: "shared_worker_not_yet_shipped",
+      direct_execution_reason_code: "shared_worker_direct_runtime_not_shipped",
+    },
+  );
+  assertWorkerSupport(
+    "shared-worker coordinator dedicated-worker support",
+    sharedWorkerCoordinatorDedicatedWorker,
+    {
+      supported: true,
+      contract_id: "wasm-shared-worker-tenancy-lifecycle-v1",
+      requested_lane: "lane.browser.shared_worker.coordinator",
+      fallback_target: DEDICATED_WORKER_LANE,
+      fallback_lane_id: DEDICATED_WORKER_LANE,
+      host_role: "dedicated_worker",
+      runtime_context: "dedicated_worker",
+      reason: "supported",
+      direct_runtime_reason: "shared_worker_not_yet_shipped",
+      direct_execution_reason_code: "shared_worker_direct_runtime_not_shipped",
+    },
+  );
+
   assertLadder("dedicated-worker ladder", workerLadder, {
     supported: true,
     selected_lane: DEDICATED_WORKER_LANE,
@@ -554,6 +660,10 @@ try {
     main_thread_preferred_worker_reason_code: preferredDedicatedWorker.reason_code,
     service_worker_fail_closed_reason_code: serviceWorkerFailClosed.reason_code,
     shared_worker_fail_closed_reason_code: sharedWorkerFailClosed.reason_code,
+    service_worker_broker_reason: serviceWorkerBroker.reason,
+    shared_worker_coordinator_main_thread_reason: sharedWorkerCoordinatorMainThread.reason,
+    shared_worker_coordinator_dedicated_worker_reason:
+      sharedWorkerCoordinatorDedicatedWorker.reason,
     downgrade_selected_lane: downgrade.selected_lane,
     downgrade_browser_selection_lane: downgradeBrowserSelection.selected_lane,
     downgrade_reason_code: downgrade.reason_code,

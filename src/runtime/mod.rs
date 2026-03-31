@@ -157,7 +157,10 @@ pub use blocking_pool::{
 };
 pub use builder::{
     BrowserRuntime, BrowserRuntimeBuildError, BrowserRuntimeBuilder, BrowserRuntimeSelectionResult,
-    DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder, RuntimeHandle,
+    BrowserServiceWorkerBrokerSupportDiagnostics, BrowserServiceWorkerBrokerSupportReason,
+    BrowserSharedWorkerCoordinatorSupportDiagnostics, BrowserSharedWorkerCoordinatorSupportReason,
+    BrowserWorkerFallbackTarget, DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder,
+    RuntimeHandle,
 };
 pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use deadline_monitor::{
