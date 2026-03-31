@@ -166,7 +166,7 @@ struct FabricState {
     cells: BTreeMap<String, FabricCellRuntime>,
     cell_routes: BTreeMap<SubscriptionId, String>,
     subscribers: BTreeMap<u64, FabricSubscriberState>,
-    decision_records: Vec<FabricDecisionRecord>,
+    decision_records: VecDeque<FabricDecisionRecord>,
     routing: Arc<Sublist>,
     next_sequence: u64,
     next_subscriber_id: u64,
@@ -273,7 +273,7 @@ impl FabricState {
             cells: BTreeMap::new(),
             cell_routes: BTreeMap::new(),
             subscribers: BTreeMap::new(),
-            decision_records: Vec::new(),
+            decision_records: VecDeque::new(),
             routing: Arc::new(Sublist::new()),
             next_sequence: 0,
             next_subscriber_id: 1,
@@ -300,9 +300,15 @@ impl FabricState {
         self.cell_buffer_capacity.max(1)
     }
 
+    /// Maximum number of decision records retained per endpoint.
+    const MAX_DECISION_RECORDS: usize = 10_000;
+
     fn push_decision(&mut self, cx: &Cx, record: FabricDecisionRecord) {
         trace_fabric_decision_recorded(cx, &record);
-        self.decision_records.push(record);
+        if self.decision_records.len() >= Self::MAX_DECISION_RECORDS {
+            self.decision_records.pop_front();
+        }
+        self.decision_records.push_back(record);
     }
 
     #[allow(clippy::result_large_err)]
@@ -2563,7 +2569,7 @@ impl Fabric {
     /// endpoint.
     #[must_use]
     pub fn decision_records(&self) -> Vec<FabricDecisionRecord> {
-        self.state.lock().decision_records.clone()
+        self.state.lock().decision_records.iter().cloned().collect()
     }
 
     /// Render the recorded FABRIC decision audits into an explain-plan payload.
