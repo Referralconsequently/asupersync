@@ -648,7 +648,7 @@ impl PacketBuffer {
     /// with incrementing sequence IDs until the last chunk is shorter than
     /// `MAX_PACKET_SIZE`. An exact-boundary payload therefore needs a
     /// zero-length terminator packet.
-    fn build_packet(&self) -> Result<EncodedPacket, MySqlError> {
+    fn build_packet(&self) -> EncodedPacket {
         let mut sequence = self.sequence;
         let mut offset = 0usize;
         let max_payload = MAX_PACKET_SIZE as usize;
@@ -688,10 +688,10 @@ impl PacketBuffer {
             }
         }
 
-        Ok(EncodedPacket {
+        EncodedPacket {
             bytes: result,
             next_sequence: sequence,
-        })
+        }
     }
 }
 
@@ -1301,7 +1301,7 @@ impl MySqlConnection {
         // Auth plugin name
         buf.write_null_terminated(&handshake.auth_plugin_name);
 
-        let packet = buf.build_packet()?;
+        let packet = buf.build_packet();
         self.write_all(&packet.bytes).await?;
         self.inner.sequence = packet.next_sequence;
 
@@ -1385,7 +1385,7 @@ impl MySqlConnection {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(self.inner.sequence);
         buf.write_bytes(&auth_response);
-        let packet = buf.build_packet()?;
+        let packet = buf.build_packet();
         self.write_all(&packet.bytes).await?;
         self.inner.sequence = packet.next_sequence;
 
@@ -1491,10 +1491,7 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(sql.as_bytes());
-        let packet = match buf.build_packet() {
-            Ok(p) => p,
-            Err(e) => return Outcome::Err(e),
-        };
+        let packet = buf.build_packet();
 
         if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
@@ -1832,10 +1829,7 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(sql.as_bytes());
-        let packet = match buf.build_packet() {
-            Ok(p) => p,
-            Err(e) => return Outcome::Err(e),
-        };
+        let packet = buf.build_packet();
 
         if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
@@ -1905,10 +1899,7 @@ impl MySqlConnection {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_PING);
-        let packet = match buf.build_packet() {
-            Ok(p) => p,
-            Err(e) => return Outcome::Err(e),
-        };
+        let packet = buf.build_packet();
 
         if let Err(e) = self.write_all(&packet.bytes).await {
             return Outcome::Err(e);
@@ -1955,9 +1946,8 @@ impl MySqlConnection {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUIT);
-        if let Ok(packet) = buf.build_packet() {
-            let _ = self.write_all(&packet.bytes).await;
-        }
+        let packet = buf.build_packet();
+        let _ = self.write_all(&packet.bytes).await;
 
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
         self.inner.closed = true;
@@ -1997,7 +1987,7 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(b"ROLLBACK");
-        let packet = buf.build_packet()?;
+        let packet = buf.build_packet();
 
         if let Err(e) = self.write_all(&packet.bytes).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -2263,7 +2253,7 @@ mod tests {
             let mut buf = PacketBuffer::new();
             buf.set_sequence(0);
             buf.buf = server_payload;
-            let packet = buf.build_packet().expect("build packet");
+            let packet = buf.build_packet();
             stream.write_all(&packet.bytes).expect("write packet");
             stream.flush().expect("flush packet");
         });
@@ -2370,7 +2360,7 @@ mod tests {
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(b"SELECT 1");
 
-        let packet = buf.build_packet().unwrap();
+        let packet = buf.build_packet();
         assert_eq!(packet.bytes[0], 9); // length low byte
         assert_eq!(packet.bytes[1], 0); // length mid byte
         assert_eq!(packet.bytes[2], 0); // length high byte
@@ -2505,7 +2495,7 @@ mod tests {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(5);
         buf.write_byte(0x00);
-        let packet = buf.build_packet().unwrap();
+        let packet = buf.build_packet();
         assert_eq!(packet.bytes[3], 5); // sequence byte
         assert_eq!(packet.next_sequence, 6);
     }
@@ -2518,7 +2508,7 @@ mod tests {
         for _ in 0..256 {
             buf.write_byte(0x41);
         }
-        let packet = buf.build_packet().unwrap();
+        let packet = buf.build_packet();
         // Length should be 256 = 0x100
         assert_eq!(packet.bytes[0], 0x00); // low byte
         assert_eq!(packet.bytes[1], 0x01); // mid byte (256)
@@ -2749,7 +2739,7 @@ mod tests {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.buf = vec![0x41; MAX_PACKET_SIZE as usize + 3];
-        let packet = buf.build_packet().unwrap();
+        let packet = buf.build_packet();
 
         assert_eq!(&packet.bytes[..4], &[0xFF, 0xFF, 0xFF, 0x00]);
         let second_header_offset = 4 + MAX_PACKET_SIZE as usize;
@@ -2765,7 +2755,7 @@ mod tests {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.buf = vec![0x41; MAX_PACKET_SIZE as usize];
-        let packet = buf.build_packet().unwrap();
+        let packet = buf.build_packet();
         assert_eq!(packet.bytes.len(), 8 + MAX_PACKET_SIZE as usize);
         let terminator_offset = 4 + MAX_PACKET_SIZE as usize;
         assert_eq!(
