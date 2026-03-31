@@ -2050,3 +2050,5 @@
 {"file":"src/runtime/kernel.rs","lines":2198,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Focused audit: event loop, parking, shutdown — all correct. Timeout-based parking prevents deadlock."}
 {"file":"src/runtime/scheduler/worker.rs","lines":1474,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Park/unpark protocol, poll-advance-park cycle, shutdown drain — all correct"}
 {"file":"src/time/driver.rs","lines":1699,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Timer advancement order, thread-safe registration, cancel cleanup — all correct"}
+{"file":"src/obligation/ledger.rs","lines":1058,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Commit/abort paths exhaustive, leak detection complete, token generation prevents stale reuse"}
+{"file":"src/channel/mpsc.rs","lines":1798,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Two-phase reserve/send cancel-correct, SendPermit infallible after reserve, Drop cleanup cascades wakes"}
