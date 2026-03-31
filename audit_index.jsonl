@@ -2060,3 +2060,9 @@
 {"file":"src/messaging/fabric.rs","lines":10771,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"Unbounded decision_records Vec growth - fixed with VecDeque 10k cap"}
 {"file":"src/messaging/ir.rs","lines":0,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deep audit - sampling_ratio=0 and role filter inconsistency are design-level, not crashes"}
 {"file":"src/sync/mutex_deadlock_test.rs","lines":64,"batch":492,"date":"2026-03-31","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"Rewrote tokio-dependent test to use std::thread + noop waker"}
+{"file":"src/messaging/service.rs","lines":0,"batch":494,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted +421 lines, admission validation additions sound"}
+{"file":"src/database/mysql.rs","lines":0,"batch":494,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted +89 lines, cancel-correctness fix for transaction commit/rollback is correct"}
+{"file":"src/database/postgres.rs","lines":0,"batch":494,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted +46 lines, identical cancel-correctness fix"}
+{"file":"src/service/buffer.rs","lines":0,"batch":494,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted +44 lines, close() wakes parked waiters - lost wakeup fix"}
+{"file":"src/trace/file.rs","lines":0,"batch":494,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted, replaced try_into().unwrap() with copy_from_slice"}
+{"file":"src/session.rs","lines":0,"batch":494,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted +62 lines, map_send_error helper sound"}
