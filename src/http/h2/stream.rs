@@ -1628,6 +1628,8 @@ mod tests {
 
         let id1 = store.allocate_stream_id().unwrap();
         let id2 = store.allocate_stream_id().unwrap();
+        // Make id2 active by sending headers
+        store.get_mut(id2).unwrap().send_headers(false).unwrap();
         store.get_mut(id1).unwrap().reset(ErrorCode::NoError);
 
         let active = store.active_stream_ids();
