@@ -784,4 +784,32 @@ mod tests {
         let cloned = cfg.clone();
         assert_eq!(cfg.close_timeout, cloned.close_timeout);
     }
+
+    #[test]
+    fn handshake_receive_close_echoes_unassigned_code() {
+        // RFC 6455 §7.4.2: unassigned codes (1016-2999) must be accepted
+        // when received and echoed back without panicking.
+        let mut handshake = CloseHandshake::new();
+
+        // Build a close frame with unassigned code 1016 via Frame::close
+        // (this only works after fixing Frame::close to accept received codes).
+        let close_frame = Frame::close(Some(1016), None);
+
+        let response = handshake.receive_close(&close_frame).unwrap().unwrap();
+        assert_eq!(response.opcode, Opcode::Close);
+        assert_eq!(&response.payload[..2], &1016u16.to_be_bytes());
+        assert_eq!(handshake.state(), CloseState::CloseReceived);
+    }
+
+    #[test]
+    fn to_frame_with_unassigned_raw_code_does_not_panic() {
+        // A CloseReason parsed from a peer with an unassigned code must
+        // round-trip through to_frame() without panicking.
+        let payload = 2000u16.to_be_bytes();
+        let reason = CloseReason::parse(&payload).unwrap();
+        assert_eq!(reason.raw_code, Some(2000));
+        let frame = reason.to_frame();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert_eq!(&frame.payload[..2], &2000u16.to_be_bytes());
+    }
 }
