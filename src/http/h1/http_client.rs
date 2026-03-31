@@ -1002,7 +1002,12 @@ impl HttpClient {
         // Check cancellation after connection acquisition.
         check_cx(cx)?;
 
-        match Http1Client::request_with_io(acquired.io, req).await {
+        let result = if let Some(max_body_size) = self.config.max_body_size {
+            Http1Client::request_with_io_and_max_body_size(acquired.io, req, max_body_size).await
+        } else {
+            Http1Client::request_with_io(acquired.io, req).await
+        };
+        match result {
             Ok((response, io)) => {
                 guard.defused = true;
                 self.store_response_cookies(&parsed.host, &response.headers);
@@ -1048,7 +1053,12 @@ impl HttpClient {
 
         check_cx(cx)?;
 
-        match Http1Client::request_with_io(acquired.io, req).await {
+        let result = if let Some(max_body_size) = self.config.max_body_size {
+            Http1Client::request_with_io_and_max_body_size(acquired.io, req, max_body_size).await
+        } else {
+            Http1Client::request_with_io(acquired.io, req).await
+        };
+        match result {
             Ok((response, io)) => {
                 guard.defused = true;
                 self.store_response_cookies(&parsed.host, &response.headers);

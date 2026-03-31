@@ -80,6 +80,7 @@ pub enum HttpError {
 }
 
 impl fmt::Display for HttpError {
+    #[allow(clippy::cast_precision_loss)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "I/O error: {e}"),
@@ -99,11 +100,13 @@ impl fmt::Display for HttpError {
             Self::BadChunkedEncoding => write!(f, "malformed chunked encoding"),
             Self::BodyTooLarge => write!(f, "body exceeds size limit"),
             Self::BodyTooLargeDetailed { actual, limit } => {
+                #[allow(clippy::cast_precision_loss)] // display-only MB approximation
+                let actual_mb = *actual as f64 / 1_048_576.0;
+                #[allow(clippy::cast_precision_loss)]
+                let limit_mb = *limit as f64 / 1_048_576.0;
                 write!(
                     f,
                     "body size ({actual} bytes, {actual_mb:.1} MB) exceeds limit ({limit} bytes, {limit_mb:.1} MB)",
-                    actual_mb = *actual as f64 / 1_048_576.0,
-                    limit_mb = *limit as f64 / 1_048_576.0,
                 )
             }
             Self::BodyCancelled => write!(f, "body stream cancelled"),

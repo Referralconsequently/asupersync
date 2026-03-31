@@ -174,9 +174,12 @@ impl Frame {
     #[must_use]
     pub fn close(code: Option<u16>, reason: Option<&str>) -> Self {
         if let Some(c) = code {
+            // Use is_valid_received_code: we may be echoing back an unassigned
+            // code (1016-2999) received from the peer, which is valid per
+            // RFC 6455 §7.4.2.
             assert!(
-                CloseCode::is_valid_code(c),
-                "close code {c} must not be sent in a Close frame (RFC 6455 §7.4.1)"
+                CloseCode::is_valid_received_code(c),
+                "close code {c} is not valid for use in a Close frame (RFC 6455 §7.4)"
             );
         }
         if let Some(r) = reason {
@@ -919,7 +922,7 @@ impl CloseCode {
     /// out-of-range values (0-999, 5000+) are still rejected.
     #[must_use]
     pub fn is_valid_received_code(code: u16) -> bool {
-        matches!(code, 1000..=1003 | 1007..=4999)
+        matches!(code, 1000..=1003 | 1007..=1014 | 1016..=4999)
     }
 }
 
@@ -1593,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must not be sent")]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
     fn close_frame_code_1005_panics() {
         // RFC 6455 §7.4.1: 1005 (No Status Received) MUST NOT be set as a
         // status code in a Close control frame by an endpoint.
@@ -1601,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must not be sent")]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
     fn close_frame_code_1006_panics() {
         // RFC 6455 §7.4.1: 1006 (Abnormal Closure) MUST NOT be set as a
         // status code in a Close control frame by an endpoint.
@@ -1609,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must not be sent")]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
     fn close_frame_code_1015_panics() {
         // RFC 6455 §7.4.1: 1015 (TLS Handshake) MUST NOT be set as a
         // status code in a Close control frame by an endpoint.
@@ -1617,10 +1620,26 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must not be sent")]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
     fn close_frame_code_1004_panics() {
         // RFC 6455 §7.4.1: 1004 is reserved and MUST NOT be sent.
         let _ = Frame::close(Some(1004), None);
+    }
+
+    #[test]
+    fn received_close_code_1015_rejected() {
+        // RFC 6455 §7.4.1: 1015 is reserved for TLS layer only —
+        // must never appear on the wire, even when receiving.
+        assert!(!CloseCode::is_valid_received_code(1015));
+    }
+
+    #[test]
+    fn received_close_code_unassigned_accepted() {
+        // RFC 6455 §7.4.2: codes 1016-2999 are reserved for future
+        // WebSocket revisions/extensions and must be accepted.
+        assert!(CloseCode::is_valid_received_code(1016));
+        assert!(CloseCode::is_valid_received_code(2000));
+        assert!(CloseCode::is_valid_received_code(2999));
     }
 
     #[test]

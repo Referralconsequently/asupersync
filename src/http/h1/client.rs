@@ -586,9 +586,23 @@ impl Http1Client {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
+        Self::request_with_io_and_max_body_size(io, req, DEFAULT_MAX_BODY_SIZE).await
+    }
+
+    /// Like [`request_with_io`](Self::request_with_io) but with an explicit
+    /// maximum body size limit.
+    pub async fn request_with_io_and_max_body_size<T>(
+        io: T,
+        req: Request,
+        max_body_size: usize,
+    ) -> Result<(Response, T), HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
         // Reuse the method-aware streaming implementation so HEAD responses
         // correctly ignore Content-Length/Transfer-Encoding bodies.
-        let mut streaming = Self::request_streaming(io, req).await?;
+        let mut streaming =
+            Self::request_streaming_with_max_body_size(io, req, max_body_size).await?;
 
         let mut response = Response {
             version: streaming.head.version,
@@ -703,8 +717,7 @@ impl Http1Client {
                     continue;
                 }
 
-                let kind =
-                    response_body_kind(&headers, status, &request_method, max_body_size)?;
+                let kind = response_body_kind(&headers, status, &request_method, max_body_size)?;
 
                 let head = crate::http::h1::stream::ResponseHead {
                     version,
@@ -718,7 +731,8 @@ impl Http1Client {
                 // the upgraded stream.
                 let body_buf = read_buf;
 
-                let body = ClientIncomingBody::with_max_body_size(io, kind, body_buf, max_body_size);
+                let body =
+                    ClientIncomingBody::with_max_body_size(io, kind, body_buf, max_body_size);
                 return Ok(ClientStreamingResponse { head, body });
             }
 
