@@ -1989,3 +1989,39 @@
 {"file":"src/messaging/kafka.rs","lines":1569,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Agent HIGH finding was FALSE POSITIVE - ensure_initialized is lock-guarded and idempotent"}
 {"file":"src/messaging/kafka_consumer.rs","lines":1072,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Agent MEDIUM finding was FALSE POSITIVE - kafka test path uses rdkafka consumer not local records"}
 {"file":"src/http/body.rs","lines":0,"batch":491,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Agent LOW findings verified - documentation gaps only, no functional bugs"}
+{"file":"src/http/h1/codec.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20, cast_precision_loss already fixed by another agent"}
+{"file":"src/messaging/fabric.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20, 405-line refactor audited"}
+{"file":"src/messaging/federation.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20, 420-line refactor audited"}
+{"file":"src/plan/extractor.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20, cycle detection changes sound"}
+{"file":"src/runtime/builder.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted +554 lines, browser worker diagnostics sound"}
+{"file":"src/lab/runtime.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit uncommitted +144 lines, AutoAdvanceTermination sound"}
+{"file":"src/cx/scope.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/http/h1/http_client.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/http/h2/stream.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/messaging/session/conformance.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/messaging/control.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/messaging/service.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/net/dns/resolver.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/net/websocket/close.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/database/postgres.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/database/mysql.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/lab/opportunity.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/lab/oracle/cancellation_protocol.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/distributed/bridge.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/messaging/session/contract.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/messaging/kafka_consumer.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/lab/http/harness.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/record/distributed_region.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/http/pool.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/sync/notify.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/stream/watch_stream.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/io/copy.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/channel/session.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/gen_server.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/runtime/io_op.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/runtime/spawn_blocking.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/database/pool.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/distributed/snapshot.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/io/browser_storage.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/sync/pool.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
+{"file":"src/channel/mpsc.rs","lines":0,"batch":490,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~20 + uncommitted"}
