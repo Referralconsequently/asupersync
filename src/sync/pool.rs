@@ -1694,6 +1694,7 @@ where
                     let id = cleanup.waiter_id.take();
                     if let Some(id) = id {
                         self.return_wakers.lock().retain(|(wid, _)| *wid != id);
+                        self.remove_waiter(id);
                     }
 
                     let now = get_now();
