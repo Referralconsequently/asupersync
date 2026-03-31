@@ -50,6 +50,29 @@ pub struct LabTraceCertificateSummary {
     pub schedule_hash: u64,
 }
 
+/// Why a [`LabRuntime::run_with_auto_advance`] loop terminated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutoAdvanceTermination {
+    /// The runtime reached quiescence: no runnable tasks, no pending timers,
+    /// and all regions are closed.
+    Quiescent,
+    /// The configured `max_steps` limit was reached before quiescence.
+    StepLimitReached,
+    /// The runtime was stuck (scheduler empty, no pending deadlines, not
+    /// quiescent) for 1 000 consecutive iterations and bailed out.
+    StuckBailout,
+}
+
+impl fmt::Display for AutoAdvanceTermination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Quiescent => f.write_str("quiescent"),
+            Self::StepLimitReached => f.write_str("step-limit-reached"),
+            Self::StuckBailout => f.write_str("stuck-bailout"),
+        }
+    }
+}
+
 /// Report from a [`LabRuntime::run_with_auto_advance`] execution.
 ///
 /// Captures statistics about automatic time advancement during the run.
@@ -68,6 +91,8 @@ pub struct VirtualTimeReport {
     pub time_end: Time,
     /// Total virtual nanoseconds elapsed during the run.
     pub virtual_elapsed_nanos: u64,
+    /// Why the auto-advance loop terminated.
+    pub termination: AutoAdvanceTermination,
 }
 
 impl VirtualTimeReport {
@@ -992,11 +1017,11 @@ impl LabRuntime {
         let mut stuck_counter: u32 = 0;
         let start_time = self.virtual_time;
 
-        loop {
+        let termination = loop {
             // Check step limit
             if let Some(max) = self.config.max_steps {
                 if self.steps >= max {
-                    break;
+                    break AutoAdvanceTermination::StepLimitReached;
                 }
             }
 
@@ -1027,17 +1052,17 @@ impl LabRuntime {
 
             // No runnable tasks and no pending virtual deadlines → quiescent
             if self.is_quiescent() {
-                break;
+                break AutoAdvanceTermination::Quiescent;
             }
 
             // Not quiescent but nothing to advance — try one more step
             // (there may be I/O or finalizers to process)
             stuck_counter += 1;
             if stuck_counter > 1000 {
-                break;
+                break AutoAdvanceTermination::StuckBailout;
             }
             self.step();
-        }
+        };
 
         VirtualTimeReport {
             steps: self.steps - start_steps,
@@ -1046,6 +1071,7 @@ impl LabRuntime {
             time_start: start_time,
             time_end: self.virtual_time,
             virtual_elapsed_nanos: self.virtual_time.as_nanos() - start_time.as_nanos(),
+            termination,
         }
     }
 
@@ -4621,6 +4647,7 @@ mod tests {
             time_start: Time::ZERO,
             time_end: Time::from_secs(3600),
             virtual_elapsed_nanos: 3_600_000_000_000,
+            termination: AutoAdvanceTermination::Quiescent,
         };
 
         let ms = report.virtual_elapsed_ms();
@@ -4801,6 +4828,7 @@ mod tests {
             time_start: Time::ZERO,
             time_end: Time::from_millis(500),
             virtual_elapsed_nanos: 500_000_000,
+            termination: AutoAdvanceTermination::Quiescent,
         };
         let copied = report;
         assert_eq!(copied, report);
@@ -4808,6 +4836,112 @@ mod tests {
         assert_eq!(report.virtual_elapsed_secs(), 0);
         let dbg = format!("{report:?}");
         assert!(dbg.contains("VirtualTimeReport"));
+    }
+
+    // =========================================================================
+    // AutoAdvanceTermination tests (bead 56c785)
+    // =========================================================================
+
+    #[test]
+    fn auto_advance_quiescent_termination() {
+        init_test("auto_advance_quiescent_termination");
+        let mut lab = LabRuntime::new(LabConfig::new(42));
+        // No tasks enqueued → immediately quiescent
+        let report = lab.run_with_auto_advance();
+        assert_eq!(
+            report.termination,
+            AutoAdvanceTermination::Quiescent,
+            "empty runtime should terminate as quiescent"
+        );
+        crate::test_complete!("auto_advance_quiescent_termination");
+    }
+
+    #[test]
+    fn auto_advance_step_limit_termination() {
+        init_test("auto_advance_step_limit_termination");
+        let mut lab = LabRuntime::new(LabConfig::new(42).max_steps(0));
+        let report = lab.run_with_auto_advance();
+        assert_eq!(
+            report.termination,
+            AutoAdvanceTermination::StepLimitReached,
+            "zero max_steps should terminate as step-limit-reached"
+        );
+        crate::test_complete!("auto_advance_step_limit_termination");
+    }
+
+    #[test]
+    fn auto_advance_stuck_bailout_termination() {
+        init_test("auto_advance_stuck_bailout_termination");
+        let config = LabConfig::new(42)
+            .with_auto_advance()
+            .no_step_limit()
+            .futurelock_max_idle_steps(0);
+        let mut lab = LabRuntime::new(config);
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                std::future::pending::<()>().await;
+            })
+            .expect("create pending task");
+        lab.scheduler.lock().schedule(task_id, 0);
+
+        let report = lab.run_with_auto_advance();
+        assert_eq!(
+            report.termination,
+            AutoAdvanceTermination::StuckBailout,
+            "pending task without deadlines should terminate via stuck bailout"
+        );
+        assert!(
+            !lab.is_quiescent(),
+            "stuck bailout should preserve non-quiescent state for diagnosis"
+        );
+        assert_eq!(
+            report.auto_advances, 0,
+            "stuck bailout path should not auto-advance virtual time without deadlines"
+        );
+        crate::test_complete!("auto_advance_stuck_bailout_termination");
+    }
+
+    #[test]
+    fn auto_advance_termination_display() {
+        assert_eq!(
+            format!("{}", AutoAdvanceTermination::Quiescent),
+            "quiescent"
+        );
+        assert_eq!(
+            format!("{}", AutoAdvanceTermination::StepLimitReached),
+            "step-limit-reached"
+        );
+        assert_eq!(
+            format!("{}", AutoAdvanceTermination::StuckBailout),
+            "stuck-bailout"
+        );
+    }
+
+    #[test]
+    fn auto_advance_termination_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let variants = [
+            AutoAdvanceTermination::Quiescent,
+            AutoAdvanceTermination::StepLimitReached,
+            AutoAdvanceTermination::StuckBailout,
+        ];
+        // Copy + Clone + Eq
+        for &v in &variants {
+            let copied = v;
+            let cloned = v;
+            assert_eq!(copied, cloned);
+        }
+        // Hash uniqueness
+        let mut set = HashSet::new();
+        for &v in &variants {
+            assert!(set.insert(v));
+        }
+        assert_eq!(set.len(), 3);
+        // Debug contains type name
+        let dbg = format!("{:?}", AutoAdvanceTermination::StuckBailout);
+        assert!(dbg.contains("StuckBailout"));
     }
 
     #[test]

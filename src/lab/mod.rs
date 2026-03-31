@@ -147,8 +147,8 @@ pub use replay::{
     normalize_for_replay_with_config, summarize_spork_reports, traces_equivalent,
 };
 pub use runtime::{
-    HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary, LabRunReport, LabRuntime,
-    LabTraceCertificateSummary, SporkHarnessReport, VirtualTimeReport,
+    AutoAdvanceTermination, HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary,
+    LabRunReport, LabRuntime, LabTraceCertificateSummary, SporkHarnessReport, VirtualTimeReport,
 };
 pub use scenario::{
     CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent, IncludeRef,
