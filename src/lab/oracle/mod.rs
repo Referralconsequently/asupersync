@@ -882,24 +882,33 @@ impl OracleReport {
 mod tests {
     use super::*;
     use parking_lot::Mutex;
+    #[cfg(feature = "tracing-integration")]
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    #[cfg(feature = "tracing-integration")]
     use tracing::Subscriber;
+    #[cfg(feature = "tracing-integration")]
     use tracing::field::{Field, Visit};
+    #[cfg(feature = "tracing-integration")]
     use tracing_subscriber::layer::{Context, Layer};
+    #[cfg(feature = "tracing-integration")]
     use tracing_subscriber::prelude::*;
+    #[cfg(feature = "tracing-integration")]
     use tracing_subscriber::registry::LookupSpan;
 
+    #[cfg(feature = "tracing-integration")]
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct RecordedEvent {
         fields: BTreeMap<String, String>,
     }
 
+    #[cfg(feature = "tracing-integration")]
     #[derive(Default)]
     struct EventFieldVisitor {
         fields: BTreeMap<String, String>,
     }
 
+    #[cfg(feature = "tracing-integration")]
     impl Visit for EventFieldVisitor {
         fn record_bool(&mut self, field: &Field, value: bool) {
             self.fields
@@ -922,11 +931,13 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tracing-integration")]
     #[derive(Default)]
     struct EventRecorder {
         events: Arc<Mutex<Vec<RecordedEvent>>>,
     }
 
+    #[cfg(feature = "tracing-integration")]
     impl<S> Layer<S> for EventRecorder
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
