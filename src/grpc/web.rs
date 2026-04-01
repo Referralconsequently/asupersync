@@ -143,7 +143,9 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
     let block_bytes = block.as_bytes();
     dst.reserve(5 + block_bytes.len());
     dst.put_u8(TRAILER_FLAG);
-    dst.put_u32(u32::try_from(block_bytes.len()).unwrap_or(u32::MAX));
+    let block_len = u32::try_from(block_bytes.len())
+        .expect("gRPC trailer block exceeds 4 GiB — metadata must be bounded before encoding");
+    dst.put_u32(block_len);
     dst.extend_from_slice(block_bytes);
 }
 

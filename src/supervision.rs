@@ -2900,6 +2900,7 @@ impl Supervisor {
         self.generalized_evidence.push(generalized_record);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn decide_err_with_budget(
         &mut self,
         task_id: TaskId,
@@ -2959,7 +2960,10 @@ impl Supervisor {
                                 task_id,
                                 region_id,
                                 reason: StopReason::RestartBudgetExhausted {
-                                    total_restarts: history.recent_restart_count(now),
+                                    total_restarts: u32::try_from(
+                                        history.recent_restart_count(now),
+                                    )
+                                    .unwrap_or(u32::MAX),
                                     window: config.window,
                                 },
                             },
@@ -2978,7 +2982,8 @@ impl Supervisor {
                             task_id,
                             region_id,
                             reason: StopReason::RestartBudgetExhausted {
-                                total_restarts: history.recent_restart_count(now),
+                                total_restarts: u32::try_from(history.recent_restart_count(now))
+                                    .unwrap_or(u32::MAX),
                                 window: config.window,
                             },
                         },
@@ -2989,12 +2994,14 @@ impl Supervisor {
                     );
                 }
 
-                // Record the restart BEFORE computing the delay so that
-                // next_delay() sees the correct attempt count and produces
-                // the right exponential backoff step.
-                history.record_restart(now);
-                let attempt = history.recent_restart_count(now) as u32;
+                // Derive the delay from the current in-window restart count
+                // before mutating history. Backoff is zero-based for the
+                // restart being scheduled now; recording first would shift the
+                // first restart from attempt 0 to attempt 1 and over-delay
+                // every subsequent restart decision.
+                let attempt = history.recent_restart_count(now) as u32 + 1;
                 let delay = history.next_delay(now);
+                history.record_restart(now);
 
                 (
                     SupervisionDecision::Restart {
@@ -4948,6 +4955,7 @@ mod tests {
         init_test("supervisor_on_failure_with_budget_allows");
 
         let config = RestartConfig::new(3, Duration::from_mins(1)).with_restart_cost(10);
+        let expected_delay = config.backoff.delay_for_attempt(0);
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
@@ -4963,10 +4971,13 @@ mod tests {
             Some(&budget),
         );
 
-        assert!(matches!(
-            decision,
-            SupervisionDecision::Restart { attempt: 1, .. }
-        ));
+        match decision {
+            SupervisionDecision::Restart { attempt, delay, .. } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(delay, expected_delay);
+            }
+            other => unreachable!("expected Restart, got {other:?}"),
+        }
 
         crate::test_complete!("supervisor_on_failure_with_budget_allows");
     }
@@ -6043,6 +6054,81 @@ mod tests {
         ));
 
         crate::test_complete!("conformance_budget_exhaustion_idempotent_stop");
+    }
+
+    #[test]
+    fn restart_budget_exhaustion_reports_observed_restart_count() {
+        init_test("restart_budget_exhaustion_reports_observed_restart_count");
+
+        let config = RestartConfig::new(1, Duration::from_mins(1));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+        let history = supervisor
+            .history
+            .as_mut()
+            .expect("restart strategy initializes history");
+        history.record_restart(0);
+        history.record_restart(1_000_000_000);
+        history.record_restart(2_000_000_000);
+
+        let decision = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            &Outcome::Err(()),
+            2_000_000_000,
+        );
+
+        assert!(matches!(
+            decision,
+            SupervisionDecision::Stop {
+                reason: StopReason::RestartBudgetExhausted {
+                    total_restarts: 3,
+                    window,
+                },
+                ..
+            } if window == Duration::from_mins(1)
+        ));
+
+        crate::test_complete!("restart_budget_exhaustion_reports_observed_restart_count");
+    }
+
+    #[test]
+    fn restart_budget_exhaustion_with_budget_reports_observed_restart_count() {
+        init_test("restart_budget_exhaustion_with_budget_reports_observed_restart_count");
+
+        let config = RestartConfig::new(1, Duration::from_mins(1));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+        let history = supervisor
+            .history
+            .as_mut()
+            .expect("restart strategy initializes history");
+        history.record_restart(0);
+        history.record_restart(1_000_000_000);
+        history.record_restart(2_000_000_000);
+
+        let decision = supervisor.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            &Outcome::Err(()),
+            2_000_000_000,
+            Some(&Budget::INFINITE),
+        );
+
+        assert!(matches!(
+            decision,
+            SupervisionDecision::Stop {
+                reason: StopReason::RestartBudgetExhausted {
+                    total_restarts: 3,
+                    window,
+                },
+                ..
+            } if window == Duration::from_mins(1)
+        ));
+
+        crate::test_complete!(
+            "restart_budget_exhaustion_with_budget_reports_observed_restart_count"
+        );
     }
 
     /// Conformance: budget refusal priority — window exhaustion is checked before
