@@ -1980,6 +1980,7 @@ mod tests {
         let repair_count = 5;
         let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
+        let kp = enc.params().k_prime;
 
         let systematic = enc.emit_systematic();
         assert_eq!(
@@ -2000,8 +2001,8 @@ mod tests {
         );
         assert_eq!(
             combined.first().map(|symbol| symbol.esi),
-            Some(k as u32),
-            "repair emission should resume at the first repair ESI"
+            Some(kp as u32),
+            "repair emission should resume at K' (the first repair ESI per RFC 6330)"
         );
         assert_eq!(
             enc.stats().systematic_bytes_emitted,
