@@ -1409,6 +1409,15 @@ fn g1_budget_unit_matrix_markdown_status_snapshot_matches_artifact_subset() {
     );
 }
 
+#[test]
+fn e3_unit_matrix_e4_e5_signal_keys_match_live_probe_contract() {
+    let required_row = "| `E4` / `E5` | `profile_pack`, `architecture_class`, `profile_fallback_reason`, `mode_fallback_reason`, `mode`, `dual_policy_env_requested`, `profile_pack_env_requested`, `criterion_sample_size`, `criterion_warm_up_seconds`, `criterion_measurement_seconds`, `tail_confidence_proxy` | verifies deterministic GF256 dispatch/fallback behavior, explicit env-request provenance, and benchmark-sampling contract metadata |";
+    assert!(
+        RAPTORQ_UNIT_MATRIX_MD.contains(required_row),
+        "unit matrix E4/E5 diagnostics row must stay aligned with the live dual-policy probe contract"
+    );
+}
+
 fn assert_percentiles_monotonic(block: &serde_json::Value, label: &str) {
     let p50 = block["p50"]
         .as_f64()

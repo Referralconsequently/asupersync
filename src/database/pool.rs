@@ -199,6 +199,7 @@ pub struct DbPool<M: ConnectionManager> {
     stats: PoolStatCounters,
 }
 
+#[allow(clippy::struct_field_names)]
 struct PoolStatCounters {
     total_acquisitions: AtomicU64,
     total_creates: AtomicU64,
@@ -1454,6 +1455,20 @@ mod tests {
         assert!(dbg.contains("total_acquisitions: 0"));
     }
 
+    #[test]
+    fn async_pool_debug_reports_live_counter_values() {
+        init_test("async_pool_debug_reports_live_counter_values");
+        let pool = AsyncDbPool::new(AsyncTestManager::new(), DbPoolConfig::default());
+        let cx = Cx::for_testing();
+        let _conn = block_on(pool.get(&cx)).expect("async pool get should succeed");
+
+        let dbg = format!("{pool:?}");
+        assert!(dbg.contains("total_acquisitions: 1"));
+        assert!(dbg.contains("total_creates: 1"));
+        assert!(dbg.contains("total_discards: 0"));
+        crate::test_complete!("async_pool_debug_reports_live_counter_values");
+    }
+
     // ================================================================
     // Get / return
     // ================================================================
@@ -1853,6 +1868,7 @@ mod tests {
         let dbg = format!("{stats:?}");
         assert!(dbg.contains("DbPoolStats"));
         let cloned = stats.clone();
+        assert_eq!(stats.total, 0);
         assert_eq!(cloned.total, 0);
     }
 

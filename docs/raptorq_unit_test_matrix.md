@@ -230,7 +230,7 @@ Use these signal keys during triage, especially when CI gate logs (`tests/ci_reg
 
 | Lever | Primary Signal Keys | Interpretation |
 |---|---|---|
-| `E4` / `E5` | `profile_pack`, `architecture_class`, `profile_fallback_reason`, `mode`, `criterion_sample_size`, `criterion_warm_up_seconds`, `criterion_measurement_seconds`, `tail_confidence_proxy` | verifies deterministic GF256 dispatch/fallback behavior and explicit benchmark-sampling contract metadata |
+| `E4` / `E5` | `profile_pack`, `architecture_class`, `profile_fallback_reason`, `mode_fallback_reason`, `mode`, `dual_policy_env_requested`, `profile_pack_env_requested`, `criterion_sample_size`, `criterion_warm_up_seconds`, `criterion_measurement_seconds`, `tail_confidence_proxy` | verifies deterministic GF256 dispatch/fallback behavior, explicit env-request provenance, and benchmark-sampling contract metadata |
 | `C5` | `hard_regime_activated`, `hard_regime_branch`, `hard_regime_fallbacks` | verifies hard-regime activation and branch stability |
 | `C6` | `dense_core_rows`, `dense_core_cols`, `gauss_ops`, `peeling_fallback_reason` | verifies dense-core path engagement under loss pressure |
 | `F5` | `policy_mode`, `policy_reason`, `policy_baseline_loss`, `policy_high_support_loss`, `policy_block_schur_loss` | explains policy selection and expected-loss tradeoff |
