@@ -174,8 +174,8 @@ pub use policy::{
     CompiledOperatorIntent, ControlCapsulePolicy, CrossTenantTrafficPolicy, DegradationDecision,
     DegradationDisposition, DegradationPlan, DegradationPolicy, EgressBudget, EgressBudgetMode,
     FederationConstraints, IntentCompileError, MobilityBudget, MobilityPreference, ObligationLoad,
-    OperatorIntent, OperatorIntentCompiler, PromotionApproval, PromotionEvidence,
-    SemanticServiceClass, SovereigntyMode, TrafficSlice, ViolationResponse,
+    OperatorIntent, OperatorIntentCompiler, OperatorWorkloadShape, PromotionApproval,
+    PromotionEvidence, SemanticServiceClass, SovereigntyMode, TrafficSlice, ViolationResponse,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use privacy::{

@@ -1011,6 +1011,21 @@ impl EgressBudget {
     }
 }
 
+/// Semantic workload shape selected explicitly by the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorWorkloadShape {
+    /// Let the compiler infer the generic interactive vs durable posture.
+    #[default]
+    General,
+    /// Read-side materializations and derived views.
+    ReadModel,
+    /// Wide fanout where partial degradation is preferable to stronger contracts.
+    LowValueFanout,
+    /// Replay-heavy or forensic work that is valuable but expensive to keep hot.
+    ExpensiveReplay,
+}
+
 /// Narrow, auditable operator intent surface for FABRIC control policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperatorIntent {
@@ -1022,6 +1037,9 @@ pub struct OperatorIntent {
     pub sovereignty: SovereigntyMode,
     /// Mobility preference compiled into delivery and failover artifacts.
     pub mobility: MobilityPreference,
+    /// Explicit semantic workload shape when the operator wants more than generic inference.
+    #[serde(default)]
+    pub workload_shape: OperatorWorkloadShape,
     /// Egress posture compiled into relay and federation constraints.
     pub egress_budget: EgressBudget,
     /// Minimum recoverability class to preserve before relaxing the egress posture.
@@ -1039,6 +1057,7 @@ impl OperatorIntent {
             latency_objective: None,
             sovereignty: SovereigntyMode::Relaxed,
             mobility: MobilityPreference::Balanced,
+            workload_shape: OperatorWorkloadShape::General,
             egress_budget: EgressBudget::default(),
             recoverability_floor: 0,
             cross_tenant_policy: CrossTenantTrafficPolicy::AllowTrusted,
@@ -1063,6 +1082,13 @@ impl OperatorIntent {
     #[must_use]
     pub fn with_mobility(mut self, mobility: MobilityPreference) -> Self {
         self.mobility = mobility;
+        self
+    }
+
+    /// Declare an explicit semantic workload shape for overload and delivery policy selection.
+    #[must_use]
+    pub fn with_workload_shape(mut self, workload_shape: OperatorWorkloadShape) -> Self {
+        self.workload_shape = workload_shape;
         self
     }
 
@@ -1259,13 +1285,22 @@ fn compile_service_class(intent: &OperatorIntent) -> SemanticServiceClass {
         SemanticServiceClass::LeaseRepair
     } else if intent.latency_objective.is_some() {
         SemanticServiceClass::ReplyCritical
-    } else if intent.cross_tenant_policy == CrossTenantTrafficPolicy::RequireCertificates
-        || intent.sovereignty == SovereigntyMode::Strict
-        || !matches!(intent.egress_budget.mode, EgressBudgetMode::Balanced)
-    {
-        SemanticServiceClass::DurablePipeline
     } else {
-        SemanticServiceClass::Interactive
+        match intent.workload_shape {
+            OperatorWorkloadShape::ReadModel => SemanticServiceClass::ReadModel,
+            OperatorWorkloadShape::LowValueFanout => SemanticServiceClass::LowValueFanout,
+            OperatorWorkloadShape::ExpensiveReplay => SemanticServiceClass::ExpensiveReplay,
+            OperatorWorkloadShape::General => {
+                if intent.cross_tenant_policy == CrossTenantTrafficPolicy::RequireCertificates
+                    || intent.sovereignty == SovereigntyMode::Strict
+                    || !matches!(intent.egress_budget.mode, EgressBudgetMode::Balanced)
+                {
+                    SemanticServiceClass::DurablePipeline
+                } else {
+                    SemanticServiceClass::Interactive
+                }
+            }
+        }
     }
 }
 
@@ -1975,11 +2010,86 @@ mod tests {
     }
 
     #[test]
+    fn compiler_maps_read_model_workload_shape_to_read_model_lane() {
+        let intent =
+            OperatorIntent::new("read-model").with_workload_shape(OperatorWorkloadShape::ReadModel);
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(compiled.service_class, SemanticServiceClass::ReadModel);
+        assert_eq!(
+            compiled.delivery_policy.default_class,
+            DeliveryClass::DurableOrdered
+        );
+        let plan = DegradationPolicy::new(0, 0).plan(&[slice(
+            "read-model",
+            compiled.service_class,
+            compiled.delivery_policy.default_class,
+        )]);
+        assert_eq!(plan.degraded.len(), 1);
+        assert_eq!(plan.degraded[0].disposition, DegradationDisposition::Defer);
+    }
+
+    #[test]
+    fn compiler_maps_low_value_fanout_workload_shape_to_fanout_lane() {
+        let intent = OperatorIntent::new("fanout")
+            .with_workload_shape(OperatorWorkloadShape::LowValueFanout);
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(compiled.service_class, SemanticServiceClass::LowValueFanout);
+        assert_eq!(
+            compiled.delivery_policy.default_class,
+            DeliveryClass::EphemeralInteractive
+        );
+        let plan = DegradationPolicy::new(0, 0).plan(&[slice(
+            "fanout",
+            compiled.service_class,
+            compiled.delivery_policy.default_class,
+        )]);
+        assert_eq!(plan.degraded.len(), 1);
+        assert_eq!(
+            plan.degraded[0].disposition,
+            DegradationDisposition::ReduceFanout
+        );
+    }
+
+    #[test]
+    fn compiler_maps_expensive_replay_workload_shape_to_forensic_lane() {
+        let intent = OperatorIntent::new("replay")
+            .with_workload_shape(OperatorWorkloadShape::ExpensiveReplay)
+            .with_cross_tenant_policy(CrossTenantTrafficPolicy::RequireCertificates);
+
+        let compiled = OperatorIntentCompiler::compile(&intent).expect("compiled intent");
+
+        assert_eq!(
+            compiled.service_class,
+            SemanticServiceClass::ExpensiveReplay
+        );
+        assert_eq!(
+            compiled.delivery_policy.default_class,
+            DeliveryClass::ForensicReplayable
+        );
+        let plan = DegradationPolicy::new(0, 0).plan(&[slice(
+            "replay",
+            compiled.service_class,
+            compiled.delivery_policy.default_class,
+        )]);
+        assert_eq!(plan.degraded.len(), 1);
+        assert_eq!(
+            plan.degraded[0].disposition,
+            DegradationDisposition::PauseReplay
+        );
+        assert!(compiled.federation_constraints.require_certificate_edges);
+    }
+
+    #[test]
     fn intent_round_trip_preserves_compiled_artifacts() {
         let intent = OperatorIntent::new("round-trip")
             .with_latency_objective(Duration::from_millis(150))
             .with_sovereignty(SovereigntyMode::PreferLocal)
             .with_mobility(MobilityPreference::Balanced)
+            .with_workload_shape(OperatorWorkloadShape::ExpensiveReplay)
             .with_egress_budget(EgressBudget::new(EgressBudgetMode::Minimize, 1))
             .with_cross_tenant_policy(CrossTenantTrafficPolicy::AllowTrusted);
 
