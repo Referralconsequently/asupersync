@@ -48,6 +48,14 @@ fn react_adapter_exposes_provider_context_and_scope_hooks() {
 fn react_adapter_preserves_strictmode_safe_bootstrap_and_runtime_cleanup() {
     let content = read_source("packages/react/src/index.ts");
     for marker in [
+        "const consumerVersionMajor = runtimeOptions?.consumerVersion?.major ?? null;",
+        "const consumerVersionMinor = runtimeOptions?.consumerVersion?.minor ?? null;",
+        "const globalObject = runtimeOptions?.globalObject;",
+        "const healthPolicyCooldownMs = runtimeOptions?.healthPolicy?.cooldownMs ?? null;",
+        "const healthPolicyMaxConsecutiveFailures =",
+        "const healthScopeKey = runtimeOptions?.healthScopeKey ?? null;",
+        "const preferredLane = runtimeOptions?.preferredLane ?? null;",
+        "const wasmInput = runtimeOptions?.wasmInput;",
         "const [reloadNonce, setReloadNonce] = useState(0);",
         "const epochRef = useRef(0);",
         "const reload = useCallback(() => {",
@@ -70,6 +78,10 @@ fn react_adapter_preserves_strictmode_safe_bootstrap_and_runtime_cleanup() {
             "react adapter must preserve bootstrap/cleanup marker: {marker}"
         );
     }
+    assert!(
+        !content.contains("}, [reloadNonce, runtimeOptions]);"),
+        "react adapter must not key bootstrap churn on raw runtimeOptions identity"
+    );
 }
 
 #[test]

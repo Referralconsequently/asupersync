@@ -127,12 +127,23 @@ export function ReactRuntimeProvider({
   children,
   runtimeOptions,
 }: ReactRuntimeProviderProps): JSX.Element {
+  const consumerVersionMajor = runtimeOptions?.consumerVersion?.major ?? null;
+  const consumerVersionMinor = runtimeOptions?.consumerVersion?.minor ?? null;
+  const eagerInit = runtimeOptions?.eagerInit;
+  const globalObject = runtimeOptions?.globalObject;
+  const healthPolicyCooldownMs = runtimeOptions?.healthPolicy?.cooldownMs ?? null;
+  const healthPolicyMaxConsecutiveFailures =
+    runtimeOptions?.healthPolicy?.maxConsecutiveFailures ?? null;
+  const healthScopeKey = runtimeOptions?.healthScopeKey ?? null;
+  const now = runtimeOptions?.now;
+  const preferredLane = runtimeOptions?.preferredLane ?? null;
+  const wasmInput = runtimeOptions?.wasmInput;
   const [status, setStatus] = useState<ReactRuntimeStatus>("idle");
   const [runtime, setRuntime] = useState<BrowserRuntime | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [diagnostics, setDiagnostics] = useState<ReactRuntimeSupportDiagnostics>(
-    () => detectReactRuntimeSupport(runtimeOptions?.globalObject),
+    () => detectReactRuntimeSupport(globalObject),
   );
   const runtimeRef = useRef<BrowserRuntime | null>(null);
   const epochRef = useRef(0);
@@ -142,7 +153,7 @@ export function ReactRuntimeProvider({
   }, []);
 
   useEffect(() => {
-    const diagnosticsSnapshot = detectReactRuntimeSupport(runtimeOptions?.globalObject);
+    const diagnosticsSnapshot = detectReactRuntimeSupport(globalObject);
     setDiagnostics(diagnosticsSnapshot);
 
     const previousRuntime = runtimeRef.current;
@@ -194,7 +205,19 @@ export function ReactRuntimeProvider({
         closeRuntime(activeRuntime);
       }
     };
-  }, [reloadNonce, runtimeOptions]);
+  }, [
+    consumerVersionMajor,
+    consumerVersionMinor,
+    eagerInit,
+    globalObject,
+    healthPolicyCooldownMs,
+    healthPolicyMaxConsecutiveFailures,
+    healthScopeKey,
+    now,
+    preferredLane,
+    reloadNonce,
+    wasmInput,
+  ]);
 
   const value = useMemo<ReactRuntimeContextValue>(
     () => ({

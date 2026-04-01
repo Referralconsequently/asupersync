@@ -105,12 +105,22 @@ fn react_adapter_threads_runtime_options_global_object_into_support_diagnostics(
         "export function detectReactRuntimeSupport(",
         "globalObject: Record<string, unknown> | undefined = undefined,",
         "const browserDiagnostics = detectBrowserRuntimeSupport(globalObject);",
-        "() => detectReactRuntimeSupport(runtimeOptions?.globalObject),",
-        "const diagnosticsSnapshot = detectReactRuntimeSupport(runtimeOptions?.globalObject);",
+        "const globalObject = runtimeOptions?.globalObject;",
+        "() => detectReactRuntimeSupport(globalObject),",
+        "const diagnosticsSnapshot = detectReactRuntimeSupport(globalObject);",
+        "const consumerVersionMajor = runtimeOptions?.consumerVersion?.major ?? null;",
+        "const consumerVersionMinor = runtimeOptions?.consumerVersion?.minor ?? null;",
+        "const healthPolicyCooldownMs = runtimeOptions?.healthPolicy?.cooldownMs ?? null;",
+        "const healthPolicyMaxConsecutiveFailures =",
     ] {
         assert!(
             content.contains(marker),
             "React adapter source must preserve runtimeOptions/globalObject diagnostics alignment marker: {marker}"
         );
     }
+
+    assert!(
+        !content.contains("}, [reloadNonce, runtimeOptions]);"),
+        "React adapter source must not key provider churn on raw runtimeOptions identity"
+    );
 }
