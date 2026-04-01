@@ -822,7 +822,7 @@ pub struct SystematicEncoder {
     stats: EncodingStats,
     /// Whether systematic symbols have been emitted via `emit_systematic()`.
     systematic_emitted: bool,
-    /// Next repair ESI to emit (monotonic cursor, starts at K).
+    /// Next repair ESI to emit (monotonic cursor, starts at K').
     next_repair_esi: u32,
 }
 
@@ -878,6 +878,7 @@ impl SystematicEncoder {
             repair_bytes_emitted: 0,
         };
 
+        let k_prime = params.k_prime;
         Some(Self {
             params,
             intermediate,
@@ -885,7 +886,7 @@ impl SystematicEncoder {
             seed,
             stats,
             systematic_emitted: false,
-            next_repair_esi: k as u32,
+            next_repair_esi: k_prime as u32,
         })
     }
 
