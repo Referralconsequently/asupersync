@@ -389,6 +389,7 @@ validate_dual_policy_probe_contract() {
             (.repro_command | type == "string" and test("^((rch exec -- )?cargo bench --bench raptorq_benchmark -- gf256_dual_policy)")) and
             (if .selected_tuning_candidate_id == "manual-env-override-unbacked"
                 then
+                    .tuning_corpus_id == "manual-env-override-unbacked" and
                     .selected_tuning_tile_bytes == 0 and
                     .selected_tuning_unroll == 0 and
                     .selected_tuning_prefetch_distance == 0 and
@@ -408,6 +409,7 @@ validate_dual_policy_probe_contract() {
                         .max_lane_ratio_env_override
                     )
                 else
+                    .tuning_corpus_id != "manual-env-override-unbacked" and
                     .selected_tuning_tile_bytes >= 1 and
                     .selected_tuning_unroll >= 1 and
                     .selected_tuning_fusion_shape != "unknown" and

@@ -2539,6 +2539,10 @@ fn e5_live_dual_policy_snapshot_surfaces_decision_provenance() {
 
     if snapshot.decision_artifact_id == "manual_env_override_unbacked" {
         assert_eq!(
+            snapshot.tuning_corpus_id, "manual-env-override-unbacked",
+            "override policy snapshots must scrub the canonical tuning corpus id"
+        );
+        assert_eq!(
             snapshot.decision_artifact_id, "manual_env_override_unbacked",
             "override policy snapshots must fail closed on decision provenance"
         );
@@ -2559,7 +2563,15 @@ fn e5_live_dual_policy_snapshot_surfaces_decision_provenance() {
             snapshot.decision_evidence_status, selected_profile.decision_evidence_status,
             "override policy snapshots must not keep the catalog evidence maturity"
         );
+        assert_ne!(
+            snapshot.tuning_corpus_id, selected_profile.tuning_corpus_id,
+            "override policy snapshots must not keep the catalog tuning corpus id"
+        );
     } else {
+        assert_eq!(
+            snapshot.tuning_corpus_id, selected_profile.tuning_corpus_id,
+            "canonical policy snapshots must mirror the selected catalog tuning corpus id"
+        );
         assert_eq!(
             snapshot.decision_artifact_id, selected_profile.decision_artifact_id,
             "canonical policy snapshots must mirror the selected catalog artifact id"
@@ -3414,6 +3426,7 @@ fn e5_profile_pack_doc_explains_command_bundle_split() {
 #[test]
 fn e5_profile_pack_doc_explains_override_truthfulness_rule() {
     for required in [
+        "tuning_corpus_id = manual-env-override-unbacked",
         "manual-env-override-unbacked",
         "runtime_override_not_canonical_profile_selection",
         "manual_env_override_unbacked",
@@ -5285,6 +5298,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".selected_targeted_addmul_average_delta_pct",
         ".profile_pack_env_requested | type == \"boolean\"",
         ".max_lane_ratio_env_override | type == \"boolean\"",
+        ".tuning_corpus_id == \"manual-env-override-unbacked\"",
         ".selected_tuning_candidate_id == \"manual-env-override-unbacked\"",
         ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives\"",
         ".decision_artifact_id == \"manual_env_override_unbacked\"",

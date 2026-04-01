@@ -792,6 +792,7 @@ const X86_SELECTED_MUL_DELTA_VS_BASELINE_PCT: &str = "0.3048";
 const X86_SELECTED_ADDMUL_DELTA_VS_BASELINE_PCT: &str = "-3.3759";
 const X86_SELECTED_TARGETED_ADDMUL_AVERAGE_DELTA_PCT: &str = "-8.9924";
 const NA_PROFILE_DELTA_PCT: &str = "n/a";
+const MANUAL_OVERRIDE_TUNING_CORPUS_ID: &str = "manual-env-override-unbacked";
 const MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE: &str = "manual-env-override-unbacked";
 const MANUAL_OVERRIDE_DECISION_ARTIFACT_ID: &str = "manual_env_override_unbacked";
 const MANUAL_OVERRIDE_DECISION_ROLE: &str = "runtime_override_not_canonical_profile_selection";
@@ -1265,6 +1266,7 @@ fn apply_effective_selection_contract(policy: &mut DualKernelPolicy) {
         return;
     }
 
+    policy.tuning_corpus_id = MANUAL_OVERRIDE_TUNING_CORPUS_ID;
     policy.selected_tuning_candidate_id = MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE;
     policy.rejected_tuning_candidate_ids = &[];
     policy.replay_pointer = MANUAL_OVERRIDE_REPLAY_POINTER;
@@ -1273,6 +1275,7 @@ fn apply_effective_selection_contract(policy: &mut DualKernelPolicy) {
 
 fn effective_profile_pack_metadata(policy: &DualKernelPolicy) -> Gf256ProfilePackMetadata {
     let mut metadata = *profile_pack_metadata(policy.profile_pack);
+    metadata.tuning_corpus_id = policy.tuning_corpus_id;
     metadata.selected_tuning_candidate_id = policy.selected_tuning_candidate_id;
     metadata.rejected_tuning_candidate_ids = policy.rejected_tuning_candidate_ids;
     metadata.mul_min_total = policy.mul_min_total;
@@ -5237,11 +5240,13 @@ mod tests {
         apply_effective_selection_contract(&mut policy);
         let metadata = effective_profile_pack_metadata(&policy);
 
+        assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
         assert_eq!(
             policy.selected_tuning_candidate_id,
             MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
         );
         assert!(policy.rejected_tuning_candidate_ids.is_empty());
+        assert_eq!(metadata.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
         assert_eq!(policy.replay_pointer, MANUAL_OVERRIDE_REPLAY_POINTER);
         assert_eq!(policy.command_bundle, MANUAL_OVERRIDE_COMMAND_BUNDLE);
         assert_eq!(
@@ -5289,10 +5294,12 @@ mod tests {
         apply_effective_selection_contract(&mut policy);
         let metadata = effective_profile_pack_metadata(&policy);
 
+        assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
         assert_eq!(
             policy.selected_tuning_candidate_id,
             MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
         );
+        assert_eq!(metadata.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
         assert_eq!(metadata.decision_role, MANUAL_OVERRIDE_DECISION_ROLE);
         assert_eq!(
             metadata.decision_evidence_status,
@@ -5334,12 +5341,15 @@ mod tests {
             snapshot.architecture_class,
             architecture_class_for_kernel(snapshot.kernel)
         );
-        assert_eq!(snapshot.tuning_corpus_id, GF256_PROFILE_TUNING_CORPUS_ID);
+        assert_eq!(
+            snapshot.tuning_corpus_id,
+            effective_profile.tuning_corpus_id
+        );
         assert!(!snapshot.selected_tuning_candidate_id.is_empty());
         assert!(!snapshot.command_bundle.is_empty());
         assert!(snapshot.command_bundle.contains("gf256_primitives"));
         assert!(!snapshot.command_bundle.contains("gf256_dual_policy"));
-        assert_eq!(snapshot.replay_pointer, GF256_PROFILE_PACK_REPLAY_POINTER);
+        assert_eq!(snapshot.replay_pointer, effective_profile.replay_pointer);
         assert!(!snapshot.decision_artifact_id.is_empty());
         assert!(!snapshot.decision_role.is_empty());
         assert!(!snapshot.decision_evidence_status.as_str().is_empty());
@@ -5395,6 +5405,10 @@ mod tests {
             policy.profile_pack
         );
         assert_eq!(
+            manifest.active_profile_metadata.tuning_corpus_id,
+            policy.tuning_corpus_id
+        );
+        assert_eq!(
             manifest
                 .active_profile_metadata
                 .selected_tuning_candidate_id,
@@ -5447,11 +5461,20 @@ mod tests {
                 manifest.active_profile_metadata.decision_evidence_status,
                 catalog_profile.decision_evidence_status
             );
+            assert_eq!(
+                manifest.active_profile_metadata.tuning_corpus_id,
+                catalog_profile.tuning_corpus_id
+            );
         } else {
             assert_eq!(manifest.active_selected_tuning_candidate, None);
+            assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
             assert_eq!(
                 policy.selected_tuning_candidate_id,
                 MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
+            );
+            assert_eq!(
+                manifest.active_profile_metadata.tuning_corpus_id,
+                MANUAL_OVERRIDE_TUNING_CORPUS_ID
             );
             assert_eq!(
                 manifest.active_profile_metadata.decision_artifact_id,

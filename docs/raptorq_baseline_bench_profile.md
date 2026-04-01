@@ -181,7 +181,8 @@ Probe log schema:
 Override truthfulness rule:
 
 - if forced mode or numeric `ASUPERSYNC_GF256_*` window overrides mutate the live contract, the manifest/probe surface must fail closed instead of pretending the run still matches the catalog default
-- override runs therefore scrub canonical selection provenance to `selected_tuning_candidate_id = manual-env-override-unbacked`,
+- override runs therefore scrub canonical selection provenance to `tuning_corpus_id = manual-env-override-unbacked`,
+  `selected_tuning_candidate_id = manual-env-override-unbacked`,
   `decision_role = runtime_override_not_canonical_profile_selection`,
   `decision_artifact_id = manual_env_override_unbacked`,
   `decision_evidence_status = runtime-override-unbacked`,
