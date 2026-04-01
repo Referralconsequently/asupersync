@@ -1383,6 +1383,9 @@ fn compile_safety_envelope(
         envelope.min_delivery_class = DeliveryClass::MobilitySafe;
         envelope.max_delivery_class = DeliveryClass::MobilitySafe;
     }
+    if service_class == SemanticServiceClass::ExpensiveReplay {
+        envelope.max_delivery_class = DeliveryClass::ForensicReplayable;
+    }
 
     envelope
 }
@@ -2068,6 +2071,10 @@ mod tests {
         );
         assert_eq!(
             compiled.delivery_policy.default_class,
+            DeliveryClass::ForensicReplayable
+        );
+        assert_eq!(
+            compiled.safety_envelope.max_delivery_class,
             DeliveryClass::ForensicReplayable
         );
         let plan = DegradationPolicy::new(0, 0).plan(&[slice(
