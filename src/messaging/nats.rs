@@ -1343,6 +1343,12 @@ impl Subscription {
     pub async fn next(&mut self, cx: &Cx) -> Result<Option<Message>, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        // Drain any buffered messages before reporting closure so that
+        // messages dispatched before close() are not silently lost.
+        if let Ok(msg) = self.rx.try_recv() {
+            return Ok(Some(msg));
+        }
+
         if self.state.closed.load(Ordering::Acquire) {
             return Ok(None);
         }

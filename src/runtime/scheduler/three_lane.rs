@@ -362,6 +362,9 @@ impl AdaptiveCancelStreakPolicy {
         let reward_hat = reward / p;
         let exponent = (ADAPTIVE_EXP3_GAMMA * reward_hat / k).clamp(-20.0, 20.0);
         self.weights[chosen] *= exponent.exp();
+        // Prevent weight overflow: cap at 1e30 to avoid inf/NaN in refresh_probs.
+        // This preserves the relative ranking while keeping arithmetic stable.
+        self.weights[chosen] = self.weights[chosen].clamp(1e-30, 1e30);
 
         self.e_process_log += ADAPTIVE_EPROCESS_LAMBDA
             .mul_add(reward - 0.5, -(ADAPTIVE_EPROCESS_LAMBDA.powi(2) / 8.0));

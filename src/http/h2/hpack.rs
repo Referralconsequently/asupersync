@@ -192,7 +192,7 @@ impl DynamicTable {
         let entry_size = header.size();
 
         // Evict oldest entries (at back) to make room
-        while self.size + entry_size > self.max_size && !self.entries.is_empty() {
+        while self.size.saturating_add(entry_size) > self.max_size && !self.entries.is_empty() {
             if let Some(evicted) = self.entries.pop_back() {
                 self.size = self.size.saturating_sub(evicted.size());
             }
@@ -313,8 +313,9 @@ impl Encoder {
     /// Per RFC 7541 Section 6.3, the encoder will emit a dynamic table size
     /// update at the start of the next encoded header block.
     pub fn set_max_table_size(&mut self, size: usize) {
-        self.dynamic_table.set_max_size(size);
-        self.pending_size_update = Some(size);
+        let capped = size.min(MAX_ALLOWED_TABLE_SIZE);
+        self.dynamic_table.set_max_size(capped);
+        self.pending_size_update = Some(capped);
     }
 
     /// Encode a list of headers.

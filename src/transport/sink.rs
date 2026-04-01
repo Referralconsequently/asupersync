@@ -382,6 +382,11 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
             // Local capacity is already committed or an older staged backlog
             // exists. Queue the symbol before flushing so direct poll_send()
             // callers never lose ownership or leapfrog earlier staged work.
+            // Cap staged_symbols to prevent unbounded growth when the inner
+            // sink is blocked.
+            if this.staged_symbols.len() >= this.capacity.saturating_mul(2).max(16) {
+                return Poll::Pending;
+            }
             this.staged_symbols.push_back(symbol);
             match Pin::new(&mut *this).poll_flush(cx) {
                 Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),

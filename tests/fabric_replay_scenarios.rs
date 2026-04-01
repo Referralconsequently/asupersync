@@ -206,9 +206,10 @@ fn assert_dpor_clean(label: &str, seed: u64, max_runs: usize, build: fn(&mut Lab
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn schedule_leaf_partition(
     runtime: &mut LabRuntime,
-    summary: Arc<Mutex<Option<LeafPartitionSummary>>>,
+    summary: &Arc<Mutex<Option<LeafPartitionSummary>>>,
 ) {
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let bridge = Arc::new(Mutex::new(
@@ -252,10 +253,12 @@ fn schedule_leaf_partition(
                         )
                         .expect("forward initial route");
                     bridge.mark_degraded().expect("degrade");
-                    matches!(
+                    let forwarded = matches!(
                         immediate,
                         asupersync::messaging::federation::LeafRouteDisposition::Forwarded { .. }
-                    )
+                    );
+                    drop(bridge);
+                    forwarded
                 };
                 partitioned.store(true, Ordering::SeqCst);
 
@@ -284,6 +287,7 @@ fn schedule_leaf_partition(
                     .map(|route| route.subject.canonical_key())
                     .collect::<Vec<_>>();
                 drained_subjects.sort_unstable();
+                drop(bridge);
                 *summary.lock().expect("summary lock") = Some(LeafPartitionSummary {
                     immediate_forwarded,
                     drained_routes: drain.routes.len(),
@@ -338,7 +342,7 @@ fn schedule_leaf_partition(
 fn run_leaf_partition(seed: u64) -> LeafPartitionSummary {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let summary = Arc::new(Mutex::new(None));
-    schedule_leaf_partition(&mut runtime, Arc::clone(&summary));
+    schedule_leaf_partition(&mut runtime, &summary);
     assert_runtime_clean(&mut runtime, "leaf partition replay");
     summary
         .lock()
@@ -348,12 +352,13 @@ fn run_leaf_partition(seed: u64) -> LeafPartitionSummary {
 }
 
 fn build_leaf_partition(runtime: &mut LabRuntime) {
-    schedule_leaf_partition(runtime, Arc::new(Mutex::new(None)));
+    let summary = Arc::new(Mutex::new(None));
+    schedule_leaf_partition(runtime, &summary);
 }
 
 fn schedule_capability_revocation(
     runtime: &mut LabRuntime,
-    summary: Arc<Mutex<Option<CapabilityRevocationSummary>>>,
+    summary: &Arc<Mutex<Option<CapabilityRevocationSummary>>>,
 ) {
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let parent = Arc::new(test_fabric_cx(410));
@@ -462,7 +467,7 @@ fn schedule_capability_revocation(
 fn run_capability_revocation(seed: u64) -> CapabilityRevocationSummary {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let summary = Arc::new(Mutex::new(None));
-    schedule_capability_revocation(&mut runtime, Arc::clone(&summary));
+    schedule_capability_revocation(&mut runtime, &summary);
     assert_runtime_clean(&mut runtime, "capability revocation replay");
     summary
         .lock()
@@ -472,10 +477,11 @@ fn run_capability_revocation(seed: u64) -> CapabilityRevocationSummary {
 }
 
 fn build_capability_revocation(runtime: &mut LabRuntime) {
-    schedule_capability_revocation(runtime, Arc::new(Mutex::new(None)));
+    let summary = Arc::new(Mutex::new(None));
+    schedule_capability_revocation(runtime, &summary);
 }
 
-fn schedule_ack_race(runtime: &mut LabRuntime, summary: Arc<Mutex<Option<AckRaceSummary>>>) {
+fn schedule_ack_race(runtime: &mut LabRuntime, summary: &Arc<Mutex<Option<AckRaceSummary>>>) {
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let owner = FabricConsumerOwner {
         holder: TaskId::new_for_test(41, 0),
@@ -503,7 +509,7 @@ fn schedule_ack_race(runtime: &mut LabRuntime, summary: Arc<Mutex<Option<AckRace
                     .expect("consumer lock")
                     .dispatch_push(window, &capsule, None)
                     .expect("dispatch push");
-                *attempt.lock().expect("attempt lock") = Some(delivery.attempt.clone());
+                *attempt.lock().expect("attempt lock") = Some(delivery.attempt);
             })
             .expect("create dispatch task");
         runtime.scheduler.lock().schedule(task_id, 0);
@@ -518,7 +524,8 @@ fn schedule_ack_race(runtime: &mut LabRuntime, summary: Arc<Mutex<Option<AckRace
             .state
             .create_task(region, Budget::INFINITE, async move {
                 let attempt = loop {
-                    if let Some(attempt) = attempt.lock().expect("attempt lock").clone() {
+                    let ready_attempt = attempt.lock().expect("attempt lock").clone();
+                    if let Some(attempt) = ready_attempt {
                         break attempt;
                     }
                     yield_now().await;
@@ -538,6 +545,7 @@ fn schedule_ack_race(runtime: &mut LabRuntime, summary: Arc<Mutex<Option<AckRace
                     AckResolution::Committed { .. } => counts.0 += 1,
                     AckResolution::StaleNoOp { .. } => counts.1 += 1,
                 }
+                drop(counts);
                 acked.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create ack task");
@@ -583,7 +591,7 @@ fn schedule_ack_race(runtime: &mut LabRuntime, summary: Arc<Mutex<Option<AckRace
 fn run_ack_race(seed: u64) -> AckRaceSummary {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let summary = Arc::new(Mutex::new(None));
-    schedule_ack_race(&mut runtime, Arc::clone(&summary));
+    schedule_ack_race(&mut runtime, &summary);
     assert_runtime_clean(&mut runtime, "ack race replay");
     summary
         .lock()
@@ -593,12 +601,14 @@ fn run_ack_race(seed: u64) -> AckRaceSummary {
 }
 
 fn build_ack_race(runtime: &mut LabRuntime) {
-    schedule_ack_race(runtime, Arc::new(Mutex::new(None)));
+    let summary = Arc::new(Mutex::new(None));
+    schedule_ack_race(runtime, &summary);
 }
 
+#[allow(clippy::too_many_lines)]
 fn schedule_replication_reorder(
     runtime: &mut LabRuntime,
-    summary: Arc<Mutex<Option<ReplicationReorderSummary>>>,
+    summary: &Arc<Mutex<Option<ReplicationReorderSummary>>>,
 ) {
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let stream = Arc::new(Mutex::new(
@@ -690,6 +700,7 @@ fn schedule_replication_reorder(
                 let mut stream = stream.lock().expect("stream lock");
                 let closed_after_drain = stream.close().is_ok();
                 let snapshot_state = stream.snapshot().expect("snapshot");
+                drop(stream);
                 *summary.lock().expect("summary lock") = Some(ReplicationReorderSummary {
                     catch_up_action: catch_up.action,
                     snapshot_sequence: snapshot.sequence,
@@ -753,7 +764,7 @@ fn schedule_replication_reorder(
 fn run_replication_reorder(seed: u64) -> ReplicationReorderSummary {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let summary = Arc::new(Mutex::new(None));
-    schedule_replication_reorder(&mut runtime, Arc::clone(&summary));
+    schedule_replication_reorder(&mut runtime, &summary);
     assert_runtime_clean(&mut runtime, "replication reorder replay");
     summary
         .lock()
@@ -763,12 +774,14 @@ fn run_replication_reorder(seed: u64) -> ReplicationReorderSummary {
 }
 
 fn build_replication_reorder(runtime: &mut LabRuntime) {
-    schedule_replication_reorder(runtime, Arc::new(Mutex::new(None)));
+    let summary = Arc::new(Mutex::new(None));
+    schedule_replication_reorder(runtime, &summary);
 }
 
+#[allow(clippy::too_many_lines)]
 fn schedule_advisory_storm(
     runtime: &mut LabRuntime,
-    summary: Arc<Mutex<Option<AdvisoryStormSummary>>>,
+    summary: &Arc<Mutex<Option<AdvisoryStormSummary>>>,
 ) {
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let bridge = Arc::new(Mutex::new(
@@ -920,7 +933,7 @@ fn schedule_advisory_storm(
 fn run_advisory_storm(seed: u64) -> AdvisoryStormSummary {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let summary = Arc::new(Mutex::new(None));
-    schedule_advisory_storm(&mut runtime, Arc::clone(&summary));
+    schedule_advisory_storm(&mut runtime, &summary);
     assert_runtime_clean(&mut runtime, "advisory storm replay");
     summary
         .lock()
@@ -930,7 +943,8 @@ fn run_advisory_storm(seed: u64) -> AdvisoryStormSummary {
 }
 
 fn build_advisory_storm(runtime: &mut LabRuntime) {
-    schedule_advisory_storm(runtime, Arc::new(Mutex::new(None)));
+    let summary = Arc::new(Mutex::new(None));
+    schedule_advisory_storm(runtime, &summary);
 }
 
 #[test]

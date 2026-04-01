@@ -671,8 +671,23 @@ fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut
 
 fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     let line = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
-    let size_part = line.split(';').next().unwrap_or("").trim();
+    // Split on ';' to separate chunk-size from optional chunk-ext (RFC 7230 §4.1).
+    // Do NOT trim — chunk-size = 1*HEXDIG with no leading/trailing whitespace.
+    // Trimming would mask differences from stricter proxies (request smuggling vector).
+    let size_part = line.split(';').next().unwrap_or("");
     if size_part.is_empty() {
+        return Err(HttpError::BadChunkedEncoding);
+    }
+    // Reject leading/trailing whitespace explicitly to prevent smuggling.
+    if size_part
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_whitespace)
+        || size_part
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_whitespace)
+    {
         return Err(HttpError::BadChunkedEncoding);
     }
     usize::from_str_radix(size_part, 16).map_err(|_| HttpError::BadChunkedEncoding)
