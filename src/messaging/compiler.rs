@@ -758,7 +758,8 @@ fn estimate_protocol_cost(protocol: &ProtocolContract, subjects: &[SubjectSchema
     if choice_count > 0 {
         #[allow(clippy::cast_precision_loss)]
         {
-            cost.control_plane_amplification += 0.05 * choice_count as f64;
+            cost.control_plane_amplification =
+                0.05f64.mul_add(choice_count as f64, cost.control_plane_amplification);
         }
         add_cpu_cost(
             &mut cost,
@@ -810,7 +811,8 @@ fn apply_consumer_policy_delta(cost: &mut CostVector, consumer: &ConsumerPolicy)
     }
     if let Some(window) = consumer.replay_window {
         let secs = window.as_secs().min(3600);
-        cost.storage_amplification += secs as f64 / 3600.0 * 0.2;
+        cost.storage_amplification =
+            (secs as f64 / 3600.0).mul_add(0.2, cost.storage_amplification);
     }
 }
 
@@ -886,7 +888,8 @@ fn estimate_capability_cost(capability: &CapabilityTokenSchema) -> CostVector {
         .max()
         .unwrap_or_default();
     let mut cost = CostVector::baseline_for_delivery_class(strongest_class);
-    cost.control_plane_amplification += capability.permissions.len() as f64 * 0.03;
+    cost.control_plane_amplification =
+        (capability.permissions.len() as f64).mul_add(0.03, cost.control_plane_amplification);
     add_cpu_cost(
         &mut cost,
         capability.permissions.len() as u64 * 2,
@@ -902,7 +905,8 @@ fn estimate_retention_cost(retention: &RetentionPolicy) -> CostVector {
         RetentionPolicy::RetainFor { duration } => {
             let secs = duration.as_secs().min(3600);
             let mut cost = CostVector::zero();
-            cost.storage_amplification += secs as f64 / 3600.0 * 0.25;
+            cost.storage_amplification =
+                (secs as f64 / 3600.0).mul_add(0.25, cost.storage_amplification);
             add_restore_time(
                 &mut cost,
                 Duration::from_millis(5),
@@ -913,7 +917,8 @@ fn estimate_retention_cost(retention: &RetentionPolicy) -> CostVector {
         }
         RetentionPolicy::RetainForEvents { events } => {
             let mut cost = CostVector::zero();
-            cost.storage_amplification += (*events).min(10_000) as f64 / 10_000.0 * 0.35;
+            cost.storage_amplification =
+                ((*events).min(10_000) as f64 / 10_000.0).mul_add(0.35, cost.storage_amplification);
             cost
         }
         RetentionPolicy::Forever => {

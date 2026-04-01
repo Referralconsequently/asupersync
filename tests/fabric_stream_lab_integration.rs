@@ -309,8 +309,9 @@ fn run_push_ack_scenario(seed: u64) -> (PushAckSummary, Vec<StreamConsumerLogEnt
                 };
                 let stats = consumer.obligation_stats();
                 let committed_against = match against {
-                    CursorLeaseHolder::Steward(node) => node.as_str().to_string(),
-                    CursorLeaseHolder::Relay(node) => node.as_str().to_string(),
+                    CursorLeaseHolder::Steward(node) | CursorLeaseHolder::Relay(node) => {
+                        node.as_str().to_string()
+                    }
                 };
                 push_log(
                     &log,
@@ -352,6 +353,7 @@ fn run_push_ack_scenario(seed: u64) -> (PushAckSummary, Vec<StreamConsumerLogEnt
     (summary, log_entries, runtime.steps())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_pull_flow_scenario(seed: u64) -> (PullFlowSummary, Vec<StreamConsumerLogEntry>, u64) {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
