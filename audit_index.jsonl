@@ -2090,3 +2090,11 @@
 {"file":"src/web/extract.rs","lines":1245,"batch":493,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"JSON/form/multipart size limits enforced, no XXE risk, UTF-8 validated, serde recursion bounded"}
 {"file":"src/web/multipart.rs","lines":815,"batch":493,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Boundary validation, part count limit (1024), header size limit (8K), filename is metadata only"}
 {"file":"src/web/middleware.rs","lines":2889,"batch":493,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CORS origin echo with credentials is standard pattern (same as tower-http). Design footgun noted but not a code bug."}
+{"file":"src/database/mysql.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: transaction commit/rollback deferred-finished pattern, correct Drop safety"}
+{"file":"src/database/postgres.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: identical deferred-finished fix for PgTransaction"}
+{"file":"src/session.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: map_send_error preserves Cancelled, tests confirm"}
+{"file":"src/service/buffer.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: wake parked poll_ready waiters on close"}
+{"file":"src/sync/pool.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: waiter FIFO fix, cancel cleanup, Duration migration"}
+{"file":"src/database/pool.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: narrow mutex scope in return/discard connection"}
+{"file":"src/messaging/fabric.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: decision_records bounded to 10k entries"}
+{"file":"src/sync/mutex.rs","lines":0,"batch":495,"date":"2026-03-31","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: mutex_deadlock_test rewrite without tokio dependency"}
