@@ -1151,7 +1151,10 @@ fn parse_dns_response(packet: &[u8], expected_id: u16) -> Result<ParsedDnsRespon
         let _ = read_u16(packet, &mut offset)?;
     }
 
-    let mut answers = Vec::with_capacity(answer_count);
+    // Cap pre-allocation to prevent attacker-controlled answer_count
+    // from causing excessive memory allocation (max 512 answers is
+    // well beyond any legitimate DNS response).
+    let mut answers = Vec::with_capacity(answer_count.min(512));
     for _ in 0..answer_count {
         if let Some(answer) = parse_dns_answer(packet, &mut offset)? {
             answers.push(answer);

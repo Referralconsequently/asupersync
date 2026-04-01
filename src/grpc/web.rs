@@ -194,7 +194,9 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
         }
     }
 
-    let code = Code::from_i32(status_code.unwrap_or(0));
+    // Per gRPC spec, trailers MUST include grpc-status. If absent, treat as
+    // internal error rather than success — a missing status is a protocol violation.
+    let code = Code::from_i32(status_code.unwrap_or(13)); // 13 = INTERNAL
     let status = if status_message.is_empty() {
         Status::new(code, code.as_str())
     } else {

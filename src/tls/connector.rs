@@ -495,8 +495,10 @@ impl TlsConnectorBuilder {
         }
 
         if self.root_certs.is_empty() {
-            #[cfg(feature = "tracing-integration")]
-            tracing::warn!("Building TlsConnector with no root certificates");
+            return Err(TlsError::Certificate(
+                "no root certificates configured — server certificates cannot be verified"
+                    .to_string(),
+            ));
         }
 
         // Create the config builder with the crypto provider and protocol versions.

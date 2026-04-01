@@ -1376,14 +1376,16 @@ impl ScramAuth {
         })?;
         let expected_sig = Self::hmac_sha256(&server_key, auth_message.as_bytes());
 
-        // Use constant-time comparison to prevent timing side-channel
-        // attacks against SCRAM mutual authentication.
-        let sig_matches = server_sig.len() == expected_sig.len()
-            && server_sig
-                .iter()
-                .zip(expected_sig.iter())
-                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                == 0;
+        // Constant-time comparison to prevent timing side-channel attacks
+        // against SCRAM mutual authentication. The length check must not
+        // short-circuit the content comparison.
+        let len_ok = server_sig.len() == expected_sig.len();
+        let content_ok = server_sig
+            .iter()
+            .zip(expected_sig.iter())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0;
+        let sig_matches = len_ok & content_ok;
         if !sig_matches {
             return Err(PgError::AuthenticationFailed(
                 "server signature mismatch".to_string(),
