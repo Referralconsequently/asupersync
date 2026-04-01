@@ -542,13 +542,15 @@ impl DecodingPipeline {
                     RejectReason::SymbolSizeMismatch,
                 ));
             }
-            Err(_err) => {
+            Err(err) => {
                 let block = self.blocks.get_mut(&sbn);
                 if let Some(block) = block {
                     block.state = BlockDecodingState::Failed;
                 }
                 #[cfg(feature = "tracing-integration")]
                 tracing::error!(sbn = sbn, error = %err, "unexpected error during block decode");
+                #[cfg(not(feature = "tracing-integration"))]
+                let _ = &err;
                 return Some(SymbolAcceptResult::Rejected(
                     RejectReason::InconsistentEquations,
                 ));

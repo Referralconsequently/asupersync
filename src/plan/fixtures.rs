@@ -780,6 +780,7 @@ fn execute_plan_in_lab_traced(seed: u64, dag: &PlanDag) -> (BTreeSet<String>, u6
 }
 
 /// Core plan execution logic used by both the standard and traced variants.
+#[allow(clippy::too_many_lines)]
 fn execute_plan_in_lab_core(
     runtime: &mut LabRuntime,
     seed: u64,
@@ -838,7 +839,7 @@ fn execute_plan_in_lab_core(
 
     // Schedule all tasks.
     {
-        let _is_empty = {
+        let is_empty = {
             let mut sched = runtime.scheduler.lock();
             for tid in &task_ids {
                 sched.schedule(*tid, crate::types::Budget::INFINITE.priority);
@@ -848,16 +849,20 @@ fn execute_plan_in_lab_core(
         crate::tracing_compat::trace!(
             "plan fixtures scheduled {} tasks (scheduler_empty={})",
             task_ids.len(),
-            _is_empty
+            is_empty
         );
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = is_empty;
     }
 
-    let _steps = runtime.run_with_auto_advance().steps;
+    let steps = runtime.run_with_auto_advance().steps;
     crate::tracing_compat::trace!(
         "plan fixtures first run finished in {} steps (quiescent={})",
-        _steps,
+        steps,
         runtime.is_quiescent()
     );
+    #[cfg(not(feature = "tracing-integration"))]
+    let _ = steps;
 
     // Reschedule retry for robustness (golden_outputs pattern).
     let mut attempts = 0;

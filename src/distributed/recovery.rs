@@ -616,11 +616,13 @@ impl StateDecoder {
                 SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded) => {
                     // Additional symbols after decode are fine; ignore them.
                 }
-                SymbolAcceptResult::Rejected(_reason) => {
+                SymbolAcceptResult::Rejected(reason) => {
                     // Do not fail the entire batch just because one symbol was bad.
                     // We might have enough valid symbols in the rest of the batch.
                     #[cfg(feature = "tracing-integration")]
                     tracing::warn!(reason = ?reason, "ignoring rejected symbol during recovery");
+                    #[cfg(not(feature = "tracing-integration"))]
+                    let _ = &reason;
                 }
                 _ => {}
             }

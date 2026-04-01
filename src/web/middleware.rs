@@ -936,8 +936,8 @@ impl<H: Handler> RequestTraceMiddleware<H> {
 
 impl<H: Handler> Handler for RequestTraceMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let _method = req.method.clone();
-        let _path = req.path.clone();
+        let method = req.method.clone();
+        let path = req.path.clone();
         let trace_id = Self::resolve_trace_id(&req);
         let start = (self.time_getter)();
 
@@ -985,6 +985,9 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
                 "http request completed"
             );
         }
+
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = (&method, &path);
 
         resp
     }

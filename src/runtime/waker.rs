@@ -31,6 +31,19 @@ pub enum WakeSource {
     Unknown,
 }
 
+impl WakeSource {
+    #[inline]
+    #[must_use]
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Timer => "timer",
+            Self::Io { .. } => "io",
+            Self::Explicit => "explicit",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Shared state for the waker system.
 #[derive(Debug, Default)]
 pub struct WakerState {
@@ -89,18 +102,13 @@ impl WakerState {
         !woken.is_empty()
     }
 
+    #[allow(unused_variables)] // source used by trace! macro when tracing is enabled
     fn wake(&self, task: TaskId, source: WakeSource) {
         let mut woken = self.woken.lock();
         if woken.insert(task) {
-            let _source_label = match source {
-                WakeSource::Timer => "timer",
-                WakeSource::Io { .. } => "io",
-                WakeSource::Explicit => "explicit",
-                WakeSource::Unknown => "unknown",
-            };
             trace!(
                 task_id = ?task,
-                wake_source = source_label,
+                wake_source = source.label(),
                 "task woken"
             );
         }
@@ -339,5 +347,35 @@ mod tests {
             WakeSource::Io { fd: 3 } != WakeSource::Io { fd: 5 }
         );
         crate::test_complete!("wake_source_equality");
+    }
+
+    #[test]
+    fn wake_source_labels_are_stable() {
+        init_test("wake_source_labels_are_stable");
+        crate::assert_with_log!(
+            WakeSource::Timer.label() == "timer",
+            "timer label is stable",
+            "timer",
+            WakeSource::Timer.label()
+        );
+        crate::assert_with_log!(
+            WakeSource::Io { fd: 9 }.label() == "io",
+            "io label is stable",
+            "io",
+            WakeSource::Io { fd: 9 }.label()
+        );
+        crate::assert_with_log!(
+            WakeSource::Explicit.label() == "explicit",
+            "explicit label is stable",
+            "explicit",
+            WakeSource::Explicit.label()
+        );
+        crate::assert_with_log!(
+            WakeSource::Unknown.label() == "unknown",
+            "unknown label is stable",
+            "unknown",
+            WakeSource::Unknown.label()
+        );
+        crate::test_complete!("wake_source_labels_are_stable");
     }
 }

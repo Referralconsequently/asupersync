@@ -999,13 +999,16 @@ impl Consumer {
             }
         }
 
-        if let Err(_err) = client.unsubscribe(cx, sid).await {
+        #[allow(unused_variables)] // err used by warn! macro when tracing is enabled
+        if let Err(err) = client.unsubscribe(cx, sid).await {
             warn!(
                 subject = %sub.subject(),
                 sid,
                 error = ?err,
                 "JetStream pull unsubscribe failed"
             );
+            #[cfg(not(feature = "tracing-integration"))]
+            let _ = &err;
         }
 
         result.map(|()| messages)
