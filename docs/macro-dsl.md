@@ -9,11 +9,17 @@ testing.
 
 ## Enable Macros
 
-Enable the `proc-macros` feature and import the macros you need.
+The macro DSL ships in the default feature set, so a standard dependency is
+enough. If you disable default features, re-enable `proc-macros` explicitly.
 
 ```toml
 [dependencies]
-asupersync = { path = ".", features = ["proc-macros"] }
+asupersync = { path = "." }
+```
+
+```toml
+[dependencies]
+asupersync = { path = ".", default-features = false, features = ["proc-macros"] }
 ```
 
 ```rust

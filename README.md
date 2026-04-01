@@ -928,10 +928,12 @@ let winner = race!(cx, {
 });
 ```
 
-Enable them with the `proc-macros` feature. The macros expand to standard
-`Scope`/`Cx` calls with proper region ownership. Compile-fail tests (via
-`trybuild`) verify that incorrect usage produces clear error messages. See
-`docs/macro-dsl.md` for the full pattern catalog.
+These macros are available in the default feature set. If you opt out of
+default features for a minimal core-only build, re-enable `proc-macros`
+explicitly. The macros expand to standard `Scope`/`Cx` calls with proper
+region ownership. Compile-fail tests (via `trybuild`) verify that incorrect
+usage produces clear error messages. See `docs/macro-dsl.md` for the full
+pattern catalog.
 
 ---
 
@@ -1110,7 +1112,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `test-internals` | Expose test-only helpers (not for production) | Yes |
 | `metrics` | OpenTelemetry metrics provider | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
-| `proc-macros` | `scope!`, `spawn!`, `join!`, `race!` proc macros | No |
+| `proc-macros` | `scope!`, `spawn!`, `join!`, `race!` proc macros | Yes |
 | `tower` | Tower `Service` adapter support | No |
 | `trace-compression` | LZ4 compression for trace files | No |
 | `debug-server` | Debug HTTP server for runtime inspection | No |

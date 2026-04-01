@@ -283,8 +283,9 @@ pub use types::{
 };
 
 // Re-export proc macros from the crate root when the proc-macros feature is
-// enabled. The fallback compile_error! macro_rules! placeholders in
-// combinator/ are only exported when this feature is disabled.
+// enabled. Default builds include this feature; the fallback compile_error!
+// macro_rules! placeholders in combinator/ are only exported by explicit
+// minimal builds that disable default features.
 #[cfg(feature = "proc-macros")]
 pub use asupersync_macros::{join, join_all, race, scope, spawn};
 

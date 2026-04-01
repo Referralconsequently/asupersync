@@ -29,7 +29,8 @@ fn main() -> Result<(), asupersync::Error> {
 ```
 
 Notes:
-- The `scope!` macro requires the `proc-macros` feature.
+- The `scope!` macro is available in default builds; if you disable default
+  features, re-enable `proc-macros`.
 - `Cx::for_request()` is convenient for integration testing and request-style entry points.
 - Production code should receive `Cx` from runtime-managed tasks when available.
 - Use `Cx` and `Scope` for all effects: no ambient authority.
