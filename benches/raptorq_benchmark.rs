@@ -10,16 +10,17 @@
 #![allow(missing_docs)]
 #![recursion_limit = "512"]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    DualKernelDecisionDetail, DualKernelModeFallbackReason, Gf256, Gf256ProfileFallbackReason,
-    Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot, dual_addmul_kernel_decision_detail,
-    dual_mul_kernel_decision_detail, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice,
-    gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
+    dual_addmul_kernel_decision_detail, dual_mul_kernel_decision_detail, gf256_add_slice,
+    gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice,
+    gf256_mul_slices2, gf256_profile_pack_manifest_snapshot, DualKernelDecisionDetail,
+    DualKernelModeFallbackReason, Gf256, Gf256ProfileFallbackReason, Gf256ProfilePackId,
+    Gf256ProfilePackManifestSnapshot,
 };
-use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
+use asupersync::raptorq::linalg::{row_scale_add, row_xor, DenseRow, GaussianSolver};
 use asupersync::raptorq::systematic::SystematicEncoder;
 
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
