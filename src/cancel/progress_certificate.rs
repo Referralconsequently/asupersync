@@ -658,7 +658,7 @@ impl ProgressCertificate {
 
         let denom = 2.0 * step_bound.mul_add(lambda / 3.0, predictable_variation);
 
-        if denom <= 0.0 {
+        if !denom.is_finite() || denom <= 0.0 {
             return 1.0;
         }
 
@@ -1039,7 +1039,13 @@ impl ProgressCertificate {
         // Var = E[Δ²] - (E[Δ])²
         let mean_sq = self.sum_delta_sq / steps;
         let variance = mean_delta.mul_add(-mean_delta, mean_sq);
-        Some(variance.max(0.0)) // clamp numerical noise
+        // Clamp numerical noise AND NaN (inf - inf from overflow) to 0.0.
+        // NaN.max(0.0) returns NaN per IEEE 754, so we must check explicitly.
+        Some(if variance.is_finite() && variance > 0.0 {
+            variance
+        } else {
+            0.0
+        })
     }
 
     /// Checks whether the supermartingale property approximately holds.

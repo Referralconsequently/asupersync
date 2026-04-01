@@ -135,6 +135,18 @@ fn is_disk_full_os_error(code: Option<i32>) -> bool {
     }
 }
 
+fn validate_event_len(len: usize) -> TraceFileResult<()> {
+    if len > MAX_EVENT_LEN {
+        return Err(TraceFileError::OversizedField {
+            field: "event_len",
+            actual: len as u64,
+            max: MAX_EVENT_LEN as u64,
+        });
+    }
+
+    Ok(())
+}
+
 fn truncated_or_io(err: io::Error) -> TraceFileError {
     if err.kind() == io::ErrorKind::UnexpectedEof {
         TraceFileError::Truncated
@@ -1050,13 +1062,7 @@ impl TraceReader {
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Guard against oversized event length (DoS mitigation — issues #8, #10)
-        if len > MAX_EVENT_LEN {
-            return Err(TraceFileError::OversizedField {
-                field: "event_len",
-                actual: len as u64,
-                max: MAX_EVENT_LEN as u64,
-            });
-        }
+        validate_event_len(len)?;
 
         // Read event data
         let mut event_bytes = vec![0u8; len];
@@ -1086,6 +1092,7 @@ impl TraceReader {
             .try_into()
             .map_err(|_| TraceFileError::Truncated)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
+        validate_event_len(len)?;
         self.buffer_pos += 4;
 
         // Read event data from buffer
@@ -1243,13 +1250,7 @@ impl TraceEventIterator {
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Guard against oversized event length (DoS mitigation — issues #8, #10)
-        if len > MAX_EVENT_LEN {
-            return Err(TraceFileError::OversizedField {
-                field: "event_len",
-                actual: len as u64,
-                max: MAX_EVENT_LEN as u64,
-            });
-        }
+        validate_event_len(len)?;
 
         // Read event data
         let mut event_bytes = vec![0u8; len];
@@ -1284,6 +1285,7 @@ impl TraceEventIterator {
                 Err(_) => return Err(TraceFileError::Truncated),
             };
         let len = u32::from_le_bytes(len_bytes) as usize;
+        validate_event_len(len)?;
         self.buffer_pos += 4;
 
         // Read event data from buffer
@@ -2137,6 +2139,76 @@ mod tests {
                 .expect("iterator should emit an error for the missing chunk");
             assert!(
                 matches!(first, Err(TraceFileError::Truncated)),
+                "got: {first:?}"
+            );
+        }
+
+        #[test]
+        fn reader_read_event_rejects_oversized_event_len_in_compressed_stream() {
+            let temp = NamedTempFile::new().expect("create temp file");
+            let path = temp.path();
+            let mut file = std::fs::File::create(path).expect("create file");
+            write_header_with_metadata(&mut file, CompressionMode::Lz4 { level: 1 });
+            file.write_all(&1u64.to_le_bytes())
+                .expect("write event count");
+
+            let oversized_len = u32::try_from(MAX_EVENT_LEN + 1).expect("event limit fits in u32");
+            let compressed = lz4_flex::compress_prepend_size(&oversized_len.to_le_bytes());
+            let chunk_len = u32::try_from(compressed.len()).expect("compressed chunk fits in u32");
+            file.write_all(&chunk_len.to_le_bytes())
+                .expect("write chunk len");
+            file.write_all(&compressed).expect("write chunk");
+            file.flush().expect("flush");
+            drop(file);
+
+            let mut reader = TraceReader::open(path).expect("open reader");
+            let err = reader
+                .read_event()
+                .expect_err("oversized event len must error");
+            assert!(
+                matches!(
+                    err,
+                    TraceFileError::OversizedField {
+                        field: "event_len",
+                        actual,
+                        max,
+                    } if actual == (MAX_EVENT_LEN as u64) + 1 && max == MAX_EVENT_LEN as u64
+                ),
+                "got: {err:?}"
+            );
+        }
+
+        #[test]
+        fn event_iterator_rejects_oversized_event_len_in_compressed_stream() {
+            let temp = NamedTempFile::new().expect("create temp file");
+            let path = temp.path();
+            let mut file = std::fs::File::create(path).expect("create file");
+            write_header_with_metadata(&mut file, CompressionMode::Lz4 { level: 1 });
+            file.write_all(&1u64.to_le_bytes())
+                .expect("write event count");
+
+            let oversized_len = u32::try_from(MAX_EVENT_LEN + 1).expect("event limit fits in u32");
+            let compressed = lz4_flex::compress_prepend_size(&oversized_len.to_le_bytes());
+            let chunk_len = u32::try_from(compressed.len()).expect("compressed chunk fits in u32");
+            file.write_all(&chunk_len.to_le_bytes())
+                .expect("write chunk len");
+            file.write_all(&compressed).expect("write chunk");
+            file.flush().expect("flush");
+            drop(file);
+
+            let mut iter = TraceReader::open(path).expect("open reader").events();
+            let first = iter
+                .next()
+                .expect("iterator should emit an error for oversized event len");
+            assert!(
+                matches!(
+                    first,
+                    Err(TraceFileError::OversizedField {
+                        field: "event_len",
+                        actual,
+                        max,
+                    }) if actual == (MAX_EVENT_LEN as u64) + 1 && max == MAX_EVENT_LEN as u64
+                ),
                 "got: {first:?}"
             );
         }

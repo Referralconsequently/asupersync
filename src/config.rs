@@ -75,6 +75,19 @@ impl RaptorQConfig {
             ));
         }
 
+        // Backoff multiplier must be finite and positive.
+        let m = self.transport.dead_path_backoff.multiplier;
+        if !m.is_finite() || m <= 0.0 {
+            return Err(ConfigError::InvalidBackoffMultiplier);
+        }
+
+        // Initial delay must not exceed max delay.
+        if self.transport.dead_path_backoff.initial_delay
+            > self.transport.dead_path_backoff.max_delay
+        {
+            return Err(ConfigError::InvalidBackoffRange);
+        }
+
         Ok(())
     }
 }
@@ -612,6 +625,10 @@ pub enum ConfigError {
     InvalidSampleRate(f64),
     /// Invalid env override.
     InvalidOverride(String),
+    /// Backoff multiplier must be finite and positive.
+    InvalidBackoffMultiplier,
+    /// Initial backoff delay exceeds max delay.
+    InvalidBackoffRange,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -629,6 +646,12 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "sample_rate out of range: {value}")
             }
             Self::InvalidOverride(key) => write!(f, "invalid override: {key}"),
+            Self::InvalidBackoffMultiplier => {
+                write!(f, "backoff multiplier must be finite and positive")
+            }
+            Self::InvalidBackoffRange => {
+                write!(f, "backoff initial_delay must not exceed max_delay")
+            }
         }
     }
 }

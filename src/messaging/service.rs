@@ -2286,6 +2286,16 @@ pub enum ServiceBoundaryError {
         /// Destination language declared by the morphism.
         dest_language: String,
     },
+    /// Subject-only transfer requires the morphism destination to bind one exact target.
+    #[error(
+        "subject-only service transfer to `{target_subject}` requires exact morphism destination, got `{dest_language}`"
+    )]
+    TransferRequiresExactMorphismDestination {
+        /// Concrete target subject passed to the transfer.
+        target_subject: String,
+        /// Destination language declared by the morphism.
+        dest_language: String,
+    },
     /// Subject-only transfer helpers require unrestricted mobility.
     #[error(
         "subject-only service transfer to `{target_subject}` requires unrestricted mobility, got `{constraint}`"
@@ -2571,7 +2581,10 @@ impl FabricServiceBoundary {
     ///
     /// This helper operates on subject-level evidence only, so it fails closed
     /// unless the admitted request has unrestricted mobility and the obligation
-    /// is still positioned at this boundary's request subject.
+    /// is still positioned at this boundary's request subject. Because the
+    /// helper only carries one concrete target subject, the morphism
+    /// destination must also bind that exact endpoint instead of a broader
+    /// destination language.
     pub fn transfer_request_via_import(
         &self,
         admission: &ServiceAdmission,
@@ -2589,6 +2602,7 @@ impl FabricServiceBoundary {
         self.ensure_transfer_request_matches(admission, obligation)?;
         Self::ensure_transfer_mobility(&admission.validated, &target_subject)?;
         Self::ensure_morphism_target(morphism, &target_subject)?;
+        Self::ensure_exact_morphism_target(morphism, &target_subject)?;
         let plan = self.compile_import_plan(morphism, requested_reply_space)?;
         obligation.transfer(
             callee,
@@ -2642,6 +2656,22 @@ impl FabricServiceBoundary {
                 subject: target_subject.as_str().to_owned(),
                 dest_language: morphism.dest_language.as_str().to_owned(),
             })
+        }
+    }
+
+    fn ensure_exact_morphism_target(
+        morphism: &Morphism,
+        target_subject: &Subject,
+    ) -> Result<(), ServiceBoundaryError> {
+        if morphism.dest_language.as_str() == target_subject.as_str() {
+            Ok(())
+        } else {
+            Err(
+                ServiceBoundaryError::TransferRequiresExactMorphismDestination {
+                    target_subject: target_subject.as_str().to_owned(),
+                    dest_language: morphism.dest_language.as_str().to_owned(),
+                },
+            )
         }
     }
 
@@ -4096,6 +4126,68 @@ mod tests {
             ServiceBoundaryError::TargetOutsideMorphismDestination {
                 subject: "tenant.acme.service.wrong.lookup".to_owned(),
                 dest_language: "tenant.acme.service.edge-orders.lookup".to_owned(),
+            }
+        );
+        assert!(obligation.lineage.is_empty());
+        assert_eq!(obligation.subject, boundary.request_subject().as_str());
+    }
+
+    #[test]
+    fn service_boundary_transfer_rejects_broad_destination_language_for_subject_only_transfer() {
+        let boundary = transferable_service_boundary();
+        let mut ledger = ObligationLedger::new();
+        let caller = CallerOptions {
+            requested_class: Some(DeliveryClass::MobilitySafe),
+            ..CallerOptions::default()
+        };
+        let admission = boundary
+            .admit_request(
+                "req-transfer-broad-dest",
+                "caller-a",
+                &caller,
+                ReplySpaceRule::CallerInbox,
+                22,
+                Time::from_nanos(1),
+            )
+            .expect("admission");
+        let mut obligation = ServiceObligation::allocate(
+            &mut ledger,
+            "req-transfer-broad-dest",
+            "caller-a",
+            "orders-origin",
+            boundary.request_subject().as_str(),
+            admission.validated.delivery_class,
+            make_task(),
+            make_region(),
+            Time::from_nanos(2),
+            admission.validated.timeout,
+        )
+        .expect("allocate obligation");
+        let broad_destination = Morphism {
+            dest_language: SubjectPattern::new("tenant.acme.service.edge-orders.>"),
+            ..authoritative_import_morphism()
+        };
+
+        let error = boundary
+            .transfer_request_via_import(
+                &admission,
+                &mut obligation,
+                ImportTransferRequest::new(
+                    "orders-edge",
+                    Subject::new("tenant.acme.service.edge-orders.lookup"),
+                    "import/orders->edge",
+                    None,
+                    Time::from_nanos(3),
+                ),
+                &broad_destination,
+            )
+            .expect_err("broad destination language should fail closed");
+
+        assert_eq!(
+            error,
+            ServiceBoundaryError::TransferRequiresExactMorphismDestination {
+                target_subject: "tenant.acme.service.edge-orders.lookup".to_owned(),
+                dest_language: "tenant.acme.service.edge-orders.>".to_owned(),
             }
         );
         assert!(obligation.lineage.is_empty());

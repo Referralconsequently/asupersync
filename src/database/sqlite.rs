@@ -1604,9 +1604,7 @@ mod tests {
                 other => panic!("create table failed: {other:?}"),
             }
 
-            let tx = if let Outcome::Ok(tx) = conn.begin(&cx).await {
-                tx
-            } else {
+            let Outcome::Ok(tx) = conn.begin(&cx).await else {
                 panic!("begin failed");
             };
             match tx
@@ -1659,9 +1657,7 @@ mod tests {
                 other => panic!("set_busy_timeout failed: {other:?}"),
             }
 
-            let tx = if let Outcome::Ok(tx) = conn1.begin_immediate(&cx).await {
-                tx
-            } else {
+            let Outcome::Ok(tx) = conn1.begin_immediate(&cx).await else {
                 panic!("begin_immediate failed");
             };
 

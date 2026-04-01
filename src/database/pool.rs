@@ -335,15 +335,13 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
 
                 let mut popped = None;
-                while let Some(idle) = inner.idle.pop_front() {
+                if let Some(idle) = inner.idle.pop_front() {
                     if idle.is_expired(&self.config) || idle.is_idle_too_long(&self.config) {
                         inner.total = inner.total.saturating_sub(1);
                         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                         popped = Some((idle.conn, false, idle.created_at));
-                        break;
                     } else {
                         popped = Some((idle.conn, true, idle.created_at));
-                        break;
                     }
                 }
 
@@ -992,11 +990,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         created_at: Instant,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
         {
-            let inner = self.inner.lock();
+            let mut inner = self.inner.lock();
             if inner.closed {
+                inner.total = inner.total.saturating_sub(1);
                 drop(inner);
-                let mut inner2 = self.inner.lock();
-                inner2.total = inner2.total.saturating_sub(1);
                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                 self.manager.disconnect(conn);
                 return Err(DbPoolError::Closed);

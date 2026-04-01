@@ -645,10 +645,32 @@ impl Command {
             _ => ProcessError::Io(e),
         })?;
 
-        // Extract the I/O handles before wrapping (use take() to avoid partial move)
-        let stdin = child.stdin.take().map(ChildStdin::from_std).transpose()?;
-        let stdout = child.stdout.take().map(ChildStdout::from_std).transpose()?;
-        let stderr = child.stderr.take().map(ChildStderr::from_std).transpose()?;
+        // Extract the I/O handles before wrapping (use take() to avoid partial move).
+        // If set_nonblocking fails for any handle, kill the child to prevent zombies.
+        let stdin = child
+            .stdin
+            .take()
+            .map(ChildStdin::from_std)
+            .transpose()
+            .inspect_err(|_| {
+                let _ = child.kill();
+            })?;
+        let stdout = child
+            .stdout
+            .take()
+            .map(ChildStdout::from_std)
+            .transpose()
+            .inspect_err(|_| {
+                let _ = child.kill();
+            })?;
+        let stderr = child
+            .stderr
+            .take()
+            .map(ChildStderr::from_std)
+            .transpose()
+            .inspect_err(|_| {
+                let _ = child.kill();
+            })?;
 
         Ok(Child {
             inner: Some(child),

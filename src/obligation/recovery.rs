@@ -48,7 +48,7 @@
 use crate::obligation::crdt::{CrdtObligationLedger, LinearityViolation};
 use crate::trace::distributed::lattice::LatticeState;
 use crate::types::ObligationId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Configuration for the recovery protocol.
@@ -275,6 +275,7 @@ impl RecoveryGovernor {
         }
 
         // 2b: Conflicts
+        let mut unresolved_conflicts = BTreeSet::new();
         if budget > 0 {
             let conflicts: Vec<ObligationId> =
                 ledger.conflicts().iter().map(|(id, _)| *id).collect();
@@ -287,6 +288,7 @@ impl RecoveryGovernor {
                     ledger.force_abort_repair(id);
                     actions.push(RecoveryAction::ConflictResolved { id });
                 } else {
+                    unresolved_conflicts.insert(id);
                     actions.push(RecoveryAction::Flagged {
                         id,
                         reason: "conflict: Committed ⊔ Aborted".to_string(),
@@ -302,6 +304,12 @@ impl RecoveryGovernor {
             for v in violations {
                 if budget == 0 {
                     break;
+                }
+                if unresolved_conflicts.contains(&v.id) {
+                    // When conflict auto-resolution is disabled, the conflict
+                    // lane owns this obligation. Do not silently repair the
+                    // same entry through the linearity path.
+                    continue;
                 }
                 if self.config.auto_abort_violations {
                     ledger.force_abort_repair(v.id);
@@ -540,11 +548,6 @@ mod tests {
     fn conflict_flagged_when_auto_resolve_disabled() {
         let mut config = test_config();
         config.auto_resolve_conflicts = false;
-        // Also disable auto-abort for violations: the merged ledger has both a
-        // conflict (Committed ⊔ Aborted) and a linearity violation (2 acquires,
-        // 2 resolves). If auto_abort_violations is true, force_abort_repair()
-        // clears the conflict before remaining_conflicts is computed.
-        config.auto_abort_violations = false;
         let mut gov = RecoveryGovernor::new(config);
 
         let mut a = CrdtObligationLedger::new(node("A"));
@@ -558,13 +561,14 @@ mod tests {
         a.merge(&b);
 
         let result = gov.tick(&mut a, 0);
-        assert!(
-            result
-                .actions
-                .iter()
-                .any(|a| matches!(a, RecoveryAction::Flagged { .. }))
-        );
+        assert_eq!(result.action_count(), 1);
+        assert!(matches!(
+            &result.actions[0],
+            RecoveryAction::Flagged { id, reason }
+                if *id == oid(1) && reason == "conflict: Committed ⊔ Aborted"
+        ));
         assert!(result.remaining_conflicts > 0);
+        assert_eq!(a.get(&oid(1)), LatticeState::Conflict);
     }
 
     // ── Linearity violation recovery ────────────────────────────────────

@@ -321,15 +321,16 @@ impl GradedScope {
     ///
     /// Returns `Err` with the number of leaked obligations if any remain.
     pub fn close(mut self) -> Result<ScopeProof, ScopeLeakError> {
-        self.closed = true;
         let outstanding = self.outstanding();
         if outstanding == 0 {
+            self.closed = true;
             Ok(ScopeProof {
                 label: self.label.clone(),
                 total_reserved: self.reserved,
                 total_resolved: self.resolved,
             })
         } else {
+            // Leave self.closed = false so Drop::drop fires the leak panic.
             Err(ScopeLeakError {
                 label: self.label.clone(),
                 outstanding,
@@ -1359,5 +1360,15 @@ mod tests {
         assert!(dbg.contains("ScopeProof"), "{dbg}");
         let cloned = sp;
         assert_eq!(cloned.label, "test");
+    }
+
+    #[test]
+    #[should_panic(expected = "SCOPE LEAKED")]
+    fn close_err_drop_panics_on_outstanding_obligations() {
+        let mut scope = GradedScope::open("leak-test");
+        scope.on_reserve();
+        // close() returns Err because 1 obligation is outstanding.
+        // The scope is consumed by close(), and Drop must panic.
+        let _err = scope.close();
     }
 }

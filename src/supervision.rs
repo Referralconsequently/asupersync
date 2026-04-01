@@ -2989,9 +2989,12 @@ impl Supervisor {
                     );
                 }
 
-                let attempt = history.recent_restart_count(now) as u32 + 1;
-                let delay = history.next_delay(now);
+                // Record the restart BEFORE computing the delay so that
+                // next_delay() sees the correct attempt count and produces
+                // the right exponential backoff step.
                 history.record_restart(now);
+                let attempt = history.recent_restart_count(now) as u32;
+                let delay = history.next_delay(now);
 
                 (
                     SupervisionDecision::Restart {

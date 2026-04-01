@@ -328,15 +328,18 @@ impl Strategy for Weighted {
             return None;
         }
 
+        // Ensure state vectors cover at least `len` entries before indexing.
+        if state.weights.len() < len {
+            state.weights.resize(len, 1);
+        }
+        if state.current_weights.len() < len {
+            state.current_weights.resize(len, 0);
+        }
+
         let total_weight: i64 = state.weights[..len].iter().map(|&w| i64::from(w)).sum();
 
         if total_weight == 0 {
             return None;
-        }
-
-        // Ensure state vector matches backend count.
-        if state.current_weights.len() != len {
-            state.current_weights.resize(len, 0);
         }
 
         // SWRR: add effective weight, pick max, subtract total.
