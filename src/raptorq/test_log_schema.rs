@@ -427,6 +427,11 @@ impl UnitLogEntry {
     /// Set the artifact path.
     #[must_use]
     pub fn with_artifact_path(mut self, path: &str) -> Self {
+        let path = path.trim();
+        assert!(
+            !path.is_empty(),
+            "UnitLogEntry::with_artifact_path requires a non-empty artifact path"
+        );
         self.artifact_path = Some(path.to_string());
         self
     }
@@ -676,6 +681,7 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
 ///
 /// Returns a list of violations. An empty list means the entry is valid.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     let mut violations = Vec::new();
 
@@ -747,6 +753,19 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
                 "unrecognized outcome '{outcome}': expected one of {VALID_UNIT_OUTCOMES:?}"
             ));
         }
+    }
+
+    match value.get("artifact_path") {
+        Some(path) if path.is_null() => {}
+        Some(path) => match path.as_str() {
+            Some(text) if text.trim().is_empty() => {
+                violations
+                    .push("artifact_path must be a non-empty string when present".to_string());
+            }
+            Some(_) => {}
+            None => violations.push("artifact_path must be a string when present".to_string()),
+        },
+        None => {}
     }
 
     if let Some(decode_stats) = value.get("decode_stats") {
@@ -1342,6 +1361,47 @@ mod tests {
     }
 
     #[test]
+    fn unit_log_entry_with_artifact_path_trims_and_validates() {
+        let entry = UnitLogEntry::new(
+            "RQ-U-ARTIFACT-PATH",
+            321,
+            "k=8,symbol_size=32",
+            "replay:rq-u-artifact-path-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_with_artifact_path_trims_and_validates -- --nocapture",
+            "ok",
+        )
+        .with_artifact_path("  artifacts/raptorq/unit/RQ-U-ARTIFACT-PATH.json  ");
+
+        assert_eq!(
+            entry.artifact_path.as_deref(),
+            Some("artifacts/raptorq/unit/RQ-U-ARTIFACT-PATH.json")
+        );
+
+        let json = entry.to_json().expect("serialize");
+        let violations = validate_unit_log_json(&json);
+        assert!(
+            violations.is_empty(),
+            "trimmed artifact path should satisfy schema contract: {violations:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "UnitLogEntry::with_artifact_path requires a non-empty artifact path"
+    )]
+    fn unit_log_entry_with_artifact_path_rejects_whitespace_only_path() {
+        let _ = UnitLogEntry::new(
+            "RQ-U-EMPTY-ARTIFACT-PATH",
+            321,
+            "k=8,symbol_size=32",
+            "replay:rq-u-empty-artifact-path-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_with_artifact_path_rejects_whitespace_only_path -- --nocapture",
+            "ok",
+        )
+        .with_artifact_path("   ");
+    }
+
+    #[test]
     fn validate_unit_log_valid() {
         let entry = UnitLogEntry::new(
             "RQ-U-ROUNDTRIP",
@@ -1552,6 +1612,50 @@ mod tests {
                 "should flag `{expected}`: {violations:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_whitespace_only_artifact_path() {
+        let mut entry = serde_json::to_value(UnitLogEntry::new(
+            "RQ-U-WHITESPACE-ARTIFACT",
+            42,
+            "k=8,symbol_size=32",
+            "replay:rq-u-whitespace-artifact-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_whitespace_only_artifact_path -- --nocapture",
+            "ok",
+        ))
+        .expect("serialize to value");
+        entry["artifact_path"] = json!("   ");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v == "artifact_path must be a non-empty string when present"),
+            "should reject whitespace-only artifact_path: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_non_string_artifact_path() {
+        let mut entry = serde_json::to_value(UnitLogEntry::new(
+            "RQ-U-NONSTRING-ARTIFACT",
+            42,
+            "k=8,symbol_size=32",
+            "replay:rq-u-nonstring-artifact-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_non_string_artifact_path -- --nocapture",
+            "ok",
+        ))
+        .expect("serialize to value");
+        entry["artifact_path"] = json!(["artifact.json"]);
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v == "artifact_path must be a string when present"),
+            "should reject non-string artifact_path: {violations:?}"
+        );
     }
 
     #[test]

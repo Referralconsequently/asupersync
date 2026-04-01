@@ -740,16 +740,18 @@ impl RegionBridge {
     /// Synchronizes local state to distributed replicas (sync test path).
     ///
     /// Returns [`SyncResult::NotNeeded`] if in local mode or no changes pending.
-    pub fn sync(&mut self) -> Result<SyncResult, Error> {
+    pub fn sync(&mut self, now: Time) -> Result<SyncResult, Error> {
         if !self.mode.is_replicated() || !self.sync_state.sync_pending || self.distributed.is_none()
         {
             return Ok(SyncResult::NotNeeded);
         }
 
-        let snapshot = self.create_snapshot();
+        let snapshot = self.create_snapshot(now);
         let seq = snapshot.sequence;
+        let timestamp = snapshot.timestamp;
 
         self.sync_state.last_synced_sequence = seq;
+        self.sync_state.last_sync_time = Some(timestamp);
         self.sync_state.sync_pending = false;
         self.sync_state.pending_ops = 0;
 
@@ -758,7 +760,7 @@ impl RegionBridge {
 
     /// Creates a snapshot of current region state.
     #[must_use]
-    pub fn create_snapshot(&mut self) -> RegionSnapshot {
+    pub fn create_snapshot(&mut self, now: Time) -> RegionSnapshot {
         self.sequence += 1;
 
         let tasks: Vec<TaskSnapshot> = self
@@ -775,9 +777,7 @@ impl RegionBridge {
         RegionSnapshot {
             region_id: self.local.id,
             state: self.local.state(),
-            // TODO(SapphireHill): timestamp should capture actual current time,
-            // not Time::ZERO. Requires threading `now: Time` through callers.
-            timestamp: Time::ZERO,
+            timestamp: now,
             sequence: self.sequence,
             tasks,
             children: self.local.child_ids(),
@@ -846,6 +846,7 @@ impl RegionBridge {
         // Keep future locally created snapshots monotonic after recovery/apply.
         self.sequence = self.sequence.max(snapshot.sequence);
         self.sync_state.last_synced_sequence = snapshot.sequence;
+        self.sync_state.last_sync_time = Some(snapshot.timestamp);
         self.sync_state.sync_pending = false;
         self.sync_state.pending_ops = 0;
 
@@ -862,6 +863,7 @@ impl RegionBridge {
     /// In production, this would also encode and distribute the snapshot.
     pub fn upgrade_to_distributed(
         &mut self,
+        now: Time,
         config: DistributedRegionConfig,
         _replicas: &[ReplicaInfo],
     ) -> Result<UpgradeResult, Error> {
@@ -882,7 +884,7 @@ impl RegionBridge {
 
         config.validate()?;
 
-        let snapshot = self.create_snapshot();
+        let snapshot = self.create_snapshot(now);
         let snapshot_sequence = snapshot.sequence;
 
         let replication_factor = config.replication_factor;
@@ -1295,7 +1297,7 @@ mod tests {
     #[test]
     fn sync_not_needed_local() {
         let mut bridge = create_local_bridge();
-        let result = bridge.sync().unwrap();
+        let result = bridge.sync(Time::from_secs(1)).unwrap();
         assert!(matches!(result, SyncResult::NotNeeded));
     }
 
@@ -1304,9 +1306,11 @@ mod tests {
         let mut bridge = create_distributed_bridge();
         bridge.sync_state.sync_pending = true;
 
-        let result = bridge.sync().unwrap();
+        let sync_time = Time::from_secs(10);
+        let result = bridge.sync(sync_time).unwrap();
         assert!(matches!(result, SyncResult::Synced { .. }));
         assert!(!bridge.sync_state.sync_pending);
+        assert_eq!(bridge.sync_state.last_sync_time, Some(sync_time));
     }
 
     // =====================================================================
@@ -1317,12 +1321,14 @@ mod tests {
     fn create_snapshot_increments_sequence() {
         let mut bridge = create_local_bridge();
 
-        let snap1 = bridge.create_snapshot();
-        let snap2 = bridge.create_snapshot();
+        let snap1 = bridge.create_snapshot(Time::from_secs(10));
+        let snap2 = bridge.create_snapshot(Time::from_secs(11));
 
         assert_eq!(snap1.sequence, 1);
         assert_eq!(snap2.sequence, 2);
         assert_eq!(snap1.region_id, bridge.id());
+        assert_eq!(snap1.timestamp, Time::from_secs(10));
+        assert_eq!(snap2.timestamp, Time::from_secs(11));
     }
 
     #[test]
@@ -1331,7 +1337,7 @@ mod tests {
         bridge.add_task(TaskId::new_for_test(1, 0)).unwrap();
         bridge.add_task(TaskId::new_for_test(2, 0)).unwrap();
 
-        let snap = bridge.create_snapshot();
+        let snap = bridge.create_snapshot(Time::from_secs(20));
         assert_eq!(snap.tasks.len(), 2);
     }
 
@@ -1361,6 +1367,7 @@ mod tests {
 
         bridge.apply_snapshot(&snap).unwrap();
         assert_eq!(bridge.sync_state.last_synced_sequence, 42);
+        assert_eq!(bridge.sync_state.last_sync_time, Some(Time::from_secs(100)));
         assert!(!bridge.sync_state.sync_pending);
         assert_eq!(bridge.sync_state.pending_ops, 0);
     }
@@ -1389,7 +1396,7 @@ mod tests {
 
         bridge.apply_snapshot(&snap).unwrap();
 
-        let next = bridge.create_snapshot();
+        let next = bridge.create_snapshot(Time::from_secs(101));
         assert_eq!(next.sequence, 43);
     }
 
@@ -1434,7 +1441,9 @@ mod tests {
         };
         let replicas = create_test_replicas(3);
 
-        let result = bridge.upgrade_to_distributed(config, &replicas).unwrap();
+        let result = bridge
+            .upgrade_to_distributed(Time::from_secs(30), config, &replicas)
+            .unwrap();
 
         assert_eq!(result.previous_mode, RegionMode::Local);
         assert!(result.new_mode.is_distributed());
@@ -1446,8 +1455,11 @@ mod tests {
         let mut bridge = create_local_bridge();
         bridge.config.allow_upgrade = false;
 
-        let result = bridge
-            .upgrade_to_distributed(DistributedRegionConfig::default(), &create_test_replicas(3));
+        let result = bridge.upgrade_to_distributed(
+            Time::from_secs(31),
+            DistributedRegionConfig::default(),
+            &create_test_replicas(3),
+        );
 
         assert!(result.is_err());
         assert_eq!(
@@ -1460,8 +1472,11 @@ mod tests {
     fn upgrade_already_distributed() {
         let mut bridge = create_distributed_bridge();
 
-        let result = bridge
-            .upgrade_to_distributed(DistributedRegionConfig::default(), &create_test_replicas(3));
+        let result = bridge.upgrade_to_distributed(
+            Time::from_secs(32),
+            DistributedRegionConfig::default(),
+            &create_test_replicas(3),
+        );
 
         assert!(result.is_err());
     }
@@ -1471,8 +1486,11 @@ mod tests {
         let mut bridge = create_local_bridge();
         bridge.begin_close(None, Time::from_secs(0)).unwrap();
 
-        let result = bridge
-            .upgrade_to_distributed(DistributedRegionConfig::default(), &create_test_replicas(3));
+        let result = bridge.upgrade_to_distributed(
+            Time::from_secs(33),
+            DistributedRegionConfig::default(),
+            &create_test_replicas(3),
+        );
 
         assert!(result.is_err());
     }
@@ -1517,7 +1535,7 @@ mod tests {
             ..Default::default()
         };
         let result = bridge
-            .upgrade_to_distributed(config, &create_test_replicas(3))
+            .upgrade_to_distributed(Time::from_secs(34), config, &create_test_replicas(3))
             .unwrap();
 
         assert!(result.new_mode.is_distributed());
@@ -1532,11 +1550,11 @@ mod tests {
         let mut bridge = create_local_bridge();
 
         let mut prev_seq = 0;
-        for i in 0..20 {
+        for i in 0u64..20 {
             // Interleave task add/remove with snapshots.
-            let tid = TaskId::new_for_test(i, 0);
+            let tid = TaskId::new_for_test(i as u32, 0);
             bridge.add_task(tid).unwrap();
-            let snap = bridge.create_snapshot();
+            let snap = bridge.create_snapshot(Time::from_secs(i + 1));
             assert!(
                 snap.sequence > prev_seq,
                 "sequence must be monotonically increasing"
@@ -1636,7 +1654,7 @@ mod tests {
         // sync_pending is false by default.
         assert!(!bridge.sync_state.sync_pending);
 
-        let result = bridge.sync().unwrap();
+        let result = bridge.sync(Time::from_secs(40)).unwrap();
         assert!(matches!(result, SyncResult::NotNeeded));
     }
 
@@ -1646,10 +1664,12 @@ mod tests {
         bridge.sync_state.sync_pending = true;
         bridge.sync_state.pending_ops = 5;
 
-        let result = bridge.sync().unwrap();
+        let sync_time = Time::from_secs(41);
+        let result = bridge.sync(sync_time).unwrap();
         assert!(matches!(result, SyncResult::Synced { .. }));
         assert_eq!(bridge.sync_state.pending_ops, 0);
         assert!(!bridge.sync_state.sync_pending);
+        assert_eq!(bridge.sync_state.last_sync_time, Some(sync_time));
     }
 
     #[test]
@@ -1689,8 +1709,8 @@ mod tests {
         let mut bridge = create_local_bridge();
 
         // Create two snapshots first to advance sequence.
-        let _ = bridge.create_snapshot();
-        let _ = bridge.create_snapshot();
+        let _ = bridge.create_snapshot(Time::from_secs(50));
+        let _ = bridge.create_snapshot(Time::from_secs(51));
         assert_eq!(bridge.sequence, 2);
 
         let config = DistributedRegionConfig {
@@ -1698,7 +1718,7 @@ mod tests {
             ..Default::default()
         };
         let result = bridge
-            .upgrade_to_distributed(config, &create_test_replicas(3))
+            .upgrade_to_distributed(Time::from_secs(52), config, &create_test_replicas(3))
             .unwrap();
 
         // Upgrade creates a snapshot, so sequence should be 3.
@@ -1744,7 +1764,7 @@ mod tests {
         };
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            bridge.upgrade_to_distributed(config, &[])
+            bridge.upgrade_to_distributed(Time::from_secs(53), config, &[])
         }))
         .expect("invalid config should return Err rather than panic");
         let err = result.expect_err("zero-replica config must be rejected");
@@ -1765,7 +1785,7 @@ mod tests {
         };
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            bridge.upgrade_to_distributed(config, &[])
+            bridge.upgrade_to_distributed(Time::from_secs(54), config, &[])
         }))
         .expect("invalid config should return Err rather than panic");
         let err = result.expect_err("out-of-range quorum must be rejected");
@@ -1823,7 +1843,7 @@ mod tests {
         bridge.add_child(RegionId::new_for_test(2, 0)).unwrap();
         bridge.add_child(RegionId::new_for_test(3, 0)).unwrap();
 
-        let snap = bridge.create_snapshot();
+        let snap = bridge.create_snapshot(Time::from_secs(60));
         assert_eq!(snap.children.len(), 2);
     }
 
@@ -1981,7 +2001,7 @@ mod tests {
             RegionMode::hybrid(3),
         );
         assert!(bridge.mode().is_replicated());
-        let sync = bridge.sync().unwrap();
+        let sync = bridge.sync(Time::from_secs(70)).unwrap();
         assert!(
             matches!(sync, SyncResult::NotNeeded),
             "hybrid mode without distributed record must report NotNeeded"
@@ -2003,7 +2023,7 @@ mod tests {
         bridge.sync_state.sync_pending = true;
         bridge.sync_state.pending_ops = 3;
 
-        let sync = bridge.sync().unwrap();
+        let sync = bridge.sync(Time::from_secs(71)).unwrap();
         assert!(
             matches!(sync, SyncResult::NotNeeded),
             "hybrid mode without distributed record must report NotNeeded even with pending ops"
