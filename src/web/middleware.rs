@@ -936,8 +936,8 @@ impl<H: Handler> RequestTraceMiddleware<H> {
 
 impl<H: Handler> Handler for RequestTraceMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let method = req.method.clone();
-        let path = req.path.clone();
+        let _method = req.method.clone();
+        let _path = req.path.clone();
         let trace_id = Self::resolve_trace_id(&req);
         let start = (self.time_getter)();
 

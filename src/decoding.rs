@@ -542,7 +542,7 @@ impl DecodingPipeline {
                     RejectReason::SymbolSizeMismatch,
                 ));
             }
-            Err(err) => {
+            Err(_err) => {
                 let block = self.blocks.get_mut(&sbn);
                 if let Some(block) = block {
                     block.state = BlockDecodingState::Failed;
