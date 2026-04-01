@@ -1113,18 +1113,18 @@ impl LabRuntime {
     #[allow(clippy::no_effect_underscore_binding)]
     pub fn inject_clock_skew(&mut self, skew_nanos: u64) {
         // Capture old time *before* advance for accurate logging.
-        // Prefixed with `_` because the tracing_compat::warn! macro compiles
-        // to a no-op when the tracing-integration feature is disabled.
-        let _old_nanos = self.virtual_time.as_nanos();
+        let old_nanos = self.virtual_time.as_nanos();
         self.advance_time(skew_nanos);
 
         crate::tracing_compat::warn!(
             "virtual clock jump detected: old_time_ms={}, new_time_ms={}, jump_ms={} \
              -- may affect lease/timeout correctness",
-            _old_nanos / 1_000_000,
+            old_nanos / 1_000_000,
             self.virtual_time.as_nanos() / 1_000_000,
             skew_nanos / 1_000_000
         );
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = old_nanos;
     }
 
     /// Runs until quiescent or max steps reached.
