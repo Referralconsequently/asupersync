@@ -46,6 +46,9 @@
 //! Runtime can request a specific pack via `ASUPERSYNC_GF256_PROFILE_PACK`.
 //! Unsupported requests fail closed to the host default pack with an explicit
 //! fallback reason surfaced in [`DualKernelPolicySnapshot`].
+//! Invalid `ASUPERSYNC_GF256_DUAL_POLICY` values likewise fail closed to
+//! `Auto`, but they retain an explicit mode-fallback reason so probe logs do
+//! not silently hide malformed env requests.
 //!
 //! Advanced tuning overrides can further refine auto policy windows:
 //! - `ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL`
@@ -323,6 +326,23 @@ pub enum DualKernelMode {
     Fused,
 }
 
+/// Reason why the requested dual-kernel mode fell back to a safe default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DualKernelModeFallbackReason {
+    /// Environment requested an unknown `ASUPERSYNC_GF256_DUAL_POLICY` value.
+    UnknownRequestedMode,
+}
+
+impl DualKernelModeFallbackReason {
+    /// Stable machine-readable identifier for structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownRequestedMode => "unknown-requested-mode",
+        }
+    }
+}
+
 /// Deterministic dual-kernel dispatch decision for a lane pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DualKernelDecision {
@@ -435,6 +455,8 @@ pub struct DualKernelPolicySnapshot {
     pub decision_evidence_status: Gf256ProfileEvidenceStatus,
     /// Effective policy mode.
     pub mode: DualKernelMode,
+    /// Fallback reason when requested mode is invalid and policy falls back to `Auto`.
+    pub mode_fallback_reason: Option<DualKernelModeFallbackReason>,
     /// Bitmask describing which policy knobs were explicitly overridden via env vars.
     pub override_mask: DualKernelOverrideMask,
     /// Inclusive minimum total lane bytes for fused dual-mul path in auto mode.
@@ -578,6 +600,7 @@ impl DualKernelOverrideMask {
     const ADDMUL_MAX_TOTAL_ENV_OVERRIDE: u8 = 1 << 4;
     const ADDMUL_MIN_LANE_ENV_OVERRIDE: u8 = 1 << 5;
     const MAX_LANE_RATIO_ENV_OVERRIDE: u8 = 1 << 6;
+    const DUAL_POLICY_ENV_REQUESTED: u8 = 1 << 7;
 
     /// Returns an empty override mask.
     #[must_use]
@@ -599,6 +622,11 @@ impl DualKernelOverrideMask {
     #[inline]
     fn set_profile_pack_env_requested(&mut self) {
         self.insert_flag(Self::PROFILE_PACK_ENV_REQUESTED);
+    }
+
+    #[inline]
+    fn set_dual_policy_env_requested(&mut self) {
+        self.insert_flag(Self::DUAL_POLICY_ENV_REQUESTED);
     }
 
     #[inline]
@@ -635,6 +663,12 @@ impl DualKernelOverrideMask {
     #[must_use]
     pub const fn profile_pack_env_requested(self) -> bool {
         (self.0 & Self::PROFILE_PACK_ENV_REQUESTED) != 0
+    }
+
+    /// Whether `ASUPERSYNC_GF256_DUAL_POLICY` was provided for this policy selection.
+    #[must_use]
+    pub const fn dual_policy_env_requested(self) -> bool {
+        (self.0 & Self::DUAL_POLICY_ENV_REQUESTED) != 0
     }
 
     /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL` overrode catalog defaults.
@@ -1073,6 +1107,7 @@ struct DualKernelPolicy {
     replay_pointer: &'static str,
     command_bundle: &'static str,
     mode: DualKernelOverride,
+    mode_fallback_reason: Option<DualKernelModeFallbackReason>,
     override_mask: DualKernelOverrideMask,
     mul_min_total: usize,
     mul_max_total: usize,
@@ -1084,6 +1119,15 @@ struct DualKernelPolicy {
 
 fn dual_policy() -> &'static DualKernelPolicy {
     DUAL_POLICY.get_or_init(detect_dual_policy)
+}
+
+fn parse_dual_policy_request(raw: &str) -> Option<DualKernelOverride> {
+    match raw.trim() {
+        "auto" => Some(DualKernelOverride::Auto),
+        "off" | "sequential" => Some(DualKernelOverride::ForceSequential),
+        "fused" | "force_fused" => Some(DualKernelOverride::ForceFused),
+        _ => None,
+    }
 }
 
 fn parse_profile_pack_request(raw: &str) -> Option<ProfilePackRequest> {
@@ -1174,14 +1218,19 @@ fn select_profile_pack(
 }
 
 fn detect_dual_policy() -> DualKernelPolicy {
-    let mode = match std::env::var("ASUPERSYNC_GF256_DUAL_POLICY")
-        .ok()
-        .as_deref()
-    {
-        Some("off" | "sequential") => DualKernelOverride::ForceSequential,
-        Some("fused" | "force_fused") => DualKernelOverride::ForceFused,
-        _ => DualKernelOverride::Auto,
-    };
+    let requested_mode_raw = std::env::var("ASUPERSYNC_GF256_DUAL_POLICY").ok();
+    let (mode, mode_fallback_reason) =
+        requested_mode_raw
+            .as_deref()
+            .map_or((DualKernelOverride::Auto, None), |raw| {
+                parse_dual_policy_request(raw).map_or(
+                    (
+                        DualKernelOverride::Auto,
+                        Some(DualKernelModeFallbackReason::UnknownRequestedMode),
+                    ),
+                    |m| (m, None),
+                )
+            });
 
     let requested_profile_raw = std::env::var("ASUPERSYNC_GF256_PROFILE_PACK").ok();
     let requested_profile = requested_profile_raw
@@ -1198,6 +1247,9 @@ fn detect_dual_policy() -> DualKernelPolicy {
     let selection = select_profile_pack(dispatch().kind, requested_profile);
     let metadata = profile_pack_metadata(selection.profile_pack);
     let mut override_mask = DualKernelOverrideMask::empty();
+    if requested_mode_raw.is_some() {
+        override_mask.set_dual_policy_env_requested();
+    }
     if requested_profile_raw.is_some() {
         override_mask.set_profile_pack_env_requested();
     }
@@ -1213,6 +1265,7 @@ fn detect_dual_policy() -> DualKernelPolicy {
         replay_pointer: metadata.replay_pointer,
         command_bundle: metadata.command_bundle,
         mode,
+        mode_fallback_reason,
         override_mask,
         mul_min_total: metadata.mul_min_total,
         mul_max_total: metadata.mul_max_total,
@@ -1450,6 +1503,7 @@ pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
         decision_role: effective_profile.decision_role,
         decision_evidence_status: effective_profile.decision_evidence_status,
         mode: to_public_mode(policy.mode),
+        mode_fallback_reason: policy.mode_fallback_reason,
         override_mask: policy.override_mask,
         mul_min_total: policy.mul_min_total,
         mul_max_total: policy.mul_max_total,
@@ -3233,6 +3287,7 @@ mod tests {
             replay_pointer: metadata.replay_pointer,
             command_bundle: metadata.command_bundle,
             mode: DualKernelOverride::Auto,
+            mode_fallback_reason: None,
             override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: metadata.mul_min_total,
             mul_max_total: metadata.mul_max_total,
@@ -3256,6 +3311,7 @@ mod tests {
             replay_pointer: metadata.replay_pointer,
             command_bundle: metadata.command_bundle,
             mode: DualKernelOverride::Auto,
+            mode_fallback_reason: None,
             override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: metadata.mul_min_total,
             mul_max_total: metadata.mul_max_total,
@@ -4594,6 +4650,7 @@ mod tests {
             replay_pointer: metadata.replay_pointer,
             command_bundle: metadata.command_bundle,
             mode: DualKernelOverride::Auto,
+            mode_fallback_reason: None,
             override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: metadata.mul_min_total,
             mul_max_total: metadata.mul_max_total,
@@ -4852,6 +4909,7 @@ mod tests {
             decision_role: metadata.decision_role,
             decision_evidence_status: metadata.decision_evidence_status,
             mode: DualKernelMode::Auto,
+            mode_fallback_reason: None,
             override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: metadata.mul_min_total,
             mul_max_total: metadata.mul_max_total,
@@ -4899,6 +4957,32 @@ mod tests {
         );
         assert_eq!(parse_profile_pack_request("unknown-pack"), None);
         assert_eq!(parse_profile_pack_request("   "), None);
+    }
+
+    #[test]
+    fn dual_policy_request_parser_handles_known_and_unknown_values() {
+        assert_eq!(
+            parse_dual_policy_request("auto"),
+            Some(DualKernelOverride::Auto)
+        );
+        assert_eq!(
+            parse_dual_policy_request(" sequential "),
+            Some(DualKernelOverride::ForceSequential)
+        );
+        assert_eq!(
+            parse_dual_policy_request("off"),
+            Some(DualKernelOverride::ForceSequential)
+        );
+        assert_eq!(
+            parse_dual_policy_request("fused"),
+            Some(DualKernelOverride::ForceFused)
+        );
+        assert_eq!(
+            parse_dual_policy_request(" force_fused "),
+            Some(DualKernelOverride::ForceFused)
+        );
+        assert_eq!(parse_dual_policy_request("invalid-mode"), None);
+        assert_eq!(parse_dual_policy_request("   "), None);
     }
 
     #[test]
@@ -5076,6 +5160,26 @@ mod tests {
             metadata.decision_evidence_status,
             catalog_profile.decision_evidence_status
         );
+        assert_eq!(
+            metadata.selected_candidate_summary,
+            catalog_profile.selected_candidate_summary
+        );
+        assert_eq!(
+            metadata.rejected_candidate_set_summary,
+            catalog_profile.rejected_candidate_set_summary
+        );
+        assert_eq!(
+            metadata.selected_mul_delta_vs_baseline_pct,
+            catalog_profile.selected_mul_delta_vs_baseline_pct
+        );
+        assert_eq!(
+            metadata.selected_addmul_delta_vs_baseline_pct,
+            catalog_profile.selected_addmul_delta_vs_baseline_pct
+        );
+        assert_eq!(
+            metadata.selected_targeted_addmul_average_delta_pct,
+            catalog_profile.selected_targeted_addmul_average_delta_pct
+        );
     }
 
     #[test]
@@ -5113,6 +5217,26 @@ mod tests {
             metadata.decision_evidence_status,
             catalog_profile.decision_evidence_status
         );
+        assert_eq!(
+            metadata.selected_candidate_summary,
+            catalog_profile.selected_candidate_summary
+        );
+        assert_eq!(
+            metadata.rejected_candidate_set_summary,
+            catalog_profile.rejected_candidate_set_summary
+        );
+        assert_eq!(
+            metadata.selected_mul_delta_vs_baseline_pct,
+            catalog_profile.selected_mul_delta_vs_baseline_pct
+        );
+        assert_eq!(
+            metadata.selected_addmul_delta_vs_baseline_pct,
+            catalog_profile.selected_addmul_delta_vs_baseline_pct
+        );
+        assert_eq!(
+            metadata.selected_targeted_addmul_average_delta_pct,
+            catalog_profile.selected_targeted_addmul_average_delta_pct
+        );
     }
 
     #[test]
@@ -5141,6 +5265,66 @@ mod tests {
         assert!(
             policy_uses_canonical_selection_contract(&policy),
             "unknown profile-pack env requests should fall back to the canonical host profile"
+        );
+        assert_eq!(
+            policy.selected_tuning_candidate_id,
+            catalog_profile.selected_tuning_candidate_id
+        );
+        assert_eq!(
+            policy.rejected_tuning_candidate_ids,
+            catalog_profile.rejected_tuning_candidate_ids
+        );
+        assert_eq!(
+            metadata.decision_artifact_id,
+            catalog_profile.decision_artifact_id
+        );
+        assert_eq!(metadata.decision_role, catalog_profile.decision_role);
+        assert_eq!(
+            metadata.decision_evidence_status,
+            catalog_profile.decision_evidence_status
+        );
+        assert_eq!(
+            metadata.selected_candidate_summary,
+            catalog_profile.selected_candidate_summary
+        );
+        assert_eq!(
+            metadata.rejected_candidate_set_summary,
+            catalog_profile.rejected_candidate_set_summary
+        );
+        assert_eq!(
+            metadata.selected_mul_delta_vs_baseline_pct,
+            catalog_profile.selected_mul_delta_vs_baseline_pct
+        );
+        assert_eq!(
+            metadata.selected_addmul_delta_vs_baseline_pct,
+            catalog_profile.selected_addmul_delta_vs_baseline_pct
+        );
+        assert_eq!(
+            metadata.selected_targeted_addmul_average_delta_pct,
+            catalog_profile.selected_targeted_addmul_average_delta_pct
+        );
+    }
+
+    #[test]
+    fn unknown_dual_policy_env_request_falls_back_without_scrubbing_canonical_metadata() {
+        let selection = select_profile_pack(dispatch().kind, None);
+        let mut policy = policy_fixture_from_selection(selection);
+        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        policy.override_mask.set_dual_policy_env_requested();
+        policy.mode_fallback_reason = Some(DualKernelModeFallbackReason::UnknownRequestedMode);
+
+        apply_effective_selection_contract(&mut policy);
+        let metadata = effective_profile_pack_metadata(&policy);
+
+        assert!(policy.override_mask.dual_policy_env_requested());
+        assert_eq!(policy.mode, DualKernelOverride::Auto);
+        assert_eq!(
+            policy.mode_fallback_reason,
+            Some(DualKernelModeFallbackReason::UnknownRequestedMode)
+        );
+        assert!(
+            policy_uses_canonical_selection_contract(&policy),
+            "unknown dual-policy env requests should fall back to the canonical host policy"
         );
         assert_eq!(
             policy.selected_tuning_candidate_id,
@@ -5211,6 +5395,26 @@ mod tests {
             metadata.decision_evidence_status,
             SCALAR_DECISION_EVIDENCE_STATUS
         );
+        assert_eq!(
+            metadata.selected_candidate_summary,
+            SCALAR_SELECTED_CANDIDATE_SUMMARY
+        );
+        assert_eq!(
+            metadata.rejected_candidate_set_summary,
+            SCALAR_REJECTED_CANDIDATE_SET_SUMMARY
+        );
+        assert_eq!(
+            metadata.selected_mul_delta_vs_baseline_pct,
+            NA_PROFILE_DELTA_PCT
+        );
+        assert_eq!(
+            metadata.selected_addmul_delta_vs_baseline_pct,
+            NA_PROFILE_DELTA_PCT
+        );
+        assert_eq!(
+            metadata.selected_targeted_addmul_average_delta_pct,
+            NA_PROFILE_DELTA_PCT
+        );
     }
 
     #[test]
@@ -5226,6 +5430,7 @@ mod tests {
             replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
             command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelOverride::Auto,
+            mode_fallback_reason: None,
             override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: usize::MAX,
             mul_max_total: 0,
@@ -5258,9 +5463,25 @@ mod tests {
             metadata.decision_evidence_status,
             MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
         );
+        assert_eq!(
+            metadata.selected_candidate_summary,
+            MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY
+        );
+        assert_eq!(
+            metadata.rejected_candidate_set_summary,
+            MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY
+        );
         assert_eq!(metadata.addmul_min_total, 16 * 1024);
         assert_eq!(
             metadata.selected_mul_delta_vs_baseline_pct,
+            NA_PROFILE_DELTA_PCT
+        );
+        assert_eq!(
+            metadata.selected_addmul_delta_vs_baseline_pct,
+            NA_PROFILE_DELTA_PCT
+        );
+        assert_eq!(
+            metadata.selected_targeted_addmul_average_delta_pct,
             NA_PROFILE_DELTA_PCT
         );
         assert_eq!(
@@ -5282,6 +5503,7 @@ mod tests {
             replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
             command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelOverride::ForceSequential,
+            mode_fallback_reason: None,
             override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: usize::MAX,
             mul_max_total: 0,
@@ -5304,6 +5526,26 @@ mod tests {
         assert_eq!(
             metadata.decision_evidence_status,
             MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
+        );
+        assert_eq!(
+            metadata.selected_candidate_summary,
+            MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY
+        );
+        assert_eq!(
+            metadata.rejected_candidate_set_summary,
+            MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY
+        );
+        assert_eq!(
+            metadata.selected_mul_delta_vs_baseline_pct,
+            NA_PROFILE_DELTA_PCT
+        );
+        assert_eq!(
+            metadata.selected_addmul_delta_vs_baseline_pct,
+            NA_PROFILE_DELTA_PCT
+        );
+        assert_eq!(
+            metadata.selected_targeted_addmul_average_delta_pct,
+            NA_PROFILE_DELTA_PCT
         );
     }
 
@@ -5372,6 +5614,9 @@ mod tests {
             assert!(!rejected.as_str().is_empty());
         }
         if let Some(reason) = snapshot.fallback_reason {
+            assert!(!reason.as_str().is_empty());
+        }
+        if let Some(reason) = snapshot.mode_fallback_reason {
             assert!(!reason.as_str().is_empty());
         }
     }

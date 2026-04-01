@@ -962,7 +962,7 @@ fn validate_decode_stats_governance_field(
         "unsigned integer",
         violations,
     );
-    validate_governance_string_field(governance, "chosen_action", violations);
+    validate_governance_canonical_action_field(governance, "chosen_action", violations);
     validate_governance_unsigned_integer_field(governance, "confidence_score", violations);
     validate_governance_unsigned_integer_field(governance, "uncertainty_score", violations);
     validate_governance_string_field(governance, "replay_ref", violations);
@@ -1021,6 +1021,8 @@ fn validate_decode_stats_governance_field(
             "decode_stats.governance.deterministic_fallback_trigger is missing or null".to_string(),
         ),
     }
+
+    validate_governance_fallback_consistency(governance, violations);
 }
 
 fn validate_governance_map_field(
@@ -1065,6 +1067,26 @@ fn validate_governance_string_field(
     validate_governance_string_field_in(governance, field, violations);
 }
 
+fn validate_governance_canonical_action_field(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    validate_governance_string_field(governance, field, violations);
+
+    let Some(action) = governance.get(field).and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    if action.trim().is_empty() {
+        return;
+    }
+    if action != action.trim() || !GOVERNANCE_ACTION_KEYS.contains(&action) {
+        violations.push(format!(
+            "decode_stats.governance.{field} must be one of {GOVERNANCE_ACTION_KEYS:?}"
+        ));
+    }
+}
+
 fn validate_governance_unsigned_integer_field(
     governance: &serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -1081,9 +1103,12 @@ fn validate_governance_string_field_in(
     let key = field.rsplit('.').next().unwrap_or(field);
     if let Some(value) = map.get(key) {
         match value {
-            serde_json::Value::String(_) => {}
+            serde_json::Value::String(text) if !text.trim().is_empty() => {}
             serde_json::Value::Null => violations.push(format!(
                 "decode_stats.governance.{field} is missing or null"
+            )),
+            serde_json::Value::String(_) => violations.push(format!(
+                "decode_stats.governance.{field} must be a non-empty string"
             )),
             _ => violations.push(format!("decode_stats.governance.{field} must be a string")),
         }
@@ -1135,6 +1160,57 @@ fn validate_governance_bool_field_in(
         violations.push(format!(
             "decode_stats.governance.{field} is missing or null"
         ));
+    }
+}
+
+fn validate_governance_fallback_consistency(
+    governance: &serde_json::Map<String, serde_json::Value>,
+    violations: &mut Vec<String>,
+) {
+    let Some(chosen_action) = governance
+        .get("chosen_action")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    else {
+        return;
+    };
+
+    let Some(trigger) = governance
+        .get("deterministic_fallback_trigger")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+
+    let Some(fired) = trigger.get("fired").and_then(serde_json::Value::as_bool) else {
+        return;
+    };
+    let Some(reason) = trigger
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    else {
+        return;
+    };
+
+    if fired {
+        if chosen_action != "fallback" {
+            violations.push(
+                "decode_stats.governance.deterministic_fallback_trigger.fired requires chosen_action to be 'fallback'"
+                    .to_string(),
+            );
+        }
+        if reason.is_empty() || reason == "none" {
+            violations.push(
+                "decode_stats.governance.deterministic_fallback_trigger.reason must be a non-empty non-'none' string when fired is true"
+                    .to_string(),
+            );
+        }
+    } else if reason != "none" {
+        violations.push(
+            "decode_stats.governance.deterministic_fallback_trigger.reason must be 'none' when fired is false"
+                .to_string(),
+        );
     }
 }
 
@@ -1652,6 +1728,176 @@ mod tests {
                 )
             }),
             "should reject non-string governance contributor name: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_non_canonical_governance_action_and_fallback_contradiction() {
+        let mut entry = serde_json::to_value(
+            UnitLogEntry::new(
+                "RQ-U-G7-ACTION-CONTRACT",
+                42,
+                "k=8,symbol_size=32",
+                "replay:rq-u-g7-action-contract-v1",
+                "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_non_canonical_governance_action_and_fallback_contradiction -- --nocapture",
+                "ok",
+            )
+            .with_decode_stats(UnitDecodeStats {
+                k: 8,
+                loss_pct: 25,
+                dropped: 2,
+                peeled: 6,
+                inactivated: 1,
+                gauss_ops: 12,
+                pivots: 4,
+                peel_queue_pushes: 9,
+                peel_queue_pops: 9,
+                peel_frontier_peak: 3,
+                dense_core_rows: 4,
+                dense_core_cols: 4,
+                dense_core_dropped_rows: 1,
+                fallback_reason: "none".to_string(),
+                hard_regime_activated: false,
+                hard_regime_branch: "markowitz".to_string(),
+                hard_regime_fallbacks: 0,
+                conservative_fallback_reason: "none".to_string(),
+                governance: Some(sample_governance_decision()),
+            }),
+        )
+        .expect("serialize to value");
+        entry["decode_stats"]["governance"]["chosen_action"] = json!("promote");
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["fired"] =
+            json!(true);
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
+            json!("none");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| { v.contains("decode_stats.governance.chosen_action must be one of") }),
+            "should reject unknown governance chosen_action: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| { v.contains("fired requires chosen_action to be 'fallback'") }),
+            "should reject contradictory fallback trigger/action pair: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains("reason must be a non-empty non-'none' string when fired is true")
+            }),
+            "should reject fired fallback trigger with non-canonical reason: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_whitespace_padded_governance_action() {
+        let mut entry = serde_json::to_value(
+            UnitLogEntry::new(
+                "RQ-U-G7-ACTION-WHITESPACE",
+                42,
+                "k=8,symbol_size=32",
+                "replay:rq-u-g7-action-whitespace-v1",
+                "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_whitespace_padded_governance_action -- --nocapture",
+                "ok",
+            )
+            .with_decode_stats(UnitDecodeStats {
+                k: 8,
+                loss_pct: 25,
+                dropped: 2,
+                peeled: 6,
+                inactivated: 1,
+                gauss_ops: 12,
+                pivots: 4,
+                peel_queue_pushes: 9,
+                peel_queue_pops: 9,
+                peel_frontier_peak: 3,
+                dense_core_rows: 4,
+                dense_core_cols: 4,
+                dense_core_dropped_rows: 1,
+                fallback_reason: "none".to_string(),
+                hard_regime_activated: false,
+                hard_regime_branch: "markowitz".to_string(),
+                hard_regime_fallbacks: 0,
+                conservative_fallback_reason: "none".to_string(),
+                governance: Some(sample_governance_decision()),
+            }),
+        )
+        .expect("serialize to value");
+        entry["decode_stats"]["governance"]["chosen_action"] = json!(" fallback ");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| { v.contains("decode_stats.governance.chosen_action must be one of") }),
+            "should reject whitespace-padded governance chosen_action: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_rejects_empty_governance_strings() {
+        let mut entry = serde_json::to_value(
+            UnitLogEntry::new(
+                "RQ-U-G7-EMPTY-STRINGS",
+                42,
+                "k=8,symbol_size=32",
+                "replay:rq-u-g7-empty-strings-v1",
+                "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_rejects_empty_governance_strings -- --nocapture",
+                "ok",
+            )
+            .with_decode_stats(UnitDecodeStats {
+                k: 8,
+                loss_pct: 25,
+                dropped: 2,
+                peeled: 6,
+                inactivated: 1,
+                gauss_ops: 12,
+                pivots: 4,
+                peel_queue_pushes: 9,
+                peel_queue_pops: 9,
+                peel_frontier_peak: 3,
+                dense_core_rows: 4,
+                dense_core_cols: 4,
+                dense_core_dropped_rows: 1,
+                fallback_reason: "none".to_string(),
+                hard_regime_activated: false,
+                hard_regime_branch: "markowitz".to_string(),
+                hard_regime_fallbacks: 0,
+                conservative_fallback_reason: "none".to_string(),
+                governance: Some(sample_governance_decision()),
+            }),
+        )
+        .expect("serialize to value");
+        entry["decode_stats"]["governance"]["replay_ref"] = json!("   ");
+        entry["decode_stats"]["governance"]["top_evidence_contributors"][1]["name"] = json!("\t");
+        entry["decode_stats"]["governance"]["deterministic_fallback_trigger"]["reason"] =
+            json!(" ");
+
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations.iter().any(|v| {
+                v.contains("decode_stats.governance.replay_ref must be a non-empty string")
+            }),
+            "should reject empty governance replay_ref: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.top_evidence_contributors[1].name must be a non-empty string",
+                )
+            }),
+            "should reject empty governance contributor names: {violations:?}"
+        );
+        assert!(
+            violations.iter().any(|v| {
+                v.contains(
+                    "decode_stats.governance.deterministic_fallback_trigger.reason must be a non-empty string",
+                )
+            }),
+            "should reject empty governance fallback reason: {violations:?}"
         );
     }
 

@@ -2597,6 +2597,8 @@ fn e5_probe_contract_keeps_host_vs_selected_profile_architecture_fields_distinct
     for required in [
         "\"architecture_class\": policy.architecture_class.as_str()",
         "\"active_profile_architecture_class\": active_profile.architecture_class.as_str()",
+        "\"mode_fallback_reason\": policy.mode_fallback_reason.map_or(",
+        "\"dual_policy_env_requested\": policy.override_mask.dual_policy_env_requested()",
         "\"profile_pack_env_requested\": policy.override_mask.profile_pack_env_requested()",
     ] {
         assert!(
@@ -2620,6 +2622,8 @@ fn e5_probe_contract_keeps_host_vs_selected_profile_architecture_fields_distinct
     for required in [
         "(.architecture_class | type == \"string\" and length > 0)",
         "(.active_profile_architecture_class | type == \"string\" and length > 0)",
+        "(.mode_fallback_reason == \"none\" or .mode_fallback_reason == \"unknown-requested-mode\")",
+        "(.dual_policy_env_requested | type == \"boolean\")",
         "(.profile_pack_env_requested | type == \"boolean\")",
     ] {
         assert!(
@@ -3358,7 +3362,7 @@ fn e5_profile_pack_doc_mentions_current_x86_default_contract() {
     for required in [
         "artifacts/raptorq_track_e_gf256_bench_v1.json",
         "simd_policy_ablation_2026_03_04",
-        "raptorq-track-e-dual-policy-probe-v5",
+        "raptorq-track-e-dual-policy-probe-v6",
         "profile-pack schema v5",
         "replay:rq-e-gf256-profile-pack-v3",
         "decision_artifact_id = simd_policy_ablation_2026_03_04",
@@ -3432,6 +3436,11 @@ fn e5_profile_pack_doc_explains_override_truthfulness_rule() {
         "manual_env_override_unbacked",
         "replay:rq-e-gf256-profile-pack-env-override-v1",
         "override-specific `command_bundle` placeholder",
+        "selected_candidate_summary = runtime override changed the effective dual-policy contract; canonical selected candidate suppressed",
+        "rejected_candidate_set_summary = override run is not a catalog-backed offline selection result; use emitted override fields to reproduce",
+        "selected_mul_delta_vs_baseline_pct = n/a",
+        "selected_addmul_delta_vs_baseline_pct = n/a",
+        "selected_targeted_addmul_average_delta_pct = n/a",
     ] {
         assert!(
             RAPTORQ_BASELINE_PROFILE_MD.contains(required),
@@ -5265,11 +5274,12 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
     for required in [
         "validate_dual_policy_probe_contract",
         "bench-smoke-gf256-dual-policy-contract",
-        "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v5\"",
+        "\"schema_version\":\"raptorq-track-e-dual-policy-probe-v6\"",
         ".manifest_schema_version | type == \"string\" and length > 0",
         ".profile_schema_version | type == \"string\" and length > 0",
         ".kernel | type == \"string\" and length > 0",
         ".mode == \"Auto\" or .mode == \"Sequential\" or .mode == \"Fused\"",
+        ".mode_fallback_reason == \"none\" or .mode_fallback_reason == \"unknown-requested-mode\"",
         ".architecture_class | type == \"string\" and length > 0",
         ".target_arch | type == \"string\" and length > 0",
         ".target_os | type == \"string\" and length > 0",
@@ -5296,15 +5306,23 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".selected_mul_delta_vs_baseline_pct",
         ".selected_addmul_delta_vs_baseline_pct",
         ".selected_targeted_addmul_average_delta_pct",
+        ".dual_policy_env_requested | type == \"boolean\"",
         ".profile_pack_env_requested | type == \"boolean\"",
         ".max_lane_ratio_env_override | type == \"boolean\"",
+        ".mode_fallback_reason == \"unknown-requested-mode\"",
         ".tuning_corpus_id == \"manual-env-override-unbacked\"",
         ".selected_tuning_candidate_id == \"manual-env-override-unbacked\"",
         ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives\"",
         ".decision_artifact_id == \"manual_env_override_unbacked\"",
         ".decision_role == \"runtime_override_not_canonical_profile_selection\"",
         ".decision_evidence_status == \"runtime-override-unbacked\"",
+        ".selected_candidate_summary == \"runtime override changed the effective dual-policy contract; canonical selected candidate suppressed\"",
+        ".rejected_candidate_set_summary == \"override run is not a catalog-backed offline selection result; use emitted override fields to reproduce\"",
+        ".selected_mul_delta_vs_baseline_pct == \"n/a\"",
+        ".selected_addmul_delta_vs_baseline_pct == \"n/a\"",
+        ".selected_targeted_addmul_average_delta_pct == \"n/a\"",
         ".replay_pointer == \"replay:rq-e-gf256-profile-pack-env-override-v1\"",
+        ".dual_policy_env_requested",
         ".mode != \"Auto\"",
         ".selected_tuning_fusion_shape == \"unknown\"",
         ".addmul_min_lane",

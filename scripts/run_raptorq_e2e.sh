@@ -314,7 +314,7 @@ validate_dual_policy_probe_contract() {
     echo ">>> [bundle] ${stage_id}: ${stage_desc}"
     start_s="$(date +%s)"
 
-    grep '"schema_version":"raptorq-track-e-dual-policy-probe-v5"' "$stage_log" >"$contract_log" || true
+    grep '"schema_version":"raptorq-track-e-dual-policy-probe-v6"' "$stage_log" >"$contract_log" || true
     if [[ ! -s "$contract_log" ]]; then
         status="fail"
         rc=1
@@ -323,13 +323,14 @@ validate_dual_policy_probe_contract() {
     elif ! jq -s -e '
         length >= 7 and
         all(.[];
-            .schema_version == "raptorq-track-e-dual-policy-probe-v5" and
+            .schema_version == "raptorq-track-e-dual-policy-probe-v6" and
             (.manifest_schema_version | type == "string" and length > 0) and
             (.profile_schema_version | type == "string" and length > 0) and
             (.scenario_id | type == "string" and length > 0) and
             (.seed | type == "number" and . >= 0 and floor == .) and
             (.kernel | type == "string" and length > 0) and
             (.mode == "Auto" or .mode == "Sequential" or .mode == "Fused") and
+            (.mode_fallback_reason == "none" or .mode_fallback_reason == "unknown-requested-mode") and
             (.architecture_class | type == "string" and length > 0) and
             (.target_arch | type == "string" and length > 0) and
             (.target_os | type == "string" and length > 0) and
@@ -358,6 +359,7 @@ validate_dual_policy_probe_contract() {
             (.selected_mul_delta_vs_baseline_pct | type == "string" and length > 0) and
             (.selected_addmul_delta_vs_baseline_pct | type == "string" and length > 0) and
             (.selected_targeted_addmul_average_delta_pct | type == "string" and length > 0) and
+            (.dual_policy_env_requested | type == "boolean") and
             (.profile_pack_env_requested | type == "boolean") and
             (.mul_min_total_env_override | type == "boolean") and
             (.mul_max_total_env_override | type == "boolean") and
@@ -398,6 +400,11 @@ validate_dual_policy_probe_contract() {
                     .decision_artifact_id == "manual_env_override_unbacked" and
                     .decision_role == "runtime_override_not_canonical_profile_selection" and
                     .decision_evidence_status == "runtime-override-unbacked" and
+                    .selected_candidate_summary == "runtime override changed the effective dual-policy contract; canonical selected candidate suppressed" and
+                    .rejected_candidate_set_summary == "override run is not a catalog-backed offline selection result; use emitted override fields to reproduce" and
+                    .selected_mul_delta_vs_baseline_pct == "n/a" and
+                    .selected_addmul_delta_vs_baseline_pct == "n/a" and
+                    .selected_targeted_addmul_average_delta_pct == "n/a" and
                     .replay_pointer == "replay:rq-e-gf256-profile-pack-env-override-v1" and
                     (
                         .mode != "Auto" or
@@ -418,6 +425,12 @@ validate_dual_policy_probe_contract() {
                     .decision_role != "runtime_override_not_canonical_profile_selection" and
                     .decision_evidence_status != "runtime-override-unbacked" and
                     .replay_pointer != "replay:rq-e-gf256-profile-pack-env-override-v1"
+             end) and
+            (if .mode_fallback_reason == "unknown-requested-mode"
+                then
+                    .mode == "Auto" and
+                    .dual_policy_env_requested
+                else true
              end) and
             (if .addmul_decision == "Fused"
                 then

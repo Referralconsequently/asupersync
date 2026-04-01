@@ -148,15 +148,16 @@ rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy
 
 Probe log schema:
 
-- `schema_version = raptorq-track-e-dual-policy-probe-v5`
+- `schema_version = raptorq-track-e-dual-policy-probe-v6`
 - `manifest_schema_version`, `profile_schema_version`
 - `scenario_id`, `seed`
 - `kernel`, `architecture_class`, `active_profile_architecture_class`
 - `target_arch`, `target_os`, `target_env`, `target_endian`, `target_pointer_width_bits`
-- `mode`, `profile_pack`, `profile_fallback_reason`
+- `mode`, `mode_fallback_reason`, `profile_pack`, `profile_fallback_reason`
 - `rejected_profile_packs` lists every non-selected pack id for the active profile selection
 - `profile_catalog_count`, `tuning_candidate_catalog_count`
 - `tuning_corpus_id`
+- `dual_policy_env_requested`
 - `profile_pack_env_requested`
 - `mul_min_total_env_override`, `mul_max_total_env_override`
 - `addmul_min_total_env_override`, `addmul_max_total_env_override`, `addmul_min_lane_env_override`
@@ -180,6 +181,9 @@ Probe log schema:
 
 Override truthfulness rule:
 
+- invalid `ASUPERSYNC_GF256_DUAL_POLICY` values fail closed to `mode = Auto`, but probe logs still surface
+  `mode_fallback_reason = unknown-requested-mode` together with `dual_policy_env_requested = true`
+  so malformed env requests remain visible in replay and bench forensics
 - if forced mode or numeric `ASUPERSYNC_GF256_*` window overrides mutate the live contract, the manifest/probe surface must fail closed instead of pretending the run still matches the catalog default
 - override runs therefore scrub canonical selection provenance to `tuning_corpus_id = manual-env-override-unbacked`,
   `selected_tuning_candidate_id = manual-env-override-unbacked`,
@@ -190,6 +194,12 @@ Override truthfulness rule:
   and an override-specific `command_bundle` placeholder:
   `rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark -- gf256_primitives`
   that tells operators to replay from the emitted override fields
+- the same override branch must keep the rationale/delta fields honest:
+  `selected_candidate_summary = runtime override changed the effective dual-policy contract; canonical selected candidate suppressed`,
+  `rejected_candidate_set_summary = override run is not a catalog-backed offline selection result; use emitted override fields to reproduce`,
+  `selected_mul_delta_vs_baseline_pct = n/a`,
+  `selected_addmul_delta_vs_baseline_pct = n/a`,
+  `selected_targeted_addmul_average_delta_pct = n/a`
 
 Coverage intent:
 
