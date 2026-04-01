@@ -2959,7 +2959,7 @@ impl Supervisor {
                                 task_id,
                                 region_id,
                                 reason: StopReason::RestartBudgetExhausted {
-                                    total_restarts: config.max_restarts,
+                                    total_restarts: history.recent_restart_count(now),
                                     window: config.window,
                                 },
                             },
@@ -2978,7 +2978,7 @@ impl Supervisor {
                             task_id,
                             region_id,
                             reason: StopReason::RestartBudgetExhausted {
-                                total_restarts: config.max_restarts,
+                                total_restarts: history.recent_restart_count(now),
                                 window: config.window,
                             },
                         },
