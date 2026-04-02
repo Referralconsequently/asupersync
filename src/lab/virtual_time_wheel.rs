@@ -257,7 +257,9 @@ impl VirtualTimerWheel {
                 break;
             }
 
-            let timer = self.heap.pop().unwrap();
+            let Some(timer) = self.heap.pop() else {
+                break;
+            };
 
             // Skip cancelled timers
             if self.cancelled.remove(&timer.timer_id) {
@@ -491,6 +493,37 @@ mod tests {
         let expired = wheel.advance_to(20);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].timer_id, live_handle.timer_id());
+    }
+
+    #[test]
+    fn insert_panics_before_timer_ids_wrap() {
+        let mut wheel = VirtualTimerWheel::new();
+        wheel.next_timer_id = u64::MAX - 1;
+
+        let (_, first_waker) = counting_waker();
+        let first = wheel.insert(10, first_waker);
+        assert_eq!(first.timer_id(), u64::MAX - 1);
+        assert_eq!(wheel.next_timer_id, u64::MAX);
+
+        let (_, overflow_waker) = counting_waker();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = wheel.insert(20, overflow_waker);
+        }));
+
+        assert!(
+            panic.is_err(),
+            "timer wheel must fail closed instead of wrapping timer IDs"
+        );
+        assert_eq!(
+            wheel.next_timer_id,
+            u64::MAX,
+            "failed insert must not wrap the next timer ID"
+        );
+        assert_eq!(
+            wheel.next_deadline(),
+            Some(10),
+            "overflow attempt must not enqueue a wrapped timer"
+        );
     }
 
     #[test]

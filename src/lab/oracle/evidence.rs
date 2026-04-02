@@ -291,16 +291,11 @@ impl DetectionModel {
             // Observed: pass.  BF for "holds" = P(pass|holds) / P(pass|violated)
             let p_h0 = self.p_pass_given_clean();
             let p_h1 = self.p_pass_given_violation(n);
-            let log10_h0 = p_h0.log10();
-            let log10_h1 = p_h1.log10();
-
-            // The BF for "violation" hypothesis is inverted: we want BF < 1 for clean.
-            let log10_bf_violation = log10_h1 - log10_h0;
-
-            // Structural bonus: more events recorded → slightly more confident.
-            let structural = structural_contribution(stats);
-
-            let detection = log10_bf_violation;
+            // The BF for the violation hypothesis should stay below 1 for a clean
+            // observation, so structural support must reinforce the clean outcome
+            // instead of always pushing toward violation.
+            let detection = p_h1.log10() - p_h0.log10();
+            let structural = -structural_contribution(stats);
             let total = structural + detection;
 
             let bf_val = 10.0_f64.powf(total.clamp(-300.0, 300.0));
@@ -316,7 +311,7 @@ impl DetectionModel {
                     equation: "BF_violation = P(pass | violated) / P(pass | holds)".into(),
                     substitution: format!("BF = {p_h1:.6} / {p_h0:.6} = {bf_val:.4}"),
                     intuition: format!(
-                        "{} evidence that '{invariant}' is violated ({n} entities tracked, oracle saw pass)",
+                        "{} evidence against '{invariant}' violation ({n} entities tracked, oracle saw pass)",
                         bf.strength.label().to_uppercase(),
                     ),
                 },
@@ -839,6 +834,42 @@ mod tests {
             events_recorded: 100,
         });
         assert!(s2 > s1);
+    }
+
+    #[test]
+    fn clean_entry_stays_against_violation_even_with_many_events() {
+        let report = OracleReport {
+            entries: vec![OracleEntryReport {
+                invariant: "task_leak".into(),
+                passed: true,
+                violation: None,
+                stats: OracleStats {
+                    entities_tracked: 1,
+                    events_recorded: 1_000_000,
+                },
+            }],
+            total: 1,
+            passed: 1,
+            failed: 0,
+            check_time_nanos: 7,
+        };
+
+        let ledger = EvidenceLedger::from_report(&report);
+        let entry = &ledger.entries[0];
+
+        assert!(
+            entry.bayes_factor.log10_bf < 0.0,
+            "clean pass must remain evidence against violation even with large event counts"
+        );
+        assert!(
+            entry.log_likelihoods.structural < 0.0,
+            "clean pass should record structural support in the clean direction"
+        );
+        assert_eq!(entry.bayes_factor.strength, EvidenceStrength::Against);
+        assert!(
+            entry.evidence_lines[0].intuition.contains("against"),
+            "clean intuition should explicitly describe evidence against violation"
+        );
     }
 
     // -- EvidenceLedger from clean report --
