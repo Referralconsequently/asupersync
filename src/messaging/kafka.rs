@@ -522,6 +522,9 @@ impl Default for StubBroker {
 #[cfg(not(feature = "kafka"))]
 static STUB_BROKER: OnceLock<StubBroker> = OnceLock::new();
 
+#[cfg(all(not(feature = "kafka"), test))]
+static STUB_BROKER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 #[cfg(not(feature = "kafka"))]
 fn stub_broker() -> &'static StubBroker {
     STUB_BROKER.get_or_init(StubBroker::default)
@@ -594,6 +597,29 @@ pub(crate) fn reset_stub_broker_for_tests() {
         broker.state.lock().partitions.clear();
         broker.notify.notify_waiters();
     }
+}
+
+#[cfg(all(not(feature = "kafka"), test))]
+pub(crate) struct StubBrokerTestGuard(parking_lot::MutexGuard<'static, ()>);
+
+#[cfg(all(not(feature = "kafka"), test))]
+impl Drop for StubBrokerTestGuard {
+    fn drop(&mut self) {
+        reset_stub_broker_for_tests();
+    }
+}
+
+#[cfg(all(not(feature = "kafka"), test))]
+pub(crate) fn lock_stub_broker_for_tests() -> StubBrokerTestGuard {
+    let lock = STUB_BROKER_TEST_LOCK.get_or_init(|| Mutex::new(()));
+    let guard = lock.lock();
+
+    // The broker fallback is global state shared across producer and consumer
+    // unit tests, so keep one test in the lane at a time and reset state on
+    // both entry and exit.
+    reset_stub_broker_for_tests();
+
+    StubBrokerTestGuard(guard)
 }
 
 fn validate_topic(topic: &str) -> Result<(), KafkaError> {
@@ -1441,8 +1467,8 @@ mod tests {
     use std::task::{Context, Wake, Waker};
 
     #[cfg(not(feature = "kafka"))]
-    fn reset_stub_broker() {
-        reset_stub_broker_for_tests();
+    fn stub_broker_guard() -> StubBrokerTestGuard {
+        lock_stub_broker_for_tests()
     }
 
     #[cfg(feature = "kafka")]
@@ -1886,8 +1912,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_commit_applies_staged_offsets_on_commit() {
+        let _broker = stub_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let topic = "transactional-fallback-commit-applies";
             let producer = TransactionalProducer::new(TransactionalConfig::new(
                 ProducerConfig::default(),
@@ -1912,8 +1938,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_abort_discards_staged_offsets() {
+        let _broker = stub_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let topic = "transactional-fallback-abort-discards";
             let producer = TransactionalProducer::new(TransactionalConfig::new(
                 ProducerConfig::default(),
@@ -1938,8 +1964,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_rejects_concurrent_begin() {
+        let _broker = stub_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let producer = TransactionalProducer::new(TransactionalConfig::new(
                 ProducerConfig::default(),
                 "tx-active-check".to_string(),
@@ -1956,8 +1982,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_drop_requires_recovery_before_next_begin() {
+        let _broker = stub_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let topic = "transactional-fallback-drop-recovery";
             let producer = TransactionalProducer::new(TransactionalConfig::new(
                 ProducerConfig::default(),
@@ -2011,8 +2037,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_send_returns_deterministic_delivery_metadata() {
+        let _broker = stub_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
 
             // Use unique topic name to avoid cross-test contamination via the
@@ -2052,8 +2078,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_rejects_blank_topic_name() {
+        let _broker = stub_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let err = producer
                 .send(&cx, "   ", None, b"x", None)
@@ -2066,8 +2092,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_close_is_idempotent_and_blocks_new_operations() {
+        let _broker = stub_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             producer
                 .send(&cx, "orders", None, b"before-close", None)

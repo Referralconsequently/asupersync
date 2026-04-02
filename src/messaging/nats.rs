@@ -733,9 +733,8 @@ impl NatsClient {
                 return Ok(Some(NatsMessage::Ok));
             } else if buf.len() < 5 {
                 return Ok(None); // Need more data
-            } else {
-                return Err(NatsError::Protocol("malformed +OK frame".to_string()));
             }
+            return Err(NatsError::Protocol("malformed +OK frame".to_string()));
         } else if buf.starts_with(b"-ERR ") {
             return self.parse_err();
         } else if buf.starts_with(b"PING") {
@@ -744,18 +743,16 @@ impl NatsClient {
                 return Ok(Some(NatsMessage::Ping));
             } else if buf.len() < 6 {
                 return Ok(None);
-            } else {
-                return Err(NatsError::Protocol("malformed PING frame".to_string()));
             }
+            return Err(NatsError::Protocol("malformed PING frame".to_string()));
         } else if buf.starts_with(b"PONG") {
             if buf.len() >= 6 && buf[4] == b'\r' && buf[5] == b'\n' {
                 self.read_buf.consume(6);
                 return Ok(Some(NatsMessage::Pong));
             } else if buf.len() < 6 {
                 return Ok(None);
-            } else {
-                return Err(NatsError::Protocol("malformed PONG frame".to_string()));
             }
+            return Err(NatsError::Protocol("malformed PONG frame".to_string()));
         }
 
         // Wait for more data or report unknown

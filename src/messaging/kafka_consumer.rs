@@ -1298,7 +1298,9 @@ fn validate_partition_number(partition: i32) -> Result<(), KafkaError> {
 mod tests {
     use super::*;
     #[cfg(not(feature = "kafka"))]
-    use crate::messaging::kafka::{KafkaProducer, ProducerConfig, reset_stub_broker_for_tests};
+    use crate::messaging::kafka::{
+        KafkaProducer, ProducerConfig, StubBrokerTestGuard, lock_stub_broker_for_tests,
+    };
     use crate::test_utils::run_test_with_cx;
     #[cfg(feature = "kafka")]
     use rdkafka::topic_partition_list::Offset;
@@ -1307,8 +1309,8 @@ mod tests {
     use std::time::Instant;
 
     #[cfg(not(feature = "kafka"))]
-    fn reset_stub_broker() {
-        reset_stub_broker_for_tests();
+    fn stub_broker_guard() -> StubBrokerTestGuard {
+        lock_stub_broker_for_tests()
     }
 
     #[cfg(feature = "kafka")]
@@ -1641,9 +1643,9 @@ mod tests {
 
     #[test]
     fn consumer_subscribe_tracks_assignments() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer
                 .subscribe(&cx, &["orders", "orders", "payments"])
@@ -1670,9 +1672,9 @@ mod tests {
 
     #[test]
     fn consumer_commit_and_seek_track_offsets() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer.subscribe(&cx, &["orders"]).await.unwrap();
 
@@ -1704,9 +1706,9 @@ mod tests {
 
     #[test]
     fn consumer_close_is_idempotent_and_blocks_operations() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer.subscribe(&cx, &["orders"]).await.unwrap();
             consumer.close(&cx).await.unwrap();
@@ -1729,9 +1731,9 @@ mod tests {
 
     #[test]
     fn consumer_rejects_empty_topic_entries() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             let err = consumer.subscribe(&cx, &["orders", ""]).await.unwrap_err();
             assert!(
@@ -1742,9 +1744,9 @@ mod tests {
 
     #[test]
     fn consumer_rebalance_tracks_assignment_and_revocation() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer
                 .subscribe(&cx, &["orders", "payments"])
@@ -1783,9 +1785,9 @@ mod tests {
 
     #[test]
     fn consumer_rebalance_rejects_duplicate_partition_entries() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer
                 .subscribe(&cx, &["orders", "payments"])
@@ -1815,9 +1817,9 @@ mod tests {
 
     #[test]
     fn consumer_rebalance_rejects_close_race_after_open() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = Arc::new(KafkaConsumer::new(ConsumerConfig::default()).unwrap());
             consumer.subscribe(&cx, &["orders"]).await.unwrap();
 
@@ -1853,9 +1855,9 @@ mod tests {
 
     #[test]
     fn consumer_rebalance_rejects_negative_partition_numbers() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer
                 .subscribe(&cx, &["orders", "payments"])
@@ -1879,9 +1881,9 @@ mod tests {
 
     #[test]
     fn consumer_commit_rejects_unassigned_partitions_and_regression() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer.subscribe(&cx, &["orders"]).await.unwrap();
 
@@ -1905,9 +1907,9 @@ mod tests {
 
     #[test]
     fn consumer_commit_rejects_duplicate_partition_entries_in_single_batch() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer.subscribe(&cx, &["orders"]).await.unwrap();
 
@@ -1928,9 +1930,9 @@ mod tests {
 
     #[test]
     fn consumer_commit_and_seek_reject_negative_partition_numbers() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer.subscribe(&cx, &["orders"]).await.unwrap();
 
@@ -1952,9 +1954,9 @@ mod tests {
 
     #[test]
     fn consumer_seek_rejects_unassigned_partitions() {
+        #[cfg(not(feature = "kafka"))]
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            #[cfg(not(feature = "kafka"))]
-            reset_stub_broker();
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
             consumer.subscribe(&cx, &["orders"]).await.unwrap();
 
@@ -1969,8 +1971,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn consumer_poll_returns_brokerless_records_and_advances_position() {
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let topic = "consumer-poll-returns-brokerless-records";
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let consumer = KafkaConsumer::new(
@@ -2016,8 +2018,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn consumer_latest_offset_reset_skips_existing_backlog() {
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let topic = "consumer-latest-offset-reset-skips-existing-backlog";
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let consumer =
@@ -2050,8 +2052,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn consumer_offset_reset_none_requires_existing_position() {
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let topic = "consumer-offset-reset-none-requires-existing-position";
             let consumer = KafkaConsumer::new(
                 ConsumerConfig::new(vec!["localhost:9092".to_string()], "g")
@@ -2068,8 +2070,8 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn consumer_poll_rechecks_brokerless_records_after_waiter_registration() {
+        let _broker = stub_broker_guard();
         run_test_with_cx(|cx| async move {
-            reset_stub_broker();
             let topic = "consumer-poll-rechecks-brokerless-records-after-waiter-registration";
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let consumer = Arc::new(
