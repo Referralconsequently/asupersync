@@ -716,7 +716,9 @@ fn bridge_upgrade_preserves_state() {
         ..Default::default()
     };
     let replicas = create_test_replicas(3);
-    let result = bridge.upgrade_to_distributed(config, &replicas).unwrap();
+    let result = bridge
+        .upgrade_to_distributed(Time::from_secs(10), config, &replicas)
+        .unwrap();
 
     assert_eq!(result.previous_mode, RegionMode::Local);
     assert!(result.new_mode.is_distributed());
@@ -784,8 +786,11 @@ fn bridge_config_variants() {
         conflict_resolution: ConflictResolution::HighestSequence,
     };
 
-    let result =
-        bridge.upgrade_to_distributed(DistributedRegionConfig::default(), &create_test_replicas(3));
+    let result = bridge.upgrade_to_distributed(
+        Time::from_secs(11),
+        DistributedRegionConfig::default(),
+        &create_test_replicas(3),
+    );
     assert!(result.is_err()); // upgrade blocked
 }
 
@@ -902,14 +907,17 @@ fn effective_state_all_combinations() {
 fn bridge_snapshot_sequence_monotonic() {
     let mut bridge = RegionBridge::new_local(RegionId::new_for_test(1, 0), None, Budget::default());
 
-    let snap1 = bridge.create_snapshot();
+    let snap1 = bridge.create_snapshot(Time::from_secs(20));
     bridge.add_task(TaskId::new_for_test(1, 0)).unwrap();
-    let snap2 = bridge.create_snapshot();
+    let snap2 = bridge.create_snapshot(Time::from_secs(21));
     bridge.remove_task(TaskId::new_for_test(1, 0));
-    let snap3 = bridge.create_snapshot();
+    let snap3 = bridge.create_snapshot(Time::from_secs(22));
 
     assert!(snap2.sequence > snap1.sequence);
     assert!(snap3.sequence > snap2.sequence);
+    assert_eq!(snap1.timestamp, Time::from_secs(20));
+    assert_eq!(snap2.timestamp, Time::from_secs(21));
+    assert_eq!(snap3.timestamp, Time::from_secs(22));
     assert_eq!(snap1.tasks.len(), 0);
     assert_eq!(snap2.tasks.len(), 1);
     assert_eq!(snap3.tasks.len(), 0);

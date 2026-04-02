@@ -1550,11 +1550,11 @@ mod tests {
         let mut bridge = create_local_bridge();
 
         let mut prev_seq = 0;
-        for i in 0u64..20 {
+        for i in 0u32..20 {
             // Interleave task add/remove with snapshots.
-            let tid = TaskId::new_for_test(i as u32, 0);
+            let tid = TaskId::new_for_test(i, 0);
             bridge.add_task(tid).unwrap();
-            let snap = bridge.create_snapshot(Time::from_secs(i + 1));
+            let snap = bridge.create_snapshot(Time::from_secs(u64::from(i) + 1));
             assert!(
                 snap.sequence > prev_seq,
                 "sequence must be monotonically increasing"

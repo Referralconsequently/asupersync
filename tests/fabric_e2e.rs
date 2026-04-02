@@ -997,7 +997,7 @@ fn run_mirror_source_drain(seed: u64) -> MirrorSourceDrainOutcome {
                     .add_task(TaskId::new_for_test(71, 0))
                     .expect("source task");
                 let transfer = federation
-                    .export_replication_transfer(&mut source)
+                    .export_replication_transfer(&mut source, Time::from_secs(1))
                     .expect("export transfer");
                 push_log(
                     &log,

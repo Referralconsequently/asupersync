@@ -11,6 +11,7 @@ use super::subject::{
 use crate::distributed::{RegionBridge, RegionSnapshot, SnapshotError};
 use crate::remote::NodeId;
 use crate::supervision::{RestartConfig, SupervisionStrategy};
+use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
@@ -874,13 +875,14 @@ impl FederationBridge {
     pub fn export_replication_transfer(
         &mut self,
         bridge: &mut RegionBridge,
+        now: Time,
     ) -> Result<ReplicationTransfer, FederationError> {
         let config = self
             .replication_config("export_replication_transfer")?
             .clone();
         self.ensure_not_closed("export_replication_transfer")?;
 
-        let snapshot = bridge.create_snapshot();
+        let snapshot = bridge.create_snapshot(now);
         let transfer = ReplicationTransfer {
             sequence: snapshot.sequence,
             ordering_guarantee: config.ordering_guarantee,
@@ -3242,7 +3244,9 @@ mod tests {
         source.add_task(task_id(11)).unwrap();
         source.add_child(region_id(12)).unwrap();
 
-        let transfer = federation.export_replication_transfer(&mut source).unwrap();
+        let transfer = federation
+            .export_replication_transfer(&mut source, Time::from_secs(1))
+            .unwrap();
         assert_eq!(transfer.sequence, 1);
 
         let mut target = RegionBridge::new_local(region, None, Budget::new());
@@ -3333,7 +3337,9 @@ mod tests {
         let mut source = RegionBridge::new_local(region, None, Budget::new());
         source.add_task(task_id(21)).unwrap();
 
-        let mut transfer = federation.export_replication_transfer(&mut source).unwrap();
+        let mut transfer = federation
+            .export_replication_transfer(&mut source, Time::from_secs(2))
+            .unwrap();
         transfer.sequence += 1;
 
         let mut target = RegionBridge::new_local(region, None, Budget::new());

@@ -586,7 +586,7 @@ fn e2e_bridge_upgrade_snapshot_close() {
     bridge.add_task(TaskId::new_for_test(2, 0)).unwrap();
     bridge.add_child(RegionId::new_for_test(6, 0)).unwrap();
     assert!(bridge.has_live_work());
-    let snap_before = bridge.create_snapshot();
+    let snap_before = bridge.create_snapshot(Time::from_secs(10));
     tracing::info!(
         tasks = snap_before.tasks.len(),
         children = snap_before.children.len(),
@@ -601,7 +601,7 @@ fn e2e_bridge_upgrade_snapshot_close() {
     };
     let replicas = test_replicas(3);
     let upgrade = bridge
-        .upgrade_to_distributed(dist_config, &replicas)
+        .upgrade_to_distributed(Time::from_secs(11), dist_config, &replicas)
         .unwrap();
     assert_eq!(upgrade.previous_mode, RegionMode::Local);
     assert!(upgrade.new_mode.is_distributed());
@@ -612,7 +612,7 @@ fn e2e_bridge_upgrade_snapshot_close() {
     );
 
     test_section!("Snapshot after upgrade");
-    let snap_after = bridge.create_snapshot();
+    let snap_after = bridge.create_snapshot(Time::from_secs(12));
     assert!(snap_after.sequence > snap_before.sequence);
     assert_eq!(snap_after.tasks.len(), snap_before.tasks.len());
     assert_eq!(snap_after.children.len(), snap_before.children.len());
