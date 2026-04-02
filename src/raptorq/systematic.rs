@@ -805,8 +805,12 @@ pub struct EmittedSymbol {
 ///
 /// Symbols are emitted in deterministic order:
 /// 1. Source symbols (ESI 0..K-1) in ascending order
-/// 2. Repair symbols (ESI K'..) in ascending order (K' is the smallest
-///    systematic-index-table entry >= K)
+/// 2. Repair symbols (ESI K..) in ascending order
+///
+/// RFC 6330 uses repair ESIs on the wire starting at `K`. Tuple generation is
+/// keyed by the internal repair-symbol ISI `X = ESI + (K' - K)`, so the public
+/// emission cursor stays in ESI space while [`SystematicParams::rfc_repair_equation`]
+/// applies the required `K' - K` translation.
 ///
 /// Use [`emit_systematic`] for source-only, [`emit_repair`] for repair-only,
 /// or [`emit_all`] for a combined stream.
@@ -823,7 +827,7 @@ pub struct SystematicEncoder {
     stats: EncodingStats,
     /// Whether systematic symbols have been emitted via `emit_systematic()`.
     systematic_emitted: bool,
-    /// Next repair ESI to emit (monotonic cursor, starts at K').
+    /// Next repair ESI to emit (monotonic cursor, starts at K).
     next_repair_esi: u32,
 }
 
@@ -879,7 +883,6 @@ impl SystematicEncoder {
             repair_bytes_emitted: 0,
         };
 
-        let k_prime = params.k_prime;
         Some(Self {
             params,
             intermediate,
@@ -887,7 +890,7 @@ impl SystematicEncoder {
             seed,
             stats,
             systematic_emitted: false,
-            next_repair_esi: k_prime as u32,
+            next_repair_esi: k as u32,
         })
     }
 
@@ -1582,15 +1585,13 @@ mod tests {
         let symbol_size = 32;
         let source = make_source_symbols(k, symbol_size);
         let mut enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
-        let k_prime = enc.params().k_prime as u32;
-
         let repair_count = 10;
         let emitted = enc.emit_repair(repair_count);
 
         assert_eq!(emitted.len(), repair_count, "should emit requested count");
         for (i, sym) in emitted.iter().enumerate() {
-            let expected_esi = k_prime + i as u32;
-            assert_eq!(sym.esi, expected_esi, "ESI should start at K'");
+            let expected_esi = k as u32 + i as u32;
+            assert_eq!(sym.esi, expected_esi, "ESI should start at K");
             assert!(!sym.is_source, "should be marked as repair");
             assert!(sym.degree >= 1, "degree should be at least 1");
             assert_eq!(sym.data.len(), symbol_size, "correct symbol size");
@@ -1603,8 +1604,6 @@ mod tests {
         let symbol_size = 24;
         let source = make_source_symbols(k, symbol_size);
         let mut enc = SystematicEncoder::new(&source, symbol_size, 99).unwrap();
-        let k_prime = enc.params().k_prime as u32;
-
         let repair_count = 5;
         let emitted = enc.emit_all(repair_count);
 
@@ -1616,9 +1615,9 @@ mod tests {
             assert!(sym.is_source);
         }
 
-        // Rest are repair (ESI starts at K', not K)
+        // Rest are repair (ESI starts at K on the wire; helper translates to RFC ISI)
         for (i, sym) in emitted.iter().skip(k).enumerate() {
-            assert_eq!(sym.esi, k_prime + i as u32);
+            assert_eq!(sym.esi, k as u32 + i as u32);
             assert!(!sym.is_source);
         }
     }
@@ -1747,25 +1746,22 @@ mod tests {
     fn repair_cursor_advances_across_calls() {
         let symbol_size = 16;
         let mut enc = make_encoder(16, symbol_size, 42);
-        // Repair ESIs start at K' (the padded source block size), not K.
-        // RFC 6330 defines repair symbols as ESI >= K'.
-        let kp = enc.params().k_prime;
-
-        assert_eq!(enc.next_repair_esi(), kp as u32, "cursor starts at K'");
+        let k = enc.params().k;
+        assert_eq!(enc.next_repair_esi(), k as u32, "cursor starts at K");
 
         let batch1 = enc.emit_repair(3);
-        assert_eq!(enc.next_repair_esi(), kp as u32 + 3);
-        assert_eq!(batch1[0].esi, kp as u32);
-        assert_eq!(batch1[2].esi, kp as u32 + 2);
+        assert_eq!(enc.next_repair_esi(), k as u32 + 3);
+        assert_eq!(batch1[0].esi, k as u32);
+        assert_eq!(batch1[2].esi, k as u32 + 2);
 
         let batch2 = enc.emit_repair(5);
-        assert_eq!(enc.next_repair_esi(), kp as u32 + 8);
+        assert_eq!(enc.next_repair_esi(), k as u32 + 8);
         assert_eq!(
             batch2[0].esi,
-            kp as u32 + 3,
+            k as u32 + 3,
             "second batch continues from cursor"
         );
-        assert_eq!(batch2[4].esi, kp as u32 + 7);
+        assert_eq!(batch2[4].esi, k as u32 + 7);
     }
 
     #[test]
@@ -1980,8 +1976,6 @@ mod tests {
         let repair_count = 5;
         let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
-        let kp = enc.params().k_prime;
-
         let systematic = enc.emit_systematic();
         assert_eq!(
             systematic.len(),
@@ -2001,8 +1995,8 @@ mod tests {
         );
         assert_eq!(
             combined.first().map(|symbol| symbol.esi),
-            Some(kp as u32),
-            "repair emission should resume at K' (the first repair ESI per RFC 6330)"
+            Some(k as u32),
+            "repair emission should resume at K (the first repair ESI per RFC 6330)"
         );
         assert_eq!(
             enc.stats().systematic_bytes_emitted,

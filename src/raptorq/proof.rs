@@ -95,13 +95,42 @@ fn recovered_source_hash(source: &[Vec<u8>]) -> u64 {
     hasher.finish()
 }
 
-fn received_esi_multiset_hash(mut symbols: Vec<(u32, bool)>) -> u64 {
-    use std::hash::{Hash, Hasher};
+#[derive(Default)]
+struct ReceivedEsiMultisetHashState {
+    count: u64,
+    sum: u64,
+    sum_products: u64,
+    mix: u64,
+}
 
-    symbols.sort_unstable();
-    let mut hasher = DetHasher::default();
-    symbols.hash(&mut hasher);
-    hasher.finish()
+impl ReceivedEsiMultisetHashState {
+    fn observe(&mut self, esi: u32, is_source: bool) {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DetHasher::default();
+        (esi, is_source).hash(&mut hasher);
+        let digest = hasher.finish();
+
+        self.count = self.count.wrapping_add(1);
+        self.sum = self.sum.wrapping_add(digest);
+        self.sum_products = self
+            .sum_products
+            .wrapping_add(digest.wrapping_mul(digest | 1));
+        self.mix = self
+            .mix
+            .wrapping_add(digest.rotate_left(17) ^ digest.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    }
+
+    fn finish(self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DetHasher::default();
+        self.count.hash(&mut hasher);
+        self.sum.hash(&mut hasher);
+        self.sum_products.hash(&mut hasher);
+        self.mix.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 // ============================================================================
@@ -409,7 +438,7 @@ impl ReceivedSummary {
         let mut repair_count = 0;
         let mut total = 0usize;
         let mut esis_heap: BinaryHeap<u32> = BinaryHeap::new();
-        let mut all_symbols: Vec<(u32, bool)> = Vec::new();
+        let mut hash_state = ReceivedEsiMultisetHashState::default();
 
         for (esi, is_source) in symbols {
             total += 1;
@@ -418,7 +447,7 @@ impl ReceivedSummary {
             } else {
                 repair_count += 1;
             }
-            all_symbols.push((esi, is_source));
+            hash_state.observe(esi, is_source);
             if esis_heap.len() < MAX_RECEIVED_SYMBOLS {
                 esis_heap.push(esi);
                 continue;
@@ -432,7 +461,7 @@ impl ReceivedSummary {
         }
 
         let truncated = total > MAX_RECEIVED_SYMBOLS;
-        let esi_multiset_hash = received_esi_multiset_hash(all_symbols);
+        let esi_multiset_hash = hash_state.finish();
         let mut esis = esis_heap.into_vec();
         esis.sort_unstable();
         Self {
@@ -894,6 +923,38 @@ mod tests {
         assert_ne!(
             original.esi_multiset_hash, mutated.esi_multiset_hash,
             "full multiset hash must distinguish divergence beyond the preview window"
+        );
+    }
+
+    #[test]
+    fn received_summary_hash_is_order_independent_for_same_multiset() {
+        let ordered = [
+            (9, false),
+            (1, true),
+            (7, false),
+            (1, true),
+            (4, false),
+            (2, true),
+        ];
+        let permuted = [
+            (2, true),
+            (4, false),
+            (1, true),
+            (9, false),
+            (1, true),
+            (7, false),
+        ];
+
+        let ordered_summary = ReceivedSummary::from_received(ordered.into_iter());
+        let permuted_summary = ReceivedSummary::from_received(permuted.into_iter());
+
+        assert_eq!(ordered_summary.total, permuted_summary.total);
+        assert_eq!(ordered_summary.source_count, permuted_summary.source_count);
+        assert_eq!(ordered_summary.repair_count, permuted_summary.repair_count);
+        assert_eq!(ordered_summary.esis, permuted_summary.esis);
+        assert_eq!(
+            ordered_summary.esi_multiset_hash, permuted_summary.esi_multiset_hash,
+            "multiset hash must remain stable across input orderings"
         );
     }
 

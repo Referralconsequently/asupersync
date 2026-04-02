@@ -681,7 +681,6 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
 ///
 /// Returns a list of violations. An empty list means the entry is valid.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     let mut violations = Vec::new();
 
@@ -755,18 +754,7 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
         }
     }
 
-    match value.get("artifact_path") {
-        Some(path) if path.is_null() => {}
-        Some(path) => match path.as_str() {
-            Some(text) if text.trim().is_empty() => {
-                violations
-                    .push("artifact_path must be a non-empty string when present".to_string());
-            }
-            Some(_) => {}
-            None => violations.push("artifact_path must be a string when present".to_string()),
-        },
-        None => {}
-    }
+    validate_optional_non_empty_string_field(&value, "artifact_path", &mut violations);
 
     if let Some(decode_stats) = value.get("decode_stats") {
         if decode_stats.is_object() {
@@ -903,6 +891,23 @@ fn validate_optional_string_field(
     if let Some(value) = parent.get(field) {
         if !value.is_null() && value.as_str().is_none() {
             violations.push(format!("{path}.{field} must be a string"));
+        }
+    }
+}
+
+fn validate_optional_non_empty_string_field(
+    parent: &serde_json::Value,
+    field: &str,
+    violations: &mut Vec<String>,
+) {
+    if let Some(value) = parent.get(field) {
+        match value {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(text) if !text.trim().is_empty() => {}
+            serde_json::Value::String(_) => {
+                violations.push(format!("{field} must be a non-empty string when present"));
+            }
+            _ => violations.push(format!("{field} must be a string when present")),
         }
     }
 }
