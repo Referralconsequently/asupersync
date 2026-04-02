@@ -2238,3 +2238,6 @@
 {"file":"src/app.rs","lines":2374,"batch":496,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Drop bomb only on AppHandle which is not created on error path. Cleanup panic safe."}
 {"file":"src/codec/lines.rs","lines":300,"batch":496,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"EOF oversized line returns error (not silent). CRLF handling consistent."}
 {"file":"src/codec/framed_read.rs","lines":200,"batch":496,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cooperative yielding bounds per-poll reads. Unbounded growth only with misconfigured decoder."}
+{"file":"src/messaging/fabric.rs","lines":2500,"batch":496,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Subscribe+publish under same lock, no race. Wildcard matching delegates to validated patterns."}
+{"file":"src/messaging/ir.rs","lines":300,"batch":496,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"IR validation comprehensive, all node types handled"}
+{"file":"src/messaging/federation.rs","lines":300,"batch":496,"date":"2026-04-01","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"No federation loops, per-bridge sequences prevent collision"}
