@@ -88,11 +88,29 @@
 //!              . B continues as S
 //! ```
 //!
+//! # Transport Modes
+//!
+//! Session channels operate in two modes:
+//!
+//! - **Pure typestate** (default): `send(v)` discards the value and only tracks
+//!   the state transition. Created with `new_session()`.
+//! - **Transport-backed**: `send_async(&cx, v)` actually sends the value over an
+//!   in-process `mpsc` channel. Created with `new_transport_pair()`.
+//!
+//! The async methods (`send_async`, `recv_async`, `select_*_async`, `offer_async`)
+//! require transport backing and take `&Cx` for cancellation and budget enforcement.
+//! When the peer drops or `Cx` is cancelled, they return `SessionError`.
+//!
+//! # Supported Scope
+//!
+//! - **In-process `mpsc` transport** is the only supported bridge.
+//! - **Cross-process/network transport** is explicitly deferred.
+//! - **Serialization** (Serde bounds) is not required for in-process use.
+//!
 //! # Cx Integration
 //!
-//! Each `Chan` endpoint carries a reference to the `Cx` capability context.
-//! Transitions consume budget from the context, and the trace ID propagates
-//! through delegated channels for end-to-end distributed tracing.
+//! All transport-backed operations take `&Cx` for cancellation and budget checks.
+//! The trace ID propagates through delegated channels for distributed tracing.
 //!
 //! # Compile-Fail Migration Guards
 //!
@@ -322,7 +340,7 @@ impl<R, S> Chan<R, S> {
     }
 
     /// Disarm the drop bomb for testing without leaking memory or triggering warnings.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn disarm_for_test(mut self) {
         self.closed = true;
     }
@@ -351,16 +369,25 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
     pub async fn send_async(mut self, cx: &Cx, value: T) -> Result<Chan<R, S>, SessionError> {
         let transport = self
             .transport
-            .as_ref()
+            .take()
             .expect("send_async called on non-transport-backed session channel");
 
-        let permit = transport
+        let ok = transport
             .tx
             .reserve(cx)
             .await
-            .map_err(|_| SessionError::Closed)?;
-        permit.send(Box::new(value) as Box<dyn std::any::Any + std::marker::Send>);
-        Ok(self.transition())
+            .map(|permit| {
+                permit.send(Box::new(value) as Box<dyn std::any::Any + std::marker::Send>);
+            })
+            .is_ok();
+
+        if ok {
+            self.transport = Some(transport);
+            Ok(self.transition())
+        } else {
+            self.closed = true;
+            Err(SessionError::Closed)
+        }
     }
 }
 
@@ -385,25 +412,26 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
     /// Panics if this channel has no transport backing, or if the received
     /// value is not of the expected type (protocol violation).
     pub async fn recv_async(mut self, cx: &Cx) -> Result<(T, Chan<R, S>), SessionError> {
-        let transport = self
+        let mut transport = self
             .transport
-            .as_mut()
+            .take()
             .expect("recv_async called on non-transport-backed session channel");
 
-        let boxed = transport
-            .rx
-            .recv(cx)
-            .await
-            .map_err(|_| SessionError::Closed)?;
+        let Ok(boxed) = transport.rx.recv(cx).await else {
+            self.closed = true;
+            return Err(SessionError::Closed);
+        };
 
-        let value = *boxed
-            .downcast::<T>()
-            .map_err(|_| SessionError::ProtocolViolation {
+        let Ok(value) = boxed.downcast::<T>() else {
+            self.closed = true;
+            return Err(SessionError::ProtocolViolation {
                 expected: std::any::type_name::<T>(),
                 actual: "unknown (downcast failed)",
-            })?;
+            });
+        };
 
-        Ok((value, self.transition()))
+        self.transport = Some(transport);
+        Ok((*value, self.transition()))
     }
 }
 
@@ -430,26 +458,46 @@ impl<R, A, B> Chan<R, Select<A, B>> {
 
     /// Select the left branch and notify the peer via transport.
     pub async fn select_left_async(mut self, cx: &Cx) -> Result<Chan<R, A>, SessionError> {
-        if let Some(ref transport) = self.transport {
-            let permit = transport
+        if let Some(transport) = self.transport.take() {
+            let ok = transport
                 .tx
                 .reserve(cx)
                 .await
-                .map_err(|_| SessionError::Closed)?;
-            permit.send(Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>);
+                .map(|permit| {
+                    permit.send(
+                        Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>,
+                    );
+                })
+                .is_ok();
+            if ok {
+                self.transport = Some(transport);
+            } else {
+                self.closed = true;
+                return Err(SessionError::Closed);
+            }
         }
         Ok(self.transition())
     }
 
     /// Select the right branch and notify the peer via transport.
     pub async fn select_right_async(mut self, cx: &Cx) -> Result<Chan<R, B>, SessionError> {
-        if let Some(ref transport) = self.transport {
-            let permit = transport
+        if let Some(transport) = self.transport.take() {
+            let ok = transport
                 .tx
                 .reserve(cx)
                 .await
-                .map_err(|_| SessionError::Closed)?;
-            permit.send(Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>);
+                .map(|permit| {
+                    permit.send(
+                        Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>,
+                    );
+                })
+                .is_ok();
+            if ok {
+                self.transport = Some(transport);
+            } else {
+                self.closed = true;
+                return Err(SessionError::Closed);
+            }
         }
         Ok(self.transition())
     }
@@ -475,23 +523,26 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
         mut self,
         cx: &Cx,
     ) -> Result<Selected<Chan<R, A>, Chan<R, B>>, SessionError> {
-        let transport = self
+        let mut transport = self
             .transport
-            .as_mut()
+            .take()
             .expect("offer_async called on non-transport-backed session channel");
 
-        let boxed = transport
-            .rx
-            .recv(cx)
-            .await
-            .map_err(|_| SessionError::Closed)?;
+        let Ok(boxed) = transport.rx.recv(cx).await else {
+            self.closed = true;
+            return Err(SessionError::Closed);
+        };
 
-        let branch = *boxed
-            .downcast::<Branch>()
-            .map_err(|_| SessionError::ProtocolViolation {
+        let Ok(branch) = boxed.downcast::<Branch>() else {
+            self.closed = true;
+            return Err(SessionError::ProtocolViolation {
                 expected: "Branch (Left/Right)",
                 actual: "unknown (downcast failed)",
-            })?;
+            });
+        };
+
+        self.transport = Some(transport);
+        let branch = *branch;
 
         match branch {
             Branch::Left => Ok(Selected::Left(self.transition())),
@@ -555,6 +606,45 @@ impl<R, S> Drop for Chan<R, S> {
             );
         }
     }
+}
+
+// ============================================================================
+// Transport-backed session creation (works with any protocol)
+// ============================================================================
+
+/// Create a transport-backed session pair for any protocol.
+///
+/// Returns `(Chan<Initiator, I>, Chan<Responder, R>)` where each endpoint
+/// has bidirectional mpsc channels to the peer.
+///
+/// `buffer` controls the mpsc channel capacity for backpressure.
+pub fn new_transport_pair<I, R>(
+    channel_id: u64,
+    obligation_kind: ObligationKind,
+    buffer: usize,
+) -> (Chan<Initiator, I>, Chan<Responder, R>) {
+    let (tx_i2r, rx_i2r) =
+        mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+    let (tx_r2i, rx_r2i) =
+        mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+    (
+        Chan::new_with_transport(
+            channel_id,
+            obligation_kind,
+            SessionTransport {
+                tx: tx_i2r,
+                rx: rx_r2i,
+            },
+        ),
+        Chan::new_with_transport(
+            channel_id,
+            obligation_kind,
+            SessionTransport {
+                tx: tx_r2i,
+                rx: rx_i2r,
+            },
+        ),
+    )
 }
 
 // ============================================================================
@@ -1846,5 +1936,151 @@ mod tests {
             }
             Selected::Left(_) => panic!("expected Release"),
         }
+    }
+
+    // =================================================================
+    // Transport-backed session tests (G2 — bead v2ofj7.7.2)
+    // =================================================================
+
+    #[test]
+    fn transport_backed_send_permit_happy_path() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(100, ObligationKind::SendPermit, 4);
+
+        assert!(sender.is_transport_backed());
+        assert!(receiver.is_transport_backed());
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+
+            // Initiator: Send ReserveMsg
+            let sender = sender
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+
+            // Responder: Recv ReserveMsg
+            let (_, receiver) = receiver.recv_async(&cx).await.unwrap();
+
+            // Initiator: Select Send branch (left)
+            let sender = sender.select_left_async(&cx).await.unwrap();
+
+            // Responder: Offer and receive branch choice
+            let receiver = match receiver.offer_async(&cx).await.unwrap() {
+                Selected::Left(ch) => ch,
+                Selected::Right(_) => panic!("expected Left (Send) branch"),
+            };
+
+            // Initiator: Send the payload
+            let sender = sender.send_async(&cx, 42_u64).await.unwrap();
+
+            // Responder: Recv the payload
+            let (value, receiver) = receiver.recv_async(&cx).await.unwrap();
+            assert_eq!(value, 42_u64);
+
+            // Both sides close
+            let proof_s = sender.close();
+            let proof_r = receiver.close();
+            assert_eq!(proof_s.channel_id, 100);
+            assert_eq!(proof_r.channel_id, 100);
+            assert_eq!(proof_s.obligation_kind, ObligationKind::SendPermit);
+        });
+    }
+
+    #[test]
+    fn transport_backed_send_permit_abort_path() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(200, ObligationKind::SendPermit, 4);
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+
+            let sender = sender
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await
+                .unwrap();
+            let (_, receiver) = receiver.recv_async(&cx).await.unwrap();
+
+            // Initiator: Select Abort branch (right)
+            let sender = sender.select_right_async(&cx).await.unwrap();
+
+            let receiver = match receiver.offer_async(&cx).await.unwrap() {
+                Selected::Right(ch) => ch,
+                Selected::Left(_) => panic!("expected Right (Abort) branch"),
+            };
+
+            let sender = sender
+                .send_async(&cx, send_permit::AbortMsg)
+                .await
+                .unwrap();
+            let (_, receiver) = receiver.recv_async(&cx).await.unwrap();
+
+            let proof_s = sender.close();
+            let proof_r = receiver.close();
+            assert_eq!(proof_s.obligation_kind, ObligationKind::SendPermit);
+            assert_eq!(proof_r.obligation_kind, ObligationKind::SendPermit);
+        });
+    }
+
+    #[test]
+    fn transport_backed_peer_drop_returns_closed() {
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(300, ObligationKind::SendPermit, 4);
+
+        // Drop the receiver immediately
+        receiver.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let result = sender
+                .send_async(&cx, send_permit::ReserveMsg)
+                .await;
+            match result {
+                Err(SessionError::Closed) => {} // expected
+                Err(other) => panic!("expected Closed, got {other}"),
+                Ok(ch) => {
+                    ch.disarm_for_test();
+                    panic!("expected error, got Ok");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn transport_backed_is_transport_backed_flag() {
+        let (pure_s, pure_r) = send_permit::new_session::<u32>(1);
+        assert!(!pure_s.is_transport_backed());
+        assert!(!pure_r.is_transport_backed());
+        pure_s.disarm_for_test();
+        pure_r.disarm_for_test();
+
+        let (trans_s, trans_r) = new_transport_pair::<
+            send_permit::InitiatorSession<u32>,
+            send_permit::ResponderSession<u32>,
+        >(2, ObligationKind::SendPermit, 4);
+        assert!(trans_s.is_transport_backed());
+        assert!(trans_r.is_transport_backed());
+        trans_s.disarm_for_test();
+        trans_r.disarm_for_test();
+    }
+
+    #[test]
+    fn session_error_display() {
+        assert_eq!(SessionError::Cancelled.to_string(), "session cancelled");
+        assert_eq!(SessionError::Closed.to_string(), "session peer closed");
+        assert_eq!(
+            SessionError::ProtocolViolation {
+                expected: "u64",
+                actual: "String"
+            }
+            .to_string(),
+            "protocol violation: expected u64, got String"
+        );
     }
 }

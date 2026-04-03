@@ -9,8 +9,8 @@ mod common;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::obligation::ledger::{LedgerStats, ObligationLedger};
 use asupersync::obligation::session_types::{
-    Branch, End, Initiator, Select, Selected, Send, SessionProof, delegation, lease, send_permit,
-    session_protocol_adoption_specs, two_phase,
+    Branch, End, Initiator, Select, Selected, Send, SessionError, SessionProof, delegation, lease,
+    new_transport_pair, send_permit, session_protocol_adoption_specs, two_phase,
 };
 use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::types::{RegionId, TaskId, Time};
@@ -1300,4 +1300,177 @@ fn two_phase_abort_msg_reason_preserved() {
         }
         Selected::Left(_) => panic!("expected Abort"),
     }
+}
+
+// ============================================================================
+// Transport-backed integration tests (G3 — bead v2ofj7.7.6)
+// ============================================================================
+
+#[test]
+fn transport_send_permit_commit_integration() {
+    use asupersync::cx::Cx;
+
+    let (sender, receiver) = new_transport_pair::<
+        send_permit::InitiatorSession<String>,
+        send_permit::ResponderSession<String>,
+    >(1000, ObligationKind::SendPermit, 8);
+
+    futures_lite::future::block_on(async {
+        let cx = Cx::for_testing();
+
+        // Initiator: Reserve → Select Send → Send payload → End
+        let sender = sender
+            .send_async(&cx, send_permit::ReserveMsg)
+            .await
+            .expect("reserve");
+
+        // Responder: Recv Reserve
+        let (_, receiver) = receiver.recv_async(&cx).await.expect("recv reserve");
+
+        // Initiator: Select Send branch
+        let sender = sender.select_left_async(&cx).await.expect("select left");
+
+        // Responder: Offer (receive branch choice)
+        let receiver = match receiver.offer_async(&cx).await.expect("offer") {
+            Selected::Left(ch) => ch,
+            Selected::Right(_) => panic!("expected Send branch"),
+        };
+
+        // Initiator: Send the actual payload
+        let payload = "hello, session types!".to_string();
+        let sender = sender
+            .send_async(&cx, payload)
+            .await
+            .expect("send payload");
+
+        // Responder: Recv the payload
+        let (payload_out, receiver) = receiver.recv_async(&cx).await.expect("recv payload");
+        assert_eq!(payload_out, "hello, session types!");
+
+        // Both close
+        let sender_proof = sender.close();
+        let receiver_proof = receiver.close();
+
+        assert_eq!(sender_proof.channel_id, 1000);
+        assert_eq!(receiver_proof.channel_id, 1000);
+        assert_eq!(sender_proof.obligation_kind, ObligationKind::SendPermit);
+        assert_eq!(receiver_proof.obligation_kind, ObligationKind::SendPermit);
+    });
+}
+
+#[test]
+fn transport_send_permit_abort_integration() {
+    use asupersync::cx::Cx;
+
+    let (sender, receiver) = new_transport_pair::<
+        send_permit::InitiatorSession<u64>,
+        send_permit::ResponderSession<u64>,
+    >(2000, ObligationKind::SendPermit, 8);
+
+    futures_lite::future::block_on(async {
+        let cx = Cx::for_testing();
+
+        let sender = sender
+            .send_async(&cx, send_permit::ReserveMsg)
+            .await
+            .expect("reserve");
+        let (_, receiver) = receiver.recv_async(&cx).await.expect("recv reserve");
+
+        // Initiator chooses Abort (right branch)
+        let sender = sender.select_right_async(&cx).await.expect("select right");
+        let receiver = match receiver.offer_async(&cx).await.expect("offer") {
+            Selected::Right(ch) => ch,
+            Selected::Left(_) => panic!("expected Abort branch"),
+        };
+
+        let sender = sender
+            .send_async(&cx, send_permit::AbortMsg)
+            .await
+            .expect("send abort");
+        let (_, receiver) = receiver.recv_async(&cx).await.expect("recv abort");
+
+        let sp = sender.close();
+        let rp = receiver.close();
+        assert_eq!(sp.obligation_kind, ObligationKind::SendPermit);
+        assert_eq!(rp.obligation_kind, ObligationKind::SendPermit);
+    });
+}
+
+#[test]
+fn transport_peer_closed_returns_session_error() {
+    use asupersync::cx::Cx;
+
+    let (sender, receiver) = new_transport_pair::<
+        send_permit::InitiatorSession<u64>,
+        send_permit::ResponderSession<u64>,
+    >(3000, ObligationKind::SendPermit, 4);
+
+    // Drop receiver to simulate peer disconnect.
+    receiver.disarm_for_test();
+
+    futures_lite::future::block_on(async {
+        let cx = Cx::for_testing();
+        match sender.send_async(&cx, send_permit::ReserveMsg).await {
+            Err(SessionError::Closed) => {} // expected
+            Err(other) => panic!("expected Closed, got {other}"),
+            Ok(ch) => {
+                ch.disarm_for_test();
+                panic!("expected Closed error, got Ok");
+            }
+        }
+    });
+}
+
+#[test]
+fn transport_multiple_payloads_in_sequence() {
+    use asupersync::cx::Cx;
+    use asupersync::obligation::session_types::{End, Recv, Send as STypeSend};
+
+    // Define a custom 3-message protocol: Send<u32, Send<u32, Send<u32, End>>>
+    type ThreeSends = STypeSend<u32, STypeSend<u32, STypeSend<u32, End>>>;
+    type ThreeRecvs = Recv<u32, Recv<u32, Recv<u32, End>>>;
+
+    let (sender, receiver) =
+        new_transport_pair::<ThreeSends, ThreeRecvs>(4000, ObligationKind::IoOp, 4);
+
+    futures_lite::future::block_on(async {
+        let cx = Cx::for_testing();
+
+        let sender = sender.send_async(&cx, 10_u32).await.expect("send 1");
+        let (v1, receiver) = receiver.recv_async(&cx).await.expect("recv 1");
+        assert_eq!(v1, 10);
+
+        let sender = sender.send_async(&cx, 20_u32).await.expect("send 2");
+        let (v2, receiver) = receiver.recv_async(&cx).await.expect("recv 2");
+        assert_eq!(v2, 20);
+
+        let sender = sender.send_async(&cx, 30_u32).await.expect("send 3");
+        let (v3, receiver) = receiver.recv_async(&cx).await.expect("recv 3");
+        assert_eq!(v3, 30);
+
+        let sp = sender.close();
+        let rp = receiver.close();
+        assert_eq!(sp.channel_id, 4000);
+        assert_eq!(rp.channel_id, 4000);
+    });
+}
+
+#[test]
+fn transport_is_transport_backed_discriminator() {
+    // Pure typestate sessions report no transport
+    let (ps, pr) = send_permit::new_session::<u32>(1);
+    assert!(!ps.is_transport_backed());
+    assert!(!pr.is_transport_backed());
+    ps.disarm_for_test();
+    pr.disarm_for_test();
+
+    // Transport-backed sessions report transport
+    let (ts, tr) = new_transport_pair::<
+        send_permit::InitiatorSession<u32>,
+        send_permit::ResponderSession<u32>,
+    >(2, ObligationKind::SendPermit, 4);
+    assert!(ts.is_transport_backed());
+    assert!(tr.is_transport_backed());
+    ts.disarm_for_test();
+    tr.disarm_for_test();
 }
