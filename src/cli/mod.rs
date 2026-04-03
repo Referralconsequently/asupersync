@@ -180,8 +180,12 @@ mod tests {
             vec![CompletionItem::new("--help")]
         }
 
-        fn subcommand_options(&self, _: &str) -> Vec<CompletionItem> {
-            vec![]
+        fn subcommand_options(&self, subcommand: &str) -> Vec<CompletionItem> {
+            if subcommand == "run" {
+                vec![CompletionItem::new("--dry-run")]
+            } else {
+                vec![]
+            }
         }
     }
 
@@ -247,6 +251,13 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         let contains = output.contains("test");
         crate::assert_with_log!(contains, "contains test", true, contains);
+        let has_subcommand_option = output.contains("--dry-run");
+        crate::assert_with_log!(
+            has_subcommand_option,
+            "contains subcommand option",
+            true,
+            has_subcommand_option
+        );
         crate::test_complete!("completion_integration");
     }
 }

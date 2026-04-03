@@ -87,7 +87,7 @@ impl CliError {
     /// Set exit code.
     #[must_use]
     pub const fn exit_code(mut self, code: i32) -> Self {
-        self.exit_code = code;
+        self.exit_code = ExitCode::sanitize(code);
         self
     }
 
@@ -491,5 +491,25 @@ mod tests {
         crate::assert_with_log!(error.title == "Test", "title", "Test", error.title);
         crate::assert_with_log!(error.exit_code == 1, "exit_code", 1, error.exit_code);
         crate::test_complete!("error_deserializes_from_json");
+    }
+
+    #[test]
+    fn exit_code_builder_sanitizes_invalid_values() {
+        init_test("exit_code_builder_sanitizes_invalid_values");
+        let reserved = CliError::new("test", "Test").exit_code(130);
+        crate::assert_with_log!(
+            reserved.exit_code == ExitCode::INTERNAL_ERROR,
+            "130 sanitized",
+            ExitCode::INTERNAL_ERROR,
+            reserved.exit_code
+        );
+        let negative = CliError::new("test", "Test").exit_code(-5);
+        crate::assert_with_log!(
+            negative.exit_code == ExitCode::INTERNAL_ERROR,
+            "-5 sanitized",
+            ExitCode::INTERNAL_ERROR,
+            negative.exit_code
+        );
+        crate::test_complete!("exit_code_builder_sanitizes_invalid_values");
     }
 }

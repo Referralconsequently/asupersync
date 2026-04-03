@@ -169,21 +169,37 @@ pub fn generate_completions<W: Write, C: Completable>(
     }
 }
 
+fn completion_values(items: &[CompletionItem]) -> Vec<String> {
+    items.iter().map(|item| item.value.clone()).collect()
+}
+
+fn subcommand_option_sets<C: Completable>(
+    completable: &C,
+    subcommands: &[CompletionItem],
+) -> Vec<(String, Vec<CompletionItem>)> {
+    subcommands
+        .iter()
+        .map(|item| {
+            (
+                item.value.clone(),
+                completable.subcommand_options(&item.value),
+            )
+        })
+        .collect()
+}
+
 fn generate_bash_completions<W: Write, C: Completable>(
     completable: &C,
     writer: &mut W,
 ) -> io::Result<()> {
     let cmd = completable.command_name();
-    let subcommands: Vec<_> = completable
-        .subcommands()
+    let subcommands = completable.subcommands();
+    let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
+    let has_subcommand_options = subcommand_option_sets
         .iter()
-        .map(|c| c.value.clone())
-        .collect();
-    let options: Vec<_> = completable
-        .global_options()
-        .iter()
-        .map(|c| c.value.clone())
-        .collect();
+        .any(|(_, options)| !options.is_empty());
+    let subcommands = completion_values(&subcommands);
+    let options = completion_values(&completable.global_options());
 
     writeln!(writer, "# Bash completion for {cmd}")?;
     writeln!(writer, "_{cmd}_completions() {{")?;
@@ -197,6 +213,21 @@ fn generate_bash_completions<W: Write, C: Completable>(
         subcommands.join(" ")
     )?;
     writeln!(writer, "    local options=\"{}\"", options.join(" "))?;
+    writeln!(writer, "    local subcommand_options=\"\"")?;
+    if has_subcommand_options {
+        writeln!(writer)?;
+        writeln!(writer, "    case \"${{COMP_WORDS[1]}}\" in")?;
+        for (subcommand, subcommand_options) in &subcommand_option_sets {
+            if !subcommand_options.is_empty() {
+                writeln!(
+                    writer,
+                    "        {subcommand}) subcommand_options=\"{}\" ;;",
+                    completion_values(subcommand_options).join(" ")
+                )?;
+            }
+        }
+        writeln!(writer, "    esac")?;
+    }
     writeln!(writer)?;
     writeln!(writer, "    if [[ ${{COMP_CWORD}} -eq 1 ]]; then")?;
     writeln!(
@@ -206,7 +237,7 @@ fn generate_bash_completions<W: Write, C: Completable>(
     writeln!(writer, "    else")?;
     writeln!(
         writer,
-        "        COMPREPLY=( $(compgen -W \"$options\" -- \"$cur\") )"
+        "        COMPREPLY=( $(compgen -W \"$options $subcommand_options\" -- \"$cur\") )"
     )?;
     writeln!(writer, "    fi")?;
     writeln!(writer, "}}")?;
@@ -223,11 +254,19 @@ fn generate_zsh_completions<W: Write, C: Completable>(
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
     let options = completable.global_options();
+    let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
+    let has_subcommand_options = subcommand_option_sets
+        .iter()
+        .any(|(_, options)| !options.is_empty());
 
-    writeln!(writer, "compdef {cmd}")?;
+    writeln!(writer, "compdef _{cmd} {cmd}")?;
     writeln!(writer)?;
     writeln!(writer, "_{cmd}() {{")?;
-    writeln!(writer, "    local -a commands options")?;
+    writeln!(writer, "    local context state line")?;
+    writeln!(
+        writer,
+        "    local -a commands options subcommand_options current_options"
+    )?;
     writeln!(writer)?;
     writeln!(writer, "    commands=(")?;
     for item in &subcommands {
@@ -249,9 +288,9 @@ fn generate_zsh_completions<W: Write, C: Completable>(
     }
     writeln!(writer, "    )")?;
     writeln!(writer)?;
-    writeln!(writer, "    _arguments -s \\")?;
+    writeln!(writer, "    _arguments -C -s \\")?;
     writeln!(writer, "        '1: :->command' \\")?;
-    writeln!(writer, "        '*: :->args'")?;
+    writeln!(writer, "        '*:: :->args'")?;
     writeln!(writer)?;
     writeln!(writer, "    case $state in")?;
     writeln!(writer, "        command)")?;
@@ -261,12 +300,37 @@ fn generate_zsh_completions<W: Write, C: Completable>(
     )?;
     writeln!(writer, "            ;;")?;
     writeln!(writer, "        args)")?;
-    writeln!(writer, "            _describe -t options 'options' options")?;
+    writeln!(writer, "            subcommand_options=()")?;
+    if has_subcommand_options {
+        writeln!(writer, "            case $words[2] in")?;
+        for (subcommand, subcommand_options) in &subcommand_option_sets {
+            if !subcommand_options.is_empty() {
+                writeln!(writer, "                {subcommand})")?;
+                writeln!(writer, "                    subcommand_options=(")?;
+                for item in subcommand_options {
+                    if let Some(ref desc) = item.description {
+                        writeln!(writer, "                        '{}[{}]'", item.value, desc)?;
+                    } else {
+                        writeln!(writer, "                        '{}'", item.value)?;
+                    }
+                }
+                writeln!(writer, "                    )")?;
+                writeln!(writer, "                    ;;")?;
+            }
+        }
+        writeln!(writer, "            esac")?;
+    }
+    writeln!(
+        writer,
+        "            current_options=($options $subcommand_options)"
+    )?;
+    writeln!(
+        writer,
+        "            _describe -t options 'options' current_options"
+    )?;
     writeln!(writer, "            ;;")?;
     writeln!(writer, "    esac")?;
     writeln!(writer, "}}")?;
-    writeln!(writer)?;
-    writeln!(writer, "_{cmd}")?;
 
     Ok(())
 }
@@ -278,6 +342,7 @@ fn generate_fish_completions<W: Write, C: Completable>(
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
     let options = completable.global_options();
+    let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
 
     writeln!(writer, "# Fish completion for {cmd}")?;
     writeln!(writer)?;
@@ -317,6 +382,39 @@ fn generate_fish_completions<W: Write, C: Completable>(
         }
     }
 
+    writeln!(writer)?;
+
+    for (subcommand, subcommand_options) in &subcommand_option_sets {
+        for item in subcommand_options {
+            let opt = item.value.trim_start_matches('-');
+            if item.value.starts_with("--") {
+                if let Some(ref desc) = item.description {
+                    writeln!(
+                        writer,
+                        "complete -c {cmd} -n '__fish_seen_subcommand_from {subcommand}' -l '{opt}' -d '{desc}'"
+                    )?;
+                } else {
+                    writeln!(
+                        writer,
+                        "complete -c {cmd} -n '__fish_seen_subcommand_from {subcommand}' -l '{opt}'"
+                    )?;
+                }
+            } else if item.value.starts_with('-') {
+                if let Some(ref desc) = item.description {
+                    writeln!(
+                        writer,
+                        "complete -c {cmd} -n '__fish_seen_subcommand_from {subcommand}' -s '{opt}' -d '{desc}'"
+                    )?;
+                } else {
+                    writeln!(
+                        writer,
+                        "complete -c {cmd} -n '__fish_seen_subcommand_from {subcommand}' -s '{opt}'"
+                    )?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -327,6 +425,10 @@ fn generate_powershell_completions<W: Write, C: Completable>(
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
     let options = completable.global_options();
+    let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
+    let has_subcommand_options = subcommand_option_sets
+        .iter()
+        .any(|(_, options)| !options.is_empty());
 
     writeln!(writer, "# PowerShell completion for {cmd}")?;
     writeln!(writer)?;
@@ -363,7 +465,33 @@ fn generate_powershell_completions<W: Write, C: Completable>(
     writeln!(writer)?;
     writeln!(
         writer,
-        "    $commands + $options | Where-Object {{ $_.CompletionText -like \"$wordToComplete*\" }}"
+        "    $subcommand = if ($commandAst.CommandElements.Count -gt 1) {{ $commandAst.CommandElements[1].Value }} else {{ $null }}"
+    )?;
+    writeln!(writer, "    $subcommandOptions = @()")?;
+    if has_subcommand_options {
+        writeln!(writer, "    switch ($subcommand) {{")?;
+        for (subcommand, subcommand_options) in &subcommand_option_sets {
+            if !subcommand_options.is_empty() {
+                writeln!(writer, "        '{subcommand}' {{")?;
+                writeln!(writer, "            $subcommandOptions = @(")?;
+                for item in subcommand_options {
+                    let desc = item.description.as_deref().unwrap_or("");
+                    writeln!(
+                        writer,
+                        "                [CompletionResult]::new('{}', '{}', 'ParameterName', '{}')",
+                        item.value, item.value, desc
+                    )?;
+                }
+                writeln!(writer, "            )")?;
+                writeln!(writer, "        }}")?;
+            }
+        }
+        writeln!(writer, "    }}")?;
+    }
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "    $commands + $options + $subcommandOptions | Where-Object {{ $_.CompletionText -like \"$wordToComplete*\" }}"
     )?;
     writeln!(writer, "}}")?;
 
@@ -377,6 +505,7 @@ fn generate_elvish_completions<W: Write, C: Completable>(
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
     let options = completable.global_options();
+    let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
 
     writeln!(writer, "# Elvish completion for {cmd}")?;
     writeln!(writer)?;
@@ -402,6 +531,23 @@ fn generate_elvish_completions<W: Write, C: Completable>(
     writeln!(writer, "        keys $commands")?;
     writeln!(writer, "    }} else {{")?;
     writeln!(writer, "        all $options")?;
+    let mut first_branch = true;
+    for (subcommand, subcommand_options) in &subcommand_option_sets {
+        if !subcommand_options.is_empty() {
+            if first_branch {
+                writeln!(writer, "        if (eq $args[0] {subcommand}) {{")?;
+                first_branch = false;
+            } else {
+                writeln!(writer, "        }} elif (eq $args[0] {subcommand}) {{")?;
+            }
+            for item in subcommand_options {
+                writeln!(writer, "            put {}", item.value)?;
+            }
+        }
+    }
+    if !first_branch {
+        writeln!(writer, "        }}")?;
+    }
     writeln!(writer, "    }}")?;
     writeln!(writer, "}}")?;
 
@@ -521,8 +667,15 @@ mod tests {
             ]
         }
 
-        fn subcommand_options(&self, _subcommand: &str) -> Vec<CompletionItem> {
-            vec![]
+        fn subcommand_options(&self, subcommand: &str) -> Vec<CompletionItem> {
+            match subcommand {
+                "run" => vec![
+                    CompletionItem::new("--dry-run").description("Preview execution"),
+                    CompletionItem::new("-j").description("Parallel jobs"),
+                ],
+                "test" => vec![CompletionItem::new("--nocapture").description("Show test output")],
+                _ => vec![],
+            }
         }
     }
 
@@ -541,6 +694,13 @@ mod tests {
         crate::assert_with_log!(has_run, "has run", true, has_run);
         let has_help = output.contains("--help");
         crate::assert_with_log!(has_help, "has --help", true, has_help);
+        let has_subcommand_option = output.contains("--dry-run");
+        crate::assert_with_log!(
+            has_subcommand_option,
+            "has run subcommand option",
+            true,
+            has_subcommand_option
+        );
         crate::test_complete!("generate_bash_completions_works");
     }
 
@@ -551,12 +711,19 @@ mod tests {
         generate_completions(Shell::Zsh, &TestCompletable, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        let has_compdef = output.contains("compdef testcmd");
+        let has_compdef = output.contains("compdef _testcmd testcmd");
         crate::assert_with_log!(has_compdef, "has compdef", true, has_compdef);
         let has_cmd = output.contains("_testcmd");
         crate::assert_with_log!(has_cmd, "has _testcmd", true, has_cmd);
         let has_run = output.contains("run:Run the program");
         crate::assert_with_log!(has_run, "has run", true, has_run);
+        let has_subcommand_option = output.contains("--dry-run[Preview execution]");
+        crate::assert_with_log!(
+            has_subcommand_option,
+            "has run subcommand option",
+            true,
+            has_subcommand_option
+        );
         crate::test_complete!("generate_zsh_completions_works");
     }
 
@@ -571,6 +738,14 @@ mod tests {
         crate::assert_with_log!(has_complete, "has complete -c", true, has_complete);
         let has_run = output.contains("-a 'run'");
         crate::assert_with_log!(has_run, "has run", true, has_run);
+        let has_subcommand_option =
+            output.contains("__fish_seen_subcommand_from run") && output.contains("-l 'dry-run'");
+        crate::assert_with_log!(
+            has_subcommand_option,
+            "has run subcommand option",
+            true,
+            has_subcommand_option
+        );
         crate::test_complete!("generate_fish_completions_works");
     }
 
@@ -675,6 +850,14 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         let has_cmd = output.contains("testcmd");
         crate::assert_with_log!(has_cmd, "has command name", true, has_cmd);
+        let has_subcommand_option =
+            output.contains("$subcommandOptions") && output.contains("--nocapture");
+        crate::assert_with_log!(
+            has_subcommand_option,
+            "has test subcommand option",
+            true,
+            has_subcommand_option
+        );
         crate::test_complete!("generate_powershell_completions_works");
     }
 
@@ -688,6 +871,13 @@ mod tests {
         crate::assert_with_log!(has_cmd, "has command name", true, has_cmd);
         let has_completion = output.contains("arg-completer");
         crate::assert_with_log!(has_completion, "has arg-completer", true, has_completion);
+        let has_subcommand_option = output.contains("put --dry-run");
+        crate::assert_with_log!(
+            has_subcommand_option,
+            "has run subcommand option",
+            true,
+            has_subcommand_option
+        );
         crate::test_complete!("generate_elvish_completions_works");
     }
 }

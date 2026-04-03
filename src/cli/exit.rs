@@ -42,6 +42,12 @@ impl ExitCode {
     /// Trace mismatch during replay.
     pub const TRACE_MISMATCH: i32 = 13;
 
+    /// Lowest valid process exit code that is not shell-reserved.
+    pub const MIN_VALID: i32 = 0;
+
+    /// Highest valid process exit code that is not shell-reserved.
+    pub const MAX_VALID: i32 = 125;
+
     /// Get human-readable description of an exit code.
     #[must_use]
     pub const fn description(code: i32) -> &'static str {
@@ -64,6 +70,24 @@ impl ExitCode {
     #[must_use]
     pub const fn is_success(code: i32) -> bool {
         code == Self::SUCCESS
+    }
+
+    /// Check whether a code is safe to pass to `std::process::exit`.
+    #[must_use]
+    pub const fn is_valid(code: i32) -> bool {
+        code >= Self::MIN_VALID && code <= Self::MAX_VALID
+    }
+
+    /// Sanitize arbitrary integers into the supported semantic exit-code range.
+    ///
+    /// Invalid or shell-reserved values are treated as internal tool bugs.
+    #[must_use]
+    pub const fn sanitize(code: i32) -> i32 {
+        if Self::is_valid(code) {
+            code
+        } else {
+            Self::INTERNAL_ERROR
+        }
     }
 
     /// Check if an exit code indicates any kind of failure (non-zero).
@@ -168,5 +192,62 @@ mod tests {
         let failure1 = ExitCode::is_failure(1);
         crate::assert_with_log!(failure1, "failure 1 true", true, failure1);
         crate::test_complete!("is_success_and_failure");
+    }
+
+    #[test]
+    fn exit_code_validity_matches_documented_range() {
+        init_test("exit_code_validity_matches_documented_range");
+        crate::assert_with_log!(
+            ExitCode::is_valid(0),
+            "0 valid",
+            true,
+            ExitCode::is_valid(0)
+        );
+        crate::assert_with_log!(
+            ExitCode::is_valid(125),
+            "125 valid",
+            true,
+            ExitCode::is_valid(125)
+        );
+        crate::assert_with_log!(
+            !ExitCode::is_valid(-1),
+            "-1 invalid",
+            false,
+            ExitCode::is_valid(-1)
+        );
+        crate::assert_with_log!(
+            !ExitCode::is_valid(126),
+            "126 invalid",
+            false,
+            ExitCode::is_valid(126)
+        );
+        crate::test_complete!("exit_code_validity_matches_documented_range");
+    }
+
+    #[test]
+    fn sanitize_invalid_exit_codes_to_internal_error() {
+        init_test("sanitize_invalid_exit_codes_to_internal_error");
+        let reserved = ExitCode::sanitize(126);
+        crate::assert_with_log!(
+            reserved == ExitCode::INTERNAL_ERROR,
+            "126 sanitized",
+            ExitCode::INTERNAL_ERROR,
+            reserved
+        );
+        let negative = ExitCode::sanitize(-7);
+        crate::assert_with_log!(
+            negative == ExitCode::INTERNAL_ERROR,
+            "-7 sanitized",
+            ExitCode::INTERNAL_ERROR,
+            negative
+        );
+        let valid = ExitCode::sanitize(ExitCode::TEST_FAILURE);
+        crate::assert_with_log!(
+            valid == ExitCode::TEST_FAILURE,
+            "valid preserved",
+            ExitCode::TEST_FAILURE,
+            valid
+        );
+        crate::test_complete!("sanitize_invalid_exit_codes_to_internal_error");
     }
 }

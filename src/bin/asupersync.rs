@@ -840,7 +840,7 @@ fn main() {
     let mut output = Output::new(format).with_color(color);
     if let Err(err) = run(cli.command, &mut output) {
         let _ = write_cli_error(&err, format, color);
-        std::process::exit(err.exit_code);
+        std::process::exit(ExitCode::sanitize(err.exit_code));
     }
 }
 
