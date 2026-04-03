@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use crate::config::RaptorQConfig;
 use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
-use crate::encoding::{max_object_size, EncodingPipeline};
+use crate::encoding::{EncodingPipeline, max_object_size};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
 use crate::security::{AuthenticatedSymbol, SecurityContext};

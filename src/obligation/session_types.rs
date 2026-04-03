@@ -468,9 +468,8 @@ impl<R, A, B> Chan<R, Select<A, B>> {
                 .reserve(cx)
                 .await
                 .map(|permit| {
-                    permit.send(
-                        Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>,
-                    );
+                    permit
+                        .send(Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>);
                 })
                 .is_ok();
             if ok {
@@ -628,10 +627,8 @@ pub fn new_transport_pair<IS, RS>(
     obligation_kind: ObligationKind,
     buffer: usize,
 ) -> (Chan<Initiator, IS>, Chan<Responder, RS>) {
-    let (tx_i2r, rx_i2r) =
-        mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
-    let (tx_r2i, rx_r2i) =
-        mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+    let (tx_i2r, rx_i2r) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+    let (tx_r2i, rx_r2i) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
     (
         Chan::new_with_transport(
             channel_id,
@@ -2011,10 +2008,7 @@ mod tests {
                 Selected::Left(_) => panic!("expected Right (Abort) branch"),
             };
 
-            let sender = sender
-                .send_async(&cx, send_permit::AbortMsg)
-                .await
-                .unwrap();
+            let sender = sender.send_async(&cx, send_permit::AbortMsg).await.unwrap();
             let (_, receiver) = receiver.recv_async(&cx).await.unwrap();
 
             let proof_s = sender.close();
@@ -2036,9 +2030,7 @@ mod tests {
 
         futures_lite::future::block_on(async {
             let cx = Cx::for_testing();
-            let result = sender
-                .send_async(&cx, send_permit::ReserveMsg)
-                .await;
+            let result = sender.send_async(&cx, send_permit::ReserveMsg).await;
             match result {
                 Err(SessionError::Closed) => {} // expected
                 Err(other) => panic!("expected Closed, got {other}"),

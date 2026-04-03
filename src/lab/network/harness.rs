@@ -748,7 +748,10 @@ impl DistributedHarness {
                 };
                 if let Some(tx) = tx {
                     let cx = Cx::for_testing();
-                    let _ = tx.send(&cx, Err(RemoteError::NodeUnreachable(to.as_str().to_owned())));
+                    let _ = tx.send(
+                        &cx,
+                        Err(RemoteError::NodeUnreachable(to.as_str().to_owned())),
+                    );
                 }
             }
             return;

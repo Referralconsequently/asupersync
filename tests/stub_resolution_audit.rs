@@ -204,9 +204,9 @@ fn probe_08_kqueue_reactor_is_platform_gated() {
         if line.contains("pub mod kqueue") {
             // Look back for cfg gate
             let start = i.saturating_sub(5);
-            let has_bsd_gate = lines[start..=i]
-                .iter()
-                .any(|l| l.contains("target_os = \"macos\"") || l.contains("target_os = \"freebsd\""));
+            let has_bsd_gate = lines[start..=i].iter().any(|l| {
+                l.contains("target_os = \"macos\"") || l.contains("target_os = \"freebsd\"")
+            });
             assert!(
                 has_bsd_gate,
                 "pub mod kqueue at line {} missing BSD platform cfg gate",

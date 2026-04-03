@@ -259,7 +259,10 @@ fn attached_remote_handle_observes_ack_before_result() {
         .try_join()
         .expect("result available")
         .expect("outcome");
-    assert!(matches!(outcome, asupersync::remote::RemoteOutcome::Success(_)));
+    assert!(matches!(
+        outcome,
+        asupersync::remote::RemoteOutcome::Success(_)
+    ));
     assert_eq!(handle.state(), RemoteTaskState::Completed);
 }
 

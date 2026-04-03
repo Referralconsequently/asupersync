@@ -490,7 +490,7 @@ impl ConnectionTasks {
             if let Err(payload) = result {
                 let _ = &payload;
                 error!(
-                    message = %payload_to_string(&payload),
+                    message = %crate::cx::scope::payload_to_string(&payload),
                     "connection task panicked"
                 );
             }

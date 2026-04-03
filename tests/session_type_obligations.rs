@@ -1338,10 +1338,7 @@ fn transport_send_permit_commit_integration() {
 
         // Initiator: Send the actual payload
         let payload = "hello, session types!".to_string();
-        let sender = sender
-            .send_async(&cx, payload)
-            .await
-            .expect("send payload");
+        let sender = sender.send_async(&cx, payload).await.expect("send payload");
 
         // Responder: Recv the payload
         let (payload_out, receiver) = receiver.recv_async(&cx).await.expect("recv payload");
