@@ -82,7 +82,7 @@ use std::fmt;
 
 use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder};
 use franken_kernel::{DecisionId, TraceId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // ---------------------------------------------------------------------------
 // Validation errors
@@ -91,6 +91,15 @@ use serde::{Deserialize, Serialize};
 /// Validation errors for decision types.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValidationError {
+    /// Loss matrix contains a non-finite value.
+    InvalidLoss {
+        /// State index of the invalid entry.
+        state: usize,
+        /// Action index of the invalid entry.
+        action: usize,
+        /// The invalid value.
+        value: f64,
+    },
     /// Loss matrix contains a negative value.
     NegativeLoss {
         /// State index of the negative entry.
@@ -111,6 +120,13 @@ pub enum ValidationError {
     PosteriorNotNormalized {
         /// Actual sum of the posterior.
         sum: f64,
+    },
+    /// Posterior contains a negative or non-finite probability.
+    InvalidPosteriorProbability {
+        /// Index of the invalid probability.
+        index: usize,
+        /// The invalid value.
+        value: f64,
     },
     /// Posterior length does not match state space size.
     PosteriorLengthMismatch {
@@ -136,6 +152,14 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidLoss {
+                state,
+                action,
+                value,
+            } => write!(
+                f,
+                "loss must be finite at state={state}, action={action}, got {value}"
+            ),
             Self::NegativeLoss {
                 state,
                 action,
@@ -149,6 +173,12 @@ impl fmt::Display for ValidationError {
             }
             Self::PosteriorNotNormalized { sum } => {
                 write!(f, "posterior sums to {sum}, expected 1.0")
+            }
+            Self::InvalidPosteriorProbability { index, value } => {
+                write!(
+                    f,
+                    "posterior[{index}] must be finite and non-negative, got {value}"
+                )
             }
             Self::PosteriorLengthMismatch { expected, got } => {
                 write!(
@@ -175,11 +205,29 @@ impl std::error::Error for ValidationError {}
 /// Stored in row-major order: `values[state * n_actions + action]`.
 /// All values must be non-negative. Serializable to TOML/JSON for
 /// runtime reconfiguration.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct LossMatrix {
     state_names: Vec<String>,
     action_names: Vec<String>,
     values: Vec<f64>,
+}
+
+#[derive(Deserialize)]
+struct LossMatrixRepr {
+    state_names: Vec<String>,
+    action_names: Vec<String>,
+    values: Vec<f64>,
+}
+
+impl<'de> Deserialize<'de> for LossMatrix {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let repr = LossMatrixRepr::deserialize(deserializer)?;
+        Self::new(repr.state_names, repr.action_names, repr.values)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl LossMatrix {
@@ -212,6 +260,13 @@ impl LossMatrix {
         }
         let n_actions = action_names.len();
         for (i, &v) in values.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(ValidationError::InvalidLoss {
+                    state: i / n_actions,
+                    action: i % n_actions,
+                    value: v,
+                });
+            }
             if v < 0.0 {
                 return Err(ValidationError::NegativeLoss {
                     state: i / n_actions,
@@ -297,9 +352,24 @@ const NORMALIZATION_TOLERANCE: f64 = 1e-6;
 /// A discrete probability distribution over states.
 ///
 /// Supports in-place Bayesian updates in O(|S|) with no allocation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Posterior {
     probs: Vec<f64>,
+}
+
+#[derive(Deserialize)]
+struct PosteriorRepr {
+    probs: Vec<f64>,
+}
+
+impl<'de> Deserialize<'de> for Posterior {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let repr = PosteriorRepr::deserialize(deserializer)?;
+        Self::new(repr.probs).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Posterior {
@@ -307,6 +377,11 @@ impl Posterior {
     ///
     /// Probabilities must sum to ~1.0 (within tolerance) and be non-negative.
     pub fn new(probs: Vec<f64>) -> Result<Self, ValidationError> {
+        for (index, &value) in probs.iter().enumerate() {
+            if !value.is_finite() || value < 0.0 {
+                return Err(ValidationError::InvalidPosteriorProbability { index, value });
+            }
+        }
         let sum: f64 = probs.iter().sum();
         if (sum - 1.0).abs() > NORMALIZATION_TOLERANCE {
             return Err(ValidationError::PosteriorNotNormalized { sum });
@@ -396,7 +471,7 @@ impl Posterior {
 ///
 /// A decision engine should switch to [`DecisionContract::fallback_action`]
 /// when any threshold is breached.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct FallbackPolicy {
     /// Activate fallback if calibration score drops below this value.
     pub calibration_drift_threshold: f64,
@@ -404,6 +479,29 @@ pub struct FallbackPolicy {
     pub e_process_breach_threshold: f64,
     /// Activate fallback if confidence interval width exceeds this value.
     pub confidence_width_threshold: f64,
+}
+
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)]
+struct FallbackPolicyRepr {
+    calibration_drift_threshold: f64,
+    e_process_breach_threshold: f64,
+    confidence_width_threshold: f64,
+}
+
+impl<'de> Deserialize<'de> for FallbackPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let repr = FallbackPolicyRepr::deserialize(deserializer)?;
+        Self::new(
+            repr.calibration_drift_threshold,
+            repr.e_process_breach_threshold,
+            repr.confidence_width_threshold,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl FallbackPolicy {
@@ -416,19 +514,21 @@ impl FallbackPolicy {
         e_process_breach_threshold: f64,
         confidence_width_threshold: f64,
     ) -> Result<Self, ValidationError> {
-        if !(0.0..=1.0).contains(&calibration_drift_threshold) {
+        if !calibration_drift_threshold.is_finite()
+            || !(0.0..=1.0).contains(&calibration_drift_threshold)
+        {
             return Err(ValidationError::ThresholdOutOfRange {
                 field: "calibration_drift_threshold",
                 value: calibration_drift_threshold,
             });
         }
-        if e_process_breach_threshold < 0.0 {
+        if !e_process_breach_threshold.is_finite() || e_process_breach_threshold < 0.0 {
             return Err(ValidationError::ThresholdOutOfRange {
                 field: "e_process_breach_threshold",
                 value: e_process_breach_threshold,
             });
         }
-        if confidence_width_threshold < 0.0 {
+        if !confidence_width_threshold.is_finite() || confidence_width_threshold < 0.0 {
             return Err(ValidationError::ThresholdOutOfRange {
                 field: "confidence_width_threshold",
                 value: confidence_width_threshold,
@@ -790,6 +890,19 @@ mod tests {
     }
 
     #[test]
+    fn loss_matrix_non_finite_rejected() {
+        let err = LossMatrix::new(vec!["s".into()], vec!["a".into()], vec![f64::NAN]).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::InvalidLoss {
+                state: 0,
+                action: 0,
+                value
+            } if value.is_nan()
+        ));
+    }
+
+    #[test]
     fn loss_matrix_expected_loss() {
         let m = two_state_matrix();
         let posterior = Posterior::new(vec![0.8, 0.2]).unwrap();
@@ -845,6 +958,13 @@ mod tests {
         assert_eq!(m, parsed);
     }
 
+    #[test]
+    fn loss_matrix_json_invalid_value_rejected_at_deserialize() {
+        let json = r#"{"state_names":["s"],"action_names":["a"],"values":[-0.5]}"#;
+        let err = serde_json::from_str::<LossMatrix>(json).unwrap_err();
+        assert!(err.to_string().contains("negative loss"));
+    }
+
     // -- Posterior tests --
 
     #[test]
@@ -868,6 +988,30 @@ mod tests {
         assert!(matches!(
             err,
             ValidationError::PosteriorNotNormalized { .. }
+        ));
+    }
+
+    #[test]
+    fn posterior_new_negative_probability_rejected() {
+        let err = Posterior::new(vec![-0.1, 1.1]).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::InvalidPosteriorProbability {
+                index: 0,
+                value
+            } if value == -0.1
+        ));
+    }
+
+    #[test]
+    fn posterior_new_non_finite_probability_rejected() {
+        let err = Posterior::new(vec![f64::NAN, 1.0]).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::InvalidPosteriorProbability {
+                index: 0,
+                value
+            } if value.is_nan()
         ));
     }
 
@@ -973,6 +1117,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn fallback_policy_non_finite_e_process_rejected() {
+        let err = FallbackPolicy::new(0.7, f64::NAN, 0.3).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::ThresholdOutOfRange {
+                field: "e_process_breach_threshold",
+                value
+            } if value.is_nan()
+        ));
+    }
+
+    #[test]
+    fn fallback_policy_non_finite_ci_width_rejected() {
+        let err = FallbackPolicy::new(0.7, 10.0, f64::INFINITY).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::ThresholdOutOfRange {
+                field: "confidence_width_threshold",
+                value
+            } if value.is_infinite()
+        ));
+    }
+
+    #[test]
+    fn fallback_policy_json_invalid_threshold_rejected_at_deserialize() {
+        let json = r#"{
+            "calibration_drift_threshold": 0.7,
+            "e_process_breach_threshold": -1.0,
+            "confidence_width_threshold": 0.3
+        }"#;
+        let err = serde_json::from_str::<FallbackPolicy>(json).unwrap_err();
+        assert!(err.to_string().contains("threshold"));
     }
 
     #[test]
@@ -1363,6 +1542,13 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let parsed: Posterior = serde_json::from_str(&json).unwrap();
         assert_eq!(p, parsed);
+    }
+
+    #[test]
+    fn posterior_json_invalid_value_rejected_at_deserialize() {
+        let json = r#"{"probs":[-0.1,1.1]}"#;
+        let err = serde_json::from_str::<Posterior>(json).unwrap_err();
+        assert!(err.to_string().contains("finite and non-negative"));
     }
 
     // -- LossMatrix 3x3 TOML --

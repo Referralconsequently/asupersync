@@ -49,7 +49,7 @@ pub mod render;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // ---------------------------------------------------------------------------
 // Core struct
@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 /// A single evidence-ledger entry recording a FrankenSuite decision.
 ///
 /// All fields use short serde names for compact JSONL serialization.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct EvidenceLedger {
     /// Millisecond Unix timestamp of the decision.
     #[serde(rename = "ts")]
@@ -99,6 +99,66 @@ pub struct EvidenceLedger {
     pub top_features: Vec<(String, f64)>,
 }
 
+#[derive(Deserialize)]
+struct EvidenceLedgerRepr {
+    #[serde(rename = "ts")]
+    ts_unix_ms: u64,
+    #[serde(rename = "c")]
+    component: String,
+    #[serde(rename = "a")]
+    action: String,
+    #[serde(rename = "p")]
+    posterior: Vec<f64>,
+    #[serde(rename = "el")]
+    expected_loss_by_action: BTreeMap<String, f64>,
+    #[serde(rename = "cel")]
+    chosen_expected_loss: f64,
+    #[serde(rename = "cal")]
+    calibration_score: f64,
+    #[serde(rename = "fb")]
+    fallback_active: bool,
+    #[serde(rename = "tf")]
+    top_features: Vec<(String, f64)>,
+}
+
+impl From<EvidenceLedgerRepr> for EvidenceLedger {
+    fn from(repr: EvidenceLedgerRepr) -> Self {
+        Self {
+            ts_unix_ms: repr.ts_unix_ms,
+            component: repr.component,
+            action: repr.action,
+            posterior: repr.posterior,
+            expected_loss_by_action: repr.expected_loss_by_action,
+            chosen_expected_loss: repr.chosen_expected_loss,
+            calibration_score: repr.calibration_score,
+            fallback_active: repr.fallback_active,
+            top_features: repr.top_features,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EvidenceLedger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entry = Self::from(EvidenceLedgerRepr::deserialize(deserializer)?);
+        let errors = entry.validate();
+        if errors.is_empty() {
+            Ok(entry)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "invalid evidence ledger: {}",
+                errors
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -113,6 +173,20 @@ pub enum ValidationError {
     },
     /// `posterior` is empty.
     PosteriorEmpty,
+    /// `posterior` contains a negative or non-finite probability.
+    InvalidPosteriorProbability {
+        /// Index of the invalid probability.
+        index: usize,
+        /// The invalid probability value.
+        value: f64,
+    },
+    /// An expected-loss value is non-finite.
+    InvalidExpectedLoss {
+        /// The action whose loss is invalid.
+        action: String,
+        /// The invalid loss value.
+        value: f64,
+    },
     /// `calibration_score` is outside [0, 1].
     CalibrationOutOfRange {
         /// The out-of-range value.
@@ -128,6 +202,11 @@ pub enum ValidationError {
     /// `chosen_expected_loss` is negative.
     NegativeChosenExpectedLoss {
         /// The negative loss value.
+        value: f64,
+    },
+    /// `chosen_expected_loss` is non-finite.
+    InvalidChosenExpectedLoss {
+        /// The invalid loss value.
         value: f64,
     },
     /// `expected_loss_by_action` is populated but does not include the chosen action.
@@ -157,6 +236,18 @@ impl fmt::Display for ValidationError {
                 write!(f, "posterior sums to {sum}, expected ~1.0")
             }
             Self::PosteriorEmpty => write!(f, "posterior must not be empty"),
+            Self::InvalidPosteriorProbability { index, value } => {
+                write!(
+                    f,
+                    "posterior[{index}] must be finite and non-negative, got {value}"
+                )
+            }
+            Self::InvalidExpectedLoss { action, value } => {
+                write!(
+                    f,
+                    "expected_loss for '{action}' must be finite, got {value}"
+                )
+            }
             Self::CalibrationOutOfRange { value } => {
                 write!(f, "calibration_score {value} not in [0, 1]")
             }
@@ -165,6 +256,9 @@ impl fmt::Display for ValidationError {
             }
             Self::NegativeChosenExpectedLoss { value } => {
                 write!(f, "chosen_expected_loss is negative: {value}")
+            }
+            Self::InvalidChosenExpectedLoss { value } => {
+                write!(f, "chosen_expected_loss must be finite, got {value}")
             }
             Self::ChosenActionMissingExpectedLoss { action } => {
                 write!(
@@ -194,8 +288,9 @@ impl EvidenceLedger {
     /// Validate all invariants and return any violations.
     ///
     /// - `posterior` must be non-empty and sum to ~1.0 (tolerance 1e-6).
+    /// - Posterior entries must be finite and non-negative.
     /// - `calibration_score` must be in [0, 1].
-    /// - All expected losses must be non-negative.
+    /// - All expected losses must be finite and non-negative.
     /// - `component` and `action` must be non-empty.
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
@@ -210,9 +305,18 @@ impl EvidenceLedger {
         if self.posterior.is_empty() {
             errors.push(ValidationError::PosteriorEmpty);
         } else {
-            let sum: f64 = self.posterior.iter().sum();
-            if (sum - 1.0).abs() > 1e-6 {
-                errors.push(ValidationError::PosteriorNotNormalized { sum });
+            let mut posterior_has_invalid_entry = false;
+            for (index, &value) in self.posterior.iter().enumerate() {
+                if !value.is_finite() || value < 0.0 {
+                    errors.push(ValidationError::InvalidPosteriorProbability { index, value });
+                    posterior_has_invalid_entry = true;
+                }
+            }
+            if !posterior_has_invalid_entry {
+                let sum: f64 = self.posterior.iter().sum();
+                if (sum - 1.0).abs() > 1e-6 {
+                    errors.push(ValidationError::PosteriorNotNormalized { sum });
+                }
             }
         }
 
@@ -222,14 +326,27 @@ impl EvidenceLedger {
             });
         }
 
-        if self.chosen_expected_loss < 0.0 {
+        let chosen_expected_loss_valid = if !self.chosen_expected_loss.is_finite() {
+            errors.push(ValidationError::InvalidChosenExpectedLoss {
+                value: self.chosen_expected_loss,
+            });
+            false
+        } else if self.chosen_expected_loss < 0.0 {
             errors.push(ValidationError::NegativeChosenExpectedLoss {
                 value: self.chosen_expected_loss,
             });
-        }
+            false
+        } else {
+            true
+        };
 
         for (action, &loss) in &self.expected_loss_by_action {
-            if loss < 0.0 {
+            if !loss.is_finite() {
+                errors.push(ValidationError::InvalidExpectedLoss {
+                    action: action.clone(),
+                    value: loss,
+                });
+            } else if loss < 0.0 {
                 errors.push(ValidationError::NegativeExpectedLoss {
                     action: action.clone(),
                     value: loss,
@@ -238,7 +355,11 @@ impl EvidenceLedger {
         }
 
         if let Some(&mapped) = self.expected_loss_by_action.get(&self.action) {
-            if (mapped - self.chosen_expected_loss).abs() > 1e-12 {
+            if chosen_expected_loss_valid
+                && mapped.is_finite()
+                && mapped >= 0.0
+                && (mapped - self.chosen_expected_loss).abs() > 1e-12
+            {
                 errors.push(ValidationError::ChosenExpectedLossMismatch {
                     action: self.action.clone(),
                     chosen: self.chosen_expected_loss,
@@ -520,6 +641,26 @@ mod tests {
     }
 
     #[test]
+    fn validation_negative_posterior_probability() {
+        let errors = expect_validation(valid_builder().posterior(vec![-0.1, 0.2, 0.9]).build());
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidPosteriorProbability { index: 0, value }
+                if *value == -0.1
+        )));
+    }
+
+    #[test]
+    fn validation_non_finite_posterior_probability() {
+        let errors = expect_validation(valid_builder().posterior(vec![f64::NAN, 0.2, 0.8]).build());
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidPosteriorProbability { index: 0, value }
+                if value.is_nan()
+        )));
+    }
+
+    #[test]
     fn validation_calibration_out_of_range() {
         let errors = expect_validation(valid_builder().calibration_score(1.5).build());
         assert!(
@@ -540,6 +681,20 @@ mod tests {
     }
 
     #[test]
+    fn validation_non_finite_expected_loss() {
+        let errors = expect_validation(
+            valid_builder()
+                .expected_loss("bad_action", f64::NAN)
+                .build(),
+        );
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidExpectedLoss { action, value }
+                if action == "bad_action" && value.is_nan()
+        )));
+    }
+
+    #[test]
     fn validation_negative_chosen_expected_loss() {
         let errors = expect_validation(valid_builder().chosen_expected_loss(-0.01).build());
         assert!(
@@ -547,6 +702,15 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ValidationError::NegativeChosenExpectedLoss { .. }))
         );
+    }
+
+    #[test]
+    fn validation_non_finite_chosen_expected_loss() {
+        let errors = expect_validation(valid_builder().chosen_expected_loss(f64::INFINITY).build());
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidChosenExpectedLoss { value } if value.is_infinite()
+        )));
     }
 
     #[test]
@@ -667,6 +831,13 @@ mod tests {
         assert_eq!(entry.calibration_score, 0.8);
         assert!(!entry.fallback_active);
         assert_eq!(entry.top_features, vec![("feat".to_string(), 0.9)]);
+    }
+
+    #[test]
+    fn deserialize_invalid_json_rejected() {
+        let json = r#"{"ts":1700000000000,"c":"test","a":"act","p":[0.6,0.4],"el":{"act":-0.1},"cel":-0.1,"cal":0.8,"fb":false,"tf":[["feat",0.9]]}"#;
+        let err = serde_json::from_str::<EvidenceLedger>(json).unwrap_err();
+        assert!(err.to_string().contains("invalid evidence ledger"));
     }
 
     #[test]
