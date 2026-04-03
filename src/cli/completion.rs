@@ -194,11 +194,11 @@ fn generate_bash_completions<W: Write, C: Completable>(
 ) -> io::Result<()> {
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
+    let subcommand_names = completion_values(&subcommands);
     let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
     let has_subcommand_options = subcommand_option_sets
         .iter()
         .any(|(_, options)| !options.is_empty());
-    let subcommands = completion_values(&subcommands);
     let options = completion_values(&completable.global_options());
 
     writeln!(writer, "# Bash completion for {cmd}")?;
@@ -210,13 +210,27 @@ fn generate_bash_completions<W: Write, C: Completable>(
     writeln!(
         writer,
         "    local subcommands=\"{}\"",
-        subcommands.join(" ")
+        subcommand_names.join(" ")
     )?;
     writeln!(writer, "    local options=\"{}\"", options.join(" "))?;
+    writeln!(writer, "    local subcommand=\"\"")?;
     writeln!(writer, "    local subcommand_options=\"\"")?;
-    if has_subcommand_options {
+    if has_subcommand_options && !subcommand_names.is_empty() {
         writeln!(writer)?;
-        writeln!(writer, "    case \"${{COMP_WORDS[1]}}\" in")?;
+        writeln!(writer, "    local idx")?;
+        writeln!(writer, "    for ((idx = 1; idx < COMP_CWORD; idx++)); do")?;
+        writeln!(writer, "        case \"${{COMP_WORDS[idx]}}\" in")?;
+        writeln!(writer, "            {})", subcommand_names.join("|"))?;
+        writeln!(
+            writer,
+            "                subcommand=\"${{COMP_WORDS[idx]}}\""
+        )?;
+        writeln!(writer, "                break")?;
+        writeln!(writer, "                ;;")?;
+        writeln!(writer, "        esac")?;
+        writeln!(writer, "    done")?;
+        writeln!(writer)?;
+        writeln!(writer, "    case \"$subcommand\" in")?;
         for (subcommand, subcommand_options) in &subcommand_option_sets {
             if !subcommand_options.is_empty() {
                 writeln!(
@@ -229,7 +243,7 @@ fn generate_bash_completions<W: Write, C: Completable>(
         writeln!(writer, "    esac")?;
     }
     writeln!(writer)?;
-    writeln!(writer, "    if [[ ${{COMP_CWORD}} -eq 1 ]]; then")?;
+    writeln!(writer, "    if [[ -z \"$subcommand\" ]]; then")?;
     writeln!(
         writer,
         "        COMPREPLY=( $(compgen -W \"$subcommands $options\" -- \"$cur\") )"
@@ -253,6 +267,7 @@ fn generate_zsh_completions<W: Write, C: Completable>(
 ) -> io::Result<()> {
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
+    let subcommand_names = completion_values(&subcommands);
     let options = completable.global_options();
     let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
     let has_subcommand_options = subcommand_option_sets
@@ -265,7 +280,7 @@ fn generate_zsh_completions<W: Write, C: Completable>(
     writeln!(writer, "    local context state line")?;
     writeln!(
         writer,
-        "    local -a commands options subcommand_options current_options"
+        "    local -a commands options subcommand_options current_items"
     )?;
     writeln!(writer)?;
     writeln!(writer, "    commands=(")?;
@@ -300,9 +315,26 @@ fn generate_zsh_completions<W: Write, C: Completable>(
     )?;
     writeln!(writer, "            ;;")?;
     writeln!(writer, "        args)")?;
+    writeln!(writer, "            local subcommand=''")?;
     writeln!(writer, "            subcommand_options=()")?;
-    if has_subcommand_options {
-        writeln!(writer, "            case $words[2] in")?;
+    if has_subcommand_options && !subcommand_names.is_empty() {
+        writeln!(writer, "            local idx")?;
+        writeln!(
+            writer,
+            "            for (( idx = 2; idx < CURRENT; idx++ )); do"
+        )?;
+        writeln!(writer, "                case $words[idx] in")?;
+        writeln!(
+            writer,
+            "                    {})",
+            subcommand_names.join("|")
+        )?;
+        writeln!(writer, "                        subcommand=$words[idx]")?;
+        writeln!(writer, "                        break")?;
+        writeln!(writer, "                        ;;")?;
+        writeln!(writer, "                esac")?;
+        writeln!(writer, "            done")?;
+        writeln!(writer, "            case $subcommand in")?;
         for (subcommand, subcommand_options) in &subcommand_option_sets {
             if !subcommand_options.is_empty() {
                 writeln!(writer, "                {subcommand})")?;
@@ -320,13 +352,17 @@ fn generate_zsh_completions<W: Write, C: Completable>(
         }
         writeln!(writer, "            esac")?;
     }
+    writeln!(writer, "            if [[ -z $subcommand ]]; then")?;
+    writeln!(writer, "                current_items=($commands $options)")?;
+    writeln!(writer, "            else")?;
     writeln!(
         writer,
-        "            current_options=($options $subcommand_options)"
+        "                current_items=($options $subcommand_options)"
     )?;
+    writeln!(writer, "            fi")?;
     writeln!(
         writer,
-        "            _describe -t options 'options' current_options"
+        "            _describe -t completions 'completions' current_items"
     )?;
     writeln!(writer, "            ;;")?;
     writeln!(writer, "    esac")?;
@@ -424,6 +460,7 @@ fn generate_powershell_completions<W: Write, C: Completable>(
 ) -> io::Result<()> {
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
+    let subcommand_names = completion_values(&subcommands);
     let options = completable.global_options();
     let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
     let has_subcommand_options = subcommand_option_sets
@@ -465,8 +502,28 @@ fn generate_powershell_completions<W: Write, C: Completable>(
     writeln!(writer)?;
     writeln!(
         writer,
-        "    $subcommand = if ($commandAst.CommandElements.Count -gt 1) {{ $commandAst.CommandElements[1].Value }} else {{ $null }}"
+        "    $subcommandNames = @({})",
+        subcommand_names
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
     )?;
+    writeln!(writer, "    $subcommand = $null")?;
+    writeln!(
+        writer,
+        "    $scanCount = if ($wordToComplete.Length -gt 0) {{ $commandAst.CommandElements.Count - 1 }} else {{ $commandAst.CommandElements.Count }}"
+    )?;
+    writeln!(writer, "    for ($i = 1; $i -lt $scanCount; $i++) {{")?;
+    writeln!(
+        writer,
+        "        $value = [string]$commandAst.CommandElements[$i].Value"
+    )?;
+    writeln!(writer, "        if ($subcommandNames -contains $value) {{")?;
+    writeln!(writer, "            $subcommand = $value")?;
+    writeln!(writer, "            break")?;
+    writeln!(writer, "        }}")?;
+    writeln!(writer, "    }}")?;
     writeln!(writer, "    $subcommandOptions = @()")?;
     if has_subcommand_options {
         writeln!(writer, "    switch ($subcommand) {{")?;
@@ -504,6 +561,7 @@ fn generate_elvish_completions<W: Write, C: Completable>(
 ) -> io::Result<()> {
     let cmd = completable.command_name();
     let subcommands = completable.subcommands();
+    let subcommand_names = completion_values(&subcommands);
     let options = completable.global_options();
     let subcommand_option_sets = subcommand_option_sets(completable, &subcommands);
 
@@ -530,15 +588,37 @@ fn generate_elvish_completions<W: Write, C: Completable>(
     writeln!(writer, "    if (eq (count $args) 1) {{")?;
     writeln!(writer, "        keys $commands")?;
     writeln!(writer, "    }} else {{")?;
+    writeln!(writer, "        var subcommand = ''")?;
+    if !subcommand_names.is_empty() {
+        writeln!(writer, "        for arg $args[..-1] {{")?;
+        let mut first_branch = true;
+        for subcommand in &subcommand_names {
+            if first_branch {
+                writeln!(writer, "            if (eq $arg {subcommand}) {{")?;
+                first_branch = false;
+            } else {
+                writeln!(writer, "            }} elif (eq $arg {subcommand}) {{")?;
+            }
+            writeln!(writer, "                set subcommand = {subcommand}")?;
+            writeln!(writer, "                break")?;
+        }
+        if !first_branch {
+            writeln!(writer, "            }}")?;
+        }
+        writeln!(writer, "        }}")?;
+    }
+    writeln!(writer, "        if (eq $subcommand '') {{")?;
+    writeln!(writer, "            keys $commands")?;
+    writeln!(writer, "        }}")?;
     writeln!(writer, "        all $options")?;
     let mut first_branch = true;
     for (subcommand, subcommand_options) in &subcommand_option_sets {
         if !subcommand_options.is_empty() {
             if first_branch {
-                writeln!(writer, "        if (eq $args[0] {subcommand}) {{")?;
+                writeln!(writer, "        if (eq $subcommand {subcommand}) {{")?;
                 first_branch = false;
             } else {
-                writeln!(writer, "        }} elif (eq $args[0] {subcommand}) {{")?;
+                writeln!(writer, "        }} elif (eq $subcommand {subcommand}) {{")?;
             }
             for item in subcommand_options {
                 writeln!(writer, "            put {}", item.value)?;
@@ -879,5 +959,122 @@ mod tests {
             has_subcommand_option
         );
         crate::test_complete!("generate_elvish_completions_works");
+    }
+
+    #[test]
+    fn bash_subcommand_detection_scans_prior_words() {
+        init_test("bash_subcommand_detection_scans_prior_words");
+        let mut buf = Vec::new();
+        generate_completions(Shell::Bash, &TestCompletable, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let scans_prior_words = output.contains("for ((idx = 1; idx < COMP_CWORD; idx++)); do");
+        crate::assert_with_log!(
+            scans_prior_words,
+            "bash scans prior words",
+            true,
+            scans_prior_words
+        );
+        let avoids_fixed_index = !output.contains("${COMP_WORDS[1]}");
+        crate::assert_with_log!(
+            avoids_fixed_index,
+            "bash avoids fixed index",
+            true,
+            avoids_fixed_index
+        );
+        let keeps_commands_until_subcommand = output.contains("if [[ -z \"$subcommand\" ]]; then");
+        crate::assert_with_log!(
+            keeps_commands_until_subcommand,
+            "bash keeps subcommands before selection",
+            true,
+            keeps_commands_until_subcommand
+        );
+        crate::test_complete!("bash_subcommand_detection_scans_prior_words");
+    }
+
+    #[test]
+    fn zsh_subcommand_detection_scans_prior_words() {
+        init_test("zsh_subcommand_detection_scans_prior_words");
+        let mut buf = Vec::new();
+        generate_completions(Shell::Zsh, &TestCompletable, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let scans_prior_words = output.contains("for (( idx = 2; idx < CURRENT; idx++ )); do");
+        crate::assert_with_log!(
+            scans_prior_words,
+            "zsh scans prior words",
+            true,
+            scans_prior_words
+        );
+        let avoids_fixed_index = !output.contains("case $words[2] in");
+        crate::assert_with_log!(
+            avoids_fixed_index,
+            "zsh avoids fixed index",
+            true,
+            avoids_fixed_index
+        );
+        let keeps_commands_until_subcommand = output.contains("current_items=($commands $options)");
+        crate::assert_with_log!(
+            keeps_commands_until_subcommand,
+            "zsh keeps subcommands before selection",
+            true,
+            keeps_commands_until_subcommand
+        );
+        crate::test_complete!("zsh_subcommand_detection_scans_prior_words");
+    }
+
+    #[test]
+    fn powershell_subcommand_detection_scans_prior_elements() {
+        init_test("powershell_subcommand_detection_scans_prior_elements");
+        let mut buf = Vec::new();
+        generate_completions(Shell::PowerShell, &TestCompletable, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let scans_prior_elements = output.contains("for ($i = 1; $i -lt $scanCount; $i++) {");
+        crate::assert_with_log!(
+            scans_prior_elements,
+            "powershell scans prior elements",
+            true,
+            scans_prior_elements
+        );
+        let avoids_fixed_index = !output.contains("CommandElements[1].Value");
+        crate::assert_with_log!(
+            avoids_fixed_index,
+            "powershell avoids fixed index",
+            true,
+            avoids_fixed_index
+        );
+        crate::test_complete!("powershell_subcommand_detection_scans_prior_elements");
+    }
+
+    #[test]
+    fn elvish_subcommand_detection_scans_prior_args() {
+        init_test("elvish_subcommand_detection_scans_prior_args");
+        let mut buf = Vec::new();
+        generate_completions(Shell::Elvish, &TestCompletable, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let scans_prior_args = output.contains("for arg $args[..-1] {");
+        crate::assert_with_log!(
+            scans_prior_args,
+            "elvish scans prior args",
+            true,
+            scans_prior_args
+        );
+        let avoids_fixed_index = !output.contains("eq $args[0] run");
+        crate::assert_with_log!(
+            avoids_fixed_index,
+            "elvish avoids fixed index",
+            true,
+            avoids_fixed_index
+        );
+        let keeps_commands_until_subcommand = output.contains("if (eq $subcommand '') {");
+        crate::assert_with_log!(
+            keeps_commands_until_subcommand,
+            "elvish keeps subcommands before selection",
+            true,
+            keeps_commands_until_subcommand
+        );
+        crate::test_complete!("elvish_subcommand_detection_scans_prior_args");
     }
 }
