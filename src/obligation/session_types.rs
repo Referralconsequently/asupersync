@@ -224,7 +224,7 @@ pub struct Responder;
 /// Each endpoint holds a sender (to push messages to the peer) and a
 /// receiver (to pull messages from the peer). Messages are `Box<dyn std::any::Any + std::marker::Send>`
 /// to allow different types at different protocol stages.
-struct SessionTransport {
+pub(super) struct SessionTransport {
     /// Send half — push messages to the peer endpoint.
     tx: mpsc::Sender<Box<dyn std::any::Any + std::marker::Send>>,
     /// Receive half — pull messages from the peer endpoint.
@@ -725,8 +725,10 @@ pub mod send_permit {
         Chan<Initiator, SenderSession<T>>,
         Chan<Responder, ReceiverSession<T>>,
     ) {
-        let (tx_i2r, rx_i2r) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
-        let (tx_r2i, rx_r2i) = mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        let (tx_i2r, rx_i2r) =
+            crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
+        let (tx_r2i, rx_r2i) =
+            crate::channel::mpsc::channel::<Box<dyn std::any::Any + std::marker::Send>>(buffer);
         (
             Chan::new_with_transport(
                 channel_id,
