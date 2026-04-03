@@ -241,6 +241,15 @@ for entry in "${ARTIFACTS[@]}"; do
     warn "artifact not built yet: ${artifact} (run build:wasm first)"
   fi
 done
+
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  if [[ -e "${BC}/${rel}" ]]; then
+    ok "files array artifact exists on disk: ${rel}"
+  else
+    err "files array advertises missing artifact: ${rel}"
+  fi
+done <<< "$bc_files"
 echo ""
 
 # ── Phase 4: Higher-Level Package Source ──────────────────────────────

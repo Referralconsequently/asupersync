@@ -328,6 +328,25 @@ fn browser_core_files_include_wasm_and_js() {
     );
 }
 
+#[test]
+fn browser_core_files_array_only_advertises_existing_artifacts() {
+    let v = read_pkg("browser-core");
+    let package_dir = repo_root().join("packages/browser-core");
+    let files = v["files"].as_array().expect("files array required");
+
+    for entry in files {
+        let rel = entry
+            .as_str()
+            .expect("browser-core files entries must be strings");
+        let path = package_dir.join(rel);
+        assert!(
+            path.exists(),
+            "browser-core files entry {rel} must exist on disk at {}",
+            path.display()
+        );
+    }
+}
+
 // ── Dependency Correctness ───────────────────────────────────────────
 
 #[test]

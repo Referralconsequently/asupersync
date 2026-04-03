@@ -26,14 +26,35 @@ fn browser_core_package_manifest_declares_artifact_layout() {
         manifest["exports"]["./debug-metadata.json"],
         "./debug-metadata.json"
     );
-    assert_eq!(
-        manifest["exports"]["./asupersync.js.map"],
-        "./asupersync.js.map"
-    );
-    assert_eq!(
-        manifest["exports"]["./asupersync_bg.wasm.map"],
-        "./asupersync_bg.wasm.map"
-    );
+}
+
+#[test]
+fn browser_core_manifest_avoids_advertising_optional_or_missing_artifacts() {
+    let package_dir = workspace_root().join("packages/browser-core");
+    let raw = fs::read_to_string(package_dir.join("package.json")).expect("read package.json");
+    let manifest: Value = serde_json::from_str(&raw).expect("parse package.json");
+    let exports = manifest["exports"]
+        .as_object()
+        .expect("exports map required");
+    let files = manifest["files"].as_array().expect("files array required");
+
+    for forbidden in ["./asupersync.js.map", "./asupersync_bg.wasm.map"] {
+        assert!(
+            !exports.contains_key(forbidden),
+            "package.json must not export optional artifact {forbidden} before it is staged"
+        );
+    }
+
+    for forbidden in ["README.md", "asupersync.js.map", "asupersync_bg.wasm.map"] {
+        assert!(
+            !files.iter().any(|entry| entry.as_str() == Some(forbidden)),
+            "files array must not advertise missing artifact {forbidden}"
+        );
+        assert!(
+            !package_dir.join(forbidden).exists(),
+            "test assumption drifted: missing artifact {forbidden} now exists on disk"
+        );
+    }
 }
 
 #[test]

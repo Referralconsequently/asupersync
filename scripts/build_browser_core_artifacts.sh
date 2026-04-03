@@ -11,6 +11,8 @@ PACKAGE_DIR="${REPO_ROOT}/packages/browser-core"
 ABI_FILE="${REPO_ROOT}/src/types/wasm_abi.rs"
 JS_MAP_FILE="asupersync.js.map"
 WASM_MAP_FILE="asupersync_bg.wasm.map"
+RCH_BIN="${RCH_BIN:-rch}"
+WRAPPER_ROOT="${REPO_ROOT}/target/browser-core-build"
 
 if ! command -v wasm-pack >/dev/null 2>&1; then
   echo "error: wasm-pack is required (https://rustwasm.github.io/wasm-pack/)" >&2
@@ -19,6 +21,11 @@ fi
 
 if ! command -v rg >/dev/null 2>&1; then
   echo "error: rg is required to extract ABI constants" >&2
+  exit 1
+fi
+
+if ! command -v "${RCH_BIN}" >/dev/null 2>&1; then
+  echo "error: ${RCH_BIN} is required to offload cargo-backed wasm builds" >&2
   exit 1
 fi
 
@@ -44,10 +51,20 @@ USAGE
     ;;
 esac
 
-mkdir -p "${STAGING_DIR}" "${PACKAGE_DIR}"
+mkdir -p "${STAGING_DIR}" "${PACKAGE_DIR}" "${WRAPPER_ROOT}"
+WORK_DIR="$(mktemp -d "${WRAPPER_ROOT}/${PROFILE}.XXXXXX")"
+CARGO_WRAPPER="${WORK_DIR}/cargo-rch"
+
+cat > "${CARGO_WRAPPER}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${REPO_ROOT}"
+exec "${RCH_BIN}" exec -- cargo "\$@"
+EOF
+chmod +x "${CARGO_WRAPPER}"
 
 echo "==> Building asupersync-browser-core (${PROFILE})"
-wasm-pack build "${CRATE_DIR}" \
+CARGO="${CARGO_WRAPPER}" wasm-pack build "${CRATE_DIR}" \
   --target web \
   --out-dir "${STAGING_DIR}" \
   --out-name asupersync \

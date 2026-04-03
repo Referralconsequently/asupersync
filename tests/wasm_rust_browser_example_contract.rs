@@ -192,6 +192,29 @@ fn rust_browser_validation_script_exists_and_offloads_wasm_builds_via_rch() {
 }
 
 #[test]
+fn browser_core_build_script_exists_and_offloads_wasm_builds_via_rch() {
+    let path = repo_root().join("scripts/build_browser_core_artifacts.sh");
+    assert!(path.exists(), "build_browser_core_artifacts.sh must exist");
+    let content = std::fs::read_to_string(&path).expect("failed to read build script");
+
+    #[allow(clippy::literal_string_with_formatting_args)]
+    for needle in [
+        "RCH_BIN=\"${RCH_BIN:-rch}\"",
+        "WRAPPER_ROOT=\"${REPO_ROOT}/target/browser-core-build\"",
+        "WORK_DIR=\"$(mktemp -d \"${WRAPPER_ROOT}/${PROFILE}.XXXXXX\")\"",
+        "CARGO_WRAPPER=\"${WORK_DIR}/cargo-rch\"",
+        "cat > \"${CARGO_WRAPPER}\" <<EOF",
+        "exec \"${RCH_BIN}\" exec -- cargo \"\\$@\"",
+        "CARGO=\"${CARGO_WRAPPER}\" wasm-pack build",
+    ] {
+        assert!(
+            content.contains(needle),
+            "build script missing expected marker: {needle}"
+        );
+    }
+}
+
+#[test]
 fn rust_browser_fixture_uses_relative_vite_base_and_portable_bundle_checks() {
     let vite_config = repo_root().join("tests/fixtures/rust-browser-consumer/vite.config.ts");
     let vite_content = std::fs::read_to_string(&vite_config)
