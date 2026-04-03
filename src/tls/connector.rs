@@ -252,6 +252,7 @@ impl TlsConnectorBuilder {
     /// Load additional CA certificates from `SSL_CERT_FILE` and `SSL_CERT_DIR`
     /// environment variables. This supports corporate proxy environments where
     /// a custom CA cert must be trusted.
+    #[allow(dead_code)]
     fn load_env_certs(&mut self) {
         // Check multiple env vars that various tools use for custom CA bundles.
         // SSL_CERT_FILE is the most standard (OpenSSL), but REQUESTS_CA_BUNDLE
@@ -305,6 +306,7 @@ impl TlsConnectorBuilder {
     }
 
     /// Parse PEM-encoded certificates from a file and add them to the root store.
+    #[allow(dead_code)]
     fn load_pem_file(&mut self, path: &std::path::Path) -> usize {
         let Ok(pem_data) = std::fs::read(path) else {
             return 0;

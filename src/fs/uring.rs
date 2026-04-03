@@ -43,10 +43,12 @@ const OP_READ: u64 = 1;
 const OP_WRITE: u64 = 2;
 const OP_FSYNC: u64 = 3;
 const OP_FDATASYNC: u64 = 4;
+#[allow(dead_code)]
 const OP_CLOSE: u64 = 5;
 
 /// State for a pending io_uring operation.
 #[derive(Debug)]
+#[allow(dead_code)]
 enum OpState {
     /// Operation not yet submitted.
     Idle,
