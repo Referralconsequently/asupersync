@@ -130,14 +130,14 @@ impl EntropySource for DetEntropy {
     }
 }
 
-/// Browser-compatible entropy source for wasm32 targets.
+/// Browser-labeled entropy source for browser-facing capability plumbing.
 ///
-/// Stub implementation (asupersync-umelq.4.4). Delegates to `getrandom` which
-/// maps to `crypto.getRandomValues()` on wasm32-unknown-unknown via the `js`
-/// feature. The implementation is intentionally identical to [`OsEntropy`] for
-/// now; it exists as a distinct type so that browser-specific entropy policies
-/// (e.g., entropy pool warming, CSPRNG seeding from Web Crypto) can be added
-/// without changing the native path.
+/// `BrowserEntropy` is an honest thin wrapper around the ambient `getrandom`
+/// backend with a distinct `source_id()` of `"browser"`. On
+/// `wasm32-unknown-unknown`, the configured `getrandom` JS backend resolves to
+/// the browser CSPRNG (for example `crypto.getRandomValues()`); on non-browser
+/// targets it still provides real entropy while preserving the browser-specific
+/// identity used by routing, diagnostics, and capability policy.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BrowserEntropy;
 
@@ -376,6 +376,35 @@ mod tests {
         let task_id = TaskId::new_for_test(1, 0);
         let forked = os.fork(task_id);
         assert_eq!(forked.source_id(), "os");
+    }
+
+    // =========================================================================
+    // BrowserEntropy Tests
+    // =========================================================================
+
+    #[test]
+    fn browser_entropy_source_id() {
+        let entropy = BrowserEntropy;
+        assert_eq!(entropy.source_id(), "browser");
+    }
+
+    #[test]
+    fn browser_entropy_fork_preserves_browser_identity() {
+        let entropy = BrowserEntropy;
+        let task_id = TaskId::new_for_test(1, 0);
+        let forked = entropy.fork(task_id);
+        assert_eq!(forked.source_id(), "browser");
+    }
+
+    #[test]
+    fn browser_entropy_fill_bytes_works() {
+        let entropy = BrowserEntropy;
+        let mut buf = [0u8; 32];
+        entropy.fill_bytes(&mut buf);
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "browser entropy should produce non-zero bytes"
+        );
     }
 
     // =========================================================================

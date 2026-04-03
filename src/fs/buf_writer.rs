@@ -1,174 +1,101 @@
-//! Buffered async writer for files.
+//! Buffered async writer for filesystem I/O.
+//!
+//! This is a thin wrapper around the core `io::BufWriter` to provide
+//! a convenient `fs`-scoped type for file operations.
 
-use crate::io::AsyncWrite;
-use std::io::{self, IoSlice};
+use crate::io::{self, AsyncWrite};
+use std::io::{self as std_io, IoSlice};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
-/// Default buffer capacity.
-const DEFAULT_BUF_CAPACITY: usize = 8192;
 
 /// Buffered async file writer.
 #[derive(Debug)]
 pub struct BufWriter<W> {
-    inner: W,
-    buf: Vec<u8>,
-    capacity: usize,
-    written: usize,
+    inner: io::BufWriter<W>,
 }
 
 impl<W> BufWriter<W> {
     /// Creates a new `BufWriter` with default capacity.
+    #[must_use]
     pub fn new(inner: W) -> Self {
-        Self::with_capacity(DEFAULT_BUF_CAPACITY, inner)
+        Self {
+            inner: io::BufWriter::new(inner),
+        }
     }
 
     /// Creates a new `BufWriter` with specified capacity.
+    #[must_use]
     pub fn with_capacity(capacity: usize, inner: W) -> Self {
         Self {
-            inner,
-            buf: Vec::with_capacity(capacity),
-            capacity,
-            written: 0,
+            inner: io::BufWriter::with_capacity(capacity, inner),
         }
     }
 
     /// Gets a reference to the underlying writer.
+    #[must_use]
     pub fn get_ref(&self) -> &W {
-        &self.inner
+        self.inner.get_ref()
     }
 
     /// Gets a mutable reference to the underlying writer.
+    ///
+    /// Note: writing directly to the inner writer may cause data ordering issues
+    /// if the buffer contains unflushed data.
     pub fn get_mut(&mut self) -> &mut W {
-        &mut self.inner
+        self.inner.get_mut()
     }
 
     /// Returns the underlying writer.
+    ///
+    /// Note: any buffered data that has not been flushed will be lost.
     pub fn into_inner(self) -> W {
-        self.inner
+        self.inner.into_inner()
     }
 
     /// Returns the contents of the buffer.
+    #[must_use]
     pub fn buffer(&self) -> &[u8] {
-        &self.buf
+        self.inner.buffer()
     }
-}
 
-impl<W: AsyncWrite + Unpin> BufWriter<W> {
-    fn poll_flush_buf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        while self.written < self.buf.len() {
-            let n = match Pin::new(&mut self.inner).poll_write(cx, &self.buf[self.written..]) {
-                Poll::Ready(Ok(n)) => n,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            };
-
-            if n == 0 {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write buffered data",
-                )));
-            }
-            self.written += n;
-        }
-        self.buf.clear();
-        self.written = 0;
-        Poll::Ready(Ok(()))
+    /// Returns the capacity of the internal buffer.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
     }
 }
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for BufWriter<W> {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.as_mut().get_mut();
-
-        // If buffer + new data <= capacity, just buffer it
-        if this.buf.len() + buf.len() <= this.capacity {
-            this.buf.extend_from_slice(buf);
-            return Poll::Ready(Ok(buf.len()));
-        }
-
-        // Flush buffer first
-        if !this.buf.is_empty() {
-            match this.poll_flush_buf(cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        // If larger than capacity, bypass buffer
-        if buf.len() >= this.capacity {
-            return Pin::new(&mut this.inner).poll_write(cx, buf);
-        }
-
-        this.buf.extend_from_slice(buf);
-        Poll::Ready(Ok(buf.len()))
+    ) -> Poll<std_io::Result<usize>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.as_mut().get_mut();
-
-        match this.poll_flush_buf(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
-
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std_io::Result<()>> {
+        let this = self.get_mut();
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.as_mut().get_mut();
-
-        match this.poll_flush_buf(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
-
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std_io::Result<()>> {
+        let this = self.get_mut();
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 
     fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.as_mut().get_mut();
-        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-
-        if this.buf.len() + total_len <= this.capacity {
-            for b in bufs {
-                this.buf.extend_from_slice(b);
-            }
-            return Poll::Ready(Ok(total_len));
-        }
-
-        if !this.buf.is_empty() {
-            match this.poll_flush_buf(cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        if total_len >= this.capacity {
-            return Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
-        }
-
-        for b in bufs {
-            this.buf.extend_from_slice(b);
-        }
-        Poll::Ready(Ok(total_len))
+    ) -> Poll<std_io::Result<usize>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_write_vectored(cx, bufs)
     }
 
     fn is_write_vectored(&self) -> bool {
-        // We support vectored writing into buffer
-        true
+        self.inner.is_write_vectored()
     }
 }
 
@@ -177,7 +104,71 @@ mod tests {
     use super::*;
     use crate::fs::File;
     use crate::io::AsyncWriteExt;
+    use std::sync::Arc;
+    use std::task::{Wake, Waker};
     use tempfile::tempdir;
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[derive(Debug)]
+    struct BlockingPartialWriter {
+        written: Vec<u8>,
+        max_chunk: usize,
+        blocked: bool,
+        should_block_after_first_write: bool,
+    }
+
+    impl BlockingPartialWriter {
+        fn new(max_chunk: usize) -> Self {
+            Self {
+                written: Vec::new(),
+                max_chunk,
+                blocked: false,
+                should_block_after_first_write: true,
+            }
+        }
+
+        fn unblock(&mut self) {
+            self.blocked = false;
+        }
+    }
+
+    impl AsyncWrite for BlockingPartialWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std_io::Result<usize>> {
+            let this = self.get_mut();
+            if this.blocked {
+                return Poll::Pending;
+            }
+
+            let n = buf.len().min(this.max_chunk);
+            this.written.extend_from_slice(&buf[..n]);
+            if this.should_block_after_first_write {
+                this.should_block_after_first_write = false;
+                this.blocked = true;
+            }
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std_io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std_io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -231,5 +222,76 @@ mod tests {
             crate::assert_with_log!(all_x, "all x", true, all_x);
         });
         crate::test_complete!("test_buf_writer_large");
+    }
+
+    #[test]
+    fn test_buf_writer_does_not_accept_new_data_while_flush_is_in_progress() {
+        init_test("test_buf_writer_does_not_accept_new_data_while_flush_is_in_progress");
+
+        let inner = BlockingPartialWriter::new(2);
+        let mut writer = BufWriter::with_capacity(8, inner);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first_write = Pin::new(&mut writer).poll_write(&mut cx, b"1234");
+        let ready = matches!(first_write, Poll::Ready(Ok(4)));
+        crate::assert_with_log!(ready, "initial write buffered", true, ready);
+
+        let first_flush = Pin::new(&mut writer).poll_flush(&mut cx);
+        let pending = matches!(first_flush, Poll::Pending);
+        crate::assert_with_log!(pending, "flush pending", true, pending);
+        crate::assert_with_log!(
+            writer.get_ref().written == b"12",
+            "partially flushed bytes",
+            b"12",
+            writer.get_ref().written.as_slice()
+        );
+        crate::assert_with_log!(
+            writer.buffer() == b"1234",
+            "buffer preserved during partial flush",
+            b"1234",
+            writer.buffer()
+        );
+
+        let second_write = Pin::new(&mut writer).poll_write(&mut cx, b"56");
+        let pending = matches!(second_write, Poll::Pending);
+        crate::assert_with_log!(
+            pending,
+            "new write waits for in-flight flush",
+            true,
+            pending
+        );
+        crate::assert_with_log!(
+            writer.buffer() == b"1234",
+            "buffer unchanged while flush blocked",
+            b"1234",
+            writer.buffer()
+        );
+
+        writer.get_mut().unblock();
+
+        let second_write = Pin::new(&mut writer).poll_write(&mut cx, b"56");
+        let ready = matches!(second_write, Poll::Ready(Ok(2)));
+        crate::assert_with_log!(ready, "second write buffered after flush", true, ready);
+        crate::assert_with_log!(
+            writer.buffer() == b"56",
+            "buffer after resumed flush",
+            b"56",
+            writer.buffer()
+        );
+
+        let final_flush = Pin::new(&mut writer).poll_flush(&mut cx);
+        let ready = matches!(final_flush, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "final flush ready", true, ready);
+        crate::assert_with_log!(
+            writer.get_ref().written == b"123456",
+            "final write order preserved",
+            b"123456",
+            writer.get_ref().written.as_slice()
+        );
+
+        crate::test_complete!(
+            "test_buf_writer_does_not_accept_new_data_while_flush_is_in_progress"
+        );
     }
 }

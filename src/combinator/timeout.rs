@@ -343,38 +343,6 @@ macro_rules! timeout {
     };
 }
 
-/// Joins multiple futures, short-circuiting on the first error.
-///
-/// **Not yet implemented as a macro.** Use the functional API instead:
-///
-/// - [`Scope::join`] with [`FailFast`](crate::types::policy::FailFast) policy
-/// - [`join2_fail_fast`](super::join::join2_fail_fast) for two futures
-///
-/// # Example
-/// ```ignore
-/// // Functional API:
-/// let result = join2_fail_fast(outcome_a, outcome_b);
-/// // Or with scope:
-/// scope.region(state, cx, FailFast, |child, state| async move { ... }).await;
-/// ```
-///
-/// # Why `compile_error!`
-///
-/// The previous placeholder silently discarded all futures without executing
-/// them — a correctness hazard. This `compile_error!` ensures callers migrate
-/// to the functional API, which properly spawns futures, short-circuits on
-/// the first error, cancels and drains remaining losers per structured
-/// concurrency invariants, and returns the first error encountered.
-#[macro_export]
-macro_rules! try_join {
-    ($($future:expr),+ $(,)?) => {{
-        compile_error!(
-            "try_join! macro is not yet implemented. Use Scope::join() with FailFast \
-             policy or join2_fail_fast() instead."
-        );
-    }};
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

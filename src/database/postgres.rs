@@ -609,16 +609,10 @@ impl ToSql for Vec<u8> {
 
 impl<T: ToSql> ToSql for Option<T> {
     fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
-        match self {
-            Some(v) => v.to_sql(buf),
-            None => Ok(IsNull::Yes),
-        }
+        self.as_ref().map_or(Ok(IsNull::Yes), |v| v.to_sql(buf))
     }
     fn type_oid(&self) -> u32 {
-        match self {
-            Some(v) => v.type_oid(),
-            None => 0,
-        }
+        self.as_ref().map_or(0, |v| v.type_oid())
     }
     fn format(&self) -> Format {
         match self {
@@ -3795,6 +3789,7 @@ mod hex {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant, clippy::float_cmp, clippy::bool_assert_comparison)]
 mod tests {
     use super::*;
     use crate::Cx;

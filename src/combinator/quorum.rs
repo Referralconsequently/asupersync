@@ -438,38 +438,6 @@ impl CancelReason {
     }
 }
 
-/// Waits for N of M futures to complete successfully.
-///
-/// **Not yet implemented as a macro.** Use the functional API instead:
-///
-/// - [`Quorum::new`] to create a quorum combinator
-/// - [`quorum_outcomes`] to aggregate outcomes with quorum semantics
-///
-/// # Example
-/// ```ignore
-/// // Functional API:
-/// let quorum = Quorum::new(2); // require 2 successes
-/// let result = quorum_outcomes(2, outcomes);
-/// assert!(result.quorum_met);
-/// ```
-///
-/// # Why `compile_error!`
-///
-/// The previous placeholder silently discarded both the threshold and all
-/// futures without executing them — a correctness hazard that could mask
-/// consensus failures. This `compile_error!` ensures callers migrate to the
-/// functional API, which properly tracks N-of-M completion, cancels losers
-/// after quorum is met, and drains them per structured concurrency invariants.
-#[macro_export]
-macro_rules! quorum {
-    ($required:expr, $($future:expr),+ $(,)?) => {{
-        compile_error!(
-            "quorum! macro is not yet implemented. Use Quorum::new() and \
-             quorum_outcomes() for N-of-M consensus semantics instead."
-        );
-    }};
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

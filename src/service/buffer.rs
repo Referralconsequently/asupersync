@@ -636,10 +636,17 @@ mod tests {
         type Future = SingleFlightFuture;
 
         fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            let mut state = self.state.lock();
-            if state.busy {
-                state.readiness_waker = Some(cx.waker().clone());
-                drop(state);
+            let busy = {
+                let mut state = self.state.lock();
+                if state.busy {
+                    state.readiness_waker = Some(cx.waker().clone());
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if busy {
                 Poll::Pending
             } else {
                 Poll::Ready(Ok(()))

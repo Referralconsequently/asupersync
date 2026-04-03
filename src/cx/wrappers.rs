@@ -16,8 +16,8 @@
 //! Wrappers enforce that handlers cannot access effects they don't need,
 //! preventing ambient authority leaks.
 
-use crate::cx::Cx;
 use crate::cx::cap::CapSet;
+use crate::cx::Cx;
 use std::sync::Arc;
 
 /// Capability set for web request handlers: time + IO only.
@@ -56,10 +56,17 @@ pub struct WebContext {
 }
 
 impl WebContext {
-    /// Create a new web context by narrowing from a full-capability Cx.
+    /// Create a new web context from any capability superset that can be
+    /// narrowed to [`WebCaps`].
     #[must_use]
-    pub fn new(cx: Arc<Cx<WebCaps>>, request_id: u64) -> Self {
-        Self { cx, request_id }
+    pub fn new<Caps>(cx: &Arc<Cx<Caps>>, request_id: u64) -> Self
+    where
+        WebCaps: crate::cx::cap::SubsetOf<Caps>,
+    {
+        Self {
+            cx: narrow(cx),
+            request_id,
+        }
     }
 
     /// Access the narrowed capability context.
@@ -85,8 +92,14 @@ pub struct GrpcContext {
 impl GrpcContext {
     /// Create a new gRPC context.
     #[must_use]
-    pub fn new(cx: Arc<Cx<GrpcCaps>>, method: String) -> Self {
-        Self { cx, method }
+    pub fn new<Caps>(cx: &Arc<Cx<Caps>>, method: String) -> Self
+    where
+        GrpcCaps: crate::cx::cap::SubsetOf<Caps>,
+    {
+        Self {
+            cx: narrow(cx),
+            method,
+        }
     }
 
     /// Access the narrowed capability context.
@@ -112,8 +125,14 @@ pub struct BackgroundContext {
 impl BackgroundContext {
     /// Create a new background task context.
     #[must_use]
-    pub fn new(cx: Arc<Cx<BackgroundCaps>>, task_name: String) -> Self {
-        Self { cx, task_name }
+    pub fn new<Caps>(cx: &Arc<Cx<Caps>>, task_name: String) -> Self
+    where
+        BackgroundCaps: crate::cx::cap::SubsetOf<Caps>,
+    {
+        Self {
+            cx: narrow(cx),
+            task_name,
+        }
     }
 
     /// Access the narrowed capability context.
@@ -210,10 +229,38 @@ mod tests {
 
     #[test]
     fn web_context_accessors() {
-        // We can't easily construct a real Cx in unit tests without
-        // a full runtime, but we verify the wrapper API compiles.
+        let full_cx = Arc::new(Cx::for_testing());
+        let web = WebContext::new(&full_cx, 7);
+        let grpc = GrpcContext::new(&full_cx, "svc/method".to_string());
+        let background = BackgroundContext::new(&full_cx, "worker".to_string());
+
+        fn requires_time<C: cap::HasTime>(_: &Cx<C>) {}
+        fn requires_io<C: cap::HasIo>(_: &Cx<C>) {}
+        fn requires_spawn<C: cap::HasSpawn>(_: &Cx<C>) {}
+
+        requires_time(web.cx());
+        requires_io(web.cx());
+        requires_time(grpc.cx());
+        requires_io(grpc.cx());
+        requires_spawn(grpc.cx());
+        requires_time(background.cx());
+        requires_spawn(background.cx());
+
+        assert_eq!(web.request_id(), 7);
+        assert_eq!(grpc.method(), "svc/method");
+        assert_eq!(background.task_name(), "worker");
         assert_eq!(std::mem::size_of::<WebCaps>(), 0);
         assert_eq!(std::mem::size_of::<GrpcCaps>(), 0);
         assert_eq!(std::mem::size_of::<BackgroundCaps>(), 0);
+    }
+
+    #[test]
+    fn narrow_preserves_runtime_identity() {
+        let full_cx = Arc::new(Cx::for_testing());
+        let web_cx: Arc<Cx<WebCaps>> = narrow(&full_cx);
+        let grpc_cx: Arc<Cx<GrpcCaps>> = narrow(&full_cx);
+
+        assert!(Arc::ptr_eq(&full_cx.inner, &web_cx.inner));
+        assert!(Arc::ptr_eq(&full_cx.inner, &grpc_cx.inner));
     }
 }

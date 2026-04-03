@@ -89,6 +89,21 @@ pub use task_inspector::{
     TaskSummaryWire,
 };
 
+#[allow(clippy::cast_precision_loss)]
+fn sample_unit_interval(key: u64) -> f64 {
+    const TWO_POW_53_F64: f64 = 9_007_199_254_740_992.0;
+    let bits = splitmix64(key) >> 11;
+    bits as f64 / TWO_POW_53_F64
+}
+
+fn splitmix64(mut state: u64) -> u64 {
+    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
 /// Configuration for observability and logging.
 ///
 /// This struct controls logging levels, tracing behavior, and sampling rates
@@ -269,7 +284,6 @@ impl ObservabilityConfig {
     ///
     /// Uses deterministic sampling based on a hash of the provided key.
     #[must_use]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // sample_rate is validated to be 0.0..=1.0
     pub fn should_sample(&self, key: u64) -> bool {
         if self.sample_rate >= 1.0 {
             return true;
@@ -277,9 +291,8 @@ impl ObservabilityConfig {
         if self.sample_rate <= 0.0 {
             return false;
         }
-        // Simple deterministic sampling based on key hash
-        let threshold = (self.sample_rate * f64::from(u32::MAX)) as u32;
-        (key as u32) < threshold
+
+        sample_unit_interval(key) < self.sample_rate
     }
 
     /// Returns a development-oriented configuration.
@@ -408,6 +421,21 @@ mod tests {
         let result1 = half.should_sample(12345);
         let result2 = half.should_sample(12345);
         assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn config_sampling_hashes_low_sequential_keys() {
+        let half = ObservabilityConfig::new().with_sample_rate(0.5);
+        let sampled = (0..64).filter(|&key| half.should_sample(key)).count();
+
+        assert!(
+            sampled > 0,
+            "hashed sampling should accept some low sequential keys"
+        );
+        assert!(
+            sampled < 64,
+            "hashed sampling should not deterministically accept every low sequential key"
+        );
     }
 
     #[test]

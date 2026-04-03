@@ -354,8 +354,9 @@ fn pattern_covers_pattern(granted: &SubjectPattern, requested: &SubjectPattern) 
 
 fn pattern_covers_segments(granted: &[SubjectToken], requested: &[SubjectToken]) -> bool {
     match (granted.split_first(), requested.split_first()) {
-        (Some((SubjectToken::Tail, _)), _) | (None, None) => true,
+        (Some((SubjectToken::Tail, _)), Some(_)) | (None, None) => true,
         (None, Some(_))
+        | (Some((SubjectToken::Tail, _)), None)
         | (Some(_), None)
         | (
             Some((SubjectToken::Literal(_), _)),
@@ -489,6 +490,9 @@ mod tests {
         }));
         assert!(registry.check(&FabricCapability::Publish {
             subject: SubjectPattern::new("orders.*"),
+        }));
+        assert!(!registry.check(&FabricCapability::Publish {
+            subject: SubjectPattern::new("orders"),
         }));
         assert!(!registry.check(&FabricCapability::Publish {
             subject: SubjectPattern::new("payments.created"),

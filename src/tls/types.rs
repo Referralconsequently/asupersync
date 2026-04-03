@@ -470,16 +470,18 @@ impl CertificatePin {
     }
 
     /// Compute the SPKI SHA-256 pin for a certificate.
+    ///
+    /// This hashes the DER-encoded `SubjectPublicKeyInfo` structure from the
+    /// certificate, which is the pinning form that survives certificate
+    /// renewal as long as the key pair stays the same.
     #[cfg(feature = "tls")]
-    pub fn compute_spki_sha256(_cert: &Certificate) -> Result<Self, TlsError> {
-        // use ring::digest::{SHA256, digest};
-        // use x509_parser::prelude::*;
-        // let (_, parsed) = X509Certificate::from_der(cert.as_der())
-        //     .map_err(|e| TlsError::Certificate(format!("failed to parse certificate: {e}")))?;
-        // let spki_bytes = parsed.public_key().raw;
-        // let hash = digest(&SHA256, spki_bytes);
-        // Ok(Self::SpkiSha256(hash.as_ref().to_vec()))
-        Err(TlsError::Certificate("Not implemented".into()))
+    pub fn compute_spki_sha256(cert: &Certificate) -> Result<Self, TlsError> {
+        use ring::digest::{SHA256, digest};
+
+        let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_der())
+            .map_err(|e| TlsError::Certificate(format!("failed to parse certificate DER: {e}")))?;
+        let hash = digest(&SHA256, parsed.public_key().raw);
+        Ok(Self::SpkiSha256(hash.as_ref().to_vec()))
     }
 
     /// Compute the SPKI SHA-256 pin for a certificate (fallback when TLS is disabled).
@@ -607,8 +609,8 @@ impl CertificatePinSet {
             return Ok(true);
         }
 
-        // Compute pin types on demand — only compute what the pin set
-        // actually contains to avoid failing on unimplemented pin types.
+        // Compute pin types on demand so malformed certificate material only
+        // affects the pin types the set actually needs.
         let spki_pin = CertificatePin::compute_spki_sha256(cert).ok();
         let cert_pin = CertificatePin::compute_cert_sha256(cert).ok();
 
@@ -663,6 +665,29 @@ impl FromIterator<CertificatePin> for CertificatePinSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tls")]
+    const TEST_CERT_PEM: &[u8] = br"-----BEGIN CERTIFICATE-----
+MIIDGjCCAgKgAwIBAgIUEOa/xZnL2Xclme2QSueCrHSMLnEwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDIyNjIyMjk1MloXDTM2MDIy
+NDIyMjk1MlowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAx1JqCHpDIHPR4H1LDrb3gHVCzoKujANyHdOKw7CTLKdz
+JbDybwJYqZ8vZpq0xwhYKpHdGO4yv7yLT7a2kThq3MrxohfXp9tv1Dop7siTQiWT
+7uGYJzh1bOhw7ElLJc8bW/mBf7ksMyqkX8/8mRXRWqqDv3dKe5CrSt2Pqti9tYH0
+DcT2fftUGT14VvL/Fq1kWPM16ebTRCFp/4ki/Th7SzFvTN99L45MAilHZFefRSzc
+9xN1qQZNm7lT6oo0zD3wmOy70iiasqpLrmG51TRdbnBnGH6CIHvUIl3rCDteUuj1
+pB9lh67qt5kipCn4+8zceXmUaO/nmRawC7Vz+6AsTwIDAQABo2QwYjALBgNVHQ8E
+BAMCBLAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwFAYDVR0RBA0wC4IJbG9jYWxob3N0
+MAkGA1UdEwQCMAAwHQYDVR0OBBYEFEGZkeJqxBWpc24NHkE8k5PM8gTyMA0GCSqG
+SIb3DQEBCwUAA4IBAQAzfQ4na2v1VhK/dyhC89rMHPN/8OX7CGWwrpWlEOYtpMds
+OyQKTZjdz8aFSFl9rvnyGRHrdo4J1RoMGNR5wt1XQ7+k3l/iEWRlSRw+JU6+jqsx
+xfjik55Dji36pN7ARGW4ADBpc3yTOHFhaH41GpSZ6s/2KdGG2gifo7UGNdkdgL60
+nxRt1tfapaNtzpi90TfDx2w6MQmkNMKVOowbYX/zUY7kklJLP8KWTwXO7eovtIpr
+FPAy+SbPl3+sqPbes5IqAQO9jhjb0w0/5RlSTPtiKetb6gAA7Yqw+yZWkBN0WDye
+Lru15URJw9pE1Uae8IuzyzHiF1fnn45swnvW3Szb
+-----END CERTIFICATE-----";
+    #[cfg(feature = "tls")]
+    const TEST_CERT_SPKI_SHA256_BASE64: &str = "Wic7R2QEWx8m0gjc0UYQD4iTxorg2Q51QmvN8HuCprc=";
 
     #[test]
     fn certificate_from_der() {
@@ -742,6 +767,37 @@ mod tests {
         let bytes = vec![0u8; 16];
         let result = CertificatePin::spki_sha256(bytes);
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn certificate_pin_compute_spki_sha256_known_answer() {
+        let cert = Certificate::from_pem(TEST_CERT_PEM).unwrap().remove(0);
+        let pin = CertificatePin::compute_spki_sha256(&cert).unwrap();
+        assert_eq!(pin.to_base64(), TEST_CERT_SPKI_SHA256_BASE64);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn certificate_pin_compute_spki_sha256_rejects_invalid_der() {
+        let cert = Certificate::from_der(vec![0x30, 0x00]);
+        let err = CertificatePin::compute_spki_sha256(&cert).unwrap_err();
+        match err {
+            TlsError::Certificate(message) => {
+                assert!(message.contains("failed to parse certificate DER"));
+            }
+            other => panic!("expected certificate error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pin_set_validate_accepts_matching_spki_pin() {
+        let cert = Certificate::from_pem(TEST_CERT_PEM).unwrap().remove(0);
+        let pin = CertificatePin::compute_spki_sha256(&cert).unwrap();
+        let mut set = CertificatePinSet::new();
+        set.add(pin);
+        assert!(set.validate(&cert).unwrap());
     }
 
     #[test]

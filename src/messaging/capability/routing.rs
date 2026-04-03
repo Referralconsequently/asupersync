@@ -729,6 +729,34 @@ mod tests {
     }
 
     #[test]
+    fn distributed_publish_route_rejects_bare_prefix_for_tail_program() {
+        let program = RoutingProgram::compile_export(&export_plan(), RoutingOperationKind::Publish)
+            .expect("routing program");
+        let cx = test_cx();
+        cx.grant_fabric_capability(FabricCapability::Publish {
+            subject: SubjectPattern::new("orders.>"),
+        })
+        .expect("publish grant");
+
+        let error = program
+            .authorize_distributed(
+                &cx,
+                SubjectFamily::Event,
+                &RoutingRequest::Publish(Subject::new("orders")),
+            )
+            .expect_err("bare prefix must be outside the tail-wildcard program");
+
+        assert_eq!(
+            error,
+            CapabilityRoutingError::SubjectOutsideProgram {
+                program: "orders-export".to_owned(),
+                source_pattern: "orders.>".to_owned(),
+                requested: "orders".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn in_process_and_distributed_publish_routes_are_equivalent() {
         let program = RoutingProgram::compile_export(&export_plan(), RoutingOperationKind::Publish)
             .expect("routing program");

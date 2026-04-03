@@ -5,6 +5,7 @@
 
 pub mod aggregator;
 pub mod error;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod mock;
 pub mod router;
 pub mod sink;
@@ -20,6 +21,7 @@ pub use aggregator::{
     TransportExperimentContext, TransportExperimentDecision, TransportPath,
 };
 pub use error::{SinkError, StreamError};
+#[cfg(any(test, feature = "test-internals"))]
 pub use mock::{
     NodeId, SimChannelSink, SimChannelStream, SimLink, SimNetwork, SimSymbolSink, SimSymbolStream,
     SimTransportConfig, sim_channel,
