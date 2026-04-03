@@ -17,18 +17,26 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::explicit_iter_loop)]
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(feature = "test-internals")]
+use criterion::BatchSize;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
+#[cfg(feature = "test-internals")]
 use asupersync::Cx;
 use asupersync::combinator::race::{RaceWinner, race2_outcomes};
 use asupersync::combinator::{TimeoutConfig, effective_deadline, join2_outcomes};
+#[cfg(feature = "test-internals")]
 use asupersync::config::RaptorQConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
+#[cfg(feature = "test-internals")]
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::runtime::RuntimeState;
+#[cfg(feature = "test-internals")]
 use asupersync::transport::mock::{SimTransportConfig, sim_channel};
-use asupersync::types::{Budget, CancelKind, CancelReason, ObjectId, ObjectParams, Outcome, Time};
+use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, Time};
+#[cfg(feature = "test-internals")]
+use asupersync::types::{ObjectId, ObjectParams};
 use asupersync::util::Arena;
 
 // =============================================================================
@@ -433,6 +441,7 @@ fn bench_time_operations(c: &mut Criterion) {
 // RAPTORQ PIPELINE BENCHMARKS
 // =============================================================================
 
+#[cfg(feature = "test-internals")]
 fn bench_raptorq_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("raptorq/pipeline");
 
@@ -494,6 +503,10 @@ fn bench_raptorq_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "test-internals"))]
+fn bench_raptorq_pipeline(_c: &mut Criterion) {}
+
+#[cfg(feature = "test-internals")]
 fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
     let mut config = RaptorQConfig::default();
     if size > config.encoding.max_block_size {
@@ -502,6 +515,7 @@ fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
     config
 }
 
+#[cfg(feature = "test-internals")]
 fn object_params_for(config: &RaptorQConfig, size: usize) -> ObjectParams {
     let symbol_size = usize::from(config.encoding.symbol_size);
     let symbols_per_block = ((size + symbol_size.saturating_sub(1)) / symbol_size) as u16;

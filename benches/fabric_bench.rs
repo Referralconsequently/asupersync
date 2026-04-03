@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
+#[cfg(feature = "test-internals")]
 use asupersync::config::RaptorQConfig;
 use asupersync::cx::Scope;
 use asupersync::gen_server::{CallError, GenServer, Reply, SystemMsg};
@@ -45,11 +46,15 @@ use asupersync::messaging::subject::{
     ShardedSublist, Subject, SubjectPattern, Sublist, SublistLinkCache,
 };
 use asupersync::obligation::ledger::ObligationLedger;
+#[cfg(feature = "test-internals")]
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::remote::NodeId;
+#[cfg(feature = "test-internals")]
 use asupersync::transport::mock::{SimTransportConfig, sim_channel};
 use asupersync::types::policy::FailFast;
-use asupersync::types::{Budget, ObjectId, ObjectParams, RegionId, TaskId, Time};
+use asupersync::types::{Budget, RegionId, TaskId, Time};
+#[cfg(feature = "test-internals")]
+use asupersync::types::{ObjectId, ObjectParams};
 
 const FABRIC_BENCH_PAYLOAD: &[u8] = b"fabric benchmark payload";
 
@@ -152,6 +157,7 @@ fn allocate_bench_service_obligation(
     .expect("allocate")
 }
 
+#[cfg(feature = "test-internals")]
 fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
     let mut config = RaptorQConfig::default();
     if size > config.encoding.max_block_size {
@@ -160,6 +166,7 @@ fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
     config
 }
 
+#[cfg(feature = "test-internals")]
 fn object_params_for(config: &RaptorQConfig, size: usize) -> ObjectParams {
     let symbol_size = usize::from(config.encoding.symbol_size);
     let symbols_per_block = ((size + symbol_size.saturating_sub(1)) / symbol_size) as u16;
@@ -808,6 +815,7 @@ fn bench_consumer_ack(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "test-internals")]
 fn bench_raptorq_data_capsule(c: &mut Criterion) {
     let mut group = c.benchmark_group("fabric_raptorq_data_capsule");
     let cx = Cx::for_testing();
@@ -934,6 +942,9 @@ fn bench_baseline_compare(c: &mut Criterion) {
 
     group.finish();
 }
+
+#[cfg(not(feature = "test-internals"))]
+fn bench_raptorq_data_capsule(_c: &mut Criterion) {}
 
 // ---------------------------------------------------------------------------
 // Criterion harness

@@ -1012,6 +1012,7 @@ fn downstream_beads_stay_in_aa_track_namespace() {
 
 // ── SimNetwork functional test ───────────────────────────────────────
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn sim_network_fully_connected_creates_paths() {
     use asupersync::transport::mock::{SimNetwork, SimTransportConfig};
@@ -1026,6 +1027,7 @@ fn sim_network_fully_connected_creates_paths() {
     drop(stream);
 }
 
+#[cfg(feature = "test-internals")]
 #[test]
 fn sim_network_ring_topology_creates_paths() {
     use asupersync::transport::mock::{SimNetwork, SimTransportConfig};

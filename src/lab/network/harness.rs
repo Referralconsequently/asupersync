@@ -37,6 +37,7 @@
 //! at(300ms) → ExpireLeases(A)
 //! ```
 
+use super::network::MAX_DUPLICATE_PACKET_DELAY;
 use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::lab::network::{Fault, HostId, NetworkConfig, SimulatedNetwork};
@@ -56,6 +57,12 @@ use std::time::Duration;
 type PendingResultsMap =
     BTreeMap<RemoteTaskId, crate::channel::oneshot::Sender<Result<RemoteOutcome, RemoteError>>>;
 type SharedPendingResults = Arc<Mutex<PendingResultsMap>>;
+
+#[derive(Clone, Debug)]
+struct StoredEnvelope {
+    envelope: MessageEnvelope<RemoteMessage>,
+    retain_until: Option<Duration>,
+}
 
 /// A virtual runtime bridge for testing distributed logic.
 #[derive(Debug)]
@@ -551,7 +558,7 @@ pub struct DistributedHarness {
     /// Next message id for the harness-local side-channel codec.
     next_msg_id: u64,
     /// Harness-local message store for side-channel decoding.
-    msg_store: BTreeMap<u64, MessageEnvelope<RemoteMessage>>,
+    msg_store: BTreeMap<u64, StoredEnvelope>,
 }
 
 /// A trace event in the harness execution.
@@ -599,6 +606,7 @@ impl DistributedHarness {
     /// Creates a new harness with the given network configuration.
     #[must_use]
     pub fn new(config: NetworkConfig) -> Self {
+        let tick = normalized_tick(config.tick_resolution);
         Self {
             network: SimulatedNetwork::new(config),
             nodes: BTreeMap::new(),
@@ -606,7 +614,7 @@ impl DistributedHarness {
             host_to_node: BTreeMap::new(),
             fault_script: FaultScript::new(),
             sim_time: Duration::ZERO,
-            tick: Duration::from_millis(1),
+            tick,
             trace: Vec::new(),
             next_msg_id: 1,
             msg_store: BTreeMap::new(),
@@ -631,7 +639,7 @@ impl DistributedHarness {
 
     /// Sets the tick resolution.
     pub fn set_tick(&mut self, tick: Duration) {
-        self.tick = tick;
+        self.tick = normalized_tick(tick);
     }
 
     /// Injects a spawn request from `origin` to `target`.
@@ -709,30 +717,40 @@ impl DistributedHarness {
     /// This advances the simulated network, delivers messages, processes
     /// node logic, and executes fault scripts.
     pub fn run_for(&mut self, duration: Duration) {
-        let target = self.sim_time + duration;
-        let fault_events: Vec<FaultEvent> = self.fault_script.events.clone();
+        let target = self.sim_time.saturating_add(duration);
+        let fault_events: Vec<FaultEvent> = self
+            .fault_script
+            .sorted_events()
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut next_fault = 0;
 
         while self.sim_time < target {
-            // Execute any faults at the current time.
-            for fe in &fault_events {
-                if fe.at >= self.sim_time && fe.at < self.sim_time + self.tick {
-                    self.execute_fault(&fe.fault.clone());
-                }
+            while fault_events
+                .get(next_fault)
+                .is_some_and(|fe| fe.at < self.sim_time)
+            {
+                next_fault += 1;
             }
 
-            // Advance network simulation by one tick.
-            self.network.run_for(self.tick);
+            let step_end = self.sim_time.saturating_add(self.tick).min(target);
+            let next_stop = fault_events
+                .get(next_fault)
+                .filter(|fe| fe.at < step_end)
+                .map_or(step_end, |fe| fe.at);
 
-            // Deliver packets from network to nodes.
-            self.deliver_packets();
+            if next_stop > self.sim_time {
+                self.advance_segment(next_stop.saturating_sub(self.sim_time));
+            }
 
-            // Tick all nodes (advance simulated work).
-            self.tick_nodes();
-
-            // Send outgoing messages from nodes.
-            self.flush_outboxes();
-
-            self.sim_time += self.tick;
+            while let Some(fe) = fault_events.get(next_fault) {
+                if fe.at != self.sim_time || fe.at >= target {
+                    break;
+                }
+                self.execute_fault(&fe.fault);
+                next_fault += 1;
+            }
         }
     }
 
@@ -783,11 +801,11 @@ impl DistributedHarness {
     }
 
     /// Ticks all nodes and collects result deliveries.
-    fn tick_nodes(&mut self) {
+    fn tick_nodes(&mut self, elapsed: Duration) {
         let mut result_messages: Vec<(NodeId, NodeId, RemoteMessage)> = Vec::new();
 
         for (node_id, node) in &mut self.nodes {
-            let completed = node.tick(self.tick);
+            let completed = node.tick(elapsed);
             for (dest, msg) in completed {
                 if let RemoteMessage::ResultDelivery(ref rd) = msg {
                     self.trace.push(HarnessTraceEvent {
@@ -814,7 +832,13 @@ impl DistributedHarness {
     fn encode_message(&mut self, msg: &MessageEnvelope<RemoteMessage>) -> Vec<u8> {
         let id = self.next_msg_id;
         self.next_msg_id = self.next_msg_id.wrapping_add(1);
-        self.msg_store.insert(id, msg.clone());
+        self.msg_store.insert(
+            id,
+            StoredEnvelope {
+                envelope: msg.clone(),
+                retain_until: None,
+            },
+        );
         id.to_le_bytes().to_vec()
     }
 
@@ -823,7 +847,33 @@ impl DistributedHarness {
             return None;
         }
         let id = u64::from_le_bytes(payload[..8].try_into().ok()?);
-        self.msg_store.remove(&id)
+        let stored = self.msg_store.get_mut(&id)?;
+        if stored.retain_until.is_none() {
+            stored.retain_until = Some(self.sim_time.saturating_add(MAX_DUPLICATE_PACKET_DELAY));
+        }
+        Some(stored.envelope.clone())
+    }
+
+    fn prune_decoded_messages(&mut self) {
+        let now = self.sim_time;
+        self.msg_store.retain(|_, stored| {
+            stored
+                .retain_until
+                .is_none_or(|retain_until| now <= retain_until)
+        });
+    }
+
+    fn advance_segment(&mut self, elapsed: Duration) {
+        if elapsed.is_zero() {
+            return;
+        }
+
+        self.network.run_for(elapsed);
+        self.sim_time = self.sim_time.saturating_add(elapsed);
+        self.deliver_packets();
+        self.tick_nodes(elapsed);
+        self.flush_outboxes();
+        self.prune_decoded_messages();
     }
 
     /// Flushes outgoing messages from all nodes.
@@ -911,6 +961,14 @@ impl DistributedHarness {
     #[must_use]
     pub fn sim_time(&self) -> Duration {
         self.sim_time
+    }
+}
+
+fn normalized_tick(tick: Duration) -> Duration {
+    if tick.is_zero() {
+        Duration::from_nanos(1)
+    } else {
+        tick
     }
 }
 
@@ -1139,6 +1197,43 @@ mod tests {
     }
 
     #[test]
+    fn in_flight_messages_to_crashed_node_do_not_resurface_after_restart() {
+        let config = NetworkConfig {
+            default_conditions: crate::lab::network::NetworkConditions {
+                latency: crate::lab::network::LatencyModel::Fixed(Duration::from_millis(50)),
+                ..crate::lab::network::NetworkConditions::ideal()
+            },
+            ..NetworkConfig::default()
+        };
+        let mut harness = DistributedHarness::new(config);
+        let a = harness.add_node("node-a");
+        let b = harness.add_node("node-b");
+        let task_id = RemoteTaskId::next();
+
+        harness.set_fault_script(
+            FaultScript::new()
+                .at(
+                    Duration::from_millis(10),
+                    HarnessFault::CrashNode(b.clone()),
+                )
+                .at(
+                    Duration::from_millis(20),
+                    HarnessFault::RestartNode(b.clone()),
+                ),
+        );
+
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_millis(200));
+
+        let events = harness.node(&b).unwrap().events();
+        assert!(events.iter().any(|e| matches!(e, NodeEvent::Crashed)));
+        assert!(events.iter().any(|e| matches!(e, NodeEvent::Restarted)));
+        assert!(!events.iter().any(
+            |e| matches!(e, NodeEvent::SpawnReceived { task_id: seen, .. } if *seen == task_id)
+        ));
+    }
+
+    #[test]
     fn lease_expiry_fails_tasks() {
         let (mut harness, a, b) = setup_harness();
         let task_id = RemoteTaskId::next();
@@ -1271,6 +1366,41 @@ mod tests {
     }
 
     #[test]
+    fn duplicated_network_packets_reach_node_logic() {
+        let config = NetworkConfig {
+            default_conditions: crate::lab::network::NetworkConditions {
+                packet_duplicate: 1.0,
+                ..crate::lab::network::NetworkConditions::local()
+            },
+            ..NetworkConfig::default()
+        };
+        let mut harness = DistributedHarness::new(config);
+        let a = harness.add_node("node-a");
+        let b = harness.add_node("node-b");
+        let task_id = RemoteTaskId::next();
+
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_millis(50));
+
+        let node_b = harness.node(&b).unwrap();
+        let accepted = node_b
+            .events()
+            .iter()
+            .filter(|e| matches!(e, NodeEvent::SpawnAccepted { task_id: seen } if *seen == task_id))
+            .count();
+        let duplicates = node_b
+            .events()
+            .iter()
+            .filter(
+                |e| matches!(e, NodeEvent::DuplicateSpawn { task_id: seen } if *seen == task_id),
+            )
+            .count();
+
+        assert_eq!(accepted, 1);
+        assert_eq!(duplicates, 1);
+    }
+
+    #[test]
     fn idempotent_spawn_ttl_expiry_allows_fresh_spawn() {
         let (mut harness, a, b) = setup_harness();
         harness.set_tick(Duration::from_secs(1));
@@ -1319,6 +1449,109 @@ mod tests {
             "expired dedup entry should allow respawn"
         );
         assert_eq!(dedup_after, 1, "only pre-expiry replay should deduplicate");
+    }
+
+    #[test]
+    fn new_harness_uses_configured_tick_resolution() {
+        let harness = DistributedHarness::new(NetworkConfig {
+            tick_resolution: Duration::from_micros(250),
+            ..NetworkConfig::default()
+        });
+
+        assert_eq!(harness.tick, Duration::from_micros(250));
+    }
+
+    #[test]
+    fn zero_tick_is_clamped_to_one_nanosecond() {
+        let mut harness = DistributedHarness::new(NetworkConfig {
+            tick_resolution: Duration::ZERO,
+            ..NetworkConfig::default()
+        });
+
+        assert_eq!(harness.tick, Duration::from_nanos(1));
+        harness.set_tick(Duration::ZERO);
+        assert_eq!(harness.tick, Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn run_for_caps_final_step_to_remaining_duration() {
+        let (mut harness, _, _) = setup_harness();
+        harness.set_tick(Duration::from_millis(1));
+
+        harness.run_for(Duration::from_micros(250));
+
+        assert_eq!(harness.sim_time(), Duration::from_micros(250));
+    }
+
+    #[test]
+    fn faults_within_large_tick_execute_at_their_scheduled_time() {
+        let config = NetworkConfig {
+            default_conditions: crate::lab::network::NetworkConditions {
+                latency: crate::lab::network::LatencyModel::Fixed(Duration::from_millis(500)),
+                ..crate::lab::network::NetworkConditions::ideal()
+            },
+            tick_resolution: Duration::from_secs(1),
+            ..NetworkConfig::default()
+        };
+        let mut harness = DistributedHarness::new(config);
+        let a = harness.add_node("node-a");
+        let b = harness.add_node("node-b");
+        let task_id = RemoteTaskId::next();
+
+        harness.set_fault_script(FaultScript::new().at(
+            Duration::from_millis(900),
+            HarnessFault::CrashNode(b.clone()),
+        ));
+
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_secs(1));
+
+        let node_b = harness.node(&b).unwrap();
+        assert!(node_b.events().iter().any(
+            |event| matches!(event, NodeEvent::SpawnReceived { task_id: seen, .. } if *seen == task_id)
+        ));
+
+        let fault_times: Vec<_> = harness
+            .trace()
+            .iter()
+            .filter_map(|event| {
+                matches!(event.kind, HarnessTraceKind::FaultInjected(_)).then_some(event.time)
+            })
+            .collect();
+        assert_eq!(fault_times, vec![Duration::from_millis(900)]);
+    }
+
+    #[test]
+    fn same_tick_faults_follow_timestamp_order() {
+        let (mut harness, _, b) = setup_harness();
+        harness.set_tick(Duration::from_secs(1));
+        harness.set_fault_script(
+            FaultScript::new()
+                .at(
+                    Duration::from_millis(900),
+                    HarnessFault::RestartNode(b.clone()),
+                )
+                .at(
+                    Duration::from_millis(100),
+                    HarnessFault::CrashNode(b.clone()),
+                ),
+        );
+
+        harness.run_for(Duration::from_secs(1));
+
+        let node_b = harness.node(&b).unwrap();
+        let crash_idx = node_b
+            .events()
+            .iter()
+            .position(|event| matches!(event, NodeEvent::Crashed))
+            .unwrap();
+        let restart_idx = node_b
+            .events()
+            .iter()
+            .position(|event| matches!(event, NodeEvent::Restarted))
+            .unwrap();
+        assert!(crash_idx < restart_idx);
+        assert!(!node_b.crashed);
     }
 
     #[test]

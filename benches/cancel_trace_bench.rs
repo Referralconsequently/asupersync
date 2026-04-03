@@ -14,8 +14,11 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
+#[cfg(feature = "test-internals")]
 use asupersync::Cx;
+#[cfg(feature = "test-internals")]
 use asupersync::config::RaptorQConfig;
+#[cfg(feature = "test-internals")]
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::runtime::RuntimeState;
 use asupersync::trace::boundary::SquareComplex;
@@ -24,10 +27,11 @@ use asupersync::trace::dpor::{HappensBeforeGraph, RaceDetector, detect_hb_races,
 use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::trace::event_structure::TracePoset;
 use asupersync::trace::scoring::{score_persistence, seed_fingerprint};
+#[cfg(feature = "test-internals")]
 use asupersync::transport::mock::{SimTransportConfig, sim_channel};
-use asupersync::types::{
-    Budget, CancelKind, CancelReason, ObjectId, ObjectParams, RegionId, TaskId, Time,
-};
+use asupersync::types::{Budget, CancelKind, CancelReason, RegionId, TaskId, Time};
+#[cfg(feature = "test-internals")]
+use asupersync::types::{ObjectId, ObjectParams};
 use std::collections::BTreeSet;
 
 // =============================================================================
@@ -452,6 +456,7 @@ fn bench_homology_scoring(c: &mut Criterion) {
 // RAPTORQ ENCODE/DECODE BENCHMARKS (standalone)
 // =============================================================================
 
+#[cfg(feature = "test-internals")]
 fn bench_raptorq_encode_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("raptorq/encode_decode");
     let cx: Cx = Cx::for_testing();
@@ -517,6 +522,10 @@ fn bench_raptorq_encode_decode(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "test-internals"))]
+fn bench_raptorq_encode_decode(_c: &mut Criterion) {}
+
+#[cfg(feature = "test-internals")]
 fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
     let mut config = RaptorQConfig::default();
     if size > config.encoding.max_block_size {
@@ -525,6 +534,7 @@ fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
     config
 }
 
+#[cfg(feature = "test-internals")]
 fn object_params_for(config: &RaptorQConfig, size: usize) -> ObjectParams {
     let symbol_size = usize::from(config.encoding.symbol_size);
     let symbols_per_block = ((size + symbol_size.saturating_sub(1)) / symbol_size) as u16;

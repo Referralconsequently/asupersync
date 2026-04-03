@@ -8,6 +8,9 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Duration;
 
+pub(super) const MAX_DUPLICATE_PACKET_DELAY: Duration = Duration::from_millis(1);
+const EXTRA_PACKET_DELAY_WINDOW_MICROS: u64 = 1_000;
+
 /// Identifier for a simulated host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostId(u64);
@@ -303,7 +306,8 @@ impl SimulatedNetwork {
         if self.should_drop(conditions.packet_duplicate) {
             self.metrics.packets_duplicated = self.metrics.packets_duplicated.saturating_add(1);
             self.trace_event(NetworkTraceKind::Duplicate, src, dst);
-            let duplicate_delay = Duration::from_micros(self.rng.next_u64() % 1000);
+            let duplicate_delay =
+                Duration::from_micros(self.rng.next_u64() % EXTRA_PACKET_DELAY_WINDOW_MICROS);
             let duplicate = Packet {
                 received_at: deliver_at + duplicate_delay,
                 ..base_packet
@@ -366,6 +370,7 @@ impl SimulatedNetwork {
                     h.crashed = true;
                     h.inbox.clear();
                 }
+                self.drop_queued_packets_for_host(*host);
             }
             Fault::HostRestart { host } => {
                 if let Some(h) = self.hosts.get_mut(host) {
@@ -493,7 +498,8 @@ impl SimulatedNetwork {
         conditions: &NetworkConditions,
     ) -> Time {
         if self.should_drop(conditions.packet_reorder) {
-            let reorder_jitter = Duration::from_micros(self.rng.next_u64() % 1000);
+            let reorder_jitter =
+                Duration::from_micros(self.rng.next_u64() % EXTRA_PACKET_DELAY_WINDOW_MICROS);
             self.trace_event(NetworkTraceKind::Reorder, src, dst);
             return deliver_at + reorder_jitter;
         }
@@ -536,6 +542,20 @@ impl SimulatedNetwork {
         } else {
             self.in_flight.remove(&link);
         }
+    }
+
+    fn drop_queued_packets_for_host(&mut self, host: HostId) {
+        let mut retained = BinaryHeap::with_capacity(self.queue.len());
+        while let Some(scheduled) = self.queue.pop() {
+            if scheduled.packet.dst == host {
+                self.decrement_in_flight(LinkKey::new(scheduled.packet.src, scheduled.packet.dst));
+                self.drop_packet(scheduled.packet.src, scheduled.packet.dst);
+            } else {
+                retained.push(scheduled);
+            }
+        }
+        self.queue = retained;
+        self.link_next_available.retain(|link, _| link.dst != host);
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -817,6 +837,52 @@ mod tests {
         net.send(h1, h2, Bytes::copy_from_slice(b"after"));
         net.run_until_idle();
         assert_eq!(net.inbox(h2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn host_crash_drops_in_flight_packets_even_after_restart() {
+        let config = NetworkConfig {
+            default_conditions: NetworkConditions {
+                latency: LatencyModel::Fixed(Duration::from_millis(10)),
+                ..NetworkConditions::ideal()
+            },
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+
+        net.send(h1, h2, Bytes::copy_from_slice(b"in-flight"));
+        net.inject_fault(&Fault::HostCrash { host: h2 });
+        net.inject_fault(&Fault::HostRestart { host: h2 });
+        net.run_until_idle();
+
+        assert!(net.inbox(h2).unwrap().is_empty());
+        assert_eq!(net.metrics().packets_dropped, 1);
+    }
+
+    #[test]
+    fn dropped_in_flight_packets_do_not_consume_future_bandwidth() {
+        let config = NetworkConfig {
+            enable_bandwidth: true,
+            default_bandwidth: 1_000,
+            default_conditions: NetworkConditions::ideal(),
+            ..Default::default()
+        };
+        let mut net = SimulatedNetwork::new(config);
+        let h1 = net.add_host("h1");
+        let h2 = net.add_host("h2");
+        let payload = Bytes::copy_from_slice(&vec![0u8; 1_000]);
+
+        net.send(h1, h2, payload.clone());
+        net.inject_fault(&Fault::HostCrash { host: h2 });
+        net.inject_fault(&Fault::HostRestart { host: h2 });
+        net.send(h1, h2, payload);
+        net.run_until_idle();
+
+        let inbox = net.inbox(h2).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].received_at.as_nanos(), 1_000_000_000);
     }
 
     #[test]
