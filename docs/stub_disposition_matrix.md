@@ -18,10 +18,10 @@
 ## Surface Inventory
 
 ### Surface 1: WASM boundary split-brain
-- **Files**: `asupersync-wasm/src/{exports.rs, error.rs, types.rs}`
-- **State**: Comment-only placeholders (6-22 lines each). `asupersync-browser-core` has the real implementation.
+- **Files**: `asupersync-wasm/src/{lib.rs, exports.rs, error.rs, types.rs}`
+- **State**: `asupersync-browser-core` is the frozen canonical owner of the shipped v1 JS/WASM boundary. `asupersync-wasm` is no longer comment-only; it is a retained non-canonical scaffold that exposes explicit status metadata and fail-closed helpers pointing callers at the canonical owner.
 - **Disposition**: **CONVERGE** → Track B (B1→B2→B3)
-- **Target**: `asupersync-browser-core` is canonical. `asupersync-wasm` either forwards or is deprecated.
+- **Target**: Keep `asupersync-browser-core` as the sole live boundary owner while `asupersync-wasm` remains an honest retained scaffold unless a later bead deliberately promotes a new supported role.
 - **Adjacent epic**: `asupersync-3qv04` (Browser Edition)
 
 ### Surface 2: quorum! macro placeholder
