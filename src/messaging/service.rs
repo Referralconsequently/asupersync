@@ -2391,6 +2391,16 @@ pub enum ServiceBoundaryError {
     /// Request certificate or service-obligation operations failed.
     #[error(transparent)]
     Obligation(#[from] ServiceObligationError),
+    /// An import transfer targets the same subject as the boundary itself.
+    #[error(
+        "recursive import transfer: target subject `{target_subject}` matches boundary subject `{boundary_subject}`"
+    )]
+    RecursiveImportTransfer {
+        /// The target subject that was passed to the transfer.
+        target_subject: String,
+        /// The boundary's own request subject.
+        boundary_subject: String,
+    },
 }
 
 /// Concrete control and discovery subjects attached to one service boundary.
