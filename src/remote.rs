@@ -607,14 +607,6 @@ pub struct RemoteHandle {
     completed: bool,
 }
 
-impl Drop for RemoteHandle {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.clear_runtime_state();
-        }
-    }
-}
-
 impl fmt::Debug for RemoteHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteHandle")
@@ -655,6 +647,40 @@ impl RemoteHandle {
     fn clear_runtime_state(&self) {
         if let Some(runtime) = &self.runtime {
             runtime.clear_task_state(self.remote_task_id);
+        }
+    }
+
+    #[inline]
+    fn observed_state(&self) -> RemoteTaskState {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.observe_task_state(self.remote_task_id))
+            .unwrap_or(self.state)
+    }
+
+    #[inline]
+    fn finish_result(
+        &mut self,
+        result: Result<RemoteOutcome, RemoteError>,
+    ) -> Result<RemoteOutcome, RemoteError> {
+        self.completed = true;
+        self.state = Self::terminal_state_for_result(&result);
+        self.clear_runtime_state();
+        result
+    }
+
+    #[inline]
+    fn finish_closed(&mut self) -> RemoteError {
+        self.completed = true;
+        let observed_state = self.observed_state();
+        self.state = match observed_state {
+            RemoteTaskState::Pending | RemoteTaskState::Running => RemoteTaskState::Cancelled,
+            terminal => terminal,
+        };
+        self.clear_runtime_state();
+        match observed_state {
+            RemoteTaskState::LeaseExpired => RemoteError::LeaseExpired,
+            _ => RemoteError::Cancelled(Self::closed_reason()),
         }
     }
 
@@ -722,16 +748,33 @@ impl RemoteHandle {
     ///
     /// # Errors
     ///
-    /// Returns the same terminal error as [`join`](Self::join), including
-    /// `PolledAfterCompletion` if the terminal result was already consumed.
+    /// Unlike [`join`](Self::join), once `close()` starts draining it ignores
+    /// caller cancellation so runtime bookkeeping is always finalized before
+    /// returning. If the terminal result was already consumed, it returns
+    /// `PolledAfterCompletion`.
     pub async fn close(&mut self, cx: &Cx) -> Result<RemoteOutcome, RemoteError> {
+        if self.completed {
+            return Err(RemoteError::PolledAfterCompletion);
+        }
+
         self.abort(cx);
-        self.join(cx).await
+
+        match self.receiver.recv_uninterruptible().await {
+            Ok(result) => self.finish_result(result),
+            Err(oneshot::RecvError::Closed) => Err(self.finish_closed()),
+            Err(oneshot::RecvError::Cancelled) => {
+                unreachable!("RecvUninterruptibleFuture cannot return Cancelled")
+            }
+            Err(oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("RemoteHandle::close awaits a fresh uninterruptible recv future")
+            }
+        }
     }
 
     /// Waits for the remote task to complete and returns its result.
     ///
-    /// This method yields until the remote task completes (or fails/cancels).
+    /// This method yields until the remote task completes (or fails/cancels),
+    /// unless the caller context is cancelled first.
     ///
     /// # Errors
     ///
@@ -743,23 +786,8 @@ impl RemoteHandle {
         }
 
         match self.receiver.recv(cx).await {
-            Ok(result) => {
-                self.completed = true;
-                self.state = Self::terminal_state_for_result(&result);
-                self.clear_runtime_state();
-                result
-            }
-            Err(oneshot::RecvError::Closed) => {
-                self.completed = true;
-                if matches!(
-                    self.state,
-                    RemoteTaskState::Pending | RemoteTaskState::Running
-                ) {
-                    self.state = RemoteTaskState::Cancelled;
-                }
-                self.clear_runtime_state();
-                Err(RemoteError::Cancelled(Self::closed_reason()))
-            }
+            Ok(result) => self.finish_result(result),
+            Err(oneshot::RecvError::Closed) => Err(self.finish_closed()),
             Err(oneshot::RecvError::Cancelled) => {
                 let reason = cx
                     .cancel_reason()
@@ -785,24 +813,9 @@ impl RemoteHandle {
         }
 
         match self.receiver.try_recv() {
-            Ok(result) => {
-                self.completed = true;
-                self.state = Self::terminal_state_for_result(&result);
-                self.clear_runtime_state();
-                Ok(Some(result?))
-            }
+            Ok(result) => Ok(Some(self.finish_result(result)?)),
             Err(oneshot::TryRecvError::Empty) => Ok(None),
-            Err(oneshot::TryRecvError::Closed) => {
-                self.completed = true;
-                if matches!(
-                    self.state,
-                    RemoteTaskState::Pending | RemoteTaskState::Running
-                ) {
-                    self.state = RemoteTaskState::Cancelled;
-                }
-                self.clear_runtime_state();
-                Err(RemoteError::Cancelled(Self::closed_reason()))
-            }
+            Err(oneshot::TryRecvError::Closed) => Err(self.finish_closed()),
         }
     }
 
@@ -2481,6 +2494,18 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct TestNoopWaker;
+
+    impl Wake for TestNoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(TestNoopWaker))
+    }
 
     #[test]
     fn node_id_basics() {
@@ -2611,6 +2636,10 @@ mod tests {
             self.states.lock().insert(task_id, state);
         }
 
+        fn close_sender_preserving_state(&self, task_id: RemoteTaskId) {
+            self.pending.lock().remove(&task_id);
+        }
+
         fn deliver(
             &self,
             cx: &Cx,
@@ -2633,7 +2662,7 @@ mod tests {
                 .lock()
                 .remove(&task_id)
                 .expect("pending remote task");
-            tx.send(cx, result).expect("pending remote receiver");
+            let _ = tx.send(cx, result);
         }
 
         fn sent_messages(&self) -> Vec<(NodeId, MessageEnvelope<RemoteMessage>)> {
@@ -3040,6 +3069,97 @@ mod tests {
             }
             other => unreachable!("expected CancelRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn remote_handle_close_ignores_caller_cancellation_until_terminal_result_arrives() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+        cx.set_cancel_reason(CancelReason::deadline());
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::Running);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let outcome = {
+            let mut close = std::pin::pin!(handle.close(&cx));
+
+            assert!(matches!(
+                std::future::Future::poll(close.as_mut(), &mut task_cx),
+                Poll::Pending
+            ));
+            assert_eq!(
+                runtime.observe_task_state(remote_task_id),
+                Some(RemoteTaskState::Running)
+            );
+
+            runtime.deliver(
+                &cx,
+                remote_task_id,
+                Ok(RemoteOutcome::Cancelled(CancelReason::user(
+                    "closed remotely",
+                ))),
+            );
+
+            match std::future::Future::poll(close.as_mut(), &mut task_cx) {
+                Poll::Ready(outcome) => outcome,
+                Poll::Pending => panic!("close should drain terminal result"),
+            }
+        };
+        assert!(matches!(
+            outcome,
+            Ok(RemoteOutcome::Cancelled(reason)) if reason == CancelReason::user("closed remotely")
+        ));
+        assert!(runtime.observe_task_state(remote_task_id).is_none());
+
+        let sent = runtime.sent_messages();
+        assert_eq!(sent.len(), 2);
+        match &sent[1].1.payload {
+            RemoteMessage::CancelRequest(cancel) => {
+                assert_eq!(cancel.remote_task_id, remote_task_id);
+            }
+            other => unreachable!("expected CancelRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_handle_join_closed_channel_preserves_runtime_lease_expired_state() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let mut handle = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should succeed");
+
+        let remote_task_id = handle.remote_task_id();
+        runtime.mark_state(remote_task_id, RemoteTaskState::LeaseExpired);
+        runtime.close_sender_preserving_state(remote_task_id);
+
+        let err = futures_lite::future::block_on(handle.join(&cx))
+            .expect_err("closed channel should surface the observed lease-expired state");
+        assert_eq!(err, RemoteError::LeaseExpired);
+        assert_eq!(handle.state(), RemoteTaskState::LeaseExpired);
+        assert!(runtime.observe_task_state(remote_task_id).is_none());
     }
 
     #[test]

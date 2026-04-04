@@ -120,6 +120,75 @@ where
     }
 }
 
+/// Wrapper for handlers with 3 extractors.
+pub struct FnHandler3<F, T1, T2, T3> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3)>,
+}
+
+impl<F, T1, T2, T3> FnHandler3<F, T1, T2, T3> {
+    /// Wrap a function with 3 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, T1, T2, T3, Res> Handler for FnHandler3<F, T1, T2, T3>
+where
+    F: Fn(T1, T2, T3) -> Res + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequest + Send + Sync + 'static,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, req: Request) -> Response {
+        let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+        (self.func)(t1, t2, t3).into_response()
+    }
+}
+
+/// Wrapper for handlers with 4 extractors.
+pub struct FnHandler4<F, T1, T2, T3, T4> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4)>,
+}
+
+impl<F, T1, T2, T3, T4> FnHandler4<F, T1, T2, T3, T4> {
+    /// Wrap a function with 4 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, T1, T2, T3, T4, Res> Handler for FnHandler4<F, T1, T2, T3, T4>
+where
+    F: Fn(T1, T2, T3, T4) -> Res + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequest + Send + Sync + 'static,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, req: Request) -> Response {
+        let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+        (self.func)(t1, t2, t3, t4).into_response()
+    }
+}
+
 // ─── Async Cx-aware Handler Implementations ─────────────────────────────────
 
 #[inline]
@@ -392,6 +461,85 @@ mod tests {
         let req = Request::new("GET", "/"); // no path params
         let resp = handler.call(req);
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn handler_three_extractors() {
+        #[allow(clippy::needless_pass_by_value)]
+        fn audit(
+            Path(id): Path<String>,
+            Query(query): Query<HashMap<String, String>>,
+            mut headers: HashMap<String, String>,
+        ) -> String {
+            let req_id = headers
+                .remove("x-request-id")
+                .expect("x-request-id header present");
+            let tenant = query.get("tenant").expect("tenant query");
+            format!("{req_id}:{tenant}:{id}")
+        }
+
+        let handler = FnHandler3::<
+            _,
+            Path<String>,
+            Query<HashMap<String, String>>,
+            HashMap<String, String>,
+        >::new(audit);
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "42".to_string());
+        let req = Request::new("GET", "/users/42/audit")
+            .with_path_params(params)
+            .with_query("tenant=green")
+            .with_header("x-request-id", "req-123");
+
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            std::str::from_utf8(&resp.body).expect("utf8"),
+            "req-123:green:42"
+        );
+    }
+
+    #[test]
+    fn handler_four_extractors() {
+        #[allow(clippy::needless_pass_by_value)]
+        fn audit(
+            Path(id): Path<String>,
+            Query(query): Query<HashMap<String, String>>,
+            mut headers: HashMap<String, String>,
+            Json(payload): Json<HashMap<String, String>>,
+        ) -> String {
+            let req_id = headers
+                .remove("x-request-id")
+                .expect("x-request-id header present");
+            let tenant = query.get("tenant").expect("tenant query");
+            let event = payload.get("event").expect("event key");
+            format!("{req_id}:{tenant}:{id}:{event}")
+        }
+
+        let handler = FnHandler4::<
+            _,
+            Path<String>,
+            Query<HashMap<String, String>>,
+            HashMap<String, String>,
+            Json<HashMap<String, String>>,
+        >::new(audit);
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "42".to_string());
+        let req = Request::new("POST", "/users/42/audit")
+            .with_path_params(params)
+            .with_query("tenant=green")
+            .with_header("x-request-id", "req-123")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(br#"{"event":"created"}"#));
+
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            std::str::from_utf8(&resp.body).expect("utf8"),
+            "req-123:green:42:created"
+        );
     }
 
     #[test]

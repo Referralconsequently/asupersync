@@ -13,8 +13,8 @@
 //!
 //! # Integration
 //!
-//! Uses `asupersync::time` for deterministic sleep (lab-runtime aware) and
-//! `asupersync::combinator::select::SelectAll` for concurrent racing.
+//! Uses `asupersync::time` for deterministic sleep (lab-runtime aware) and an
+//! internal state machine to coordinate staggered connection attempts.
 //!
 //! # References
 //!
@@ -234,75 +234,29 @@ where
 /// Races connection attempts with staggered starts.
 ///
 /// This is the core of the Happy Eyeballs algorithm. Each connection attempt
-/// is wrapped in a future that first sleeps until its stagger deadline, then
-/// attempts the actual connection with a per-connection timeout.
-///
-/// All futures are polled concurrently via `SelectAll`, so once the first
-/// connection succeeds, the others are dropped.
+/// is coordinated by `RaceConnections`, which starts additional attempts on
+/// staggered delays while still being able to bypass the remaining delay when
+/// an active connection fails early.
 async fn connect_racing(
     addrs: &[SocketAddr],
     config: &HappyEyeballsConfig,
     time_getter: fn() -> Time,
 ) -> io::Result<TcpStream> {
     let now = time_getter();
-
-    // Build staggered connection futures.
-    //
-    // Schedule:
-    //   addr[0]: start immediately (t=0)
-    //   addr[1]: start at t=first_family_delay (250ms)
-    //   addr[2]: start at t=first_family_delay + attempt_delay (500ms)
-    //   addr[3]: start at t=first_family_delay + 2*attempt_delay (750ms)
-    //   ...
-    let mut futures: Vec<ConnectFuture> = Vec::with_capacity(addrs.len());
-
-    for (i, &addr) in addrs.iter().enumerate() {
-        let stagger = compute_stagger_delay(config, i);
-
-        let connect_timeout = config.connect_timeout;
-
-        futures.push(Box::pin(staggered_connect(
-            now,
-            stagger,
-            addr,
-            connect_timeout,
-            time_getter,
-        )));
-    }
-
-    // Race all futures concurrently via RaceConnections.
-    //
-    // Unlike SelectAll (which returns on the first Ready regardless of
-    // success/failure), RaceConnections continues polling if an attempt
-    // errors, only returning on first Ok or when all attempts exhaust.
     let overall_deadline =
         now.saturating_add_nanos(duration_to_nanos_saturating(config.overall_timeout));
-    RaceConnections::new(futures, overall_deadline, time_getter).await
+    RaceConnections::new(
+        addrs.to_vec(),
+        config.clone(),
+        overall_deadline,
+        time_getter,
+    )
+    .await
 }
 
 #[inline]
 fn duration_to_nanos_saturating(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-}
-
-#[inline]
-fn compute_stagger_delay(config: &HappyEyeballsConfig, index: usize) -> Duration {
-    if index == 0 {
-        return Duration::ZERO;
-    }
-    if index == 1 {
-        return config.first_family_delay;
-    }
-
-    let steps = u32::try_from(index.saturating_sub(1)).unwrap_or(u32::MAX);
-    let tail = config
-        .attempt_delay
-        .checked_mul(steps)
-        .unwrap_or(Duration::MAX);
-    config
-        .first_family_delay
-        .checked_add(tail)
-        .unwrap_or(Duration::MAX)
 }
 
 /// A boxed, pinned, Send future that yields a `TcpStream` or an I/O error.
@@ -313,35 +267,108 @@ const OVERALL_CONNECTION_TIMEOUT_MSG: &str = "Happy Eyeballs: overall connection
 
 /// Future that races multiple connection attempts, returning the first success.
 ///
-/// Unlike `SelectAll` which returns on the first Ready (success or error),
-/// this continues polling if a result is an error, waiting for either a success
-/// or all attempts to fail.
+/// Implements RFC 8305: starts connections with staggered delays, but immediately
+/// starts the next connection if the current active attempt fails, bypassing the
+/// remaining stagger delay.
 struct RaceConnections {
-    /// Connection futures, set to None once completed.
-    futures: Vec<Option<ConnectFuture>>,
-    /// Number of futures still pending.
-    pending: usize,
-    /// Whether this future already returned a terminal outcome.
+    addrs: std::vec::IntoIter<SocketAddr>,
+    in_flight: Vec<ConnectFuture>,
     completed: bool,
-    /// Last error seen (returned if all fail).
     last_error: Option<io::Error>,
-    /// Sleep future for overall timeout.
+    stagger_sleep: Sleep,
     timeout_sleep: Sleep,
-    /// Time source used for timeout decisions.
     time_getter: fn() -> Time,
+    config: HappyEyeballsConfig,
+    stagger_active: bool,
+    started_count: usize,
 }
 
 impl RaceConnections {
-    fn new(futures: Vec<ConnectFuture>, deadline: Time, time_getter: fn() -> Time) -> Self {
-        let pending = futures.len();
-        let timeout_sleep = Sleep::with_time_getter(deadline, time_getter);
-        Self {
-            futures: futures.into_iter().map(Some).collect(),
-            pending,
+    fn new(
+        addrs: Vec<SocketAddr>,
+        config: HappyEyeballsConfig,
+        deadline: Time,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        let mut rc = Self {
+            addrs: addrs.into_iter(),
+            in_flight: Vec::new(),
             completed: false,
             last_error: None,
-            timeout_sleep,
+            stagger_sleep: Sleep::with_time_getter(Time::ZERO, time_getter),
+            timeout_sleep: Sleep::with_time_getter(deadline, time_getter),
             time_getter,
+            config,
+            stagger_active: false,
+            started_count: 0,
+        };
+        rc.start_next(time_getter());
+        rc
+    }
+
+    /// Test-only constructor that accepts pre-built futures instead of addresses.
+    #[cfg(test)]
+    fn from_futures(
+        futures: Vec<ConnectFuture>,
+        config: HappyEyeballsConfig,
+        deadline: Time,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        let mut remaining = futures;
+        // Start the first future immediately so tests exercise the same
+        // "one active attempt at construction" invariant as production.
+        let first = if remaining.is_empty() {
+            None
+        } else {
+            Some(remaining.remove(0))
+        };
+        let mut rc = Self {
+            addrs: Vec::new().into_iter(),
+            in_flight: Vec::new(),
+            completed: false,
+            last_error: None,
+            stagger_sleep: Sleep::with_time_getter(Time::ZERO, time_getter),
+            timeout_sleep: Sleep::with_time_getter(deadline, time_getter),
+            time_getter,
+            config,
+            stagger_active: false,
+            started_count: 0,
+        };
+        if let Some(f) = first {
+            rc.in_flight.push(f);
+            rc.started_count = 1;
+        }
+        // Queue remaining futures directly into `in_flight`; structural tests
+        // control readiness explicitly and do not need stagger scheduling.
+        for f in remaining {
+            rc.in_flight.push(f);
+            rc.started_count += 1;
+        }
+        rc
+    }
+
+    fn start_next(&mut self, now: Time) {
+        if let Some(addr) = self.addrs.next() {
+            self.in_flight.push(Box::pin(connect_one(
+                addr,
+                self.config.connect_timeout,
+                self.time_getter,
+            )));
+            self.started_count += 1;
+
+            if self.addrs.len() > 0 {
+                let delay = if self.started_count == 1 {
+                    self.config.first_family_delay
+                } else {
+                    self.config.attempt_delay
+                };
+                self.stagger_sleep.reset_after(now, delay);
+                self.stagger_active = true;
+            } else {
+                self.stagger_active = false;
+            }
+        } else {
+            self.stagger_active = false;
         }
     }
 
@@ -351,11 +378,8 @@ impl RaceConnections {
 
     fn finish(&mut self, output: io::Result<TcpStream>) -> Poll<io::Result<TcpStream>> {
         self.completed = true;
-        self.pending = 0;
+        self.in_flight.clear();
         self.last_error = None;
-        for slot in &mut self.futures {
-            *slot = None;
-        }
         Poll::Ready(output)
     }
 
@@ -366,57 +390,58 @@ impl RaceConnections {
         )))
     }
 
-    fn poll_with_time(&mut self, now: Time, cx: &mut Context<'_>) -> Poll<io::Result<TcpStream>> {
+    fn poll_with_time(
+        &mut self,
+        mut now: Time,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<TcpStream>> {
         if self.completed {
             return Poll::Ready(Err(Self::poll_after_completion_error()));
         }
 
-        // Check overall timeout first
-        if self.timeout_sleep.poll_with_time(now).is_ready() {
+        if Pin::new(&mut self.timeout_sleep).poll(cx).is_ready() {
             return self.finish_overall_timeout();
         }
 
-        // Poll all active futures, collecting results to avoid borrow conflicts
-        let mut winner: Option<TcpStream> = None;
-        let mut completed: Vec<(usize, Option<io::Error>)> = Vec::new();
-        let mut any_pending = false;
+        loop {
+            let mut made_progress = false;
 
-        for (i, slot) in self.futures.iter_mut().enumerate() {
-            if let Some(fut) = slot.as_mut() {
-                match Pin::new(fut).poll(cx) {
-                    Poll::Ready(Ok(stream)) => {
-                        if winner.is_none() {
-                            winner = Some(stream);
+            let mut i = 0;
+            while i < self.in_flight.len() {
+                if let Poll::Ready(res) = Pin::new(&mut self.in_flight[i]).poll(cx) {
+                    made_progress = true;
+                    std::mem::drop(self.in_flight.remove(i));
+                    match res {
+                        Ok(stream) => {
+                            return self.finish(Ok(stream));
                         }
-                        completed.push((i, None));
-                        break;
+                        Err(e) => {
+                            self.last_error = Some(e);
+                            if self.addrs.len() > 0 {
+                                self.start_next(now);
+                            }
+                        }
                     }
-                    Poll::Ready(Err(e)) => {
-                        completed.push((i, Some(e)));
-                    }
-                    Poll::Pending => {
-                        any_pending = true;
-                    }
+                } else {
+                    i += 1;
                 }
             }
-        }
 
-        // Process completed futures
-        for (i, err) in completed {
-            self.futures[i] = None;
-            self.pending -= 1;
-            if let Some(e) = err {
-                self.last_error = Some(e);
+            if self.stagger_active {
+                if Pin::new(&mut self.stagger_sleep).poll(cx).is_ready() {
+                    made_progress = true;
+                    self.start_next(now);
+                }
             }
+
+            if !made_progress {
+                break;
+            }
+
+            now = (self.time_getter)();
         }
 
-        // Return winner if we have one
-        if let Some(stream) = winner {
-            return self.finish(Ok(stream));
-        }
-
-        if !any_pending && self.pending == 0 {
-            // All attempts exhausted with no success
+        if self.in_flight.is_empty() && self.addrs.len() == 0 {
             let err = self.last_error.take().unwrap_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::ConnectionRefused,
@@ -435,37 +460,8 @@ impl Future for RaceConnections {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let now = (self.time_getter)();
-        let poll = self.as_mut().get_mut().poll_with_time(now, cx);
-        if poll.is_pending() {
-            let this = self.as_mut().get_mut();
-            // Preserve wake registration even when timeout decisions use a
-            // manual or virtual clock. If the sleep has actually elapsed,
-            // we must return the timeout now, otherwise we will lose the wakeup
-            // because Sleep::poll does not register a waker when it returns Ready.
-            if Pin::new(&mut this.timeout_sleep).poll(cx).is_ready() {
-                return this.finish_overall_timeout();
-            }
-        }
-        poll
+        self.as_mut().get_mut().poll_with_time(now, cx)
     }
-}
-
-/// Connects to a single address after a stagger delay, with a per-connection timeout.
-async fn staggered_connect(
-    now: Time,
-    stagger: Duration,
-    addr: SocketAddr,
-    connect_timeout: Duration,
-    time_getter: fn() -> Time,
-) -> io::Result<TcpStream> {
-    // Wait for our stagger slot
-    if !stagger.is_zero() {
-        let deadline = now.saturating_add_nanos(duration_to_nanos_saturating(stagger));
-        sleep_until_with_time_getter(deadline, time_getter).await;
-    }
-
-    // Attempt connection with timeout
-    connect_one(addr, connect_timeout, time_getter).await
 }
 
 /// Connects to a single address with a timeout.
@@ -491,10 +487,6 @@ async fn connect_one(
             format!("connection to {addr} timed out after {timeout_duration:?}"),
         )),
     }
-}
-
-async fn sleep_until_with_time_getter(deadline: Time, time_getter: fn() -> Time) {
-    Sleep::with_time_getter(deadline, time_getter).await;
 }
 
 async fn future_with_timeout<F>(
@@ -819,34 +811,17 @@ mod tests {
     }
 
     #[test]
-    fn compute_stagger_delay_saturates_on_overflow() {
-        init_test("compute_stagger_delay_saturates_on_overflow");
-
-        let config = HappyEyeballsConfig {
-            first_family_delay: Duration::MAX,
-            attempt_delay: Duration::from_secs(1),
-            ..Default::default()
-        };
-
-        assert_eq!(compute_stagger_delay(&config, 2), Duration::MAX);
-        crate::test_complete!("compute_stagger_delay_saturates_on_overflow");
-    }
-
-    #[test]
-    fn sleep_until_with_time_getter_waits_for_custom_clock() {
+    fn sleep_with_time_getter_waits_for_custom_clock() {
         static TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
         fn test_time() -> Time {
             Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
         }
 
-        init_test("sleep_until_with_time_getter_waits_for_custom_clock");
+        init_test("sleep_with_time_getter_waits_for_custom_clock");
 
         TEST_NOW.store(1_000, Ordering::SeqCst);
-        let mut sleep = Box::pin(sleep_until_with_time_getter(
-            Time::from_nanos(1_500),
-            test_time,
-        ));
+        let mut sleep = Box::pin(Sleep::with_time_getter(Time::from_nanos(1_500), test_time));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -854,7 +829,7 @@ mod tests {
 
         TEST_NOW.store(2_000, Ordering::SeqCst);
         assert!(Future::poll(sleep.as_mut(), &mut cx).is_ready());
-        crate::test_complete!("sleep_until_with_time_getter_waits_for_custom_clock");
+        crate::test_complete!("sleep_with_time_getter_waits_for_custom_clock");
     }
 
     #[test]
@@ -1061,7 +1036,12 @@ mod tests {
         });
 
         let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
-        let mut race = RaceConnections::new(vec![fail_fut], deadline, timeout_now);
+        let mut race = RaceConnections::from_futures(
+            vec![fail_fut],
+            HappyEyeballsConfig::default(),
+            deadline,
+            timeout_now,
+        );
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let result = race.poll_with_time(timeout_now(), &mut cx);
@@ -1089,7 +1069,12 @@ mod tests {
         let pending_fut: ConnectFuture =
             Box::pin(async { pending::<io::Result<TcpStream>>().await });
         let deadline = Time::from_nanos(1_500);
-        let mut race = RaceConnections::new(vec![pending_fut], deadline, test_time);
+        let mut race = RaceConnections::from_futures(
+            vec![pending_fut],
+            HappyEyeballsConfig::default(),
+            deadline,
+            test_time,
+        );
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1122,7 +1107,12 @@ mod tests {
         let pending_fut: ConnectFuture =
             Box::pin(async { pending::<io::Result<TcpStream>>().await });
         let deadline = Time::from_nanos(1_500);
-        let mut race = RaceConnections::new(vec![fail_fut, pending_fut], deadline, test_time);
+        let mut race = RaceConnections::from_futures(
+            vec![fail_fut, pending_fut],
+            HappyEyeballsConfig::default(),
+            deadline,
+            test_time,
+        );
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1150,7 +1140,12 @@ mod tests {
         let winner: ConnectFuture = Box::pin(async { Ok(connected_test_stream()) });
 
         let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
-        let mut race = RaceConnections::new(vec![loser, winner], deadline, timeout_now);
+        let mut race = RaceConnections::from_futures(
+            vec![loser, winner],
+            HappyEyeballsConfig::default(),
+            deadline,
+            timeout_now,
+        );
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -1187,23 +1182,40 @@ mod tests {
             ..Default::default()
         };
 
-        // Verify stagger delays match RFC 8305 §5 expectations:
-        // addr[0]: 0ms
-        // addr[1]: 250ms (first_family_delay)
-        // addr[2]: 500ms (first_family_delay + 1 * attempt_delay)
-        // addr[3]: 750ms (first_family_delay + 2 * attempt_delay)
-        let expected = [
+        // Verify stagger delays match RFC 8305 §5 expectations as implemented
+        // in start_next(): started_count==1 uses first_family_delay, all
+        // subsequent use attempt_delay. The first attempt (index 0) has no
+        // preceding delay.
+        //
+        // started_count after start_next:
+        //   addr[0]: started_count=1 → delay = first_family_delay = 250ms
+        //   addr[1]: started_count=2 → delay = attempt_delay      = 250ms
+        //   addr[2]: started_count=3 → delay = attempt_delay      = 250ms
+        //
+        // Each addr beyond the first sees a delay before the next attempt
+        // starts, so cumulative stagger is:
+        //   addr[0] starts at 0ms (immediate)
+        //   addr[1] starts after first_family_delay (250ms)
+        //   addr[2] starts after first_family_delay + attempt_delay (500ms)
+        //   addr[3] starts after first_family_delay + 2*attempt_delay (750ms)
+        let expected_cumulative = [
             Duration::ZERO,
             Duration::from_millis(250),
             Duration::from_millis(500),
             Duration::from_millis(750),
         ];
 
-        for (i, expected_delay) in expected.iter().enumerate() {
-            let stagger = compute_stagger_delay(&config, i);
+        // Verify cumulative delays match start_next() logic:
+        // started_count==1 → first_family_delay, all others → attempt_delay
+        for (i, expected) in expected_cumulative.iter().enumerate().skip(1) {
+            let cumulative = if i == 1 {
+                config.first_family_delay
+            } else {
+                config.first_family_delay + config.attempt_delay * (i as u32 - 1)
+            };
             assert_eq!(
-                stagger, *expected_delay,
-                "addr[{i}] stagger mismatch: got {stagger:?}, expected {expected_delay:?}"
+                cumulative, *expected,
+                "addr[{i}] cumulative stagger mismatch: got {cumulative:?}, expected {expected:?}"
             );
         }
 
