@@ -607,6 +607,14 @@ pub struct RemoteHandle {
     completed: bool,
 }
 
+impl Drop for RemoteHandle {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.clear_runtime_state();
+        }
+    }
+}
+
 impl fmt::Debug for RemoteHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteHandle")
@@ -3032,6 +3040,49 @@ mod tests {
             }
             other => unreachable!("expected CancelRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn remote_handle_drop_preserves_runtime_state_until_terminal_result_is_drained() {
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+
+        let remote_task_id = {
+            let handle = spawn_remote(
+                &cx,
+                NodeId::new("worker-1"),
+                ComputationName::new("encode_block"),
+                RemoteInput::new(vec![1, 2, 3]),
+            )
+            .expect("spawn_remote should succeed");
+
+            let remote_task_id = handle.remote_task_id();
+            assert_eq!(
+                runtime.observe_task_state(remote_task_id),
+                Some(RemoteTaskState::Pending)
+            );
+            remote_task_id
+        };
+
+        assert_eq!(
+            runtime.observe_task_state(remote_task_id),
+            Some(RemoteTaskState::Pending),
+            "dropping an unfinished handle must not detach runtime bookkeeping"
+        );
+
+        runtime.deliver(
+            &cx,
+            remote_task_id,
+            Ok(RemoteOutcome::Success(vec![7, 8, 9])),
+        );
+        assert_eq!(
+            runtime.observe_task_state(remote_task_id),
+            Some(RemoteTaskState::Completed),
+            "runtime state should remain visible until a terminal result is consumed"
+        );
     }
 
     #[test]

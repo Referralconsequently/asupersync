@@ -1052,7 +1052,7 @@ impl<B: StorageBackend> Stream<B> {
         };
 
         // Evict expired entries.
-        let window_nanos = window.as_nanos() as u64;
+        let window_nanos = u64::try_from(window.as_nanos()).unwrap_or(u64::MAX);
         self.dedup_index
             .retain(|_, (ts, _)| now.duration_since(*ts) < window_nanos);
 

@@ -938,6 +938,17 @@ impl WorkerCoordinator {
             .jobs
             .get_mut(&snapshot.job_id)
             .ok_or(WorkerChannelError::UnknownJobId(snapshot.job_id))?;
+
+        // Ignore stale status snapshots that arrive after the job has moved
+        // into cancellation phases or reached a terminal state. The worker
+        // emitted these before observing our state transition.
+        if !matches!(
+            job.state,
+            JobState::Created | JobState::Queued | JobState::Running
+        ) {
+            return Ok(());
+        }
+
         if job.state != snapshot.state {
             job.transition_to(snapshot.state)?;
         }
