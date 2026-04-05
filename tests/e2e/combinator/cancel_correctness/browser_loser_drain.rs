@@ -22,7 +22,7 @@
 //! 5. **Determinism**: Same seed produces same drain ordering
 //! 6. **Budget respect**: Drain does not exceed poll budget
 
-use asupersync::lab::oracle::LoserDrainOracle;
+use asupersync::lab::oracle::{LoserDrainOracle, LoserDrainViolation};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use std::future::Future;
@@ -364,11 +364,18 @@ fn browser_oracle_detects_skipped_loser() {
     assert!(result.is_err(), "Oracle should detect abandoned loser");
 
     let violation = result.unwrap_err();
-    assert_eq!(
-        violation.undrained_losers,
-        vec![tasks[2]],
-        "Task 3 should be the undrained loser"
-    );
+    match violation {
+        LoserDrainViolation::UndrainedLosers {
+            undrained_losers, ..
+        } => {
+            assert_eq!(
+                undrained_losers,
+                vec![tasks[2]],
+                "Task 3 should be the undrained loser"
+            );
+        }
+        other => panic!("expected UndrainedLosers violation, got {other:?}"),
+    }
 }
 
 /// Oracle handles concurrent races (browser can have multiple independent

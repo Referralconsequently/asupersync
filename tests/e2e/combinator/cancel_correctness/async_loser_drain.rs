@@ -11,7 +11,7 @@
 //!
 //! Formally: `∀race: ∀loser ∈ race.losers: loser.state = Completed`
 
-use asupersync::lab::oracle::LoserDrainOracle;
+use asupersync::lab::oracle::{LoserDrainOracle, LoserDrainViolation};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, Time};
 use std::future::Future;
@@ -277,8 +277,15 @@ fn test_loser_drain_oracle_detects_violation() {
     assert!(result.is_err(), "Oracle should detect undrained loser");
 
     let violation = result.unwrap_err();
-    assert_eq!(violation.undrained_losers.len(), 1);
-    assert_eq!(violation.undrained_losers[0], loser);
+    match violation {
+        LoserDrainViolation::UndrainedLosers {
+            undrained_losers, ..
+        } => {
+            assert_eq!(undrained_losers.len(), 1);
+            assert_eq!(undrained_losers[0], loser);
+        }
+        other => panic!("expected UndrainedLosers violation, got {other:?}"),
+    }
 }
 
 /// Test oracle with multiple races.

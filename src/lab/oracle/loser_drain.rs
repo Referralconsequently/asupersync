@@ -31,30 +31,75 @@ use std::fmt;
 
 /// A loser drain violation.
 ///
-/// This indicates that a race completed without fully draining its losers,
-/// violating the cancel-correctness invariant.
+/// This indicates either that a completed race failed to drain its losers, or
+/// that the oracle observed impossible race instrumentation (for example, a
+/// completion without a matching start).
 #[derive(Debug, Clone)]
-pub struct LoserDrainViolation {
-    /// The race identifier.
-    pub race_id: u64,
-    /// The winning task.
-    pub winner: TaskId,
-    /// Tasks that were not drained when the race completed.
-    pub undrained_losers: Vec<TaskId>,
-    /// The time when the race completed.
-    pub race_complete_time: Time,
+pub enum LoserDrainViolation {
+    /// A completed race returned before one or more losers drained.
+    UndrainedLosers {
+        /// The race identifier.
+        race_id: u64,
+        /// The winning task.
+        winner: TaskId,
+        /// Tasks that were not drained when the race completed.
+        undrained_losers: Vec<TaskId>,
+        /// The time when the race completed.
+        race_complete_time: Time,
+    },
+    /// A race was started but never completed by the time the oracle checked.
+    ActiveRaceNotCompleted {
+        /// The race identifier.
+        race_id: u64,
+        /// All participants in the still-active race.
+        participants: Vec<TaskId>,
+        /// The time when the race started.
+        race_start_time: Time,
+    },
+    /// A race completion was recorded without a matching prior start.
+    UnknownRaceCompletion {
+        /// The race identifier.
+        race_id: u64,
+        /// The recorded winning task.
+        winner: TaskId,
+        /// The time when the race completed.
+        race_complete_time: Time,
+    },
 }
 
 impl fmt::Display for LoserDrainViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Race {} completed at {:?} with {} undrained loser(s): {:?}",
-            self.race_id,
-            self.race_complete_time,
-            self.undrained_losers.len(),
-            self.undrained_losers
-        )
+        match self {
+            Self::UndrainedLosers {
+                race_id,
+                race_complete_time,
+                undrained_losers,
+                ..
+            } => write!(
+                f,
+                "Race {} completed at {:?} with {} undrained loser(s): {:?}",
+                race_id,
+                race_complete_time,
+                undrained_losers.len(),
+                undrained_losers
+            ),
+            Self::ActiveRaceNotCompleted {
+                race_id,
+                participants,
+                race_start_time,
+            } => write!(
+                f,
+                "Race {race_id} started at {race_start_time:?} never completed; participants: {participants:?}"
+            ),
+            Self::UnknownRaceCompletion {
+                race_id,
+                winner,
+                race_complete_time,
+            } => write!(
+                f,
+                "Race {race_id} completed at {race_complete_time:?} with winner {winner:?} but was never started"
+            ),
+        }
     }
 }
 
@@ -84,6 +129,15 @@ struct RaceCompleteRecord {
     complete_time: Time,
 }
 
+/// Record of a completion event that had no matching active race.
+#[derive(Debug, Clone)]
+struct UnknownCompletionRecord {
+    /// The reported winner for the unknown race.
+    winner: TaskId,
+    /// When the completion was reported.
+    complete_time: Time,
+}
+
 /// Oracle for detecting loser drain violations.
 ///
 /// Tracks race starts, completions, and task completions to verify that
@@ -94,6 +148,8 @@ pub struct LoserDrainOracle {
     active_races: BTreeMap<u64, RaceRecord>,
     /// Completed races: race_id -> RaceCompleteRecord.
     completed_races: BTreeMap<u64, RaceCompleteRecord>,
+    /// Completion events with no matching prior start.
+    unknown_completions: BTreeMap<u64, UnknownCompletionRecord>,
     /// Task completion times: task -> completion_time.
     task_completions: BTreeMap<TaskId, Time>,
     /// Next race ID.
@@ -131,18 +187,26 @@ impl LoserDrainOracle {
 
     /// Records that a race has completed.
     pub fn on_race_complete(&mut self, race_id: u64, winner: TaskId, time: Time) {
-        if self.completed_races.contains_key(&race_id) {
+        if self.completed_races.contains_key(&race_id)
+            || self.unknown_completions.contains_key(&race_id)
+        {
             return;
         }
 
-        let participants = self
-            .active_races
-            .remove(&race_id)
-            .map_or_else(Vec::new, |race| race.participants);
+        let Some(race) = self.active_races.remove(&race_id) else {
+            self.unknown_completions.insert(
+                race_id,
+                UnknownCompletionRecord {
+                    winner,
+                    complete_time: time,
+                },
+            );
+            return;
+        };
         self.completed_races.insert(
             race_id,
             RaceCompleteRecord {
-                participants,
+                participants: race.participants,
                 winner,
                 complete_time: time,
             },
@@ -156,14 +220,46 @@ impl LoserDrainOracle {
 
     /// Verifies the invariant holds.
     ///
-    /// Checks that for every completed race, all losing tasks were completed
-    /// before or at the race completion time. Returns an error with the
-    /// first violation found.
+    /// Checks that:
+    /// - every observed race completion had a matching prior start,
+    /// - no races remain active when verification runs, and
+    /// - for every completed race, all losing tasks completed before or at the
+    ///   race completion time.
+    ///
+    /// Returns an error with the first violation found.
     ///
     /// # Returns
     /// * `Ok(())` if no violations are found
     /// * `Err(LoserDrainViolation)` if a violation is detected
     pub fn check(&self) -> Result<(), LoserDrainViolation> {
+        let mut unknown_race_ids: Vec<u64> = self.unknown_completions.keys().copied().collect();
+        unknown_race_ids.sort_unstable();
+        if let Some(race_id) = unknown_race_ids.first().copied() {
+            let record = self
+                .unknown_completions
+                .get(&race_id)
+                .expect("unknown completion missing from oracle");
+            return Err(LoserDrainViolation::UnknownRaceCompletion {
+                race_id,
+                winner: record.winner,
+                race_complete_time: record.complete_time,
+            });
+        }
+
+        let mut active_race_ids: Vec<u64> = self.active_races.keys().copied().collect();
+        active_race_ids.sort_unstable();
+        if let Some(race_id) = active_race_ids.first().copied() {
+            let record = self
+                .active_races
+                .get(&race_id)
+                .expect("active race missing from oracle");
+            return Err(LoserDrainViolation::ActiveRaceNotCompleted {
+                race_id,
+                participants: record.participants.clone(),
+                race_start_time: record.start_time,
+            });
+        }
+
         let mut race_ids: Vec<u64> = self.completed_races.keys().copied().collect();
         race_ids.sort_unstable();
         for race_id in race_ids {
@@ -193,7 +289,7 @@ impl LoserDrainOracle {
             }
 
             if !undrained.is_empty() {
-                return Err(LoserDrainViolation {
+                return Err(LoserDrainViolation::UndrainedLosers {
                     race_id,
                     winner: complete_record.winner,
                     undrained_losers: undrained,
@@ -209,14 +305,15 @@ impl LoserDrainOracle {
     pub fn reset(&mut self) {
         self.active_races.clear();
         self.completed_races.clear();
+        self.unknown_completions.clear();
         self.task_completions.clear();
         // Don't reset next_race_id to avoid ID collisions across tests
     }
 
-    /// Returns the total number of races (active + completed).
+    /// Returns the total number of tracked races and race-like error states.
     #[must_use]
     pub fn race_count(&self) -> usize {
-        self.active_races.len() + self.completed_races.len()
+        self.active_races.len() + self.completed_races.len() + self.unknown_completions.len()
     }
 
     /// Returns the number of active races.
@@ -300,18 +397,22 @@ mod tests {
         crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        crate::assert_with_log!(
-            violation.winner == task(1),
-            "winner",
-            task(1),
-            violation.winner
-        );
-        crate::assert_with_log!(
-            violation.undrained_losers == vec![task(2)],
-            "undrained_losers",
-            vec![task(2)],
-            violation.undrained_losers
-        );
+        match violation {
+            LoserDrainViolation::UndrainedLosers {
+                winner,
+                undrained_losers,
+                ..
+            } => {
+                crate::assert_with_log!(winner == task(1), "winner", task(1), winner);
+                crate::assert_with_log!(
+                    undrained_losers == vec![task(2)],
+                    "undrained_losers",
+                    vec![task(2)],
+                    undrained_losers
+                );
+            }
+            other => panic!("expected UndrainedLosers, got {other:?}"),
+        }
         crate::test_complete!("undrained_loser_fails");
     }
 
@@ -332,12 +433,19 @@ mod tests {
         crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        crate::assert_with_log!(
-            violation.undrained_losers == vec![task(2)],
-            "undrained_losers",
-            vec![task(2)],
-            violation.undrained_losers
-        );
+        match violation {
+            LoserDrainViolation::UndrainedLosers {
+                undrained_losers, ..
+            } => {
+                crate::assert_with_log!(
+                    undrained_losers == vec![task(2)],
+                    "undrained_losers",
+                    vec![task(2)],
+                    undrained_losers
+                );
+            }
+            other => panic!("expected UndrainedLosers, got {other:?}"),
+        }
         crate::test_complete!("loser_never_completes_fails");
     }
 
@@ -399,12 +507,12 @@ mod tests {
         crate::assert_with_log!(err, "err", true, err);
 
         let violation = result.unwrap_err();
-        crate::assert_with_log!(
-            violation.race_id == race2,
-            "race_id",
-            race2,
-            violation.race_id
-        );
+        match violation {
+            LoserDrainViolation::UndrainedLosers { race_id, .. } => {
+                crate::assert_with_log!(race_id == race2, "race_id", race2, race_id);
+            }
+            other => panic!("expected UndrainedLosers, got {other:?}"),
+        }
         crate::test_complete!("multiple_races_independent");
     }
 
@@ -445,31 +553,107 @@ mod tests {
         let violation = oracle
             .check()
             .expect_err("duplicate complete must not erase the undrained loser");
-        crate::assert_with_log!(
-            violation.race_id == race_id,
-            "race_id",
-            race_id,
-            violation.race_id
-        );
-        crate::assert_with_log!(
-            violation.winner == task(1),
-            "winner",
-            task(1),
-            violation.winner
-        );
-        crate::assert_with_log!(
-            violation.undrained_losers == vec![task(2)],
-            "undrained_losers",
-            vec![task(2)],
-            violation.undrained_losers
-        );
-        crate::assert_with_log!(
-            violation.race_complete_time == t(100),
-            "race_complete_time",
-            t(100),
-            violation.race_complete_time
-        );
+        match violation {
+            LoserDrainViolation::UndrainedLosers {
+                race_id: violation_race_id,
+                winner,
+                undrained_losers,
+                race_complete_time,
+            } => {
+                crate::assert_with_log!(
+                    violation_race_id == race_id,
+                    "race_id",
+                    race_id,
+                    violation_race_id
+                );
+                crate::assert_with_log!(winner == task(1), "winner", task(1), winner);
+                crate::assert_with_log!(
+                    undrained_losers == vec![task(2)],
+                    "undrained_losers",
+                    vec![task(2)],
+                    undrained_losers
+                );
+                crate::assert_with_log!(
+                    race_complete_time == t(100),
+                    "race_complete_time",
+                    t(100),
+                    race_complete_time
+                );
+            }
+            other => panic!("expected UndrainedLosers, got {other:?}"),
+        }
         crate::test_complete!("duplicate_race_complete_preserves_original_participants");
+    }
+
+    #[test]
+    fn active_race_without_completion_fails() {
+        init_test("active_race_without_completion_fails");
+        let mut oracle = LoserDrainOracle::new();
+
+        let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(10));
+        oracle.on_task_complete(task(1), t(50));
+
+        let violation = oracle
+            .check()
+            .expect_err("active race must not be silently ignored");
+        match violation {
+            LoserDrainViolation::ActiveRaceNotCompleted {
+                race_id: violation_race_id,
+                participants,
+                race_start_time,
+            } => {
+                crate::assert_with_log!(
+                    violation_race_id == race_id,
+                    "race_id",
+                    race_id,
+                    violation_race_id
+                );
+                crate::assert_with_log!(
+                    participants == vec![task(1), task(2)],
+                    "participants",
+                    vec![task(1), task(2)],
+                    participants
+                );
+                crate::assert_with_log!(
+                    race_start_time == t(10),
+                    "race_start_time",
+                    t(10),
+                    race_start_time
+                );
+            }
+            other => panic!("expected ActiveRaceNotCompleted, got {other:?}"),
+        }
+        crate::test_complete!("active_race_without_completion_fails");
+    }
+
+    #[test]
+    fn unknown_race_completion_fails() {
+        init_test("unknown_race_completion_fails");
+        let mut oracle = LoserDrainOracle::new();
+
+        oracle.on_race_complete(42, task(9), t(100));
+
+        let violation = oracle
+            .check()
+            .expect_err("completion without start must not be silently accepted");
+        match violation {
+            LoserDrainViolation::UnknownRaceCompletion {
+                race_id,
+                winner,
+                race_complete_time,
+            } => {
+                crate::assert_with_log!(race_id == 42, "race_id", 42, race_id);
+                crate::assert_with_log!(winner == task(9), "winner", task(9), winner);
+                crate::assert_with_log!(
+                    race_complete_time == t(100),
+                    "race_complete_time",
+                    t(100),
+                    race_complete_time
+                );
+            }
+            other => panic!("expected UnknownRaceCompletion, got {other:?}"),
+        }
+        crate::test_complete!("unknown_race_completion_fails");
     }
 
     #[test]
@@ -500,7 +684,7 @@ mod tests {
     #[test]
     fn violation_display() {
         init_test("violation_display");
-        let violation = LoserDrainViolation {
+        let violation = LoserDrainViolation::UndrainedLosers {
             race_id: 42,
             winner: task(1),
             undrained_losers: vec![task(2), task(3)],
@@ -549,17 +733,26 @@ mod tests {
 
     #[test]
     fn loser_drain_violation_debug_clone() {
-        let v = LoserDrainViolation {
+        let v = LoserDrainViolation::UndrainedLosers {
             race_id: 1,
             winner: task(1),
             undrained_losers: vec![task(2), task(3)],
             race_complete_time: t(100),
         };
         let dbg = format!("{v:?}");
-        assert!(dbg.contains("LoserDrainViolation"), "{dbg}");
+        assert!(dbg.contains("UndrainedLosers"), "{dbg}");
         let cloned = v;
-        assert_eq!(cloned.race_id, 1);
-        assert_eq!(cloned.undrained_losers.len(), 2);
+        match cloned {
+            LoserDrainViolation::UndrainedLosers {
+                race_id,
+                undrained_losers,
+                ..
+            } => {
+                assert_eq!(race_id, 1);
+                assert_eq!(undrained_losers.len(), 2);
+            }
+            other => panic!("expected UndrainedLosers, got {other:?}"),
+        }
     }
 
     #[test]
