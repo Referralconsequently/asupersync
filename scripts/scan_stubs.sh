@@ -9,6 +9,7 @@ EVENTS_FILE="${ARTIFACT_ROOT}/stub_resolution_scan_events.ndjson"
 SUMMARY_FILE="${ARTIFACT_ROOT}/stub_resolution_scan_summary.json"
 EVENTS_PATH_FIELD="${ARTIFACT_PATH_ROOT}/stub_resolution_scan_events.ndjson"
 SUMMARY_PATH_FIELD="${ARTIFACT_PATH_ROOT}/stub_resolution_scan_summary.json"
+ALLOWLIST_FILE="${PROJECT_ROOT}/.stub-allowlist.txt"
 TMP_EVENTS="$(mktemp)"
 TMP_SUMMARY="$(mktemp)"
 BEAD_ID="asupersync-v2ofj7.10.6"
@@ -110,6 +111,109 @@ report_fail() {
     record_event "$check_id" "fail" "$subject" "$detail"
 }
 
+allowlist_symbol_regex() {
+    local symbol="$1"
+    local escaped
+    escaped="$(printf '%s' "$symbol" | sed -e 's/[][(){}.^$+?|\\]/\\&/g' -e 's/\*/[[:alnum:]_]*/g')"
+    printf '%s' "$escaped"
+}
+
+allowlist_symbol_matches_file() {
+    local path="$1"
+    local symbol="$2"
+
+    if [[ "$symbol" == *"*"* ]]; then
+        local symbol_regex
+        symbol_regex="$(allowlist_symbol_regex "$symbol")"
+        rg -q --pcre2 "$symbol_regex" "$path"
+        return
+    fi
+
+    if rg -Fq "$symbol" "$path"; then
+        return 0
+    fi
+
+    if [[ "$symbol" == *"::"* ]]; then
+        local owner="${symbol%::*}"
+        local member="${symbol##*::}"
+        if rg -Fq "$owner" "$path" && rg -Fq "$member" "$path"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+check_stub_allowlist_file_is_valid() {
+    if [[ ! -f "$ALLOWLIST_FILE" ]]; then
+        report_fail "ZR-SCAN-ALLOWLIST-FILE" "Stub allowlist is missing" "$ALLOWLIST_FILE"
+        return 0
+    fi
+
+    local line_no=0
+    local invalid_entries=""
+    local missing_paths=""
+    local missing_symbols=""
+    local duplicate_entries=""
+    declare -A seen_entries=()
+
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+        line_no=$((line_no + 1))
+        local line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+        if [[ -z "$line" || "${line:0:1}" == "#" ]]; then
+            continue
+        fi
+
+        if [[ ! "$line" =~ ^([^:[:space:]]+):([^[:space:]]+)[[:space:]]+\((.+)\)[[:space:]]+\[(IMPLEMENT|CONVERGE|QUARANTINE|DOCUMENT|RETIRE|RESOLVED)\]$ ]]; then
+            invalid_entries+="${line_no}: ${raw_line}"$'\n'
+            continue
+        fi
+
+        local path="${BASH_REMATCH[1]}"
+        local symbol="${BASH_REMATCH[2]}"
+        local entry_key="${path}:${symbol}"
+
+        if [[ -n "${seen_entries[$entry_key]:-}" ]]; then
+            duplicate_entries+="${entry_key}"$'\n'
+        else
+            seen_entries["$entry_key"]=1
+        fi
+
+        if [[ ! -e "${PROJECT_ROOT}/${path}" ]]; then
+            missing_paths+="${path}"$'\n'
+            continue
+        fi
+
+        if ! allowlist_symbol_matches_file "${PROJECT_ROOT}/${path}" "$symbol"; then
+            missing_symbols+="${path}:${symbol}"$'\n'
+        fi
+    done <"$ALLOWLIST_FILE"
+
+    if [[ -n "$invalid_entries" ]]; then
+        report_fail "ZR-SCAN-ALLOWLIST-SYNTAX" "Stub allowlist has malformed entries" "$(printf '%s' "$invalid_entries" | sed '/^$/d')"
+    else
+        report_pass "ZR-SCAN-ALLOWLIST-SYNTAX" "Stub allowlist entries parse cleanly" "$ALLOWLIST_FILE"
+    fi
+
+    if [[ -n "$duplicate_entries" ]]; then
+        report_fail "ZR-SCAN-ALLOWLIST-DUPLICATES" "Stub allowlist has duplicate path:symbol entries" "$(printf '%s' "$duplicate_entries" | sed '/^$/d')"
+    else
+        report_pass "ZR-SCAN-ALLOWLIST-DUPLICATES" "Stub allowlist entries are unique" "no duplicate path:symbol pairs"
+    fi
+
+    if [[ -n "$missing_paths" ]]; then
+        report_fail "ZR-SCAN-ALLOWLIST-PATHS" "Stub allowlist references missing paths" "$(printf '%s' "$missing_paths" | sed '/^$/d')"
+    else
+        report_pass "ZR-SCAN-ALLOWLIST-PATHS" "Stub allowlist paths exist" "all documented waiver paths resolve in-repo"
+    fi
+
+    if [[ -n "$missing_symbols" ]]; then
+        report_fail "ZR-SCAN-ALLOWLIST-SYMBOLS" "Stub allowlist references symbols that are no longer present" "$(printf '%s' "$missing_symbols" | sed '/^$/d')"
+    else
+        report_pass "ZR-SCAN-ALLOWLIST-SYMBOLS" "Stub allowlist symbols still match the referenced files" "allowlist remains anchored to live surfaces"
+    fi
+}
+
 check_no_stray_binaries_in_src() {
     local matches
     matches="$(find "${PROJECT_ROOT}/src" -type f \( -name '*.out' -o -name '*.exe' -o -name '*.o' -o -name '*.so' -o -name '*.dylib' \) -print 2>/dev/null | sort || true)"
@@ -127,6 +231,26 @@ check_no_crate_level_dead_code_allow() {
         report_pass "ZR-SCAN-NO-CRATE-DEAD-CODE" "src/lib.rs has no crate-level dead_code allow" "crate root preserves the global lint"
     else
         report_fail "ZR-SCAN-NO-CRATE-DEAD-CODE" "src/lib.rs has a crate-level dead_code allow" "$matches"
+    fi
+}
+
+check_no_todo_in_production() {
+    local matches
+    matches="$(rg -n 'todo!\(' "${PROJECT_ROOT}/src" || true)"
+    if [[ -z "$matches" ]]; then
+        report_pass "ZR-SCAN-NO-TODO-IN-SRC" "No todo!() remains in production src/" "runtime source tree is free of todo!() sentinels"
+    else
+        report_fail "ZR-SCAN-NO-TODO-IN-SRC" "Found todo!() in production src/" "$matches"
+    fi
+}
+
+check_no_unimplemented_in_production() {
+    local matches
+    matches="$(rg -n 'unimplemented!\(' "${PROJECT_ROOT}/src" || true)"
+    if [[ -z "$matches" ]]; then
+        report_pass "ZR-SCAN-NO-UNIMPLEMENTED-IN-SRC" "No unimplemented!() remains in production src/" "runtime source tree is free of production unimplemented!() sentinels"
+    else
+        report_fail "ZR-SCAN-NO-UNIMPLEMENTED-IN-SRC" "Found unimplemented!() in production src/" "$matches"
     fi
 }
 
@@ -219,8 +343,11 @@ check_no_unimplemented_in_examples_and_tests() {
     fi
 }
 
+check_stub_allowlist_file_is_valid
 check_no_stray_binaries_in_src
 check_no_crate_level_dead_code_allow
+check_no_todo_in_production
+check_no_unimplemented_in_production
 check_combinator_compile_errors_are_gated
 check_transport_mock_is_gated
 check_no_conformance_dummy_panics

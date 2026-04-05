@@ -78,6 +78,10 @@ explicit deprecated alias or otherwise clearly non-authoritative.
 
 Intentional exceptions documented in `.stub-allowlist.txt`:
 
+Track Z1 scan ratchets must validate that every allowlist entry parses, points
+to a live in-repo path, uses a known disposition, and still names a symbol that
+exists in the referenced file.
+
 ```
 # Format: path:symbol (reason) [disposition]
 src/runtime/reactor/io_uring.rs:IoUringReactor (Linux export; without `io-uring` feature methods return Err(Unsupported)) [DOCUMENT]

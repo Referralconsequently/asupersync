@@ -3,6 +3,8 @@
 # Format: path:symbol (reason) [disposition]
 #
 # These surfaces are NOT bugs — they are honest, documented, and tested.
+# `scripts/scan_stubs.sh` validates that each entry parses, points at a live
+# path, and still matches a symbol present in that file.
 
 # Platform-conditional reactors that return Err(Unsupported) on unsupported platforms
 # Note: kqueue.rs and windows.rs are cfg-gated at the module level (only compiled on
