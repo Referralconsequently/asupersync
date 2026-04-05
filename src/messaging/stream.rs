@@ -1301,9 +1301,13 @@ impl<B: StorageBackend> Stream<B> {
             return Ok(());
         }
 
+        let mut truncated = false;
         loop {
             let snapshot = self.storage.snapshot()?;
             let Some(oldest) = snapshot.records.first() else {
+                if truncated {
+                    self.rebuild_dedup_index_from_storage_snapshot(&snapshot);
+                }
                 return Ok(());
             };
 
@@ -1326,10 +1330,14 @@ impl<B: StorageBackend> Stream<B> {
                 max_age_nanos.is_some_and(|limit| now.duration_since(oldest.published_at) > limit);
 
             if !(over_msg_limit || over_byte_limit || over_age_limit) {
+                if truncated {
+                    self.rebuild_dedup_index_from_storage_snapshot(&snapshot);
+                }
                 return Ok(());
             }
 
             let _removed = self.storage.truncate_through(oldest.seq)?;
+            truncated = true;
         }
     }
 
@@ -2457,6 +2465,67 @@ mod tests {
             .expect("append after window expiry should succeed");
 
         assert_eq!(stream.state().msg_count, 2);
+    }
+
+    #[test]
+    fn dedup_window_forgets_records_truncated_by_retention() {
+        let config = StreamConfig {
+            retention: RetentionPolicy::Limits,
+            max_msgs: 1,
+            dedupe_window: Some(Duration::from_secs(60)),
+            ..StreamConfig::default()
+        };
+        let mut stream = Stream::new(
+            "dedup-retention-stream",
+            test_region(1),
+            Time::from_secs(0),
+            config,
+            InMemoryStorageBackend::default(),
+        )
+        .expect("create stream");
+
+        stream
+            .append(
+                Subject::new("fabric.default"),
+                b"same".to_vec(),
+                Time::from_secs(1),
+            )
+            .expect("first append");
+        stream
+            .append(
+                Subject::new("fabric.default"),
+                b"other".to_vec(),
+                Time::from_secs(2),
+            )
+            .expect("second append triggers retention");
+
+        assert!(
+            stream.get(1).expect("get truncated first").is_none(),
+            "retention should remove the first record from storage"
+        );
+
+        let third = stream
+            .append(
+                Subject::new("fabric.default"),
+                b"same".to_vec(),
+                Time::from_secs(3),
+            )
+            .expect("dedup must forget records truncated by retention");
+
+        assert_eq!(third.seq, 3);
+        assert_eq!(stream.state().msg_count, 1);
+        assert_eq!(stream.state().last_seq, 3);
+        assert!(
+            stream.get(2).expect("get truncated second").is_none(),
+            "max_msgs=1 should retain only the newest record"
+        );
+        assert_eq!(
+            stream
+                .get(3)
+                .expect("get retained third")
+                .map(|record| record.payload),
+            Some(b"same".to_vec())
+        );
     }
 
     #[test]
